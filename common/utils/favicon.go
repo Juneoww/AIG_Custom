@@ -21,7 +21,7 @@ package utils
 
 import (
 	"bytes"
-	"github.com/Tencent/AI-Infra-Guard/pkg/httpx"
+	"github.com/Juneoww/AIG_Custom/pkg/httpx"
 	"net/url"
 	"strings"
 

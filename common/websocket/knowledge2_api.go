@@ -28,9 +28,9 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/Tencent/AI-Infra-Guard/common/utils"
-	"github.com/Tencent/AI-Infra-Guard/internal/gologger"
-	"github.com/Tencent/AI-Infra-Guard/internal/mcp"
+	"github.com/Juneoww/AIG_Custom/common/utils"
+	"github.com/Juneoww/AIG_Custom/internal/gologger"
+	"github.com/Juneoww/AIG_Custom/internal/mcp"
 	"github.com/gin-gonic/gin"
 	"gopkg.in/yaml.v3"
 )

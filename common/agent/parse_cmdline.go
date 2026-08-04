@@ -23,8 +23,8 @@ import (
 	"fmt"
 	"path"
 
-	"github.com/Tencent/AI-Infra-Guard/common/utils"
-	"github.com/Tencent/AI-Infra-Guard/internal/gologger"
+	"github.com/Juneoww/AIG_Custom/common/utils"
+	"github.com/Juneoww/AIG_Custom/internal/gologger"
 	"github.com/google/uuid"
 )
 

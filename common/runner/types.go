@@ -18,7 +18,7 @@
 
 package runner
 
-import "github.com/Tencent/AI-Infra-Guard/pkg/vulstruct"
+import "github.com/Juneoww/AIG_Custom/pkg/vulstruct"
 
 // CallbackScanResult 扫描结果结构
 type CallbackScanResult struct {

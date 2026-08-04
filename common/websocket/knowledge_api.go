@@ -32,8 +32,8 @@ import (
 
 	"trpc.group/trpc-go/trpc-go/log"
 
-	"github.com/Tencent/AI-Infra-Guard/common/fingerprints/parser"
-	"github.com/Tencent/AI-Infra-Guard/pkg/vulstruct"
+	"github.com/Juneoww/AIG_Custom/common/fingerprints/parser"
+	"github.com/Juneoww/AIG_Custom/pkg/vulstruct"
 	"github.com/gin-gonic/gin"
 	"gopkg.in/yaml.v3"
 )

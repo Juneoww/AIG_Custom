@@ -29,8 +29,8 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/Tencent/AI-Infra-Guard/common/fingerprints/parser"
-	"github.com/Tencent/AI-Infra-Guard/internal/gologger"
+	"github.com/Juneoww/AIG_Custom/common/fingerprints/parser"
+	"github.com/Juneoww/AIG_Custom/internal/gologger"
 )
 
 // DownloadFile 下载文件

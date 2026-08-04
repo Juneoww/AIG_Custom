@@ -23,9 +23,9 @@ import (
 	"net/http"
 	"strings"
 
-	"github.com/Tencent/AI-Infra-Guard/common/utils/models"
+	"github.com/Juneoww/AIG_Custom/common/utils/models"
 
-	"github.com/Tencent/AI-Infra-Guard/pkg/database"
+	"github.com/Juneoww/AIG_Custom/pkg/database"
 	"github.com/gin-gonic/gin"
 	"trpc.group/trpc-go/trpc-go/log"
 )

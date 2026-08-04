@@ -34,9 +34,9 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/Tencent/AI-Infra-Guard/common/agent"
+	"github.com/Juneoww/AIG_Custom/common/agent"
 
-	"github.com/Tencent/AI-Infra-Guard/pkg/database"
+	"github.com/Juneoww/AIG_Custom/pkg/database"
 	"github.com/gin-gonic/gin"
 	"gorm.io/datatypes"
 	"trpc.group/trpc-go/trpc-go/log"

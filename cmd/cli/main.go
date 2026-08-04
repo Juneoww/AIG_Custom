@@ -19,7 +19,7 @@
 package main
 
 import (
-	"github.com/Tencent/AI-Infra-Guard/cmd/cli/cmd"
+	"github.com/Juneoww/AIG_Custom/cmd/cli/cmd"
 )
 
 func main() {

@@ -21,7 +21,7 @@ package database
 import (
 	"os"
 
-	"github.com/Tencent/AI-Infra-Guard/internal/gologger"
+	"github.com/Juneoww/AIG_Custom/internal/gologger"
 	"gopkg.in/yaml.v3"
 )
 

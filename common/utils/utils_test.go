@@ -19,7 +19,7 @@
 package utils
 
 import (
-	"github.com/Tencent/AI-Infra-Guard/pkg/httpx"
+	"github.com/Juneoww/AIG_Custom/pkg/httpx"
 	"github.com/hashicorp/go-version"
 	"github.com/projectdiscovery/fastdialer/fastdialer"
 	"github.com/stretchr/testify/assert"

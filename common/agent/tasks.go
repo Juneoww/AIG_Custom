@@ -29,16 +29,16 @@ import (
 	"sync"
 	"time"
 
-	"github.com/Tencent/AI-Infra-Guard/pkg/vulstruct"
+	"github.com/Juneoww/AIG_Custom/pkg/vulstruct"
 	iputil "github.com/projectdiscovery/utils/ip"
 
-	"github.com/Tencent/AI-Infra-Guard/common/utils"
+	"github.com/Juneoww/AIG_Custom/common/utils"
 
-	"github.com/Tencent/AI-Infra-Guard/common/utils/models"
+	"github.com/Juneoww/AIG_Custom/common/utils/models"
 
-	"github.com/Tencent/AI-Infra-Guard/common/runner"
-	"github.com/Tencent/AI-Infra-Guard/internal/gologger"
-	"github.com/Tencent/AI-Infra-Guard/internal/options"
+	"github.com/Juneoww/AIG_Custom/common/runner"
+	"github.com/Juneoww/AIG_Custom/internal/gologger"
+	"github.com/Juneoww/AIG_Custom/internal/options"
 	"github.com/google/uuid"
 )
 

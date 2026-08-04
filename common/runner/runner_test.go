@@ -19,8 +19,8 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	"github.com/Tencent/AI-Infra-Guard/internal/gologger"
-	"github.com/Tencent/AI-Infra-Guard/internal/options"
+	"github.com/Juneoww/AIG_Custom/internal/gologger"
+	"github.com/Juneoww/AIG_Custom/internal/options"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )

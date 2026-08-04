@@ -36,8 +36,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/Tencent/AI-Infra-Guard/common/agent"
-	"github.com/Tencent/AI-Infra-Guard/pkg/database"
+	"github.com/Juneoww/AIG_Custom/common/agent"
+	"github.com/Juneoww/AIG_Custom/pkg/database"
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 	"trpc.group/trpc-go/trpc-go/log"

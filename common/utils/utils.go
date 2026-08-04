@@ -39,7 +39,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/Tencent/AI-Infra-Guard/internal/gologger"
+	"github.com/Juneoww/AIG_Custom/internal/gologger"
 
 	"github.com/spaolacci/murmur3"
 )

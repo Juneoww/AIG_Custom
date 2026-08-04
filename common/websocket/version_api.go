@@ -27,7 +27,7 @@ import (
 	"sync"
 	"time"
 
-	version "github.com/Tencent/AI-Infra-Guard/internal/options"
+	version "github.com/Juneoww/AIG_Custom/internal/options"
 	"github.com/gin-gonic/gin"
 )
 

@@ -21,12 +21,12 @@ package websocket
 import (
 	"encoding/json"
 	"fmt"
-	"github.com/Tencent/AI-Infra-Guard/common/runner"
-	"github.com/Tencent/AI-Infra-Guard/internal/options"
+	"github.com/Juneoww/AIG_Custom/common/runner"
+	"github.com/Juneoww/AIG_Custom/internal/options"
 	"net/http"
 	"sync"
 
-	"github.com/Tencent/AI-Infra-Guard/internal/gologger"
+	"github.com/Juneoww/AIG_Custom/internal/gologger"
 
 	"github.com/gorilla/websocket"
 )

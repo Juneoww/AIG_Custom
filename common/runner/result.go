@@ -22,8 +22,8 @@ package runner
 import (
 	"encoding/json"
 
-	"github.com/Tencent/AI-Infra-Guard/common/fingerprints/preload"
-	"github.com/Tencent/AI-Infra-Guard/pkg/vulstruct"
+	"github.com/Juneoww/AIG_Custom/common/fingerprints/preload"
+	"github.com/Juneoww/AIG_Custom/pkg/vulstruct"
 )
 
 // Result defines an interface for result output

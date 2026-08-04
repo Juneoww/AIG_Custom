@@ -1,4 +1,4 @@
-module github.com/Tencent/AI-Infra-Guard
+module github.com/Juneoww/AIG_Custom
 
 go 1.23.2
 

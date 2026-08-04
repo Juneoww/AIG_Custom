@@ -49,8 +49,8 @@ definitions:
     type: object
 info:
   contact: {}
-  description: API for managing AI security scanning tasks
-  title: AI-Infra-Guard 任务API
+  description: API for managing AIG Custom Platform AI security scanning tasks
+  title: AIG Custom Platform 任务API
   version: "1.0"
 paths:
   /api/v1/app/taskapi/result/{id}:

@@ -22,7 +22,7 @@ import (
 	"os"
 	"testing"
 
-	"github.com/Tencent/AI-Infra-Guard/pkg/database"
+	"github.com/Juneoww/AIG_Custom/pkg/database"
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"

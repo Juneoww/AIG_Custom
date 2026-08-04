@@ -23,7 +23,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/Tencent/AI-Infra-Guard/common/fingerprints/parser"
+	"github.com/Juneoww/AIG_Custom/common/fingerprints/parser"
 	"gopkg.in/yaml.v3"
 )
 

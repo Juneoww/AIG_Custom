@@ -24,10 +24,10 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/Tencent/AI-Infra-Guard/common/utils/chromium"
-	"github.com/Tencent/AI-Infra-Guard/common/utils/models"
-	"github.com/Tencent/AI-Infra-Guard/internal/gologger"
-	"github.com/Tencent/AI-Infra-Guard/pkg/vulstruct"
+	"github.com/Juneoww/AIG_Custom/common/utils/chromium"
+	"github.com/Juneoww/AIG_Custom/common/utils/models"
+	"github.com/Juneoww/AIG_Custom/internal/gologger"
+	"github.com/Juneoww/AIG_Custom/pkg/vulstruct"
 )
 
 func LoadSensitivePrompt(language string) string {

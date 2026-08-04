@@ -24,9 +24,9 @@ import (
 	"os"
 	"strings"
 
-	"github.com/Tencent/AI-Infra-Guard/common/fingerprints/parser"
-	"github.com/Tencent/AI-Infra-Guard/common/utils"
-	"github.com/Tencent/AI-Infra-Guard/internal/gologger"
+	"github.com/Juneoww/AIG_Custom/common/fingerprints/parser"
+	"github.com/Juneoww/AIG_Custom/common/utils"
+	"github.com/Juneoww/AIG_Custom/internal/gologger"
 )
 
 // AdvisoryEngine 漏洞建议引擎结构体，用于管理版本漏洞信息

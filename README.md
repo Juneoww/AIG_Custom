@@ -42,10 +42,14 @@
 <br>
 
 <p align="center">
-    <h2 align="center">🚀 AI Red Teaming Platform by Tencent Zhuque Lab</h2>
+    <h2 align="center">🚀 AIG Custom Platform</h2>
 </p>
 
-<b>A.I.G (AI-Infra-Guard)</b> integrates capabilities such as ClawScan(OpenClaw Security Scan), Agent Scan，AI infra vulnerability scan, MCP Server & Agent Skills scan, and Jailbreak Evaluation, aiming to provide users with the most comprehensive, intelligent, and user-friendly solution for AI security risk self-examination.
+<b>AIG Custom Platform</b> is an independent custom platform based on AI-Infra-Guard. It integrates capabilities such as ClawScan(OpenClaw Security Scan), Agent Scan，AI infra vulnerability scan, MCP Server & Agent Skills scan, and Jailbreak Evaluation, aiming to provide users with the most comprehensive, intelligent, and user-friendly solution for AI security risk self-examination.
+
+## Upstream Attribution
+
+Based on Tencent Zhuque Lab AI-Infra-Guard. The upstream project is available at [https://github.com/Tencent/AI-Infra-Guard](https://github.com/Tencent/AI-Infra-Guard). See [deployment attribution](docs/deployment/attribution.md) for release requirements.
 
 <p>
   We are committed to making A.I.G(AI-Infra-Guard) the industry-leading AI red teaming platform. More stars help this project reach a wider audience, attracting more developers to contribute, which accelerates iteration and improvement. Your star is crucial to us!

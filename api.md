@@ -1,9 +1,9 @@
-# A.I.G API Documentation
+# AIG Custom Platform API Documentation
 
 
 ## Overview
 
-A.I.G(AI-Infra-Guard) provides a comprehensive set of API interfaces for Agent Scan, MCP Server Scan, Jailbreak Evaluation, AI Infra Scan, and Model Configuration Management. This documentation details the usage methods, parameter descriptions, and example code for each API interface.
+AIG Custom Platform is an independent custom platform based on AI-Infra-Guard. It provides a comprehensive set of API interfaces for Agent Scan, MCP Server Scan, Jailbreak Evaluation, AI Infra Scan, and Model Configuration Management. This documentation details the usage methods, parameter descriptions, and example code for each API interface.
 
 After the project is running, you can access `http://localhost:8088/docs/index.html` to view the Swagger documentation.
 

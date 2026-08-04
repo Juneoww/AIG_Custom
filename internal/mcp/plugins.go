@@ -25,9 +25,9 @@ import (
 	"regexp"
 	"strings"
 
-	"github.com/Tencent/AI-Infra-Guard/common/utils/models"
-	"github.com/Tencent/AI-Infra-Guard/internal/gologger"
-	"github.com/Tencent/AI-Infra-Guard/internal/mcp/utils"
+	"github.com/Juneoww/AIG_Custom/common/utils/models"
+	"github.com/Juneoww/AIG_Custom/internal/gologger"
+	"github.com/Juneoww/AIG_Custom/internal/mcp/utils"
 	"github.com/mark3labs/mcp-go/client"
 	"gopkg.in/yaml.v3"
 )

@@ -21,8 +21,8 @@ package preload
 
 import (
 	"errors"
-	"github.com/Tencent/AI-Infra-Guard/common/utils"
-	"github.com/Tencent/AI-Infra-Guard/pkg/httpx"
+	"github.com/Juneoww/AIG_Custom/common/utils"
+	"github.com/Juneoww/AIG_Custom/pkg/httpx"
 	"net/url"
 	"regexp"
 	"strings"

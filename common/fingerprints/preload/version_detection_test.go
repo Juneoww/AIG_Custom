@@ -24,8 +24,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/Tencent/AI-Infra-Guard/common/fingerprints/parser"
-	"github.com/Tencent/AI-Infra-Guard/pkg/httpx"
+	"github.com/Juneoww/AIG_Custom/common/fingerprints/parser"
+	"github.com/Juneoww/AIG_Custom/pkg/httpx"
 	"github.com/stretchr/testify/assert"
 )
 

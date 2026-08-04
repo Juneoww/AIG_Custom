@@ -24,7 +24,7 @@ import (
 	"flag"
 	"net/url"
 
-	"github.com/Tencent/AI-Infra-Guard/internal/gologger"
+	"github.com/Juneoww/AIG_Custom/internal/gologger"
 )
 
 // Options 定义了程序的所有配置选项

@@ -23,8 +23,8 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/Tencent/AI-Infra-Guard/common/agent"
-	"github.com/Tencent/AI-Infra-Guard/internal/gologger"
+	"github.com/Juneoww/AIG_Custom/common/agent"
+	"github.com/Juneoww/AIG_Custom/internal/gologger"
 )
 
 func main() {

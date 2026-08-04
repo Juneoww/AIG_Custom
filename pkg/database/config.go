@@ -23,7 +23,7 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/Tencent/AI-Infra-Guard/internal/gologger"
+	"github.com/Juneoww/AIG_Custom/internal/gologger"
 
 	"github.com/glebarez/sqlite"
 	"gorm.io/gorm"
