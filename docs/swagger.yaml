@@ -49,7 +49,7 @@ definitions:
     type: object
 info:
   contact: {}
-  description: API for managing AIG Custom Platform AI security scanning tasks
+  description: API for managing AIG Custom Platform AI security scanning tasks. Based on Tencent Zhuque Lab AI-Infra-Guard (https://github.com/Tencent/AI-Infra-Guard).
   title: AIG Custom Platform 任务API
   version: "1.0"
 paths:

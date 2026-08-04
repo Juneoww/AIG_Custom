@@ -3,7 +3,7 @@
 
 ## 概述
 
-AIG Custom Platform 是基于 AI-Infra-Guard 构建的独立定制平台，提供了一套完整的API接口，用于AI基础设施扫描、MCP安全扫描、大模型安全体检和模型配置管理。本文档详细介绍了各个API接口的使用方法、参数说明和示例代码。
+AIG Custom Platform 是基于 Tencent Zhuque Lab AI-Infra-Guard（https://github.com/Tencent/AI-Infra-Guard）构建的独立定制平台，提供了一套完整的API接口，用于AI基础设施扫描、MCP安全扫描、大模型安全体检和模型配置管理。本文档详细介绍了各个API接口的使用方法、参数说明和示例代码。
 
 项目运行后，可访问 `http://localhost:8088/docs/index.html` 查看Swagger文档。
 
