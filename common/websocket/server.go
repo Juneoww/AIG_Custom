@@ -32,6 +32,7 @@ import (
 
 	"github.com/Juneoww/AIG_Custom/common/trpc"
 	_ "github.com/Juneoww/AIG_Custom/docs"
+	"github.com/Juneoww/AIG_Custom/internal/gologger"
 	version "github.com/Juneoww/AIG_Custom/internal/options"
 	"github.com/Juneoww/AIG_Custom/pkg/database"
 	"github.com/gin-gonic/gin"
@@ -57,7 +58,10 @@ func RunWebServer(options *version.Options) {
 	// r.Use(middleware.MetricsMiddleware()) // 移除HTTP监控中间件，依赖TRPC自动监控
 
 	// 3. 初始化数据库和Agentmanager
-	dbConfig := database.LoadConfigFromEnv() // 从环境变量加载数据库配置
+	dbConfig, err := database.LoadConfigFromEnv() // 从环境变量加载数据库配置
+	if err != nil {
+		gologger.Fatalf("加载数据库配置失败: %v", err)
+	}
 	db, err := database.InitDB(dbConfig)
 	if err != nil {
 		log.Errorf("数据库初始化失败: trace_id=system_startup, error=%v", err)

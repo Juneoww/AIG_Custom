@@ -21,59 +21,85 @@ package database
 import (
 	"fmt"
 	"os"
-	"path/filepath"
+	"strings"
+	"time"
 
-	"github.com/Juneoww/AIG_Custom/internal/gologger"
-
-	"github.com/glebarez/sqlite"
+	"gorm.io/driver/postgres"
 	"gorm.io/gorm"
 )
 
-// Config 用于保存数据库配置
+const postgresDriver = "postgres"
+
+// Config 用于保存 PostgreSQL 数据库配置。
 type Config struct {
-	DBPath string
+	Driver          string
+	DSN             string
+	MaxIdleConns    int
+	MaxOpenConns    int
+	ConnMaxLifetime time.Duration
 }
 
-// NewConfig 创建一个新的数据库配置
-func NewConfig(dbPath string) *Config {
-	return &Config{DBPath: dbPath}
-}
-
-// LoadConfigFromEnv 从环境变量加载数据库配置
-func LoadConfigFromEnv() *Config {
-	// 默认数据库路径
-	defaultDBPath := "db/tasks.db"
-
-	// 从环境变量读取数据库路径
-	if dbPath := os.Getenv("DB_PATH"); dbPath != "" {
-		defaultDBPath = dbPath
+// NewConfig 创建使用 PostgreSQL 的数据库配置。
+func NewConfig(dsn string) *Config {
+	return &Config{
+		Driver:          postgresDriver,
+		DSN:             dsn,
+		MaxIdleConns:    10,
+		MaxOpenConns:    25,
+		ConnMaxLifetime: time.Hour,
 	}
-
-	return &Config{DBPath: defaultDBPath}
 }
 
-// InitDB 用 GORM 初始化数据库连接并返回 *gorm.DB
+// LoadConfigFromEnv 从环境变量加载 PostgreSQL 配置。
+func LoadConfigFromEnv() (*Config, error) {
+	config := NewConfig(os.Getenv("DB_DSN"))
+	if driver := os.Getenv("DB_DRIVER"); driver != "" {
+		config.Driver = driver
+	}
+	if err := config.Validate(); err != nil {
+		return nil, err
+	}
+	return config, nil
+}
+
+// Validate 检查当前交付支持的数据库配置。
+func (c *Config) Validate() error {
+	if c == nil {
+		return fmt.Errorf("数据库配置不能为空")
+	}
+	if strings.ToLower(c.Driver) != postgresDriver {
+		return fmt.Errorf("不支持的数据库驱动 %q：当前仅支持 postgres", c.Driver)
+	}
+	if strings.TrimSpace(c.DSN) == "" {
+		return fmt.Errorf("DB_DSN 不能为空")
+	}
+	return nil
+}
+
+// InitDB 用 GORM 初始化 PostgreSQL 连接并返回 *gorm.DB。
 func InitDB(config *Config) (*gorm.DB, error) {
-	// 确保数据库目录存在
-	dir := filepath.Dir(config.DBPath)
-	if err := os.MkdirAll(dir, 0755); err != nil {
-		return nil, fmt.Errorf("创建数据库目录失败: %v", err)
+	if err := config.Validate(); err != nil {
+		return nil, err
 	}
 
-	//打开数据库连接 - 启用WAL模式和共享缓存以支持并发访问
-	db, err := gorm.Open(sqlite.Open(config.DBPath+"?_journal=WAL&_timeout=5000&cache=shared"), &gorm.Config{})
+	db, err := gorm.Open(postgres.Open(config.DSN), &gorm.Config{DisableForeignKeyConstraintWhenMigrating: true})
 	if err != nil {
-		gologger.WithError(err).Fatalln("无法打开数据库连接")
+		return nil, fmt.Errorf("打开 PostgreSQL 数据库失败: %w", err)
 	}
-	// 获取底层的SQL DB以配置连接池
+
 	sqlDB, err := db.DB()
 	if err != nil {
-		panic("failed to get database connection")
+		return nil, fmt.Errorf("获取 PostgreSQL 连接池失败: %w", err)
 	}
-
-	// 设置连接池参数
-	sqlDB.SetMaxIdleConns(1000)
-	sqlDB.SetMaxOpenConns(1000)
+	if config.MaxIdleConns > 0 {
+		sqlDB.SetMaxIdleConns(config.MaxIdleConns)
+	}
+	if config.MaxOpenConns > 0 {
+		sqlDB.SetMaxOpenConns(config.MaxOpenConns)
+	}
+	if config.ConnMaxLifetime > 0 {
+		sqlDB.SetConnMaxLifetime(config.ConnMaxLifetime)
+	}
 
 	return db, nil
 }

@@ -96,12 +96,9 @@ func (s *TaskStore) ResetRunningTasks() error {
 	}).Error
 }
 
-// Init 自动迁移任务相关表结构
+// Init 执行版本化数据库迁移。
 func (s *TaskStore) Init() error {
-	if err := s.db.AutoMigrate(&User{}, &Session{}, &TaskMessage{}); err != nil {
-		return err
-	}
-	return s.createIndexes()
+	return Migrate(s.db)
 }
 
 // createIndexes 创建查询优化索引

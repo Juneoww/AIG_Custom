@@ -1,0 +1,39 @@
+x-migration-depends-on: &migration-depends-on
+  migrate:
+    condition: service_completed_successfully
+
+services:
+  postgres:
+    image: postgres:16.4-alpine
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-aig}
+      POSTGRES_USER: ${POSTGRES_USER:-aig}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD before deployment}
+    volumes:
+      - aig-postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+    restart: unless-stopped
+
+  migrate:
+    image: ${AIG_PLATFORM_IMAGE:-aig-platform:local}
+    build:
+      context: ../..
+      target: migrate
+    command: ["migrate"]
+    restart: "no"
+    environment:
+      DB_DRIVER: postgres
+      DB_DSN: postgres://${POSTGRES_USER:-aig}:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD before deployment}@postgres:5432/${POSTGRES_DB:-aig}?sslmode=disable
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  # Task 10 can add platform and agent services with:
+  # depends_on: *migration-depends-on
+
+volumes:
+  aig-postgres-data:

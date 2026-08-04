@@ -2,11 +2,12 @@
 # 第一阶段：构建Go应用
 FROM golang:1.23.2-alpine AS builder
 
+# 仅构建阶段使用，可通过 --build-arg 覆盖；避免依赖下载受默认代理瞬时故障影响。
+ARG GOPROXY=https://goproxy.cn,direct
+ENV GOPROXY=${GOPROXY}
+
 # 设置工作目录
 WORKDIR /app
-
-# 安装必要的构建工具
-RUN apk add --no-cache git ca-certificates tzdata
 
 # 复制源代码（包含go.mod和go.sum）
 COPY . .
@@ -16,6 +17,11 @@ RUN go mod download
 
 # 构建应用
 RUN CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w" -trimpath -buildvcs=false -o ai-infra-guard ./cmd/cli/main.go
+
+# 数据库迁移只需要平台二进制，无需安装 Web 运行时的 Python 依赖。
+FROM builder AS migrate
+WORKDIR /app
+ENTRYPOINT ["/app/ai-infra-guard"]
 
 # 第二阶段：运行阶段（使用Python 3.12 Alpine镜像）
 FROM python:3.12-alpine
@@ -52,7 +58,6 @@ RUN chmod +x /app/start.sh && chown root:root /app/start.sh
 
 # 创建必要的目录并设置权限（仅对镜像内有效）
 RUN mkdir -p /app/uploads \
-    /app/db && \
     chown -R root:root /app && \
     chmod -R 755 /app && \
     mkdir -p /app/AIG-PromptSecurity/utils
@@ -61,7 +66,7 @@ COPY ./AIG-PromptSecurity/utils/strategy_map.json /app/AIG-PromptSecurity/utils/
 # 设置环境变量
 ENV APP_ENV=production
 ENV UPLOAD_DIR=/app/uploads
-ENV DB_PATH=/app/db/tasks.db
+ENV DB_DRIVER=postgres
 ENV TZ=Asia/Shanghai
 ENV PYTHONUNBUFFERED=1
 
@@ -69,11 +74,11 @@ ENV PYTHONUNBUFFERED=1
 EXPOSE 8088
 
 # 声明卷挂载点
-VOLUME ["/app/uploads", "/app/db", "/app/data", "/app/logs"]
+VOLUME ["/app/uploads", "/app/data", "/app/logs"]
 
 # 健康检查
 HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
     CMD pgrep ai-infra-guard || exit 1
 
 # 启动命令
-CMD ["/app/start.sh"] 
+CMD ["/app/start.sh"]

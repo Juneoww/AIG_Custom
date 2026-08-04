@@ -59,13 +59,9 @@ func NewModelStore(db *gorm.DB) *ModelStore {
 	return &ModelStore{db: db}
 }
 
-// Init 自动迁移模型相关表结构
+// Init 执行版本化数据库迁移。
 func (s *ModelStore) Init() error {
-	if err := s.db.AutoMigrate(&Model{}); err != nil {
-		return err
-	}
-	// 创建索引优化查询
-	return s.db.Exec("CREATE INDEX IF NOT EXISTS idx_models_username_created ON models(username, created_at DESC)").Error
+	return Migrate(s.db)
 }
 
 // CreateModel 创建模型

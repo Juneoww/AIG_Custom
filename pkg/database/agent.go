@@ -48,9 +48,9 @@ func NewAgentStore(db *gorm.DB) *AgentStore {
 	return &AgentStore{db: db}
 }
 
-// Init 自动迁移agent表结构
+// Init 执行版本化数据库迁移。
 func (s *AgentStore) Init() error {
-	return s.db.AutoMigrate(&Agent{})
+	return Migrate(s.db)
 }
 
 // Register 注册或更新agent信息

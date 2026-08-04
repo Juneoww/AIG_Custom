@@ -19,9 +19,37 @@
 package main
 
 import (
+	"log"
+	"os"
+
 	"github.com/Juneoww/AIG_Custom/cmd/cli/cmd"
+	"github.com/Juneoww/AIG_Custom/pkg/database"
 )
 
 func main() {
+	if len(os.Args) == 2 && os.Args[1] == "migrate" {
+		if err := runMigrate(); err != nil {
+			log.Fatalf("数据库迁移失败: %v", err)
+		}
+		return
+	}
 	cmd.Execute()
+}
+
+func runMigrate() error {
+	config, err := database.LoadConfigFromEnv()
+	if err != nil {
+		return err
+	}
+	db, err := database.InitDB(config)
+	if err != nil {
+		return err
+	}
+	sqlDB, err := db.DB()
+	if err != nil {
+		return err
+	}
+	defer sqlDB.Close()
+
+	return database.Migrate(db)
 }

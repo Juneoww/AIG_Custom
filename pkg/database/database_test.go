@@ -15,27 +15,19 @@
 package database
 
 import (
-	"os"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
-// newTestDB creates an in-memory SQLite DB for testing.
+// newTestDB creates an isolated PostgreSQL schema for testing.
 func newTestDB(t *testing.T) (*TaskStore, *ModelStore, func()) {
 	t.Helper()
 
-	// Use a temp file-based DB (pure in-memory ":memory:" doesn't work well
-	// with glebarez/sqlite + shared cache, so use a temp file instead).
-	f, err := os.CreateTemp("", "testdb-*.db")
-	require.NoError(t, err)
-	dbPath := f.Name()
-	f.Close()
-
-	cfg := NewConfig(dbPath)
-	db, err := InitDB(cfg)
-	require.NoError(t, err)
+	db := openPostgresTestDB(t)
+	resetPostgresTestDB(t, db)
+	require.NoError(t, Migrate(db))
 
 	ts := NewTaskStore(db)
 	require.NoError(t, ts.Init())
@@ -46,9 +38,8 @@ func newTestDB(t *testing.T) (*TaskStore, *ModelStore, func()) {
 	cleanup := func() {
 		sqlDB, _ := db.DB()
 		if sqlDB != nil {
-			sqlDB.Close()
+			require.NoError(t, sqlDB.Close())
 		}
-		os.Remove(dbPath)
 	}
 	return ts, ms, cleanup
 }
@@ -57,15 +48,12 @@ func newTestDB(t *testing.T) (*TaskStore, *ModelStore, func()) {
 // InitDB / Config
 // ---------------------------------------------------------------------------
 
-func TestInitDB_InMemory(t *testing.T) {
-	f, err := os.CreateTemp("", "testdb-init-*.db")
-	require.NoError(t, err)
-	dbPath := f.Name()
-	f.Close()
-	defer os.Remove(dbPath)
+func TestInitDB_Postgres(t *testing.T) {
+	probe := openPostgresTestDB(t)
+	resetPostgresTestDB(t, probe)
 
-	cfg := NewConfig(dbPath)
-	assert.Equal(t, dbPath, cfg.DBPath)
+	cfg := NewConfig(testPostgresDSN(t))
+	assert.Equal(t, postgresDriver, cfg.Driver)
 
 	db, err := InitDB(cfg)
 	require.NoError(t, err)
@@ -78,21 +66,24 @@ func TestInitDB_InMemory(t *testing.T) {
 }
 
 func TestNewConfig(t *testing.T) {
-	cfg := NewConfig("/tmp/test.db")
-	assert.Equal(t, "/tmp/test.db", cfg.DBPath)
+	cfg := NewConfig("postgres://aig_test:aig_test@postgres-test:5432/aig_test?sslmode=disable")
+	assert.Equal(t, postgresDriver, cfg.Driver)
+	assert.NotEmpty(t, cfg.DSN)
 }
 
 func TestLoadConfigFromEnv_Default(t *testing.T) {
-	os.Unsetenv("DB_PATH")
-	cfg := LoadConfigFromEnv()
-	assert.Equal(t, "db/tasks.db", cfg.DBPath)
+	t.Setenv("DB_DRIVER", "")
+	t.Setenv("DB_DSN", "")
+	_, err := LoadConfigFromEnv()
+	assert.Error(t, err)
 }
 
 func TestLoadConfigFromEnv_Override(t *testing.T) {
-	os.Setenv("DB_PATH", "/tmp/override.db")
-	defer os.Unsetenv("DB_PATH")
-	cfg := LoadConfigFromEnv()
-	assert.Equal(t, "/tmp/override.db", cfg.DBPath)
+	t.Setenv("DB_DRIVER", postgresDriver)
+	t.Setenv("DB_DSN", testPostgresDSN(t))
+	cfg, err := LoadConfigFromEnv()
+	require.NoError(t, err)
+	assert.Equal(t, testPostgresDSN(t), cfg.DSN)
 }
 
 // ---------------------------------------------------------------------------

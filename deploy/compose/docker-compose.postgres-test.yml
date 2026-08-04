@@ -1,0 +1,31 @@
+services:
+  postgres-test:
+    image: postgres:16.4-alpine
+    environment:
+      POSTGRES_DB: aig_test
+      POSTGRES_USER: aig_test
+      POSTGRES_PASSWORD: aig_test
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U aig_test -d aig_test"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  database-test:
+    image: golang:1.23.2-alpine
+    working_dir: /workspace
+    volumes:
+      - ../..:/workspace
+      - aig-go-mod-cache:/go/pkg/mod
+      - aig-go-build-cache:/root/.cache/go-build
+    environment:
+      AIG_TEST_DB_DSN: postgres://aig_test:aig_test@postgres-test:5432/aig_test?sslmode=disable
+      GOPROXY: https://goproxy.cn,direct
+    depends_on:
+      postgres-test:
+        condition: service_healthy
+    command: go test ./pkg/database -run 'Test(DatabaseConfig|Migration)' -count=1
+
+volumes:
+  aig-go-mod-cache:
+  aig-go-build-cache:
