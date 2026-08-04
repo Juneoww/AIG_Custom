@@ -13,6 +13,7 @@ uploads
 __pycache__
 venv
 tests
+.worktrees/
 
 # OpenClaw internal workspace file
 openclaw.md
