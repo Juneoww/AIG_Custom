@@ -93,7 +93,7 @@ Task lifecycle: Frontend → REST API → TaskManager → AgentManager dispatche
 **`common/websocket/`** — Core web server layer:
 - `server.go`: Gin router setup, route registration, static file serving, CORS
 - `api.go`: REST API handlers for tasks, knowledge base CRUD, file upload (chunked), models
-- `task_manager.go` (~1500 LOC): Central task orchestrator — creates tasks, manages SSE channels, persists state to SQLite, assigns tasks to agents
+- `task_manager.go` (~1500 LOC): Central task orchestrator — creates tasks, manages SSE channels, persists state to PostgreSQL, assigns tasks to agents
 - `agent.go`: AgentManager handles WebSocket connections, agent registration, task assignment, heartbeat
 
 **`common/agent/`** — Agent-side task execution framework:
@@ -115,7 +115,7 @@ Task lifecycle: Frontend → REST API → TaskManager → AgentManager dispatche
 - `scanner.go`: AI-driven code audit using LLM, connects to MCP servers via Stdio/SSE/Stream
 - `plugins.go`: Loads security detection plugins from `data/mcp/*.yaml`, each defining rules and prompt templates
 
-**`pkg/database/`** — SQLite persistence via GORM (tasks, sessions, models, agent configs).
+**`pkg/database/`** — PostgreSQL persistence via GORM (tasks, sessions, models, agent configs).
 
 **`pkg/vulstruct/`** — Vulnerability matching engine:
 - `advisory.go`: `AdvisoryEngine` loads vuln YAML files from `data/vuln/`, matches component+version against known CVEs using DSL-compiled version range expressions.
@@ -179,9 +179,9 @@ All three Python sub-projects integrate with Go via the same pattern: Go spawns 
 
 - **Go version**: 1.23.2, module: `github.com/Tencent/AI-Infra-Guard`
 - **Web framework**: Gin (`gin-gonic/gin`)
-- **Database**: SQLite via GORM, stored at `DB_PATH` (default `/app/db/tasks.db`)
+- **Database**: PostgreSQL via GORM, configured with `DB_DRIVER=postgres` and required `DB_DSN`
 - **Frontend**: Embedded SPA via `embed.FS` (no separate frontend build step in this repo)
 - **Python env**: AIG-PromptSecurity uses `uv` (pyproject.toml); agent-scan and mcp-scan use `pip` (requirements.txt)
 - **WebSocket protocol messages**: `register`, `register_ack`, `task_assign`, `resultUpdate`, `actionLog`, `toolUsed`, `newPlanStep`, `statusUpdate`, `planUpdate`, `error`, `terminate`
 - **Logging**: tRPC-Go logging framework, configured via `trpc_go.yaml`
-- **Config**: Environment variables (`APP_ENV`, `UPLOAD_DIR`, `DB_PATH`, `AIG_SERVER`), no separate config file for app settings
+- **Config**: Environment variables (`APP_ENV`, `UPLOAD_DIR`, `DB_DRIVER`, `DB_DSN`, `AIG_SERVER`), no separate config file for app settings

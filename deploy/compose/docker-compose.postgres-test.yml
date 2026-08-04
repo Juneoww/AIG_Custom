@@ -24,7 +24,10 @@ services:
     depends_on:
       postgres-test:
         condition: service_healthy
-    command: go test ./pkg/database -run 'Test(DatabaseConfig|Migration)' -count=1
+    command: >
+      sh -ec 'go build -o /tmp/aig ./cmd/cli/main.go &&
+      AIG_TEST_CLI_BINARY=/tmp/aig go test ./pkg/database -run "Test(DatabaseConfig|Migration)" -count=1 &&
+      go test ./common/websocket -run "Test(SubmitTask_InvalidJSON|GetTaskStatus_ExistingSession)" -count=1'
 
 volumes:
   aig-go-mod-cache:

@@ -54,7 +54,7 @@ Frontend (SPA, embedded) → REST API / SSE
                          → WebSocket (/api/v1/agents/ws) → Agent Workers
 ```
 
-- **Webserver** (`cmd/cli/main.go`, port 8088): Gin HTTP server, task manager, SQLite persistence, SSE for live progress
+- **Webserver** (`cmd/cli/main.go`, port 8088): Gin HTTP server, task manager, PostgreSQL persistence, SSE for live progress
 - **Agent** (`cmd/agent/main.go`): Connects to server via WebSocket, executes tasks, streams results back
 
 ### Four Task Types
@@ -75,7 +75,7 @@ Frontend (SPA, embedded) → REST API / SSE
 - `pkg/vulstruct/` — CVE advisory engine with version range DSL
 - `internal/mcp/` — LLM-driven MCP server code auditing
 - `pkg/httpx/` — HTTP client with proxy, retry, redirect, and encoding detection
-- `pkg/database/` — SQLite via GORM (tasks, sessions, models, agents)
+- `pkg/database/` — PostgreSQL via GORM (tasks, sessions, models, agents)
 
 ### Data Directories (Not Code)
 
@@ -96,7 +96,8 @@ These are invoked as subprocesses by Go agents, each has its own virtualenv:
 | Variable | Default | Purpose |
 |----------|---------|---------|
 | `AIG_SERVER` | — | WebSocket URL for agent to connect to server |
-| `DB_PATH` | `/app/db/tasks.db` | SQLite database path |
+| `DB_DRIVER` | `postgres` | 当前唯一支持的数据库驱动 |
+| `DB_DSN` | — | PostgreSQL 连接 DSN（必填） |
 | `UPLOAD_DIR` | `/app/uploads` | File upload directory |
 | `APP_ENV` | — | `production` or `development` |
 | `TZ` | `Asia/Shanghai` | Timezone |

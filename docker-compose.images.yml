@@ -1,47 +1,76 @@
-version: '3.8'
-
-
 services:
-  webserver:
-    image: zhuquelab/aig-server:latest
-    container_name: ai-infra-guard-webserver
-    ports:
-      - "8088:8088"
+  postgres:
+    image: postgres:16.4-alpine
     environment:
-      - APP_ENV=production
-      - UPLOAD_DIR=/app/uploads
-      - DB_PATH=/app/db/tasks.db
-      - TZ=Asia/Shanghai
+      POSTGRES_DB: ${POSTGRES_DB:-aig}
+      POSTGRES_USER: ${POSTGRES_USER:-aig}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD before deployment}
+    volumes:
+      - aig-postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+    networks: [ai-infra-guard-network]
+    restart: unless-stopped
+
+  migrate:
+    image: ${AIG_PLATFORM_IMAGE:-zhuquelab/aig-server:latest}
+    command: ["/app/ai-infra-guard", "migrate"]
+    environment:
+      DB_DRIVER: postgres
+      DB_DSN: postgres://${POSTGRES_USER:-aig}:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD before deployment}@postgres:5432/${POSTGRES_DB:-aig}?sslmode=disable
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks: [ai-infra-guard-network]
+    restart: "no"
+
+  webserver:
+    image: ${AIG_PLATFORM_IMAGE:-zhuquelab/aig-server:latest}
+    container_name: ai-infra-guard-webserver
+    ports: ["8088:8088"]
+    environment:
+      APP_ENV: production
+      UPLOAD_DIR: /app/uploads
+      DB_DRIVER: postgres
+      DB_DSN: postgres://${POSTGRES_USER:-aig}:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD before deployment}@postgres:5432/${POSTGRES_DB:-aig}?sslmode=disable
+      TZ: Asia/Shanghai
     volumes:
       - ./data:/app/data
-      - ./db:/app/db
       - ./logs:/app/logs
       - ./uploads:/app/uploads
-    networks:
-      - ai-infra-guard-network
+    networks: [ai-infra-guard-network]
     restart: always
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
     healthcheck:
-      test: [ "CMD", "curl",  "http://localhost:8088/" ]
+      test: ["CMD", "curl", "http://localhost:8088/"]
       interval: 30s
       timeout: 3s
       retries: 3
+
   agent:
-    image: zhuquelab/aig-agent:latest
+    image: ${AIG_AGENT_IMAGE:-zhuquelab/aig-agent:latest}
     container_name: ai-infra-guard-agent
     environment:
-      - TZ=Asia/Shanghai
-      - AIG_SERVER=webserver:8088
-    cap_add:
-      - SYS_ADMIN
-    security_opt:
-      - seccomp:unconfined
-    shm_size: '2gb'
-    networks:
-      - ai-infra-guard-network
+      TZ: Asia/Shanghai
+      AIG_SERVER: webserver:8088
+    cap_add: [SYS_ADMIN]
+    security_opt: [seccomp:unconfined]
+    shm_size: 2gb
+    networks: [ai-infra-guard-network]
     restart: always
     depends_on:
+      migrate:
+        condition: service_completed_successfully
       webserver:
         condition: service_healthy
+
+volumes:
+  aig-postgres-data:
 
 networks:
   ai-infra-guard-network:

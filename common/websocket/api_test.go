@@ -17,13 +17,16 @@ package websocket
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"strings"
 	"testing"
 
 	"github.com/Juneoww/AIG_Custom/pkg/database"
 	"github.com/gin-gonic/gin"
+	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"gorm.io/datatypes"
@@ -37,16 +40,19 @@ func init() {
 // helpers
 // ---------------------------------------------------------------------------
 
-// newTestTaskManager builds a minimal TaskManager backed by an in-memory DB.
+// newTestTaskManager builds a minimal TaskManager backed by an isolated PostgreSQL schema.
 func newTestTaskManager(t *testing.T) (*TaskManager, func()) {
 	t.Helper()
 
-	f, err := os.CreateTemp("", "ws-testdb-*.db")
-	require.NoError(t, err)
-	dbPath := f.Name()
-	f.Close()
+	dsn := os.Getenv("AIG_TEST_DB_DSN")
+	require.NotEmpty(t, dsn, "AIG_TEST_DB_DSN must point to the isolated PostgreSQL test service")
 
-	cfg := database.NewConfig(dbPath)
+	adminDB, err := database.InitDB(database.NewConfig(dsn))
+	require.NoError(t, err)
+	schema := "ws_test_" + strings.ReplaceAll(uuid.NewString(), "-", "")
+	require.NoError(t, adminDB.Exec(fmt.Sprintf("CREATE SCHEMA %s", schema)).Error)
+
+	cfg := database.NewConfig(dsn + "&search_path=" + schema)
 	db, err := database.InitDB(cfg)
 	require.NoError(t, err)
 
@@ -63,9 +69,12 @@ func newTestTaskManager(t *testing.T) (*TaskManager, func()) {
 	cleanup := func() {
 		sqlDB, _ := db.DB()
 		if sqlDB != nil {
-			sqlDB.Close()
+			require.NoError(t, sqlDB.Close())
 		}
-		os.Remove(dbPath)
+		require.NoError(t, adminDB.Exec(fmt.Sprintf("DROP SCHEMA %s CASCADE", schema)).Error)
+		adminSQLDB, adminErr := adminDB.DB()
+		require.NoError(t, adminErr)
+		require.NoError(t, adminSQLDB.Close())
 	}
 	return tm, cleanup
 }
