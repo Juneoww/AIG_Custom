@@ -461,20 +461,20 @@ func TestGetTaskResult_WithResult(t *testing.T) {
 func TestResolveTaskAPIUsername_Default(t *testing.T) {
 	c, _ := gin.CreateTestContext(httptest.NewRecorder())
 	c.Request = httptest.NewRequest(http.MethodGet, "/", nil)
-	assert.Equal(t, "api_user", resolveTaskAPIUsername(c))
+	assert.Empty(t, resolveTaskAPIUsername(c))
 }
 
-func TestResolveTaskAPIUsername_FromHeader(t *testing.T) {
+func TestResolveTaskAPIUsername_RejectsBrowserUsernameHeader(t *testing.T) {
 	c, _ := gin.CreateTestContext(httptest.NewRecorder())
 	req := httptest.NewRequest(http.MethodGet, "/", nil)
 	req.Header.Set("username", "header-user")
 	c.Request = req
-	assert.Equal(t, "header-user", resolveTaskAPIUsername(c))
+	assert.Empty(t, resolveTaskAPIUsername(c))
 }
 
 func TestResolveTaskAPIUsername_FromContext(t *testing.T) {
 	c, _ := gin.CreateTestContext(httptest.NewRecorder())
 	c.Request = httptest.NewRequest(http.MethodGet, "/", nil)
-	c.Set("api_user", "ctx-user")
+	c.Set("username", "ctx-user")
 	assert.Equal(t, "ctx-user", resolveTaskAPIUsername(c))
 }

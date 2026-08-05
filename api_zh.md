@@ -10,6 +10,7 @@ AIG Custom Platform 是基于 Tencent Zhuque Lab AI-Infra-Guard（https://github
 ## 文档目录
 
 ### 基础接口
+- 会话认证
 - 文件上传接口
 - 任务创建接口
 
@@ -39,7 +40,7 @@ AIG Custom Platform 是基于 Tencent Zhuque Lab AI-Infra-Guard（https://github
 
 - **Base URL**: `http://localhost:8088` (根据实际部署调整)
 - **Content-Type**: `application/json`
-- **认证方式**: 通过请求头传递认证信息
+- **认证方式**: 浏览器请求使用登录接口签发的 `aig_session` HttpOnly Cookie。`username` 请求头不是认证机制，不能用于建立身份。已认证的状态变更请求还必须携带与 `aig_csrf` Cookie 相同的 `X-CSRF-Token` 请求头。
 
 ## 通用响应格式
 
@@ -54,6 +55,14 @@ AIG Custom Platform 是基于 Tencent Zhuque Lab AI-Infra-Guard（https://github
 ```
 
 ## API 接口列表
+
+### 会话认证
+
+`POST /api/v1/auth/login` 接收 `{"username":"...","password":"..."}`，并签发 `aig_session` 和 `aig_csrf` Cookie；响应中的 `must_change_password` 为 true 时，用户只能改密或退出登录。
+
+`POST /api/v1/auth/change-password` 需要会话 Cookie 和匹配的 `X-CSRF-Token`，接收 `{"old_password":"...","new_password":"..."}`；成功后会撤销当前会话。
+
+`POST /api/v1/auth/logout` 需要会话 Cookie 和匹配的 `X-CSRF-Token`，随后清除两个 Cookie。
 
 ### 1. 文件上传接口
 

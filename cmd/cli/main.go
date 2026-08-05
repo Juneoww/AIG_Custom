@@ -19,10 +19,12 @@
 package main
 
 import (
+	"context"
 	"log"
 	"os"
 
 	"github.com/Juneoww/AIG_Custom/cmd/cli/cmd"
+	"github.com/Juneoww/AIG_Custom/internal/platform/identity"
 	"github.com/Juneoww/AIG_Custom/pkg/database"
 )
 
@@ -30,6 +32,12 @@ func main() {
 	if len(os.Args) == 2 && os.Args[1] == "migrate" {
 		if err := runMigrate(); err != nil {
 			log.Fatalf("数据库迁移失败: %v", err)
+		}
+		return
+	}
+	if len(os.Args) == 2 && os.Args[1] == "bootstrap-admin" {
+		if err := runBootstrapAdmin(); err != nil {
+			log.Fatalf("初始化管理员失败: %v", err)
 		}
 		return
 	}
@@ -52,4 +60,34 @@ func runMigrate() error {
 	defer sqlDB.Close()
 
 	return database.Migrate(db)
+}
+
+func runBootstrapAdmin() error {
+	config, err := database.LoadConfigFromEnv()
+	if err != nil {
+		return err
+	}
+	db, err := database.InitDB(config)
+	if err != nil {
+		return err
+	}
+	sqlDB, err := db.DB()
+	if err != nil {
+		return err
+	}
+	defer sqlDB.Close()
+
+	repo := identity.NewGormRepository(db)
+	if err := repo.Init(); err != nil {
+		return err
+	}
+	password, err := identity.ReadBootstrapPassword(os.Stdin)
+	if err != nil {
+		return err
+	}
+	username := os.Getenv("AIG_BOOTSTRAP_ADMIN_USERNAME")
+	if username == "" {
+		username = "admin"
+	}
+	return identity.BootstrapAdmin(context.Background(), identity.NewService(repo), username, password)
 }

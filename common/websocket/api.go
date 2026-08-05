@@ -133,17 +133,9 @@ type TaskCreateResponse struct {
 }
 
 func resolveTaskAPIUsername(c *gin.Context) string {
-	username := strings.TrimSpace(c.GetString("api_user"))
-	if username != "" {
-		return username
-	}
-
-	username = strings.TrimSpace(c.GetHeader("username"))
-	if username != "" {
-		return username
-	}
-
-	return "api_user"
+	// Only the authenticated session middleware may establish a request subject.
+	// Do not accept a browser-controlled username header or a shared fallback.
+	return strings.TrimSpace(c.GetString("username"))
 }
 
 func resolveDefaultTaskAPIModel(tm *TaskManager, username string) (*database.ModelParams, error) {

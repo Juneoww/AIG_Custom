@@ -34,6 +34,7 @@ import (
 	_ "github.com/Juneoww/AIG_Custom/docs"
 	"github.com/Juneoww/AIG_Custom/internal/gologger"
 	version "github.com/Juneoww/AIG_Custom/internal/options"
+	"github.com/Juneoww/AIG_Custom/internal/platform/identity"
 	"github.com/Juneoww/AIG_Custom/pkg/database"
 	"github.com/gin-gonic/gin"
 	swaggerFiles "github.com/swaggo/files"
@@ -64,9 +65,17 @@ func RunWebServer(options *version.Options) {
 	}
 	db, err := database.InitDB(dbConfig)
 	if err != nil {
-		log.Errorf("数据库初始化失败: trace_id=system_startup, error=%v", err)
-
+		log.Fatalf("数据库初始化失败: trace_id=system_startup, error=%v", err)
 	}
+	identityRepo := identity.NewGormRepository(db)
+	if err := identityRepo.Init(); err != nil {
+		log.Fatalf("初始化身份数据库失败: trace_id=system_startup, error=%v", err)
+	}
+	identityPolicy, err := identity.CookiePolicyFromEnv()
+	if err != nil {
+		log.Fatalf("身份 Cookie 配置无效: trace_id=system_startup, error=%v", err)
+	}
+	identityService := identity.NewService(identityRepo)
 	taskStore := database.NewTaskStore(db)
 	if err := taskStore.Init(); err != nil {
 		log.Errorf("初始化tasks表失败: trace_id=system_startup, error=%v", err)
@@ -112,6 +121,7 @@ func RunWebServer(options *version.Options) {
 	// API 版本分组
 	v1 := r.Group("/api/v1")
 	{
+		identity.RegisterRoutes(v1.Group("/auth"), identityService, identityPolicy)
 		v1.GET("/images/:path", func(context *gin.Context) {
 			path := context.Param("path")
 			if strings.Contains(path, "..") {
@@ -122,7 +132,7 @@ func RunWebServer(options *version.Options) {
 		})
 		// 1. 知识库模块
 		knowledge := v1.Group("/knowledge")
-		knowledge.Use(setupIdentityMiddleware())
+		knowledge.Use(setupIdentityMiddleware(identityService, identityPolicy), identity.RequirePasswordChangeCompleted(), identity.RequireCSRF(identityPolicy))
 		{
 			// AI应用指纹
 			fingerprints := knowledge.Group("/fingerprints")
@@ -184,7 +194,7 @@ func RunWebServer(options *version.Options) {
 		}
 		appSecurity := v1.Group("/app")
 		{
-			appSecurity.Use(setupIdentityMiddleware())
+			appSecurity.Use(setupIdentityMiddleware(identityService, identityPolicy), identity.RequirePasswordChangeCompleted(), identity.RequireCSRF(identityPolicy))
 			// 任务管理
 			tasks := appSecurity.Group("/tasks")
 			{
@@ -310,7 +320,7 @@ func RunWebServer(options *version.Options) {
 
 		// system — data directory auto-sync & version check
 		system := v1.Group("/system")
-		system.Use(setupIdentityMiddleware())
+		system.Use(setupIdentityMiddleware(identityService, identityPolicy), identity.RequirePasswordChangeCompleted(), identity.RequireCSRF(identityPolicy))
 		{
 			system.POST("/update-data", HandleTriggerDataUpdate)
 			system.GET("/update-data", HandleGetUpdateStatus)
@@ -361,17 +371,6 @@ func RunWebServer(options *version.Options) {
 }
 
 // 配置身份认证中间件
-func setupIdentityMiddleware() gin.HandlerFunc {
-	return func(c *gin.Context) {
-		// 优先从请求头获取username字段
-		username := c.GetHeader("username")
-
-		// 如果都没有，使用默认的公共用户
-		if username == "" {
-			username = "public_user"
-		}
-		// 存储到gin上下文
-		c.Set("username", username)
-		c.Next()
-	}
+func setupIdentityMiddleware(service *identity.Service, policy identity.CookiePolicy) gin.HandlerFunc {
+	return identity.Authenticate(service, policy)
 }

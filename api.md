@@ -10,6 +10,7 @@ After the project is running, you can access `http://localhost:8088/docs/index.h
 ## Table of Contents
 
 ### Basic Interfaces
+- Session Authentication
 - File Upload Interface
 - Task Creation Interface
 
@@ -39,7 +40,7 @@ After the project is running, you can access `http://localhost:8088/docs/index.h
 
 - **Base URL**: `http://localhost:8088` (adjust according to actual deployment)
 - **Content-Type**: `application/json`
-- **Authentication**: Pass authentication information through request headers
+- **Authentication**: Browser requests use the `aig_session` HttpOnly cookie issued by the session login endpoint. Do not send a `username` header: it is not an authentication mechanism. State-changing authenticated requests must also send the `X-CSRF-Token` header matching the `aig_csrf` cookie.
 
 ## Common Response Format
 
@@ -54,6 +55,14 @@ All API interfaces follow a unified response format:
 ```
 
 ## API Interface List
+
+### Session Authentication
+
+`POST /api/v1/auth/login` accepts `{"username":"...","password":"..."}` and issues the `aig_session` and `aig_csrf` cookies. Its response contains `must_change_password`; when true, the user may only change their password or log out.
+
+`POST /api/v1/auth/change-password` requires the session cookie and matching `X-CSRF-Token`, and accepts `{"old_password":"...","new_password":"..."}`. It revokes current sessions after a successful change.
+
+`POST /api/v1/auth/logout` requires the session cookie and matching `X-CSRF-Token`, then clears both cookies.
 
 ### 1. File Upload Interface
 
