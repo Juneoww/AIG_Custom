@@ -80,35 +80,35 @@ git commit -m "chore: establish custom platform baseline"
 - Create: `scripts/docker-go-test.ps1`
 - Create: `deploy/compose/docker-compose.postgres-test.yml`, `deploy/compose/docker-compose.postgres.yml`, `docs/deployment/postgres.md`
 
-- [ ] **Step 1: 写入失败测试：数据库配置和迁移仅支持 PostgreSQL**
+- [x] **Step 1: 写入失败测试：数据库配置和迁移仅支持 PostgreSQL**
 
 在 `pkg/database/migrate_test.go` 覆盖缺少 DSN、未知驱动、PostgreSQL DSN、空库首次迁移、已迁移库的幂等回读与迁移版本表；集成测试使用隔离的 Docker PostgreSQL，不得引入 SQLite 驱动、临时库或生产环境变量。
 
-- [ ] **Step 2: 建立 PostgreSQL 容器测试支架**
+- [x] **Step 2: 建立 PostgreSQL 容器测试支架**
 
 创建 `docker-compose.postgres-test.yml`，其中 `postgres-test` 为隔离、临时的 PostgreSQL 服务，`database-test` 为一次性 Go 容器，挂载源码、注入专用测试 DSN，并运行 `go test ./pkg/database -run 'Test(DatabaseConfig|Migration)' -count=1`。该支架不得复用交付数据库卷，且必须在测试进程结束后清理。
 
-- [ ] **Step 3: 运行数据库配置测试并确认失败**
+- [x] **Step 3: 运行数据库配置测试并确认失败**
 
 Run: `docker compose -f deploy/compose/docker-compose.postgres-test.yml up --abort-on-container-exit --exit-code-from database-test; docker compose -f deploy/compose/docker-compose.postgres-test.yml down -v`
 
 Expected: FAIL，尚无 PostgreSQL 驱动选择、平台迁移入口和版本表。
 
-- [ ] **Step 4: 实现显式数据库配置和版本化迁移**
+- [x] **Step 4: 实现显式数据库配置和版本化迁移**
 
 扩展 `Config` 为 `Driver`、`DSN`、连接池参数；新增 `Migrate(db)`，用迁移版本表而不是仅依赖 `AutoMigrate`。当前启动与测试仅接受 PostgreSQL，不保留或新增 SQLite 迁移/运行路径；业务层不使用 PostgreSQL 专有 SQL，为达梦后续适配保留清晰边界，但本任务不得引入达梦驱动或镜像。为 `cmd/cli/main.go` 增加显式 `aig migrate` 子命令，它读取相同的 PostgreSQL 配置并只调用 `Migrate(db)` 后退出。新增带完整中文脚本头注释的 `scripts/docker-go-test.ps1`，其仅负责启动固定 Go 容器、挂载源码与命名缓存卷并传递包/测试筛选参数，禁止回退到主机 Go。
 
-- [ ] **Step 5: 为 PostgreSQL 编排最小运行验证服务**
+- [x] **Step 5: 为 PostgreSQL 编排最小运行验证服务**
 
 新增交付 Compose，包含持久化 `postgres` 和使用同一平台镜像执行 `aig migrate` 的一次性 `migrate` 服务，传入 `DB_DRIVER=postgres` 与 `DB_DSN`；`migrate` 必须设置 `restart: "no"` 并等待 PostgreSQL 健康，后续 `platform`/`agent` 必须以 `service_completed_successfully` 依赖其完成。迁移集成测试只使用 Step 2 的独立测试 Compose，不属于交付运行编排。在 `docs/deployment/postgres.md` 固化镜像版本、初始化账号权限、持久化卷、备份、回滚与迁移失败处置要求。
 
-- [ ] **Step 6: 运行测试和容器迁移验证**
+- [x] **Step 6: 运行测试和容器迁移验证**
 
 Run: `docker compose -f deploy/compose/docker-compose.postgres-test.yml up --abort-on-container-exit --exit-code-from database-test; docker compose -f deploy/compose/docker-compose.postgres-test.yml down -v; docker compose -f deploy/compose/docker-compose.postgres.yml up -d postgres; docker compose -f deploy/compose/docker-compose.postgres.yml run --rm migrate; docker compose -f deploy/compose/docker-compose.postgres.yml config`
 
 Expected: PostgreSQL 集成测试通过；`aig migrate` 创建迁移版本且可回读；Compose 明确 `migrate` 一次性语义和服务启动依赖。
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```bash
 git add cmd/cli/main.go pkg/database scripts/docker-go-test.ps1 go.mod go.sum deploy/compose docs/deployment/postgres.md
