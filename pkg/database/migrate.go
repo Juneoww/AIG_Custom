@@ -40,11 +40,28 @@ var migrations = []migration{
 	{version: 1, apply: migrateInitialSchema},
 }
 
+const migrationAdvisoryLockKey int64 = 301237729
+
 // Migrate 按版本顺序执行尚未完成的数据库迁移。
 func Migrate(db *gorm.DB) error {
 	if db == nil {
 		return fmt.Errorf("数据库连接不能为空")
 	}
+	return db.Connection(func(lockedDB *gorm.DB) (err error) {
+		if err := lockedDB.Exec("SELECT pg_advisory_lock(?)", migrationAdvisoryLockKey).Error; err != nil {
+			return fmt.Errorf("获取数据库迁移锁失败: %w", err)
+		}
+		defer func() {
+			if unlockErr := lockedDB.Exec("SELECT pg_advisory_unlock(?)", migrationAdvisoryLockKey).Error; unlockErr != nil && err == nil {
+				err = fmt.Errorf("释放数据库迁移锁失败: %w", unlockErr)
+			}
+		}()
+
+		return migrateLocked(lockedDB)
+	})
+}
+
+func migrateLocked(db *gorm.DB) error {
 	if !db.Migrator().HasTable(&SchemaMigration{}) {
 		if err := db.AutoMigrate(&SchemaMigration{}); err != nil {
 			return fmt.Errorf("创建迁移版本表失败: %w", err)

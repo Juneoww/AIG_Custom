@@ -15,10 +15,12 @@
 package database
 
 import (
+	"sync"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"gorm.io/gorm"
 )
 
 func TestDatabaseConfigRejectsMissingDSN(t *testing.T) {
@@ -74,4 +76,40 @@ func TestMigrationIsIdempotentAndRecordsVersion(t *testing.T) {
 	require.Len(t, versions, 1)
 	assert.Equal(t, int64(1), versions[0].Version)
 	assert.NotZero(t, versions[0].AppliedAt)
+}
+
+func TestMigrationSerializesConcurrentPostgresCalls(t *testing.T) {
+	first := openPostgresTestDB(t)
+	resetPostgresTestDB(t, first)
+	second := openPostgresTestDB(t)
+
+	start := make(chan struct{})
+	errs := make(chan error, 2)
+	var calls sync.WaitGroup
+	for _, db := range []*gorm.DB{first, second} {
+		calls.Add(1)
+		go func(db *gorm.DB) {
+			defer calls.Done()
+			<-start
+			errs <- Migrate(db)
+		}(db)
+	}
+
+	close(start)
+	calls.Wait()
+	close(errs)
+	for err := range errs {
+		require.NoError(t, err)
+	}
+
+	var versions []SchemaMigration
+	require.NoError(t, first.Order("version ASC").Find(&versions).Error)
+	require.Len(t, versions, 1)
+	assert.Equal(t, int64(1), versions[0].Version)
+	assert.True(t, first.Migrator().HasTable(&User{}))
+	assert.True(t, first.Migrator().HasTable(&Session{}))
+	assert.True(t, first.Migrator().HasTable(&TaskMessage{}))
+	assert.True(t, first.Migrator().HasTable(&Model{}))
+	assert.True(t, first.Migrator().HasTable(&Agent{}))
+	assert.True(t, first.Migrator().HasIndex(&Model{}, "idx_models_username_created"))
 }

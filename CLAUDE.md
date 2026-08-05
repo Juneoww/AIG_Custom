@@ -97,7 +97,7 @@ These are invoked as subprocesses by Go agents, each has its own virtualenv:
 |----------|---------|---------|
 | `AIG_SERVER` | — | WebSocket URL for agent to connect to server |
 | `DB_DRIVER` | `postgres` | 当前唯一支持的数据库驱动 |
-| `DB_DSN` | — | PostgreSQL 连接 DSN（必填） |
+| `DB_DSN` | — | PostgreSQL 连接 DSN（必填；密码部分须 URL 编码） |
 | `UPLOAD_DIR` | `/app/uploads` | File upload directory |
 | `APP_ENV` | — | `production` or `development` |
 | `TZ` | `Asia/Shanghai` | Timezone |

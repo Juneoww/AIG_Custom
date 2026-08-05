@@ -20,7 +20,7 @@ services:
     command: ["/app/ai-infra-guard", "migrate"]
     environment:
       DB_DRIVER: postgres
-      DB_DSN: postgres://${POSTGRES_USER:-aig}:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD before deployment}@postgres:5432/${POSTGRES_DB:-aig}?sslmode=disable
+      DB_DSN: ${DB_DSN:?set a URL-encoded DB_DSN before deployment}
     depends_on:
       postgres:
         condition: service_healthy
@@ -35,7 +35,7 @@ services:
       APP_ENV: production
       UPLOAD_DIR: /app/uploads
       DB_DRIVER: postgres
-      DB_DSN: postgres://${POSTGRES_USER:-aig}:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD before deployment}@postgres:5432/${POSTGRES_DB:-aig}?sslmode=disable
+      DB_DSN: ${DB_DSN:?set a URL-encoded DB_DSN before deployment}
       TZ: Asia/Shanghai
     volumes:
       - ./data:/app/data

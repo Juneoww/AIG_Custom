@@ -179,7 +179,7 @@ All three Python sub-projects integrate with Go via the same pattern: Go spawns 
 
 - **Go version**: 1.23.2, module: `github.com/Tencent/AI-Infra-Guard`
 - **Web framework**: Gin (`gin-gonic/gin`)
-- **Database**: PostgreSQL via GORM, configured with `DB_DRIVER=postgres` and required `DB_DSN`
+- **Database**: PostgreSQL via GORM, configured with `DB_DRIVER=postgres` and required `DB_DSN` (URL-encode the password portion)
 - **Frontend**: Embedded SPA via `embed.FS` (no separate frontend build step in this repo)
 - **Python env**: AIG-PromptSecurity uses `uv` (pyproject.toml); agent-scan and mcp-scan use `pip` (requirements.txt)
 - **WebSocket protocol messages**: `register`, `register_ack`, `task_assign`, `resultUpdate`, `actionLog`, `toolUsed`, `newPlanStep`, `statusUpdate`, `planUpdate`, `error`, `terminate`

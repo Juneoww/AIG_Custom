@@ -7,10 +7,12 @@ AI-Infra-Guard 当前交付仅支持 PostgreSQL。数据库服务固定使用
 
 ## 初始化
 
-在 `deploy/compose` 目录或通过环境变量设置强密码，然后先启动数据库：
+在 `deploy/compose` 目录或通过环境变量设置强密码，并单独提供使用同一凭据、且密码部分
+已经 URL 编码的完整 `DB_DSN`，然后先启动数据库：
 
 ```bash
-export POSTGRES_PASSWORD='replace-with-a-secret'
+export POSTGRES_PASSWORD='example:p@ss' # 替换为实际密码，勿写入仓库或日志
+export DB_DSN='postgres://aig:example%3Ap%40ss@postgres:5432/aig?sslmode=disable'
 docker compose -f deploy/compose/docker-compose.postgres.yml up -d postgres
 docker compose -f deploy/compose/docker-compose.postgres.yml run --rm migrate
 ```
@@ -18,7 +20,9 @@ docker compose -f deploy/compose/docker-compose.postgres.yml run --rm migrate
 `POSTGRES_USER` 和 `POSTGRES_DB` 默认都是 `aig`。该用户必须拥有目标数据库内
 建表、建索引和写入 `schema_migrations` 的权限；无需超级用户权限。迁移容器会等待
 PostgreSQL 健康检查成功后运行，并以成功完成作为后续 `platform`、`agent` 服务的
-依赖条件。
+依赖条件。`POSTGRES_PASSWORD` 仅用于初始化 PostgreSQL；`migrate` 和平台服务均使用
+相同的 `DB_DSN`。若密码中含 `:`, `@`, `/`, `?`, `#` 或 `%` 等字符，必须在 `DB_DSN`
+中进行 URL 编码。
 
 数据保存在命名卷 `aig-postgres-data`，不会与测试 Compose 使用的资源共享。生产
 应在受控网络中运行 PostgreSQL，且不要将 `DB_DSN` 或密码写入日志或提交到仓库。
