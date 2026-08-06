@@ -57,7 +57,7 @@ paths:
     post:
       consumes:
       - application/json
-      description: Creates a local password session and sets HttpOnly session and CSRF cookies.
+      description: Creates a local password session and sets HttpOnly session and CSRF cookies. HTTPS is required unless APP_ENV=test explicitly enables insecure test cookies.
       parameters:
       - in: body
         name: credentials
@@ -79,6 +79,8 @@ paths:
           description: Invalid request body.
         "401":
           description: Invalid credentials or disabled account.
+        "426":
+          description: HTTPS is required.
       summary: Log in with a local account
       tags:
       - auth
@@ -86,7 +88,7 @@ paths:
     post:
       consumes:
       - application/json
-      description: Changes the authenticated user's password. Requires aig_session cookie and matching X-CSRF-Token header.
+      description: Changes the authenticated user's password. Requires HTTPS, aig_session, and a matching X-CSRF-Token header.
       parameters:
       - in: body
         name: password
@@ -108,12 +110,14 @@ paths:
           description: Unauthenticated or invalid current password.
         "403":
           description: Missing or invalid CSRF token.
+        "426":
+          description: HTTPS is required.
       summary: Change local password
       tags:
       - auth
   /api/v1/auth/logout:
     post:
-      description: Revokes the authenticated session. Requires aig_session cookie and matching X-CSRF-Token header.
+      description: Revokes the authenticated session. Requires HTTPS, aig_session, and a matching X-CSRF-Token header.
       responses:
         "204":
           description: Session revoked.
@@ -121,7 +125,78 @@ paths:
           description: Unauthenticated.
         "403":
           description: Missing or invalid CSRF token.
+        "426":
+          description: HTTPS is required.
       summary: Log out of local session
+      tags:
+      - auth
+  /api/v1/auth/rotate-session:
+    post:
+      description: Rotates the authenticated session and CSRF cookies. Requires HTTPS, the aig_session cookie, and a matching X-CSRF-Token header.
+      responses:
+        "204":
+          description: Session and CSRF cookies rotated.
+        "401":
+          description: Unauthenticated or expired session.
+        "403":
+          description: Missing or invalid CSRF token.
+        "426":
+          description: HTTPS is required unless APP_ENV=test explicitly enables insecure test cookies.
+      summary: Rotate local session
+      tags:
+      - auth
+  /api/v1/auth/password-resets/{userID}:
+    post:
+      description: Creates a password-reset token through the configured out-of-band delivery channel. Requires HTTPS, an administrator session, and a matching X-CSRF-Token header. The token is never returned in this response.
+      parameters:
+      - description: Identity user ID
+        in: path
+        name: userID
+        required: true
+        type: string
+      responses:
+        "204":
+          description: Reset request accepted; no token is returned.
+        "401":
+          description: Unauthenticated.
+        "403":
+          description: Administrator role or valid CSRF token required.
+        "404":
+          description: User not found.
+        "426":
+          description: HTTPS is required unless APP_ENV=test explicitly enables insecure test cookies.
+      summary: Request password reset as administrator
+      tags:
+      - auth
+  /api/v1/auth/password-resets/confirm:
+    post:
+      consumes:
+      - application/json
+      description: Confirms a password reset using a one-time token. Requires HTTPS. The token is accepted only in the request body and is never echoed.
+      parameters:
+      - in: body
+        name: reset
+        required: true
+        schema:
+          type: object
+          required:
+          - token
+          - temporary_password
+          properties:
+            token:
+              type: string
+            temporary_password:
+              type: string
+      responses:
+        "204":
+          description: Password reset completed.
+        "400":
+          description: Invalid request body.
+        "401":
+          description: Invalid, expired, or already-used token.
+        "426":
+          description: HTTPS is required unless APP_ENV=test explicitly enables insecure test cookies.
+      summary: Confirm password reset
       tags:
       - auth
   /api/v1/app/taskapi/result/{id}:

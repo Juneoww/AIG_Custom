@@ -138,112 +138,133 @@ func RunWebServer(options *version.Options) {
 			fingerprints := knowledge.Group("/fingerprints")
 			{
 				// 管理功能
-				fingerprints.GET("", HandleListFingerprints)
-				fingerprints.POST("", HandleCreateFingerprint)
-				fingerprints.PUT("/:name", HandleEditFingerprint)
-				fingerprints.DELETE("", HandleDeleteFingerprint)
+				fingerprints.GET("", identity.RequireRole(identity.RoleAdmin, identity.RoleAuditor), HandleListFingerprints)
+				fingerprints.POST("", identity.RequireRole(identity.RoleAdmin), HandleCreateFingerprint)
+				fingerprints.PUT("/:name", identity.RequireRole(identity.RoleAdmin), HandleEditFingerprint)
+				fingerprints.DELETE("", identity.RequireRole(identity.RoleAdmin), HandleDeleteFingerprint)
 			}
 			// 漏洞库
 			vulnerabilities := knowledge.Group("/vulnerabilities")
 			{
 				// 管理功能
-				vulnerabilities.GET("", HandleListVulnerabilities())
-				vulnerabilities.POST("", HandleCreateVulnerability())
-				vulnerabilities.PUT("/:cve", HandleEditVulnerability)
-				vulnerabilities.DELETE("", HandleBatchDeleteVulnerabilities)
+				vulnerabilities.GET("", identity.RequireRole(identity.RoleAdmin, identity.RoleAuditor), HandleListVulnerabilities())
+				vulnerabilities.POST("", identity.RequireRole(identity.RoleAdmin), HandleCreateVulnerability())
+				vulnerabilities.PUT("/:cve", identity.RequireRole(identity.RoleAdmin), HandleEditVulnerability)
+				vulnerabilities.DELETE("", identity.RequireRole(identity.RoleAdmin), HandleBatchDeleteVulnerabilities)
 			}
 			// 评测集
 			evaluations := knowledge.Group("/evaluations")
 			{
 				// 管理功能
-				evaluations.GET("/:name", HandleGetEvaluationDetail)
-				evaluations.GET("", HandleListEvaluations)
-				evaluations.POST("", HandleCreateEvaluation)
-				evaluations.PUT("/:name", HandleEditEvaluation)
-				evaluations.DELETE("", HandleDeleteEvaluation)
+				evaluations.GET("/:name", identity.RequireRole(identity.RoleAdmin, identity.RoleAuditor), HandleGetEvaluationDetail)
+				evaluations.GET("", identity.RequireRole(identity.RoleAdmin, identity.RoleAuditor), HandleListEvaluations)
+				evaluations.POST("", identity.RequireRole(identity.RoleAdmin), HandleCreateEvaluation)
+				evaluations.PUT("/:name", identity.RequireRole(identity.RoleAdmin), HandleEditEvaluation)
+				evaluations.DELETE("", identity.RequireRole(identity.RoleAdmin), HandleDeleteEvaluation)
 			}
 			// MCP
 			mcp := knowledge.Group("/mcp")
 			{
-				mcp.GET("names", GetMcpPluginList)
-				mcp.GET("", HandleList(MCPROOT, McpLoadFile))
-				mcp.POST("", HandleCreate(mcpReadAndSave))
-				mcp.PUT("/:id", HandleEdit(mcpUpdateFunc))
-				mcp.DELETE("/:id", HandleDelete(mcpDeleteFunc))
+				mcp.GET("names", identity.RequireRole(identity.RoleAdmin, identity.RoleAuditor), GetMcpPluginList)
+				mcp.GET("", identity.RequireRole(identity.RoleAdmin, identity.RoleAuditor), HandleList(MCPROOT, McpLoadFile))
+				mcp.POST("", identity.RequireRole(identity.RoleAdmin), HandleCreate(mcpReadAndSave))
+				mcp.PUT("/:id", identity.RequireRole(identity.RoleAdmin), HandleEdit(mcpUpdateFunc))
+				mcp.DELETE("/:id", identity.RequireRole(identity.RoleAdmin), HandleDelete(mcpDeleteFunc))
 			}
 			// Prompt Collections
 			collections := knowledge.Group("/prompt_collections")
 			{
-				collections.GET("", HandleList(PromptCollectionsRoot, promptCollectionLoadFile))
-				collections.POST("", HandleCreate(promptCollectionReadAndSave))
-				collections.PUT("/:id", HandleEdit(promptCollectionUpdateFunc))
-				collections.DELETE("", HandleDelete(promptCollectionDeleteFunc))
+				collections.GET("", identity.RequireRole(identity.RoleAdmin, identity.RoleAuditor), HandleList(PromptCollectionsRoot, promptCollectionLoadFile))
+				collections.POST("", identity.RequireRole(identity.RoleAdmin), HandleCreate(promptCollectionReadAndSave))
+				collections.PUT("/:id", identity.RequireRole(identity.RoleAdmin), HandleEdit(promptCollectionUpdateFunc))
+				collections.DELETE("", identity.RequireRole(identity.RoleAdmin), HandleDelete(promptCollectionDeleteFunc))
 			}
 			agentConfigs := knowledge.Group("/agent")
 			{
-				agentConfigs.GET("/names", HandleListAgentNames)
-				agentConfigs.GET("/:name", HandleGetAgentConfig)
-				agentConfigs.POST("/:name", HandleSaveAgentConfig)
-				agentConfigs.DELETE("/:name", HandleDeleteAgentConfig)
-				agentConfigs.POST("/connect", HandleAgentConnect)
-				agentConfigs.POST("/prompt_test", HandleAgentPromptTest)
-				agentConfigs.GET("/template", HandleAgentTemplate)
+				agentConfigs.GET("/names", identity.RequireRole(identity.RoleAdmin, identity.RoleAuditor), HandleListAgentNames)
+				agentConfigs.GET("/:name", identity.RequireRole(identity.RoleAdmin, identity.RoleAuditor), HandleGetAgentConfig)
+				agentConfigs.POST("/:name", identity.RequireRole(identity.RoleAdmin), HandleSaveAgentConfig)
+				agentConfigs.DELETE("/:name", identity.RequireRole(identity.RoleAdmin), HandleDeleteAgentConfig)
+				agentConfigs.POST("/connect", identity.RequireRole(identity.RoleAdmin), HandleAgentConnect)
+				agentConfigs.POST("/prompt_test", identity.RequireRole(identity.RoleAdmin), HandleAgentPromptTest)
+				agentConfigs.GET("/template", identity.RequireRole(identity.RoleAdmin, identity.RoleAuditor), HandleAgentTemplate)
 			}
 			// 算子列表
-			knowledge.GET("/jailbreak", GetJailBreak)
+			knowledge.GET("/jailbreak", identity.RequireRole(identity.RoleAdmin, identity.RoleAuditor), GetJailBreak)
+		}
+		taskOwnerByID := func(c *gin.Context) string {
+			session, err := taskStore.GetSession(c.Param("id"))
+			if err != nil {
+				return ""
+			}
+			return session.Username
 		}
 		appSecurity := v1.Group("/app")
 		{
 			appSecurity.Use(setupIdentityMiddleware(identityService, identityPolicy), identity.RequirePasswordChangeCompleted(), identity.RequireCSRF(identityPolicy))
+			taskOwner := func(c *gin.Context) string {
+				session, err := taskStore.GetSession(c.Param("sessionId"))
+				if err != nil {
+					return ""
+				}
+				return session.Username
+			}
+			modelOwner := func(c *gin.Context) string {
+				model, err := modelStore.GetModel(c.Param("modelId"))
+				if err != nil {
+					return ""
+				}
+				return model.Username
+			}
 			// 任务管理
 			tasks := appSecurity.Group("/tasks")
 			{
 				// 获取任务列表接口
-				tasks.GET("", func(c *gin.Context) {
+				tasks.GET("", identity.RequireRole(identity.RoleAdmin, identity.RoleUser, identity.RoleAuditor), func(c *gin.Context) {
 					HandleGetTaskList(c, taskManager)
 				})
 				// 获取任务详情接口
-				tasks.GET("/:sessionId", func(c *gin.Context) {
+				tasks.GET("/:sessionId", identity.RequireOwnerOrRole(taskOwner, false), func(c *gin.Context) {
 					HandleGetTaskDetail(c, taskManager)
 				})
 				// 分享任务接口
-				tasks.POST("/share", func(c *gin.Context) {
+				tasks.POST("/share", identity.RequireRole(identity.RoleAdmin, identity.RoleUser), func(c *gin.Context) {
 					HandleShare(c, taskManager)
 				})
 				// SSE接口
-				tasks.GET("/sse/:sessionId", func(c *gin.Context) {
+				tasks.GET("/sse/:sessionId", identity.RequireOwnerOrRole(taskOwner, false), func(c *gin.Context) {
 					HandleTaskSSE(c, taskManager)
 				})
 				// 新建任务接口
-				tasks.POST("", func(c *gin.Context) {
+				tasks.POST("", identity.RequireRole(identity.RoleAdmin, identity.RoleUser), func(c *gin.Context) {
 					HandleTaskCreate(c, taskManager)
 				})
 				// 文件上传接口（完整文件上传）
-				tasks.POST("/uploadFile", func(c *gin.Context) {
+				tasks.POST("/uploadFile", identity.RequireRole(identity.RoleAdmin, identity.RoleUser), func(c *gin.Context) {
 					HandleUploadFile(c, taskManager)
 				})
 				// 分片上传接口
-				tasks.POST("/uploadChunk", func(c *gin.Context) {
+				tasks.POST("/uploadChunk", identity.RequireRole(identity.RoleAdmin, identity.RoleUser), func(c *gin.Context) {
 					HandleUploadFileChunk(c, taskManager)
 				})
 				// 合并分片接口
-				tasks.POST("/mergeChunks", func(c *gin.Context) {
+				tasks.POST("/mergeChunks", identity.RequireRole(identity.RoleAdmin, identity.RoleUser), func(c *gin.Context) {
 					HandleMergeFileChunks(c, taskManager)
 				})
 				// 文件下载接口
-				tasks.POST("/:sessionId/downloadFile", func(c *gin.Context) {
+				tasks.POST("/:sessionId/downloadFile", identity.RequireOwnerOrRole(taskOwner, true), func(c *gin.Context) {
 					HandleDownloadFile(c, taskManager)
 				})
 				// 编辑任务接口
-				tasks.PUT("/:sessionId", func(c *gin.Context) {
+				tasks.PUT("/:sessionId", identity.RequireOwnerOrRole(taskOwner, true), func(c *gin.Context) {
 					HandleUpdateTask(c, taskManager)
 				})
 				// 删除任务接口
-				tasks.DELETE("/:sessionId", func(c *gin.Context) {
+				tasks.DELETE("/:sessionId", identity.RequireOwnerOrRole(taskOwner, true), func(c *gin.Context) {
 					HandleDeleteTask(c, taskManager)
 				})
 				// 终止任务接口
-				tasks.POST("/:sessionId/terminate", func(c *gin.Context) {
+				tasks.POST("/:sessionId/terminate", identity.RequireOwnerOrRole(taskOwner, true), func(c *gin.Context) {
 					HandleTerminateTask(c, taskManager)
 				})
 			}
@@ -251,23 +272,23 @@ func RunWebServer(options *version.Options) {
 			models := appSecurity.Group("/models")
 			{
 				// 获取模型列表接口
-				models.GET("", func(c *gin.Context) {
+				models.GET("", identity.RequireRole(identity.RoleAdmin, identity.RoleUser, identity.RoleAuditor), func(c *gin.Context) {
 					HandleGetModelList(c, modelManager)
 				})
 				// 获取模型详情接口
-				models.GET("/:modelId", func(c *gin.Context) {
+				models.GET("/:modelId", identity.RequireOwnerOrRole(modelOwner, false), func(c *gin.Context) {
 					HandleGetModelDetail(c, modelManager)
 				})
 				// 创建模型接口
-				models.POST("", func(c *gin.Context) {
+				models.POST("", identity.RequireRole(identity.RoleAdmin, identity.RoleUser), func(c *gin.Context) {
 					HandleCreateModel(c, modelManager)
 				})
 				// 更新模型接口
-				models.PUT("/:modelId", func(c *gin.Context) {
+				models.PUT("/:modelId", identity.RequireOwnerOrRole(modelOwner, true), func(c *gin.Context) {
 					HandleUpdateModel(c, modelManager)
 				})
 				// 删除模型接口（支持单个和批量）
-				models.DELETE("", func(c *gin.Context) {
+				models.DELETE("", identity.RequireRole(identity.RoleAdmin, identity.RoleUser), func(c *gin.Context) {
 					HandleDeleteModel(c, modelManager)
 				})
 			}
@@ -282,26 +303,26 @@ func RunWebServer(options *version.Options) {
 		taskApi := appSecurity.Group("/taskapi")
 		{
 			// 创建任务
-			taskApi.POST("/tasks", func(c *gin.Context) {
+			taskApi.POST("/tasks", identity.RequireRole(identity.RoleAdmin, identity.RoleUser), func(c *gin.Context) {
 				SubmitTask(c, taskManager)
 			})
 			// 获取任务状态
-			taskApi.GET("/status/:id", func(c *gin.Context) {
+			taskApi.GET("/status/:id", identity.RequireOwnerOrRole(taskOwnerByID, false), func(c *gin.Context) {
 				GetTaskStatus(c, taskManager)
 			})
 			// 获取任务结果
-			taskApi.GET("/result/:id", func(c *gin.Context) {
+			taskApi.GET("/result/:id", identity.RequireOwnerOrRole(taskOwnerByID, false), func(c *gin.Context) {
 				GetTaskResult(c, taskManager)
 			})
-			taskApi.POST("/upload", func(c *gin.Context) {
+			taskApi.POST("/upload", identity.RequireRole(identity.RoleAdmin, identity.RoleUser), func(c *gin.Context) {
 				HandleUploadFile(c, taskManager)
 			})
 			// 分片上传接口
-			taskApi.POST("/uploadChunk", func(c *gin.Context) {
+			taskApi.POST("/uploadChunk", identity.RequireRole(identity.RoleAdmin, identity.RoleUser), func(c *gin.Context) {
 				HandleUploadFileChunk(c, taskManager)
 			})
 			// 合并分片接口
-			taskApi.POST("/mergeChunks", func(c *gin.Context) {
+			taskApi.POST("/mergeChunks", identity.RequireRole(identity.RoleAdmin, identity.RoleUser), func(c *gin.Context) {
 				HandleMergeFileChunks(c, taskManager)
 			})
 		}
@@ -322,9 +343,9 @@ func RunWebServer(options *version.Options) {
 		system := v1.Group("/system")
 		system.Use(setupIdentityMiddleware(identityService, identityPolicy), identity.RequirePasswordChangeCompleted(), identity.RequireCSRF(identityPolicy))
 		{
-			system.POST("/update-data", HandleTriggerDataUpdate)
-			system.GET("/update-data", HandleGetUpdateStatus)
-			system.GET("/version", HandleVersionCheck)
+			system.POST("/update-data", identity.RequireRole(identity.RoleAdmin), HandleTriggerDataUpdate)
+			system.GET("/update-data", identity.RequireRole(identity.RoleAdmin, identity.RoleAuditor), HandleGetUpdateStatus)
+			system.GET("/version", identity.RequireRole(identity.RoleAdmin, identity.RoleAuditor), HandleVersionCheck)
 		}
 	}
 

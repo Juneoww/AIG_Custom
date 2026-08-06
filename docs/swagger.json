@@ -8,6 +8,61 @@
     },
     "basePath": "/",
     "paths": {
+        "/api/v1/auth/login": {
+            "post": {
+                "consumes": ["application/json"],
+                "description": "Creates a local password session and sets HttpOnly session and CSRF cookies. HTTPS is required unless APP_ENV=test explicitly enables insecure test cookies.",
+                "tags": ["auth"],
+                "summary": "Log in with a local account",
+                "parameters": [{"in": "body", "name": "credentials", "required": true, "schema": {"type": "object", "required": ["username", "password"], "properties": {"username": {"type": "string"}, "password": {"type": "string"}}}}],
+                "responses": {"200": {"description": "Session established; response includes must_change_password."}, "400": {"description": "Invalid request body."}, "401": {"description": "Invalid credentials or disabled account."}, "426": {"description": "HTTPS is required."}}
+            }
+        },
+        "/api/v1/auth/change-password": {
+            "post": {
+                "consumes": ["application/json"],
+                "description": "Changes the authenticated user's password. Requires HTTPS, aig_session, and a matching X-CSRF-Token header.",
+                "tags": ["auth"],
+                "summary": "Change local password",
+                "parameters": [{"in": "body", "name": "password", "required": true, "schema": {"type": "object", "required": ["old_password", "new_password"], "properties": {"old_password": {"type": "string"}, "new_password": {"type": "string"}}}}],
+                "responses": {"204": {"description": "Password changed and session revoked."}, "401": {"description": "Unauthenticated or invalid current password."}, "403": {"description": "Missing or invalid CSRF token."}, "426": {"description": "HTTPS is required."}}
+            }
+        },
+        "/api/v1/auth/logout": {
+            "post": {
+                "description": "Revokes the authenticated session. Requires HTTPS, aig_session, and a matching X-CSRF-Token header.",
+                "tags": ["auth"],
+                "summary": "Log out of local session",
+                "responses": {"204": {"description": "Session revoked."}, "401": {"description": "Unauthenticated."}, "403": {"description": "Missing or invalid CSRF token."}, "426": {"description": "HTTPS is required."}}
+            }
+        },
+        "/api/v1/auth/rotate-session": {
+            "post": {
+                "description": "Rotates authenticated session and CSRF cookies. Requires HTTPS, aig_session, and a matching X-CSRF-Token header.",
+                "tags": ["auth"],
+                "summary": "Rotate local session",
+                "responses": {"204": {"description": "Session and CSRF cookies rotated."}, "401": {"description": "Unauthenticated or expired session."}, "403": {"description": "Missing or invalid CSRF token."}, "426": {"description": "HTTPS is required."}}
+            }
+        },
+        "/api/v1/auth/password-resets/{userID}": {
+            "post": {
+                "description": "Creates a password-reset token through the configured out-of-band delivery channel. Requires HTTPS, administrator session, and matching X-CSRF-Token. The token is never returned.",
+                "tags": ["auth"],
+                "summary": "Request password reset as administrator",
+                "parameters": [{"type": "string", "name": "userID", "in": "path", "required": true}],
+                "responses": {"204": {"description": "Reset request accepted; no token is returned."}, "401": {"description": "Unauthenticated."}, "403": {"description": "Administrator role or valid CSRF token required."}, "404": {"description": "User not found."}, "426": {"description": "HTTPS is required."}}
+            }
+        },
+        "/api/v1/auth/password-resets/confirm": {
+            "post": {
+                "consumes": ["application/json"],
+                "description": "Confirms a one-time password reset token over HTTPS. The token is accepted only in the request body and is never echoed.",
+                "tags": ["auth"],
+                "summary": "Confirm password reset",
+                "parameters": [{"in": "body", "name": "reset", "required": true, "schema": {"type": "object", "required": ["token", "temporary_password"], "properties": {"token": {"type": "string"}, "temporary_password": {"type": "string"}}}}],
+                "responses": {"204": {"description": "Password reset completed."}, "400": {"description": "Invalid request body."}, "401": {"description": "Invalid, expired, or already-used token."}, "426": {"description": "HTTPS is required."}}
+            }
+        },
         "/api/v1/app/taskapi/result/{id}": {
             "get": {
                 "description": "Retrieve the final result of a completed task. Returns detailed scan results, vulnerabilities found, and security assessment data.",

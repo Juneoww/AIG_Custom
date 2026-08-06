@@ -12,6 +12,7 @@ var ErrNotFound = errors.New("身份记录不存在")
 
 type Repository interface {
 	CreateUser(context.Context, *User) error
+	CreateInitialAdministrator(context.Context, *User) (bool, error)
 	UserByUsername(context.Context, string) (*User, error)
 	UserByID(context.Context, string) (*User, error)
 	UpdateUser(context.Context, *User) error
@@ -38,6 +39,32 @@ func (r *GormRepository) Init() error {
 
 func (r *GormRepository) CreateUser(ctx context.Context, user *User) error {
 	return r.db.WithContext(ctx).Create(user).Error
+}
+
+// CreateInitialAdministrator atomically creates the first administrator.
+// The project supports PostgreSQL only, so a transaction-scoped advisory lock
+// safely serializes concurrent bootstrap commands across independent processes.
+func (r *GormRepository) CreateInitialAdministrator(ctx context.Context, user *User) (bool, error) {
+	const bootstrapAdminLock int64 = 849238492384923
+	created := false
+	err := r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		if err := tx.Exec("SELECT pg_advisory_xact_lock(?)", bootstrapAdminLock).Error; err != nil {
+			return err
+		}
+		var count int64
+		if err := tx.Model(&User{}).Where("role = ?", RoleAdmin).Count(&count).Error; err != nil {
+			return err
+		}
+		if count != 0 {
+			return nil
+		}
+		if err := tx.Create(user).Error; err != nil {
+			return err
+		}
+		created = true
+		return nil
+	})
+	return created, err
 }
 func (r *GormRepository) UserByUsername(ctx context.Context, username string) (*User, error) {
 	var user User
@@ -120,6 +147,21 @@ func (r *MemoryRepository) CreateUser(_ context.Context, v *User) error {
 	r.users[v.Username] = cloneUser(v)
 	r.usersByID[v.ID] = r.users[v.Username]
 	return nil
+}
+func (r *MemoryRepository) CreateInitialAdministrator(_ context.Context, v *User) (bool, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for _, user := range r.users {
+		if user.Role == RoleAdmin {
+			return false, nil
+		}
+	}
+	if _, ok := r.users[v.Username]; ok {
+		return false, errors.New("用户名已存在")
+	}
+	r.users[v.Username] = cloneUser(v)
+	r.usersByID[v.ID] = r.users[v.Username]
+	return true, nil
 }
 func (r *MemoryRepository) UserByUsername(_ context.Context, username string) (*User, error) {
 	r.mu.Lock()

@@ -7,18 +7,37 @@ import (
 	"io"
 	"os"
 	"strings"
+
+	"github.com/google/uuid"
 )
 
 func BootstrapAdmin(ctx context.Context, service *Service, username, password string) error {
-	exists, err := service.repo.HasAdministrator(ctx)
+	username = strings.TrimSpace(username)
+	if username == "" {
+		return ErrInvalidCredentials
+	}
+	hash, err := HashPassword(password)
 	if err != nil {
 		return err
 	}
-	if exists {
+	now := service.now()
+	created, err := service.repo.CreateInitialAdministrator(ctx, &User{
+		ID:                 uuid.NewString(),
+		Username:           username,
+		PasswordHash:       hash,
+		Role:               RoleAdmin,
+		Active:             true,
+		MustChangePassword: true,
+		CreatedAt:          now,
+		UpdatedAt:          now,
+	})
+	if err != nil {
+		return err
+	}
+	if !created {
 		return ErrAdminAlreadyBootstrapped
 	}
-	_, err = service.CreateUser(ctx, CreateUserInput{Username: username, Password: password, Role: RoleAdmin, MustChangePassword: true})
-	return err
+	return nil
 }
 func ReadBootstrapPassword(stdin io.Reader) (string, error) {
 	if value, ok := os.LookupEnv("AIG_BOOTSTRAP_ADMIN_PASSWORD"); ok {

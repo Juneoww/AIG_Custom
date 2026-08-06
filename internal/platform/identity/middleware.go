@@ -57,6 +57,17 @@ func RequireCSRF(policy CookiePolicy) gin.HandlerFunc {
 		c.Next()
 	}
 }
+// RequireHTTPS blocks every credential-bearing endpoint unless the request is
+// protected by TLS (or an explicitly trusted TLS-terminating proxy).
+func RequireHTTPS(policy CookiePolicy) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		if !policy.Secure || policy.RequestIsHTTPS(c.Request) {
+			c.Next()
+			return
+		}
+		c.AbortWithStatus(http.StatusUpgradeRequired)
+	}
+}
 func RequireRole(roles ...Role) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		subject, ok := CurrentSubject(c)
@@ -114,11 +125,13 @@ func CanAccessOwnerOrRole(subject Subject, ownerID string, write bool) bool {
 	if subject.Role == RoleAuditor {
 		return !write
 	}
-	return subject.Role == RoleUser && subject.UserID == strings.TrimSpace(ownerID)
+	ownerID = strings.TrimSpace(ownerID)
+	return subject.Role == RoleUser && (subject.UserID == ownerID || subject.Username == ownerID)
 }
 
 func RegisterRoutes(group *gin.RouterGroup, service *Service, policy CookiePolicy) {
 	policy = policy.normalized()
+	group.Use(RequireHTTPS(policy))
 	group.POST("/login", func(c *gin.Context) {
 		var input struct {
 			Username string `json:"username"`
@@ -149,6 +162,45 @@ func RegisterRoutes(group *gin.RouterGroup, service *Service, policy CookiePolic
 		_ = service.RevokeSession(c.Request.Context(), cookie.Value)
 		http.SetCookie(c.Writer, policy.ClearSessionCookie())
 		http.SetCookie(c.Writer, policy.ClearCSRFCookie())
+		c.Status(http.StatusNoContent)
+	})
+	protected.POST("/rotate-session", RequireCSRF(policy), func(c *gin.Context) {
+		cookie, _ := c.Request.Cookie(policy.SessionCookieName)
+		token, err := service.RotateSession(c.Request.Context(), cookie.Value)
+		if err != nil {
+			c.Status(http.StatusUnauthorized)
+			return
+		}
+		csrfToken, err := randomToken()
+		if err != nil {
+			c.Status(http.StatusInternalServerError)
+			return
+		}
+		http.SetCookie(c.Writer, policy.SessionCookie(token))
+		http.SetCookie(c.Writer, policy.CSRFCookie(csrfToken))
+		c.Status(http.StatusNoContent)
+	})
+	protected.POST("/password-resets/:userID", RequireCSRF(policy), RequireRole(RoleAdmin), func(c *gin.Context) {
+		if _, err := service.CreatePasswordReset(c.Request.Context(), c.Param("userID")); err != nil {
+			c.Status(http.StatusNotFound)
+			return
+		}
+		// 令牌仅交给已配置的带外交付渠道，绝不写入 HTTP 响应或日志。
+		c.Status(http.StatusNoContent)
+	})
+	group.POST("/password-resets/confirm", func(c *gin.Context) {
+		var input struct {
+			Token             string `json:"token"`
+			TemporaryPassword string `json:"temporary_password"`
+		}
+		if c.ShouldBindJSON(&input) != nil {
+			c.Status(http.StatusBadRequest)
+			return
+		}
+		if err := service.ResetPassword(c.Request.Context(), input.Token, input.TemporaryPassword); err != nil {
+			c.Status(http.StatusUnauthorized)
+			return
+		}
 		c.Status(http.StatusNoContent)
 	})
 	protected.POST("/change-password", RequireCSRF(policy), func(c *gin.Context) {

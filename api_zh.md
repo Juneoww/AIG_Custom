@@ -64,6 +64,12 @@ AIG Custom Platform 是基于 Tencent Zhuque Lab AI-Infra-Guard（https://github
 
 `POST /api/v1/auth/logout` 需要会话 Cookie 和匹配的 `X-CSRF-Token`，随后清除两个 Cookie。
 
+`POST /api/v1/auth/rotate-session` 需要 HTTPS、会话 Cookie 和匹配的 `X-CSRF-Token`；成功返回 `204`，并轮换两个 Cookie。
+
+`POST /api/v1/auth/password-resets/{userID}` 需要 HTTPS、管理员会话和匹配的 `X-CSRF-Token`。请求成功后由已配置的带外交付渠道处理并返回 `204`；重置令牌绝不会出现在响应或日志中。
+
+`POST /api/v1/auth/password-resets/confirm` 需要 HTTPS，接收 `{"token":"...","temporary_password":"..."}`；成功返回 `204`，且不会回显令牌。凭据入口在明文请求时返回 `426`，仅当 `APP_ENV=test` 明确启用不安全测试 Cookie 时例外。
+
 ### 1. 文件上传接口
 
 #### 接口信息
