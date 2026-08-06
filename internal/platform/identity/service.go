@@ -158,6 +158,16 @@ func (s *Service) CreatePasswordReset(ctx context.Context, userID string) (strin
 	reset := &PasswordReset{ID: uuid.NewString(), UserID: userID, TokenHash: tokenHash(token), CreatedAt: now, ExpiresAt: now.Add(30 * time.Minute)}
 	return token, s.repo.CreatePasswordReset(ctx, reset)
 }
+
+// CreatePasswordResetForUsername is used by the trusted local operator CLI.
+// The returned token is deliberately never exposed by HTTP handlers.
+func (s *Service) CreatePasswordResetForUsername(ctx context.Context, username string) (string, error) {
+	user, err := s.repo.UserByUsername(ctx, strings.TrimSpace(username))
+	if err != nil {
+		return "", err
+	}
+	return s.CreatePasswordReset(ctx, user.ID)
+}
 func (s *Service) ResetPassword(ctx context.Context, token, temporaryPassword string) error {
 	reset, err := s.repo.PasswordResetByHash(ctx, tokenHash(token))
 	if err != nil || reset.UsedAt != nil || !reset.ExpiresAt.After(s.now()) {

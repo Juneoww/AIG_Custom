@@ -71,7 +71,7 @@ const docTemplate = `{
         },
         "/api/v1/auth/password-resets/{userID}": {
             "post": {
-                "description": "Creates a password-reset token through the configured out-of-band delivery channel. Requires HTTPS, administrator session, and matching X-CSRF-Token. The token is never returned.",
+                "description": "Requires HTTPS, administrator session, and matching X-CSRF-Token. This HTTP endpoint never returns a reset token. A trusted local administrator must run ai-infra-guard create-password-reset --username <username> to obtain the sensitive one-time token for secure delivery; it must never be logged or persisted.",
                 "tags": ["auth"],
                 "summary": "Request password reset as administrator",
                 "parameters": [{"type": "string", "name": "userID", "in": "path", "required": true}],

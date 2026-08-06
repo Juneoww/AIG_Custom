@@ -66,7 +66,7 @@ All API interfaces follow a unified response format:
 
 `POST /api/v1/auth/rotate-session` requires HTTPS, the session cookie, and matching `X-CSRF-Token`; it returns `204` and replaces both cookies.
 
-`POST /api/v1/auth/password-resets/{userID}` requires HTTPS, an administrator session, and matching `X-CSRF-Token`. It returns `204` when the reset is handed to the configured out-of-band delivery channel; the reset token is never included in the response or logs.
+`POST /api/v1/auth/password-resets/{userID}` requires HTTPS, an administrator session, and matching `X-CSRF-Token`. It never returns a reset token. To issue a deliverable token, a trusted local administrator must run `ai-infra-guard create-password-reset --username <username>` on the deployment host; the one-time token is sensitive stdout and must be delivered securely, never logged or persisted.
 
 `POST /api/v1/auth/password-resets/confirm` requires HTTPS and accepts `{"token":"...","temporary_password":"..."}`. It returns `204` on success and never echoes the token. Credential endpoints return `426` for plaintext requests, except when `APP_ENV=test` explicitly enables insecure test cookies.
 

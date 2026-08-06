@@ -147,7 +147,7 @@ paths:
       - auth
   /api/v1/auth/password-resets/{userID}:
     post:
-      description: Creates a password-reset token through the configured out-of-band delivery channel. Requires HTTPS, an administrator session, and a matching X-CSRF-Token header. The token is never returned in this response.
+      description: Requires HTTPS, an administrator session, and a matching X-CSRF-Token header. This HTTP endpoint never returns a reset token. A trusted local administrator must run ai-infra-guard create-password-reset --username <username> to obtain the sensitive one-time token for secure delivery; it must never be logged or persisted.
       parameters:
       - description: Identity user ID
         in: path

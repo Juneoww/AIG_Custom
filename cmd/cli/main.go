@@ -20,8 +20,13 @@ package main
 
 import (
 	"context"
+	"errors"
+	"flag"
+	"fmt"
+	"io"
 	"log"
 	"os"
+	"strings"
 
 	"github.com/Juneoww/AIG_Custom/cmd/cli/cmd"
 	"github.com/Juneoww/AIG_Custom/internal/platform/identity"
@@ -38,6 +43,12 @@ func main() {
 	if len(os.Args) == 2 && os.Args[1] == "bootstrap-admin" {
 		if err := runBootstrapAdmin(); err != nil {
 			log.Fatalf("初始化管理员失败: %v", err)
+		}
+		return
+	}
+	if len(os.Args) > 1 && os.Args[1] == "create-password-reset" {
+		if err := runCreatePasswordReset(os.Args[2:], os.Stdout); err != nil {
+			log.Fatalf("创建密码重置令牌失败: %v", err)
 		}
 		return
 	}
@@ -90,4 +101,47 @@ func runBootstrapAdmin() error {
 		username = "admin"
 	}
 	return identity.BootstrapAdmin(context.Background(), identity.NewService(repo), username, password)
+}
+
+// runCreatePasswordReset is intentionally a local CLI-only delivery channel.
+// It never logs the token; stdout must be treated as sensitive operator output.
+func runCreatePasswordReset(args []string, stdout io.Writer) error {
+	config, err := database.LoadConfigFromEnv()
+	if err != nil {
+		return err
+	}
+	db, err := database.InitDB(config)
+	if err != nil {
+		return err
+	}
+	sqlDB, err := db.DB()
+	if err != nil {
+		return err
+	}
+	defer sqlDB.Close()
+
+	repo := identity.NewGormRepository(db)
+	if err := repo.Init(); err != nil {
+		return err
+	}
+	return runCreatePasswordResetForService(context.Background(), identity.NewService(repo), args, stdout)
+}
+
+func runCreatePasswordResetForService(ctx context.Context, service *identity.Service, args []string, stdout io.Writer) error {
+	flags := flag.NewFlagSet("create-password-reset", flag.ContinueOnError)
+	flags.SetOutput(io.Discard)
+	username := flags.String("username", "", "username whose password reset token should be created")
+	if err := flags.Parse(args); err != nil {
+		return err
+	}
+	if flags.NArg() != 0 || strings.TrimSpace(*username) == "" {
+		return errors.New("--username is required")
+	}
+	token, err := service.CreatePasswordResetForUsername(ctx, *username)
+	if err != nil {
+		return err
+	}
+	fmt.Fprintln(stdout, "SENSITIVE one-time password reset token; deliver securely and do not log or persist it.")
+	_, err = fmt.Fprintln(stdout, token)
+	return err
 }
