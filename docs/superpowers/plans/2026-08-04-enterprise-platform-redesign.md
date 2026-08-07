@@ -122,31 +122,31 @@ git commit -m "feat: add postgres migration support"
 - Create: `internal/platform/identity/service_test.go`, `middleware_test.go`, `bootstrap_test.go`
 - Modify: `cmd/cli/main.go`, `common/websocket/server.go`
 
-- [ ] **Step 1: 写入身份服务的失败测试**
+- [x] **Step 1: 写入身份服务的失败测试**
 
 覆盖 Argon2id 校验、错误密码、禁用账号、首次/重置后强制改密、会话轮换/撤销、CSRF 缺失，以及 `admin`、`user`、`auditor` 的最小权限矩阵。另覆盖生产环境会话 Cookie 始终为 `Secure`，仅来自配置的可信反向代理 CIDR 的 `X-Forwarded-Proto: https` 可被接受，以及仅测试环境的显式 `ALLOW_INSECURE_TEST_COOKIE=true` 例外；生产环境设置该例外必须启动失败。
 
-- [ ] **Step 2: 运行身份测试并确认失败**
+- [x] **Step 2: 运行身份测试并确认失败**
 
 Run: `powershell -ExecutionPolicy Bypass -File scripts/docker-go-test.ps1 -Packages './internal/platform/identity'`
 
 Expected: FAIL，包不存在。
 
-- [ ] **Step 3: 实现安全身份服务**
+- [x] **Step 3: 实现安全身份服务**
 
 实现用户、角色、会话与密码重置状态实体；密码只存 Argon2id 哈希。将随机会话 token 的哈希入库，Cookie 设置 `HttpOnly`、`Secure`、`SameSite=Lax`，状态变更请求使用双提交 CSRF token。生产环境仅接受由 `TRUSTED_PROXY_CIDRS` 指定的 TLS 终止代理发送的 HTTPS 转发头，其他转发头一律忽略；`ALLOW_INSECURE_TEST_COOKIE=true` 仅在明确测试环境可用，不能用于开发或交付。新增 `aig bootstrap-admin`，只在无管理员时创建首个管理员，密码经 stdin 或一次性环境变量读取且不写日志。
 
-- [ ] **Step 4: 实现请求主体和策略中间件**
+- [x] **Step 4: 实现请求主体和策略中间件**
 
 中间件只从会话读取主体，拒绝 `username` 头伪造；`RequireRole`/`RequireOwnerOrRole` 在 handler 前执行。审计员只能读，普通用户只能操作本人资源，管理员全局治理。
 
-- [ ] **Step 5: 运行身份和路由测试**
+- [x] **Step 5: 运行身份和路由测试**
 
 Run: `powershell -ExecutionPolicy Bypass -File scripts/docker-go-test.ps1 -Packages './internal/platform/identity','./common/websocket'`
 
 Expected: PASS；未登录为 401、越权为 403、首次登录只能访问改密与登出。
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add internal/platform/identity cmd/cli/main.go common/websocket/server.go
