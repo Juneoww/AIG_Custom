@@ -528,7 +528,7 @@ func SubmitTask(c *gin.Context, tm *TaskManager) {
 
 // GetTaskStatus retrieves task status (developer API)
 // @Summary Get task status
-// @Description Retrieve the current status and logs of a task by session ID. Returns task metadata and execution logs.
+// @Description Retrieve the current status and logs of a task by session ID. Administrators and auditors may read any task; users may read only their own tasks.
 // @Tags taskapi
 // @Produce json
 // @Param id path string true "Task Session ID" example:"550e8400-e29b-41d4-a716-446655440000"
@@ -613,7 +613,7 @@ func GetTaskStatus(c *gin.Context, tm *TaskManager) {
 
 // GetTaskResult retrieves task result (developer API)
 // @Summary Get task result
-// @Description Retrieve the final result of a completed task. Returns detailed scan results, vulnerabilities found, and security assessment data.
+// @Description Retrieve the final result of a completed task. Administrators and auditors may read any task; users may read only their own tasks.
 // @Tags taskapi
 // @Produce json
 // @Param id path string true "Task Session ID" example:"550e8400-e29b-41d4-a716-446655440000"

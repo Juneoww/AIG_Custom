@@ -37,7 +37,17 @@ func openPostgresTestDB(t *testing.T) *gorm.DB {
 
 func resetPostgresTestDB(t *testing.T, db *gorm.DB) {
 	t.Helper()
-	require.NoError(t, db.Migrator().DropTable(&SchemaMigration{}, &TaskMessage{}, &Session{}, &Model{}, &User{}, &Agent{}))
+	require.NoError(t, db.Migrator().DropTable(
+		&identityPasswordResetMigration{},
+		&identitySessionMigration{},
+		&identityUserMigration{},
+		&SchemaMigration{},
+		&TaskMessage{},
+		&Session{},
+		&Model{},
+		&User{},
+		&Agent{},
+	))
 }
 
 func testPostgresDSN(t *testing.T) string {

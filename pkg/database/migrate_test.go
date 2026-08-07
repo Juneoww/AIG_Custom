@@ -18,10 +18,27 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/Juneoww/AIG_Custom/internal/platform/identity"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"gorm.io/gorm"
 )
+
+func TestMigrationAppliesIdentitySchemaAsVersionTwo(t *testing.T) {
+	db := openPostgresTestDB(t)
+	resetPostgresTestDB(t, db)
+
+	require.NoError(t, Migrate(db))
+	assert.True(t, db.Migrator().HasTable(&identity.User{}))
+	assert.True(t, db.Migrator().HasTable(&identity.Session{}))
+	assert.True(t, db.Migrator().HasTable(&identity.PasswordReset{}))
+
+	var versions []SchemaMigration
+	require.NoError(t, db.Order("version ASC").Find(&versions).Error)
+	require.Len(t, versions, 2)
+	assert.Equal(t, int64(1), versions[0].Version)
+	assert.Equal(t, int64(2), versions[1].Version)
+}
 
 func TestDatabaseConfigRejectsMissingDSN(t *testing.T) {
 	cfg := &Config{Driver: "postgres"}
@@ -73,9 +90,11 @@ func TestMigrationIsIdempotentAndRecordsVersion(t *testing.T) {
 
 	var versions []SchemaMigration
 	require.NoError(t, db.Order("version ASC").Find(&versions).Error)
-	require.Len(t, versions, 1)
+	require.Len(t, versions, 2)
 	assert.Equal(t, int64(1), versions[0].Version)
+	assert.Equal(t, int64(2), versions[1].Version)
 	assert.NotZero(t, versions[0].AppliedAt)
+	assert.NotZero(t, versions[1].AppliedAt)
 }
 
 func TestMigrationSerializesConcurrentPostgresCalls(t *testing.T) {
@@ -104,12 +123,16 @@ func TestMigrationSerializesConcurrentPostgresCalls(t *testing.T) {
 
 	var versions []SchemaMigration
 	require.NoError(t, first.Order("version ASC").Find(&versions).Error)
-	require.Len(t, versions, 1)
+	require.Len(t, versions, 2)
 	assert.Equal(t, int64(1), versions[0].Version)
+	assert.Equal(t, int64(2), versions[1].Version)
 	assert.True(t, first.Migrator().HasTable(&User{}))
 	assert.True(t, first.Migrator().HasTable(&Session{}))
 	assert.True(t, first.Migrator().HasTable(&TaskMessage{}))
 	assert.True(t, first.Migrator().HasTable(&Model{}))
 	assert.True(t, first.Migrator().HasTable(&Agent{}))
+	assert.True(t, first.Migrator().HasTable(&identity.User{}))
+	assert.True(t, first.Migrator().HasTable(&identity.Session{}))
+	assert.True(t, first.Migrator().HasTable(&identity.PasswordReset{}))
 	assert.True(t, first.Migrator().HasIndex(&Model{}, "idx_models_username_created"))
 }

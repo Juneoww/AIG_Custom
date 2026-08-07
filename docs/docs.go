@@ -81,7 +81,7 @@ const docTemplate = `{
         "/api/v1/auth/password-resets/confirm": {
             "post": {
                 "consumes": ["application/json"],
-                "description": "Confirms a one-time password reset token over HTTPS. The token is accepted only in the request body and is never echoed.",
+                "description": "Confirms a password reset using a one-time token. Requires HTTPS. The token is accepted only in the request body and is never echoed.",
                 "tags": ["auth"],
                 "summary": "Confirm password reset",
                 "parameters": [{"in": "body", "name": "reset", "required": true, "schema": {"type": "object", "required": ["token", "temporary_password"], "properties": {"token": {"type": "string"}, "temporary_password": {"type": "string"}}}}],
@@ -90,7 +90,7 @@ const docTemplate = `{
         },
         "/api/v1/app/taskapi/result/{id}": {
             "get": {
-                "description": "Retrieve the final result of a completed task. Returns detailed scan results, vulnerabilities found, and security assessment data.",
+                "description": "Retrieve the final result of a completed task. Administrators and auditors may read any task; users may read only their own tasks.",
                 "produces": [
                     "application/json"
                 ],
@@ -137,7 +137,7 @@ const docTemplate = `{
         },
         "/api/v1/app/taskapi/status/{id}": {
             "get": {
-                "description": "Retrieve the current status and logs of a task by session ID. Returns task metadata and execution logs.",
+                "description": "Retrieve the current status and logs of a task by session ID. Administrators and auditors may read any task; users may read only their own tasks.",
                 "produces": [
                     "application/json"
                 ],
@@ -422,8 +422,8 @@ var SwaggerInfo = &swag.Spec{
 	Host:             "",
 	BasePath:         "/",
 	Schemes:          []string{},
-	Title:            "AI-Infra-Guard 任务API",
-	Description:      "API for managing AI security scanning tasks",
+	Title:            "AIG Custom Platform 任务API",
+	Description:      "API for managing AIG Custom Platform AI security scanning tasks. Based on Tencent Zhuque Lab AI-Infra-Guard (https://github.com/Tencent/AI-Infra-Guard).",
 	InfoInstanceName: "swagger",
 	SwaggerTemplate:  docTemplate,
 	LeftDelim:        "{{",

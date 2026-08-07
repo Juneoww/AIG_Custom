@@ -291,8 +291,11 @@ func HandleTaskCreate(c *gin.Context, tm *TaskManager) {
 		return
 	}
 
-	// 从中间件获取用户名
-	username := c.GetString("username")
+	subject, ok := requestSubject(c)
+	if !ok {
+		return
+	}
+	username := subject.Username
 
 	// 设置用户名到请求中
 	req.Username = username
@@ -349,14 +352,20 @@ func HandleTerminateTask(c *gin.Context, tm *TaskManager) {
 		return
 	}
 
-	// 从中间件获取用户名
-	username := c.GetString("username")
+	subject, ok := requestSubject(c)
+	if !ok {
+		return
+	}
+	username := subject.Username
 
 	log.Infof("用户请求终止任务: trace_id=%s, sessionId=%s, username=%s", traceID, sessionId, username)
 
 	// 调用TaskManager（包含权限验证）
-	err := tm.TerminateTask(sessionId, username, traceID)
+	err := tm.TerminateTask(sessionId, subject, traceID)
 	if err != nil {
+		if respondResourceAccessDenied(c, err) {
+			return
+		}
 		log.Errorf("任务终止失败: trace_id=%s, sessionId=%s, username=%s, error=%v", traceID, sessionId, username, err)
 		c.JSON(http.StatusOK, gin.H{
 			"status":  1,
@@ -418,14 +427,20 @@ func HandleUpdateTask(c *gin.Context, tm *TaskManager) {
 		return
 	}
 
-	// 从中间件获取用户名
-	username := c.GetString("username")
+	subject, ok := requestSubject(c)
+	if !ok {
+		return
+	}
+	username := subject.Username
 
 	log.Infof("开始更新任务: trace_id=%s, sessionId=%s, username=%s", traceID, sessionId, username)
 
 	// 执行任务信息更新（包含权限验证）
-	err := tm.UpdateTask(sessionId, &req, username, traceID)
+	err := tm.UpdateTask(sessionId, &req, subject, traceID)
 	if err != nil {
+		if respondResourceAccessDenied(c, err) {
+			return
+		}
 		log.Errorf("任务信息更新失败: trace_id=%s, sessionId=%s, username=%s, error=%v", traceID, sessionId, username, err)
 		c.JSON(http.StatusOK, gin.H{
 			"status":  1,
@@ -467,14 +482,20 @@ func HandleDeleteTask(c *gin.Context, tm *TaskManager) {
 		return
 	}
 
-	// 从中间件获取用户名
-	username := c.GetString("username")
+	subject, ok := requestSubject(c)
+	if !ok {
+		return
+	}
+	username := subject.Username
 
 	log.Infof("开始删除任务: trace_id=%s, sessionId=%s, username=%s", traceID, sessionId, username)
 
 	// 执行任务删除（包含权限验证）
-	err := tm.DeleteTask(sessionId, username, traceID)
+	err := tm.DeleteTask(sessionId, subject, traceID)
 	if err != nil {
+		if respondResourceAccessDenied(c, err) {
+			return
+		}
 		log.Errorf("任务删除失败: trace_id=%s, sessionId=%s, username=%s, error=%v", traceID, sessionId, username, err)
 		c.JSON(http.StatusOK, gin.H{
 			"status":  1,
@@ -788,8 +809,11 @@ func HandleMergeFileChunks(c *gin.Context, tm *TaskManager) {
 // 获取任务列表接口
 func HandleGetTaskList(c *gin.Context, tm *TaskManager) {
 	traceID := getTraceID(c)
-	// 从中间件获取用户名
-	username := c.GetString("username")
+	subject, ok := requestSubject(c)
+	if !ok {
+		return
+	}
+	username := subject.Username
 	query := c.Query("q")
 	taskType := c.DefaultQuery("taskType", "")
 	var err error
@@ -806,7 +830,7 @@ func HandleGetTaskList(c *gin.Context, tm *TaskManager) {
 		searchParams.Page = 1
 		searchParams.PageSize = 999
 		// 调用TaskManager进行简化搜索
-		results, err = tm.SearchUserTasksSimple(username, searchParams, traceID)
+		results, err = tm.SearchUserTasksSimple(subject, searchParams, traceID)
 		if err != nil {
 			log.Errorf("搜索任务失败: trace_id=%s, username=%s, error=%v", traceID, username, err)
 			c.JSON(http.StatusOK, gin.H{
@@ -819,7 +843,7 @@ func HandleGetTaskList(c *gin.Context, tm *TaskManager) {
 
 	} else {
 		// 获取用户的任务列表（支持taskType过滤）
-		results, err = tm.GetUserTasksByType(username, taskType, traceID)
+		results, err = tm.GetUserTasksByType(subject, taskType, traceID)
 		if err != nil {
 			log.Errorf("获取任务列表失败: trace_id=%s, username=%s, error=%v", traceID, username, err)
 			c.JSON(http.StatusOK, gin.H{
@@ -874,8 +898,10 @@ func HandleShare(c *gin.Context, tm *TaskManager) {
 		return
 	}
 
-	// 获取用户信息
-	username := c.GetString("username")
+	subject, ok := requestSubject(c)
+	if !ok {
+		return
+	}
 	session, err := tm.taskStore.GetSession(params.Session)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{
@@ -885,12 +911,8 @@ func HandleShare(c *gin.Context, tm *TaskManager) {
 		})
 		return
 	}
-	if username != session.Username {
-		c.JSON(http.StatusForbidden, gin.H{
-			"status":  1,
-			"message": "无权限访问",
-			"data":    nil,
-		})
+	if err := authorizeResource(subject, session.Username, true); err != nil {
+		respondResourceAccessDenied(c, err)
 		return
 	}
 	err = tm.taskStore.SetShare(params.Session, true)
@@ -932,14 +954,20 @@ func HandleGetTaskDetail(c *gin.Context, tm *TaskManager) {
 		return
 	}
 
-	// 获取用户信息
-	username := c.GetString("username")
+	subject, ok := requestSubject(c)
+	if !ok {
+		return
+	}
+	username := subject.Username
 
 	log.Infof("开始获取任务详情: trace_id=%s, sessionId=%s, username=%s", traceID, sessionId, username)
 
 	// 调用TaskManager获取任务详情
-	detail, err := tm.GetTaskDetail(sessionId, username, traceID)
+	detail, err := tm.GetTaskDetail(sessionId, subject, traceID)
 	if err != nil {
+		if respondResourceAccessDenied(c, err) {
+			return
+		}
 		log.Errorf("获取任务详情失败: trace_id=%s, sessionId=%s, username=%s, error=%v", traceID, sessionId, username, err)
 		c.JSON(http.StatusInternalServerError, gin.H{
 			"status":  1,

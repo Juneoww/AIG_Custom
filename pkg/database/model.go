@@ -130,6 +130,11 @@ func (s *ModelStore) UpdateModel(modelID string, username string, updates map[st
 	return s.db.Model(&Model{}).Where("model_id = ? AND username = ?", modelID, username).Updates(updates).Error
 }
 
+func (s *ModelStore) UpdateModelByID(modelID string, updates map[string]interface{}) error {
+	updates["updated_at"] = time.Now().UnixMilli()
+	return s.db.Model(&Model{}).Where("model_id = ?", modelID).Updates(updates).Error
+}
+
 // DeleteModel 删除模型
 func (s *ModelStore) DeleteModel(modelID string, username string) error {
 	return s.db.Delete(&Model{}, "model_id = ? AND username = ?", modelID, username).Error
@@ -138,6 +143,11 @@ func (s *ModelStore) DeleteModel(modelID string, username string) error {
 // BatchDeleteModels 批量删除模型
 func (s *ModelStore) BatchDeleteModels(modelIDs []string, username string) (int64, error) {
 	result := s.db.Delete(&Model{}, "model_id IN ? AND username = ?", modelIDs, username)
+	return result.RowsAffected, result.Error
+}
+
+func (s *ModelStore) BatchDeleteModelsByID(modelIDs []string) (int64, error) {
+	result := s.db.Delete(&Model{}, "model_id IN ?", modelIDs)
 	return result.RowsAffected, result.Error
 }
 

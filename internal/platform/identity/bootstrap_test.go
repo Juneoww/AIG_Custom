@@ -31,6 +31,7 @@ func TestBootstrapAdminOnlyOneConcurrentPostgresCallSucceeds(t *testing.T) {
 	require.NoError(t, adminDB.Exec(fmt.Sprintf("CREATE SCHEMA %s", schema)).Error)
 	t.Cleanup(func() { require.NoError(t, adminDB.Exec(fmt.Sprintf("DROP SCHEMA %s CASCADE", schema)).Error) })
 	db, err := database.InitDB(database.NewConfig(dsn + "&search_path=" + schema)); require.NoError(t, err)
+	require.NoError(t, database.Migrate(db))
 	repo := NewGormRepository(db); require.NoError(t, repo.Init())
 	service := NewService(repo)
 	start := make(chan struct{}); results := make(chan error, 2); var wg sync.WaitGroup
@@ -57,6 +58,7 @@ func TestBootstrapAdminPersistsOnlyOneAdministratorInPostgres(t *testing.T) {
 
 	db, err := database.InitDB(database.NewConfig(dsn + "&search_path=" + schema))
 	require.NoError(t, err)
+	require.NoError(t, database.Migrate(db))
 	repo := NewGormRepository(db)
 	require.NoError(t, repo.Init())
 	service := NewService(repo)

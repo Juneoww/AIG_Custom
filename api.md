@@ -70,6 +70,8 @@ All API interfaces follow a unified response format:
 
 `POST /api/v1/auth/password-resets/confirm` requires HTTPS and accepts `{"token":"...","temporary_password":"..."}`. It returns `204` on success and never echoes the token. Credential endpoints return `426` for plaintext requests, except when `APP_ENV=test` explicitly enables insecure test cookies.
 
+Task and model resources use the authenticated session subject for authorization: administrators can read and manage resources across owners, auditors can read resources across owners but cannot modify them, and users can read and manage only their own resources. Client-supplied identity headers do not grant access.
+
 ### 1. File Upload Interface
 
 #### Interface Information
@@ -1359,7 +1361,7 @@ except Exception as e:
 11. **Model Validation**: The system automatically validates the token and base_url when creating a model
 12. **YAML Models**: Models configured through YAML are read-only and cannot be modified or deleted through the API
 13. **Batch Deletion**: Model deletion supports passing multiple model_ids for batch deletion
-14. **Permission Control**: Only the creator of a model can view, modify, and delete that model
+14. **Permission Control**: Administrators can view, modify, and delete models across owners; auditors have global read-only access; users can view, modify, and delete only their own models
 
 ## Technical Support
 

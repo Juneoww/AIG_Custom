@@ -38,6 +38,7 @@ type migration struct {
 
 var migrations = []migration{
 	{version: 1, apply: migrateInitialSchema},
+	{version: 2, apply: migrateIdentitySchema},
 }
 
 const migrationAdvisoryLockKey int64 = 301237729
@@ -97,4 +98,49 @@ func migrateInitialSchema(db *gorm.DB) error {
 		return err
 	}
 	return db.Exec("CREATE INDEX IF NOT EXISTS idx_models_username_created ON models(username, created_at DESC)").Error
+}
+
+// Migration-local models keep pkg/database independent from the identity
+// repository while creating the exact tables consumed by that package.
+type identityUserMigration struct {
+	ID                 string    `gorm:"primaryKey;column:id"`
+	Username           string    `gorm:"uniqueIndex;not null"`
+	PasswordHash       string    `gorm:"not null"`
+	Role               string    `gorm:"not null"`
+	Active             bool      `gorm:"not null;default:true"`
+	MustChangePassword bool      `gorm:"not null;default:true"`
+	CreatedAt          time.Time `gorm:"not null"`
+	UpdatedAt          time.Time `gorm:"not null"`
+}
+
+func (identityUserMigration) TableName() string { return "identity_users" }
+
+type identitySessionMigration struct {
+	ID        string     `gorm:"primaryKey;column:id"`
+	UserID    string     `gorm:"index;not null"`
+	TokenHash string     `gorm:"uniqueIndex;not null"`
+	ExpiresAt time.Time  `gorm:"index;not null"`
+	RevokedAt *time.Time `gorm:"index"`
+	CreatedAt time.Time  `gorm:"not null"`
+}
+
+func (identitySessionMigration) TableName() string { return "identity_sessions" }
+
+type identityPasswordResetMigration struct {
+	ID        string     `gorm:"primaryKey;column:id"`
+	UserID    string     `gorm:"index;not null"`
+	TokenHash string     `gorm:"uniqueIndex;not null"`
+	ExpiresAt time.Time  `gorm:"index;not null"`
+	UsedAt    *time.Time `gorm:"index"`
+	CreatedAt time.Time  `gorm:"not null"`
+}
+
+func (identityPasswordResetMigration) TableName() string { return "identity_password_resets" }
+
+func migrateIdentitySchema(db *gorm.DB) error {
+	return db.AutoMigrate(
+		&identityUserMigration{},
+		&identitySessionMigration{},
+		&identityPasswordResetMigration{},
+	)
 }

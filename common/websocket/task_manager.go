@@ -35,6 +35,7 @@ import (
 	"time"
 
 	"github.com/Juneoww/AIG_Custom/common/agent"
+	"github.com/Juneoww/AIG_Custom/internal/platform/identity"
 
 	"github.com/Juneoww/AIG_Custom/pkg/database"
 	"github.com/gin-gonic/gin"
@@ -586,7 +587,8 @@ func getEventTimestamp(event interface{}) int64 {
 }
 
 // TerminateTask 终止任务
-func (tm *TaskManager) TerminateTask(sessionId string, username string, traceID string) error {
+func (tm *TaskManager) TerminateTask(sessionId string, subject identity.Subject, traceID string) error {
+	username := subject.Username
 	log.Infof("开始终止任务: trace_id=%s, sessionId=%s, username=%s", traceID, sessionId, username)
 
 	// 检查任务是否存在
@@ -596,10 +598,9 @@ func (tm *TaskManager) TerminateTask(sessionId string, username string, traceID 
 		return fmt.Errorf("任务不存在")
 	}
 
-	// 验证用户权限（只有任务创建者才能终止任务）
-	if session.Username != username {
+	if err := authorizeResource(subject, session.Username, true); err != nil {
 		log.Errorf("无权限终止任务: trace_id=%s, sessionId=%s, username=%s, owner=%s", traceID, sessionId, username, session.Username)
-		return fmt.Errorf("无权限操作此任务")
+		return err
 	}
 
 	if isTerminalTaskStatus(session.Status) {
@@ -714,7 +715,8 @@ func generateEventID() string {
 }
 
 // UpdateTask 更新任务信息
-func (tm *TaskManager) UpdateTask(sessionId string, req *TaskUpdateRequest, username string, traceID string) error {
+func (tm *TaskManager) UpdateTask(sessionId string, req *TaskUpdateRequest, subject identity.Subject, traceID string) error {
+	username := subject.Username
 	log.Infof("开始更新任务: trace_id=%s, sessionId=%s, username=%s", traceID, sessionId, username)
 
 	// 1. 验证任务是否存在
@@ -724,10 +726,9 @@ func (tm *TaskManager) UpdateTask(sessionId string, req *TaskUpdateRequest, user
 		return fmt.Errorf("任务不存在")
 	}
 
-	// 2. 验证权限（只有任务创建者才能更新）
-	if session.Username != username {
+	if err := authorizeResource(subject, session.Username, true); err != nil {
 		log.Errorf("无权限操作此任务: trace_id=%s, sessionId=%s, username=%s, owner=%s", traceID, sessionId, username, session.Username)
-		return fmt.Errorf("无权限操作此任务")
+		return err
 	}
 
 	// 3. 更新任务信息
@@ -745,7 +746,8 @@ func (tm *TaskManager) UpdateTask(sessionId string, req *TaskUpdateRequest, user
 }
 
 // DeleteTask 删除任务
-func (tm *TaskManager) DeleteTask(sessionId string, username string, traceID string) error {
+func (tm *TaskManager) DeleteTask(sessionId string, subject identity.Subject, traceID string) error {
+	username := subject.Username
 	log.Infof("开始删除任务: trace_id=%s, sessionId=%s, username=%s", traceID, sessionId, username)
 
 	// 检查任务是否存在
@@ -755,14 +757,9 @@ func (tm *TaskManager) DeleteTask(sessionId string, username string, traceID str
 		return fmt.Errorf("任务不存在")
 	}
 
-	// 验证用户权限：
-	// 1. 任务创建者始终可以删除
-	// 2. 共享任务允许 Web 公共视角（public_user / 空用户）删除，
-	//    以便在前端管理通过 API 创建的共享任务
-	isSharedWebDelete := session.Share && (username == "" || username == PublicUser)
-	if session.Username != username && !isSharedWebDelete {
+	if err := authorizeResource(subject, session.Username, true); err != nil {
 		log.Errorf("无权限操作此任务: trace_id=%s, sessionId=%s, username=%s, owner=%s", traceID, sessionId, username, session.Username)
-		return fmt.Errorf("无权限操作此任务")
+		return err
 	}
 
 	if session.Status == TaskStatusDoing {
@@ -1096,9 +1093,17 @@ func (tm *TaskManager) GetUserTasks(username string, traceID string) ([]map[stri
 }
 
 // GetUserTasksByType 获取指定用户的任务列表，支持可选的任务类型过滤
-func (tm *TaskManager) GetUserTasksByType(username string, taskType string, traceID string) ([]map[string]interface{}, error) {
-	// 从数据库获取用户的任务列表（支持类型过滤）
-	sessions, err := tm.taskStore.GetUserSessionsByType(username, taskType)
+func (tm *TaskManager) GetUserTasksByType(subject identity.Subject, taskType string, traceID string) ([]map[string]interface{}, error) {
+	username := subject.Username
+	var sessions []*database.Session
+	var err error
+	if identity.HasAnyRole(subject, identity.RoleAdmin, identity.RoleAuditor) {
+		sessions, err = tm.taskStore.GetAllSessionsByType(taskType)
+	} else if subject.Role == identity.RoleUser {
+		sessions, err = tm.taskStore.GetOwnedSessionsByType(username, taskType)
+	} else {
+		return nil, errResourceAccessDenied
+	}
 	if err != nil {
 		log.Errorf("获取用户任务列表失败: trace_id=%s, username=%s, taskType=%s, error=%v", traceID, username, taskType, err)
 		return nil, fmt.Errorf("获取任务列表失败: %v", err)
@@ -1122,7 +1127,8 @@ func (tm *TaskManager) GetUserTasksByType(username string, taskType string, trac
 }
 
 // SearchUserTasksSimple 使用简化参数搜索指定用户的任务，支持单个查询关键词和分页
-func (tm *TaskManager) SearchUserTasksSimple(username string, searchParams database.SimpleSearchParams, traceID string) ([]map[string]interface{}, error) {
+func (tm *TaskManager) SearchUserTasksSimple(subject identity.Subject, searchParams database.SimpleSearchParams, traceID string) ([]map[string]interface{}, error) {
+	username := subject.Username
 	log.Infof("开始简化搜索用户任务: trace_id=%s, username=%s, query=%s, taskType=%s", traceID, username, searchParams.Query, searchParams.TaskType)
 
 	// 验证和设置默认分页参数
@@ -1136,8 +1142,15 @@ func (tm *TaskManager) SearchUserTasksSimple(username string, searchParams datab
 		searchParams.PageSize = 100 // 限制最大页面大小
 	}
 
-	// 从数据库搜索用户的任务列表
-	sessions, _, err := tm.taskStore.SearchUserSessionsSimple(username, searchParams)
+	var sessions []*database.Session
+	var err error
+	if identity.HasAnyRole(subject, identity.RoleAdmin, identity.RoleAuditor) {
+		sessions, _, err = tm.taskStore.SearchAllSessionsSimple(searchParams)
+	} else if subject.Role == identity.RoleUser {
+		sessions, _, err = tm.taskStore.SearchOwnedSessionsSimple(username, searchParams)
+	} else {
+		return nil, errResourceAccessDenied
+	}
 	if err != nil {
 		log.Errorf("简化搜索用户任务失败: trace_id=%s, username=%s, taskType=%s, error=%v", traceID, username, searchParams.TaskType, err)
 		return nil, fmt.Errorf("搜索任务失败: %v", err)
@@ -1344,7 +1357,8 @@ func (tm *TaskManager) cleanupTask(sessionId string) {
 }
 
 // GetTaskDetail 获取任务详情
-func (tm *TaskManager) GetTaskDetail(sessionId string, username string, traceID string) (map[string]interface{}, error) {
+func (tm *TaskManager) GetTaskDetail(sessionId string, subject identity.Subject, traceID string) (map[string]interface{}, error) {
+	username := subject.Username
 	log.Infof("开始获取任务详情: trace_id=%s, sessionId=%s, username=%s", traceID, sessionId, username)
 
 	// 检查任务是否存在
@@ -1354,10 +1368,9 @@ func (tm *TaskManager) GetTaskDetail(sessionId string, username string, traceID 
 		return nil, fmt.Errorf("任务不存在")
 	}
 
-	// 验证用户权限（只有任务创建者才能查看）
-	if !session.Share && session.Username != username {
+	if err := authorizeResource(subject, session.Username, false); err != nil {
 		log.Errorf("无权限访问任务详情: trace_id=%s, sessionId=%s, username=%s, owner=%s", traceID, sessionId, username, session.Username)
-		return nil, fmt.Errorf("无权限查看此任务")
+		return nil, err
 	}
 
 	// 获取任务的所有消息
@@ -1430,10 +1443,6 @@ func (tm *TaskManager) GetTaskDetail(sessionId string, username string, traceID 
 		"source":         source,
 		"sourceLabel":    sourceLabel,
 	}
-	if session.Username != username {
-		delete(detail, "attachments")
-	}
-
 	log.Infof("获取任务详情成功: trace_id=%s, sessionId=%s, username=%s", traceID, sessionId, username)
 	return detail, nil
 }
@@ -1548,4 +1557,3 @@ func maskParamsToken(params map[string]interface{}) {
 		maskModel(v)
 	}
 }
-

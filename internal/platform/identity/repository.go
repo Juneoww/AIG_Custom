@@ -3,6 +3,7 @@ package identity
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sync"
 
 	"gorm.io/gorm"
@@ -34,7 +35,16 @@ func (r *GormRepository) Init() error {
 	if r == nil || r.db == nil {
 		return errors.New("身份数据库不能为空")
 	}
-	return r.db.AutoMigrate(&User{}, &Session{}, &PasswordReset{})
+	for table, model := range map[string]interface{}{
+		"identity_users":           &User{},
+		"identity_sessions":        &Session{},
+		"identity_password_resets": &PasswordReset{},
+	} {
+		if !r.db.Migrator().HasTable(model) {
+			return fmt.Errorf("身份数据库尚未迁移，请先运行 aig migrate：缺少表 %s", table)
+		}
+	}
+	return nil
 }
 
 func (r *GormRepository) CreateUser(ctx context.Context, user *User) error {

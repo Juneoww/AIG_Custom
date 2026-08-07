@@ -15,10 +15,16 @@
 package database
 
 import (
+	"bytes"
+	"fmt"
+	"net/url"
 	"os"
 	"os/exec"
+	"strings"
 	"testing"
 
+	"github.com/Juneoww/AIG_Custom/internal/platform/identity"
+	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
 )
 
@@ -37,6 +43,41 @@ func TestMigrationCLIIsIdempotent(t *testing.T) {
 
 	var versions []SchemaMigration
 	require.NoError(t, db.Order("version ASC").Find(&versions).Error)
-	require.Len(t, versions, 1)
+	require.Len(t, versions, 2)
 	require.Equal(t, int64(1), versions[0].Version)
+	require.Equal(t, int64(2), versions[1].Version)
+	require.True(t, db.Migrator().HasTable(&identity.User{}))
+	require.True(t, db.Migrator().HasTable(&identity.Session{}))
+	require.True(t, db.Migrator().HasTable(&identity.PasswordReset{}))
+
+	role := "aig_runtime_" + strings.ReplaceAll(uuid.NewString(), "-", "")
+	password := "runtime-test-password"
+	require.NoError(t, db.Exec(fmt.Sprintf("CREATE ROLE %s LOGIN PASSWORD '%s' NOSUPERUSER NOCREATEDB NOCREATEROLE", role, password)).Error)
+	t.Cleanup(func() {
+		_ = db.Exec(fmt.Sprintf("DROP OWNED BY %s", role)).Error
+		_ = db.Exec(fmt.Sprintf("DROP ROLE IF EXISTS %s", role)).Error
+	})
+	require.NoError(t, db.Exec(fmt.Sprintf("GRANT USAGE ON SCHEMA public TO %s", role)).Error)
+	require.NoError(t, db.Exec(fmt.Sprintf("GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO %s", role)).Error)
+
+	runtimeURL, err := url.Parse(testPostgresDSN(t))
+	require.NoError(t, err)
+	runtimeURL.User = url.UserPassword(role, password)
+	runtimeDSN := runtimeURL.String()
+
+	bootstrap := exec.Command(binary, "bootstrap-admin")
+	bootstrap.Env = append(os.Environ(),
+		"DB_DRIVER=postgres",
+		"DB_DSN="+runtimeDSN,
+		"AIG_BOOTSTRAP_ADMIN_USERNAME=runtime-admin",
+		"AIG_BOOTSTRAP_ADMIN_PASSWORD=temporary-password",
+	)
+	require.NoError(t, bootstrap.Run())
+
+	var stdout bytes.Buffer
+	reset := exec.Command(binary, "create-password-reset", "--username", "runtime-admin")
+	reset.Env = append(os.Environ(), "DB_DRIVER=postgres", "DB_DSN="+runtimeDSN)
+	reset.Stdout = &stdout
+	require.NoError(t, reset.Run())
+	require.Contains(t, stdout.String(), "SENSITIVE")
 }

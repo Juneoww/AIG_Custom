@@ -296,6 +296,26 @@ func (s *TaskStore) GetUserSessionsByType(username string, taskType string) ([]*
 	return sessions, nil
 }
 
+func (s *TaskStore) GetAllSessionsByType(taskType string) ([]*Session, error) {
+	query := s.db.Model(&Session{})
+	if taskType != "" {
+		query = query.Where("task_type = ?", taskType)
+	}
+	var sessions []*Session
+	err := query.Order("created_at DESC").Find(&sessions).Error
+	return sessions, err
+}
+
+func (s *TaskStore) GetOwnedSessionsByType(username, taskType string) ([]*Session, error) {
+	query := s.db.Model(&Session{}).Where("username = ?", username)
+	if taskType != "" {
+		query = query.Where("task_type = ?", taskType)
+	}
+	var sessions []*Session
+	err := query.Order("created_at DESC").Find(&sessions).Error
+	return sessions, err
+}
+
 // StoreEvent 存储事件消息
 func (s *TaskStore) StoreEvent(id string, sessionID string, eventType string, eventData interface{}, timestamp int64) error {
 	// 将事件数据序列化为JSON
@@ -333,6 +353,18 @@ func (s *TaskStore) GetSessionEventsByType(sessionID string, eventType string) (
 // SearchUserSessionsSimple 使用单个查询参数搜索用户的会话，支持在title、content、task_type字段中搜索
 func (s *TaskStore) SearchUserSessionsSimple(username string, searchParams SimpleSearchParams) ([]*Session, int64, error) {
 	query := s.visibleSessionsQuery(username)
+	return s.searchSessionsSimple(query, searchParams)
+}
+
+func (s *TaskStore) SearchAllSessionsSimple(searchParams SimpleSearchParams) ([]*Session, int64, error) {
+	return s.searchSessionsSimple(s.db.Model(&Session{}), searchParams)
+}
+
+func (s *TaskStore) SearchOwnedSessionsSimple(username string, searchParams SimpleSearchParams) ([]*Session, int64, error) {
+	return s.searchSessionsSimple(s.db.Model(&Session{}).Where("username = ?", username), searchParams)
+}
+
+func (s *TaskStore) searchSessionsSimple(query *gorm.DB, searchParams SimpleSearchParams) ([]*Session, int64, error) {
 
 	// 如果指定了任务类型，添加类型过滤
 	if searchParams.TaskType != "" {

@@ -24,6 +24,7 @@ import (
 	"strings"
 
 	"github.com/Juneoww/AIG_Custom/common/utils/models"
+	"github.com/Juneoww/AIG_Custom/internal/platform/identity"
 
 	"github.com/Juneoww/AIG_Custom/pkg/database"
 	"github.com/gin-gonic/gin"
@@ -88,18 +89,51 @@ func NewModelManager(modelStore *database.ModelStore) *ModelManager {
 	}
 }
 
+func (mm *ModelManager) modelsForSubject(subject identity.Subject) ([]*database.Model, error) {
+	if identity.HasAnyRole(subject, identity.RoleAdmin, identity.RoleAuditor) {
+		models, err := mm.modelStore.GetAllModels()
+		if err != nil {
+			return nil, err
+		}
+		yamlModels, _ := mm.modelStore.LoadYamlModels()
+		return append(models, yamlModels...), nil
+	}
+	if subject.Role == identity.RoleUser {
+		return mm.modelStore.GetUserModels(subject.Username)
+	}
+	return nil, errResourceAccessDenied
+}
+
+func (mm *ModelManager) modelForSubject(subject identity.Subject, modelID string, write bool) (*database.Model, error) {
+	model, err := mm.modelStore.GetModel(modelID)
+	if err != nil {
+		return nil, err
+	}
+	if err := authorizeResource(subject, model.Username, write); err != nil {
+		return nil, err
+	}
+	return model, nil
+}
+
 // HandleGetModelList 获取模型列表接口
 func HandleGetModelList(c *gin.Context, mm *ModelManager) {
 	traceID := getTraceID(c)
-	username := c.GetString("username")
+	subject, ok := requestSubject(c)
+	if !ok {
+		return
+	}
+	username := subject.Username
 
 	log.Debugf("用户请求获取模型列表: trace_id=%s, username=%s", traceID, username)
 
 	var userModels []*database.Model
 	var err error
 
-	userModels, err = mm.modelStore.GetUserModels(username)
+	userModels, err = mm.modelsForSubject(subject)
 	if err != nil {
+		if respondResourceAccessDenied(c, err) {
+			return
+		}
 		log.Errorf("获取用户模型列表失败: trace_id=%s, username=%s, error=%v", traceID, username, err)
 		c.JSON(http.StatusOK, gin.H{
 			"status":  1,
@@ -144,7 +178,11 @@ func HandleGetModelList(c *gin.Context, mm *ModelManager) {
 func HandleGetModelDetail(c *gin.Context, mm *ModelManager) {
 	traceID := getTraceID(c)
 	modelID := c.Param("modelId")
-	username := c.GetString("username")
+	subject, ok := requestSubject(c)
+	if !ok {
+		return
+	}
+	username := subject.Username
 
 	// 1. 字段校验
 	if modelID == "" {
@@ -160,23 +198,15 @@ func HandleGetModelDetail(c *gin.Context, mm *ModelManager) {
 	log.Debugf("用户请求获取模型详情: trace_id=%s, modelID=%s, username=%s", traceID, modelID, username)
 
 	// 2. 获取模型信息
-	model, err := mm.modelStore.GetModel(modelID)
+	model, err := mm.modelForSubject(subject, modelID, false)
 	if err != nil {
+		if respondResourceAccessDenied(c, err) {
+			return
+		}
 		log.Errorf("获取模型详情失败: trace_id=%s, modelID=%s, username=%s, error=%v", traceID, modelID, username, err)
 		c.JSON(http.StatusOK, gin.H{
 			"status":  1,
 			"message": "模型不存在",
-			"data":    nil,
-		})
-		return
-	}
-
-	// 3. 身份校验（只有创建者可以查看）
-	if model.Username != username {
-		log.Errorf("无权限查看模型: trace_id=%s, modelID=%s, username=%s, owner=%s", traceID, modelID, username, model.Username)
-		c.JSON(http.StatusOK, gin.H{
-			"status":  1,
-			"message": "无权限查看此模型",
 			"data":    nil,
 		})
 		return
@@ -208,7 +238,15 @@ func HandleGetModelDetail(c *gin.Context, mm *ModelManager) {
 // HandleCreateModel 创建模型接口
 func HandleCreateModel(c *gin.Context, mm *ModelManager) {
 	traceID := getTraceID(c)
-	username := c.GetString("username")
+	subject, ok := requestSubject(c)
+	if !ok {
+		return
+	}
+	if err := authorizeResource(subject, subject.Username, true); err != nil {
+		respondResourceAccessDenied(c, err)
+		return
+	}
+	username := subject.Username
 
 	// 1. 字段校验
 	var req CreateModelRequest
@@ -344,7 +382,11 @@ func HandleCreateModel(c *gin.Context, mm *ModelManager) {
 func HandleUpdateModel(c *gin.Context, mm *ModelManager) {
 	traceID := getTraceID(c)
 	modelID := c.Param("modelId")
-	username := c.GetString("username")
+	subject, ok := requestSubject(c)
+	if !ok {
+		return
+	}
+	username := subject.Username
 
 	// 1. 字段校验
 	if modelID == "" {
@@ -370,23 +412,15 @@ func HandleUpdateModel(c *gin.Context, mm *ModelManager) {
 
 	log.Infof("用户请求更新模型: trace_id=%s, modelID=%s, username=%s", traceID, modelID, username)
 
-	// 2. 身份校验（检查模型是否存在且属于该用户）
-	exists, err := mm.modelStore.CheckModelExistsByUser(modelID, username)
+	_, err := mm.modelForSubject(subject, modelID, true)
 	if err != nil {
+		if respondResourceAccessDenied(c, err) {
+			return
+		}
 		log.Errorf("检查模型权限失败: trace_id=%s, modelID=%s, username=%s, error=%v", traceID, modelID, username, err)
 		c.JSON(http.StatusOK, gin.H{
 			"status":  1,
 			"message": "检查模型权限失败: " + err.Error(),
-			"data":    nil,
-		})
-		return
-	}
-
-	if !exists {
-		log.Errorf("模型不存在或无权限: trace_id=%s, modelID=%s, username=%s", traceID, modelID, username)
-		c.JSON(http.StatusOK, gin.H{
-			"status":  1,
-			"message": "模型不存在或无权限",
 			"data":    nil,
 		})
 		return
@@ -408,7 +442,7 @@ func HandleUpdateModel(c *gin.Context, mm *ModelManager) {
 		updates["base_url"] = req.Model.BaseURL
 	}
 
-	err = mm.modelStore.UpdateModel(modelID, username, updates)
+	err = mm.modelStore.UpdateModelByID(modelID, updates)
 	if err != nil {
 		log.Errorf("更新模型失败: trace_id=%s, modelID=%s, username=%s, error=%v", traceID, modelID, username, err)
 		c.JSON(http.StatusOK, gin.H{
@@ -431,7 +465,11 @@ func HandleUpdateModel(c *gin.Context, mm *ModelManager) {
 // HandleDeleteModel 删除模型接口（支持单个和批量）
 func HandleDeleteModel(c *gin.Context, mm *ModelManager) {
 	traceID := getTraceID(c)
-	username := c.GetString("username")
+	subject, ok := requestSubject(c)
+	if !ok {
+		return
+	}
+	username := subject.Username
 
 	// 1. 字段校验
 	var req DeleteModelRequest
@@ -457,10 +495,12 @@ func HandleDeleteModel(c *gin.Context, mm *ModelManager) {
 
 	log.Infof("用户请求删除模型: trace_id=%s, modelIDs=%v, username=%s", traceID, req.ModelIDs, username)
 
-	// 2. 身份校验（检查所有模型是否属于该用户）
 	for _, modelID := range req.ModelIDs {
-		exists, err := mm.modelStore.CheckModelExistsByUser(modelID, username)
+		_, err := mm.modelForSubject(subject, modelID, true)
 		if err != nil {
+			if respondResourceAccessDenied(c, err) {
+				return
+			}
 			log.Errorf("检查模型权限失败: trace_id=%s, modelID=%s, username=%s, error=%v", traceID, modelID, username, err)
 			c.JSON(http.StatusOK, gin.H{
 				"status":  1,
@@ -470,19 +510,10 @@ func HandleDeleteModel(c *gin.Context, mm *ModelManager) {
 			return
 		}
 
-		if !exists {
-			log.Errorf("模型不存在或无权限: trace_id=%s, modelID=%s, username=%s", traceID, modelID, username)
-			c.JSON(http.StatusOK, gin.H{
-				"status":  1,
-				"message": "模型不存在或无权限",
-				"data":    nil,
-			})
-			return
-		}
 	}
 
 	// 3. 批量删除模型
-	deletedCount, err := mm.modelStore.BatchDeleteModels(req.ModelIDs, username)
+	deletedCount, err := mm.modelStore.BatchDeleteModelsByID(req.ModelIDs)
 	if err != nil {
 		log.Errorf("删除模型失败: trace_id=%s, modelIDs=%v, username=%s, error=%v", traceID, req.ModelIDs, username, err)
 		c.JSON(http.StatusOK, gin.H{

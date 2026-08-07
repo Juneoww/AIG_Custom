@@ -201,8 +201,8 @@ paths:
       - auth
   /api/v1/app/taskapi/result/{id}:
     get:
-      description: Retrieve the final result of a completed task. Returns detailed
-        scan results, vulnerabilities found, and security assessment data.
+      description: Retrieve the final result of a completed task. Administrators and
+        auditors may read any task; users may read only their own tasks.
       parameters:
       - description: Task Session ID
         in: path
@@ -234,8 +234,8 @@ paths:
       - taskapi
   /api/v1/app/taskapi/status/{id}:
     get:
-      description: Retrieve the current status and logs of a task by session ID. Returns
-        task metadata and execution logs.
+      description: Retrieve the current status and logs of a task by session ID. Administrators
+        and auditors may read any task; users may read only their own tasks.
       parameters:
       - description: Task Session ID
         in: path
