@@ -38,6 +38,8 @@ func openPostgresTestDB(t *testing.T) *gorm.DB {
 func resetPostgresTestDB(t *testing.T, db *gorm.DB) {
 	t.Helper()
 	require.NoError(t, db.Migrator().DropTable(
+		"platform_models",
+		"audit_events",
 		&identityPasswordResetMigration{},
 		&identitySessionMigration{},
 		&identityUserMigration{},

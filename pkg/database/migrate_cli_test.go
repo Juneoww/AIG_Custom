@@ -43,12 +43,15 @@ func TestMigrationCLIIsIdempotent(t *testing.T) {
 
 	var versions []SchemaMigration
 	require.NoError(t, db.Order("version ASC").Find(&versions).Error)
-	require.Len(t, versions, 2)
+	require.Len(t, versions, 3)
 	require.Equal(t, int64(1), versions[0].Version)
 	require.Equal(t, int64(2), versions[1].Version)
+	require.Equal(t, int64(3), versions[2].Version)
 	require.True(t, db.Migrator().HasTable(&identity.User{}))
 	require.True(t, db.Migrator().HasTable(&identity.Session{}))
 	require.True(t, db.Migrator().HasTable(&identity.PasswordReset{}))
+	require.True(t, db.Migrator().HasTable("audit_events"))
+	require.True(t, db.Migrator().HasTable("platform_models"))
 
 	role := "aig_runtime_" + strings.ReplaceAll(uuid.NewString(), "-", "")
 	password := "runtime-test-password"

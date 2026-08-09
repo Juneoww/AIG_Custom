@@ -33,6 +33,8 @@ import (
 	"trpc.group/trpc-go/trpc-go/log"
 
 	"github.com/Juneoww/AIG_Custom/common/fingerprints/parser"
+	"github.com/Juneoww/AIG_Custom/internal/platform/identity"
+	platformknowledge "github.com/Juneoww/AIG_Custom/internal/platform/knowledge"
 	"github.com/Juneoww/AIG_Custom/pkg/vulstruct"
 	"github.com/gin-gonic/gin"
 	"gopkg.in/yaml.v3"
@@ -57,6 +59,15 @@ func safeJoinPath(base, elem string) (string, error) {
 		return "", fmt.Errorf("path traversal detected: %q is outside base %q", elem, base)
 	}
 	return joined, nil
+}
+
+func requireGovernedKnowledgeMutation(c *gin.Context) bool {
+	subject, ok := identity.CurrentSubject(c)
+	if !ok || subject.Role != identity.RoleAdmin || !platformknowledge.IsGovernedMutation(c) {
+		c.AbortWithStatus(http.StatusForbidden)
+		return false
+	}
+	return true
 }
 
 // FingerprintWithTime 包含指纹数据和文件修改时间的结构体
@@ -208,6 +219,9 @@ func HandleListFingerprints(c *gin.Context) {
 
 // 创建指纹
 func HandleCreateFingerprint(c *gin.Context) {
+	if !requireGovernedKnowledgeMutation(c) {
+		return
+	}
 	// 1. 解析请求体，获取file_content字段
 	type FingerprintUploadRequest struct {
 		FileContent string `json:"file_content" binding:"required"`
@@ -262,6 +276,9 @@ type BatchDeleteRequest struct {
 }
 
 func HandleDeleteFingerprint(c *gin.Context) {
+	if !requireGovernedKnowledgeMutation(c) {
+		return
+	}
 	var req BatchDeleteRequest
 	if err := c.ShouldBindJSON(&req); err != nil || len(req.Name) == 0 {
 		c.JSON(http.StatusBadRequest, gin.H{"status": 1, "message": "参数错误", "data": nil})
@@ -312,6 +329,9 @@ func HandleDeleteFingerprint(c *gin.Context) {
 
 // 编辑指纹处理函数
 func HandleEditFingerprint(c *gin.Context) {
+	if !requireGovernedKnowledgeMutation(c) {
+		return
+	}
 	// 1. 获取原指纹名称
 	oldName := c.Param("name")
 	if oldName == "" {
@@ -468,6 +488,9 @@ func HandleListVulnerabilities() gin.HandlerFunc {
 // 添加漏洞信息（带严格校验）
 func HandleCreateVulnerability() gin.HandlerFunc {
 	return func(c *gin.Context) {
+		if !requireGovernedKnowledgeMutation(c) {
+			return
+		}
 		// 1. 解析请求体，获取file_content
 		type VulnUploadRequest struct {
 			FileContent string `json:"file_content" binding:"required"`
@@ -545,6 +568,9 @@ func HandleCreateVulnerability() gin.HandlerFunc {
 
 // 编辑漏洞处理函数
 func HandleEditVulnerability(c *gin.Context) {
+	if !requireGovernedKnowledgeMutation(c) {
+		return
+	}
 	// 1. 获取原CVE编号
 	oldCVE := c.Param("cve")
 	if oldCVE == "" {
@@ -659,6 +685,9 @@ type BatchDeleteVulnRequest struct {
 }
 
 func HandleBatchDeleteVulnerabilities(c *gin.Context) {
+	if !requireGovernedKnowledgeMutation(c) {
+		return
+	}
 	var req BatchDeleteVulnRequest
 	if err := c.ShouldBindJSON(&req); err != nil || len(req.CVEs) == 0 {
 		c.JSON(http.StatusBadRequest, gin.H{"status": 1, "message": "参数解析失败或CVE列表为空"})
@@ -862,6 +891,9 @@ func HandleGetEvaluationDetail(c *gin.Context) {
 
 // 创建评测集
 func HandleCreateEvaluation(c *gin.Context) {
+	if !requireGovernedKnowledgeMutation(c) {
+		return
+	}
 	// 1. 解析请求体，获取file_content字段
 	type EvaluationUploadRequest struct {
 		FileContent string `json:"file_content" binding:"required"`
@@ -933,6 +965,9 @@ func HandleCreateEvaluation(c *gin.Context) {
 
 // 编辑评测集处理函数
 func HandleEditEvaluation(c *gin.Context) {
+	if !requireGovernedKnowledgeMutation(c) {
+		return
+	}
 	// 1. 获取原评测集名称
 	oldName := c.Param("name")
 	if oldName == "" {
@@ -1031,6 +1066,9 @@ type BatchDeleteEvaluationRequest struct {
 }
 
 func HandleDeleteEvaluation(c *gin.Context) {
+	if !requireGovernedKnowledgeMutation(c) {
+		return
+	}
 	var req BatchDeleteEvaluationRequest
 	if err := c.ShouldBindJSON(&req); err != nil || len(req.Names) == 0 {
 		c.JSON(http.StatusBadRequest, gin.H{"status": 1, "message": "参数错误", "data": nil})

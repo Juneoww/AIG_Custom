@@ -72,6 +72,24 @@ All API interfaces follow a unified response format:
 
 Task and model resources use the authenticated session subject for authorization: administrators can read and manage resources across owners, auditors can read resources across owners but cannot modify them, and users can read and manage only their own resources. Client-supplied identity headers do not grant access.
 
+### Platform Governance, Audit, Models, and Knowledge
+
+All endpoints below require the authenticated session, completion of any mandatory password change, and matching CSRF cookie/header for state changes.
+
+- `GET|POST /api/v1/platform/admin/users`: administrators list or create local accounts. New accounts must change their password. Responses never contain passwords or password hashes.
+- `PUT /api/v1/platform/admin/users/{userID}/role`: administrators assign `admin`, `user`, or `auditor`.
+- `PUT /api/v1/platform/admin/users/{userID}/active`: administrators enable or disable accounts; disabling revokes active sessions.
+- `POST /api/v1/platform/admin/users/{userID}/password-reset`: requests out-of-band reset delivery and returns `204`; no reset token is returned or logged.
+- `GET /api/v1/platform/admin/audit-events`: administrators and auditors query append-only, sanitized events. Filters include `action`, `actor_user_id`, `resource_type`, `resource_id`, and `limit`. Governed mutations first append a durable `pending` event and correlate the later `success` or `failure` event with the same `request_id`; if completion persistence is interrupted, the pending record remains visible for reconciliation.
+- `GET|POST /api/v1/platform/models` and `GET|PUT|DELETE /api/v1/platform/models/{modelID}`: users manage only their private models and can read global models; administrators manage global models and can inspect governance metadata; auditors have global read-only access. Another user's private model returns `403`.
+- `POST /api/v1/platform/models/{modelID}/rotate-encryption`: administrators re-encrypt a stored token with the active master key.
+
+Model tokens are encrypted with AES-256-GCM and authenticated model metadata. Configure the active key with `MODEL_MASTER_KEY_ID` and a base64-encoded 32-byte `MODEL_MASTER_KEY`. During a rotation window, `MODEL_PREVIOUS_MASTER_KEYS` is a JSON object mapping prior key IDs to base64 keys; all new writes use the active key. Responses always return `"token":"********"` and never return plaintext, ciphertext, nonce, or key material. Do not log model request bodies.
+
+Existing `/api/v1/knowledge/*` read formats and scanner protocols are unchanged. Authenticated users, auditors, and administrators may read; only administrators may mutate fingerprints, vulnerabilities, evaluation data, MCP/prompt collections, or Agent configuration. Every change passes through a durable write-ahead audit boundary before the legacy format-preserving handler runs. A direct mount of a legacy write handler is rejected. The asynchronous system-data update records `knowledge.change_requested/pending` immediately and records `knowledge.changed/success` or `failure` only when its background work actually finishes. Changes affect future scans only; completed task/report snapshots remain unchanged.
+
+Audited actions currently include successful and failed login, account creation/enable/disable, role assignment, password reset requests, model governance, and rule/knowledge or system-data changes. Stable action constants also exist for later task changes, report exports, and system configuration callers. `/api/v1/app/models` is deprecated and delegates to the same encrypted Subject-based model service; it no longer trusts a `username` header.
+
 ### 1. File Upload Interface
 
 #### Interface Information

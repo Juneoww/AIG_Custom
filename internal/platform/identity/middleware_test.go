@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/tls"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -26,10 +27,93 @@ func TestAuthenticationNeverTrustsUsernameHeader(t *testing.T) {
 	assert.Equal(t, http.StatusUnauthorized, w.Code)
 }
 
+type recordingGovernanceObserver struct {
+	authentication []AuthenticationEvent
+	passwordResets []string
+}
+
+type failingPasswordResetObserver struct{}
+
+func (*failingPasswordResetObserver) AuthenticationAttempt(context.Context, AuthenticationEvent) error {
+	return nil
+}
+
+func (*failingPasswordResetObserver) BeginPasswordReset(context.Context, Subject, string) (GovernanceCompletion, error) {
+	return nil, errors.New("injected audit failure")
+}
+
+func (observer *recordingGovernanceObserver) AuthenticationAttempt(_ context.Context, event AuthenticationEvent) error {
+	observer.authentication = append(observer.authentication, event)
+	return nil
+}
+
+func (observer *recordingGovernanceObserver) BeginPasswordReset(_ context.Context, _ Subject, userID string) (GovernanceCompletion, error) {
+	return func(_ context.Context, success bool) error {
+		if success {
+			observer.passwordResets = append(observer.passwordResets, userID)
+		}
+		return nil
+	}, nil
+}
+
+func TestAuthRoutesNotifyGovernanceObserverForSuccessfulAndFailedLogin(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	service, _ := newTestService(t)
+	_, err := service.CreateUser(context.Background(), CreateUserInput{Username: "alice", Password: "secret", Role: RoleUser})
+	require.NoError(t, err)
+	policy, err := NewCookiePolicy(CookieConfig{AppEnv: "test", AllowInsecureTestCookie: true})
+	require.NoError(t, err)
+	observer := &recordingGovernanceObserver{}
+	router := gin.New()
+	RegisterRoutesWithObserver(router.Group("/auth"), service, policy, observer)
+
+	for _, password := range []string{"secret", "wrong"} {
+		body, marshalErr := json.Marshal(map[string]string{"username": "alice", "password": password})
+		require.NoError(t, marshalErr)
+		response := httptest.NewRecorder()
+		router.ServeHTTP(response, httptest.NewRequest(http.MethodPost, "/auth/login", bytes.NewReader(body)))
+	}
+
+	require.Len(t, observer.authentication, 2)
+	assert.True(t, observer.authentication[0].Success)
+	assert.Equal(t, "alice", observer.authentication[0].Subject.Username)
+	assert.False(t, observer.authentication[1].Success)
+	assert.Equal(t, "alice", observer.authentication[1].Username)
+}
+
+func TestHTTPPasswordResetDoesNotStartWhenAuditWriteAheadFails(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	repository := NewMemoryRepository()
+	service := NewService(repository)
+	ctx := context.Background()
+	admin, err := service.CreateUser(ctx, CreateUserInput{Username: "admin", Password: "secret", Role: RoleAdmin})
+	require.NoError(t, err)
+	target, err := service.CreateUser(ctx, CreateUserInput{Username: "target", Password: "secret", Role: RoleUser})
+	require.NoError(t, err)
+	login, err := service.Authenticate(ctx, admin.Username, "secret")
+	require.NoError(t, err)
+	policy, err := NewCookiePolicy(CookieConfig{AppEnv: "test", AllowInsecureTestCookie: true})
+	require.NoError(t, err)
+	router := gin.New()
+	RegisterRoutesWithObserver(router.Group("/auth"), service, policy, &failingPasswordResetObserver{})
+
+	request := httptest.NewRequest(http.MethodPost, "/auth/password-resets/"+target.ID, nil)
+	request.AddCookie(&http.Cookie{Name: policy.SessionCookieName, Value: login.Token})
+	request.AddCookie(&http.Cookie{Name: policy.CSRFCookieName, Value: "csrf"})
+	request.Header.Set("X-CSRF-Token", "csrf")
+	response := httptest.NewRecorder()
+	router.ServeHTTP(response, request)
+	assert.Equal(t, http.StatusInternalServerError, response.Code)
+	assert.Empty(t, repository.resets)
+}
+
 func TestAuthRoutesRequireHTTPSExceptExplicitTestCookieMode(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	service, _ := newTestService(t)
-	require.NoError(t, func() error { _, err := service.CreateUser(context.Background(), CreateUserInput{Username: "alice", Password: "secret", Role: RoleUser}); return err }())
+	require.NoError(t, func() error {
+		_, err := service.CreateUser(context.Background(), CreateUserInput{Username: "alice", Password: "secret", Role: RoleUser})
+		return err
+	}())
 	policy, err := NewCookiePolicy(CookieConfig{AppEnv: "production", TrustedProxyCIDRs: "10.0.0.0/8"})
 	require.NoError(t, err)
 	r := gin.New()
@@ -39,7 +123,12 @@ func TestAuthRoutesRequireHTTPSExceptExplicitTestCookieMode(t *testing.T) {
 
 	for _, request := range []*http.Request{
 		httptest.NewRequest(http.MethodPost, "/auth/login", bytes.NewReader(body)),
-		func() *http.Request { req := httptest.NewRequest(http.MethodPost, "/auth/login", bytes.NewReader(body)); req.RemoteAddr = "192.168.1.2:443"; req.Header.Set("X-Forwarded-Proto", "https"); return req }(),
+		func() *http.Request {
+			req := httptest.NewRequest(http.MethodPost, "/auth/login", bytes.NewReader(body))
+			req.RemoteAddr = "192.168.1.2:443"
+			req.Header.Set("X-Forwarded-Proto", "https")
+			return req
+		}(),
 	} {
 		w := httptest.NewRecorder()
 		r.ServeHTTP(w, request)
@@ -76,7 +165,8 @@ func TestAuthLifecycleRoutesRotateAndResetWithoutLeakingTokensToUsers(t *testing
 	policy, err := NewCookiePolicy(CookieConfig{AppEnv: "production"})
 	require.NoError(t, err)
 	r := gin.New()
-	RegisterRoutes(r.Group("/auth"), service, policy)
+	observer := &recordingGovernanceObserver{}
+	RegisterRoutesWithObserver(r.Group("/auth"), service, policy, observer)
 
 	userReset := httptest.NewRequest(http.MethodPost, "/auth/password-resets/"+user.ID, nil)
 	userReset.TLS = &tls.ConnectionState{}
@@ -96,6 +186,7 @@ func TestAuthLifecycleRoutesRotateAndResetWithoutLeakingTokensToUsers(t *testing
 	r.ServeHTTP(w, adminReset)
 	assert.Equal(t, http.StatusNoContent, w.Code)
 	assert.Empty(t, w.Body.String())
+	assert.Equal(t, []string{user.ID}, observer.passwordResets)
 
 	rotate := httptest.NewRequest(http.MethodPost, "/auth/rotate-session", nil)
 	rotate.TLS = &tls.ConnectionState{}
@@ -129,12 +220,19 @@ func TestRequireRoleGuardsRepresentativeReadAndWriteRoutes(t *testing.T) {
 	r.POST("/knowledge", testSubject(RoleAuditor), RequireRole(RoleAdmin), func(c *gin.Context) { c.Status(http.StatusNoContent) })
 	r.PUT("/app/owned", testSubject(RoleUser), RequireOwnerOrRole(func(*gin.Context) string { return "user" }, true), func(c *gin.Context) { c.Status(http.StatusNoContent) })
 	r.DELETE("/system", testSubject(RoleAuditor), RequireRole(RoleAdmin), func(c *gin.Context) { c.Status(http.StatusNoContent) })
-	for _, tc := range []struct{ method, path string; status int }{{http.MethodGet, "/knowledge", 204}, {http.MethodPost, "/knowledge", 403}, {http.MethodPut, "/app/owned", 204}, {http.MethodDelete, "/system", 403}} {
-		w := httptest.NewRecorder(); r.ServeHTTP(w, httptest.NewRequest(tc.method, tc.path, nil)); assert.Equal(t, tc.status, w.Code)
+	for _, tc := range []struct {
+		method, path string
+		status       int
+	}{{http.MethodGet, "/knowledge", 204}, {http.MethodPost, "/knowledge", 403}, {http.MethodPut, "/app/owned", 204}, {http.MethodDelete, "/system", 403}} {
+		w := httptest.NewRecorder()
+		r.ServeHTTP(w, httptest.NewRequest(tc.method, tc.path, nil))
+		assert.Equal(t, tc.status, w.Code)
 	}
 }
 
-func testSubject(role Role) gin.HandlerFunc { return func(c *gin.Context) { c.Set(subjectContextKey, Subject{UserID: "user", Role: role}); c.Next() } }
+func testSubject(role Role) gin.HandlerFunc {
+	return func(c *gin.Context) { c.Set(subjectContextKey, Subject{UserID: "user", Role: role}); c.Next() }
+}
 
 func TestStateChangeRequiresDoubleSubmitCSRF(t *testing.T) {
 	gin.SetMode(gin.TestMode)

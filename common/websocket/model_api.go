@@ -20,24 +20,131 @@ package websocket
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"strings"
 
 	"github.com/Juneoww/AIG_Custom/common/utils/models"
 	"github.com/Juneoww/AIG_Custom/internal/platform/identity"
+	platformmodels "github.com/Juneoww/AIG_Custom/internal/platform/models"
 
 	"github.com/Juneoww/AIG_Custom/pkg/database"
 	"github.com/gin-gonic/gin"
 	"trpc.group/trpc-go/trpc-go/log"
 )
 
+// registerPlatformModelRoutes exposes the encrypted platform model service.
+// The legacy handlers below remain available only as an internal engine
+// compatibility implementation and are no longer mounted for browsers.
+func registerPlatformModelRoutes(group *gin.RouterGroup, service *platformmodels.Service) {
+	group.GET("", func(c *gin.Context) {
+		subject, ok := identity.CurrentSubject(c)
+		if !ok {
+			c.Status(http.StatusUnauthorized)
+			return
+		}
+		views, err := service.List(c.Request.Context(), subject)
+		if err != nil {
+			respondPlatformModelError(c, err)
+			return
+		}
+		c.JSON(http.StatusOK, views)
+	})
+	group.GET("/:modelID", func(c *gin.Context) {
+		subject, ok := identity.CurrentSubject(c)
+		if !ok {
+			c.Status(http.StatusUnauthorized)
+			return
+		}
+		view, err := service.Get(c.Request.Context(), subject, c.Param("modelID"))
+		if err != nil {
+			respondPlatformModelError(c, err)
+			return
+		}
+		c.JSON(http.StatusOK, view)
+	})
+	group.POST("", func(c *gin.Context) {
+		subject, ok := identity.CurrentSubject(c)
+		if !ok {
+			c.Status(http.StatusUnauthorized)
+			return
+		}
+		var input platformmodels.CreateInput
+		if err := c.ShouldBindJSON(&input); err != nil {
+			c.Status(http.StatusBadRequest)
+			return
+		}
+		view, err := service.Create(c.Request.Context(), subject, input)
+		if err != nil {
+			respondPlatformModelError(c, err)
+			return
+		}
+		c.JSON(http.StatusCreated, view)
+	})
+	group.PUT("/:modelID", func(c *gin.Context) {
+		subject, ok := identity.CurrentSubject(c)
+		if !ok {
+			c.Status(http.StatusUnauthorized)
+			return
+		}
+		var input platformmodels.UpdateInput
+		if err := c.ShouldBindJSON(&input); err != nil {
+			c.Status(http.StatusBadRequest)
+			return
+		}
+		view, err := service.Update(c.Request.Context(), subject, c.Param("modelID"), input)
+		if err != nil {
+			respondPlatformModelError(c, err)
+			return
+		}
+		c.JSON(http.StatusOK, view)
+	})
+	group.DELETE("/:modelID", func(c *gin.Context) {
+		subject, ok := identity.CurrentSubject(c)
+		if !ok {
+			c.Status(http.StatusUnauthorized)
+			return
+		}
+		if err := service.Delete(c.Request.Context(), subject, c.Param("modelID")); err != nil {
+			respondPlatformModelError(c, err)
+			return
+		}
+		c.Status(http.StatusNoContent)
+	})
+	group.POST("/:modelID/rotate-encryption", func(c *gin.Context) {
+		subject, ok := identity.CurrentSubject(c)
+		if !ok {
+			c.Status(http.StatusUnauthorized)
+			return
+		}
+		if err := service.RotateEncryption(c.Request.Context(), subject, c.Param("modelID")); err != nil {
+			respondPlatformModelError(c, err)
+			return
+		}
+		c.Status(http.StatusNoContent)
+	})
+}
+
+func respondPlatformModelError(c *gin.Context, err error) {
+	switch {
+	case errors.Is(err, platformmodels.ErrForbidden):
+		c.Status(http.StatusForbidden)
+	case errors.Is(err, platformmodels.ErrNotFound):
+		c.Status(http.StatusNotFound)
+	case errors.Is(err, platformmodels.ErrInvalid):
+		c.Status(http.StatusBadRequest)
+	default:
+		c.Status(http.StatusInternalServerError)
+	}
+}
+
 // ModelInfo 模型信息（用于创建）
 type ModelInfo struct {
-	Model              string `json:"model" binding:"required"`
-	Token              string `json:"token" binding:"required"`
-	BaseURL            string `json:"base_url" binding:"required"`
-	Limit              int    `json:"limit"`
-	Note               string `json:"note"`
+	Model   string `json:"model" binding:"required"`
+	Token   string `json:"token" binding:"required"`
+	BaseURL string `json:"base_url" binding:"required"`
+	Limit   int    `json:"limit"`
+	Note    string `json:"note"`
 }
 
 // CreateModelRequest 创建模型请求
@@ -49,11 +156,11 @@ type CreateModelRequest struct {
 // UpdateModelInfo 模型信息（用于更新）
 // 这里不对 Token/BaseURL 使用 binding:"required"，以支持“只改名称等字段”的场景。
 type UpdateModelInfo struct {
-	Model              string `json:"model"`
-	Token              string `json:"token"`
-	BaseURL            string `json:"base_url"`
-	Limit              int    `json:"limit"`
-	Note               string `json:"note"`
+	Model   string `json:"model"`
+	Token   string `json:"token"`
+	BaseURL string `json:"base_url"`
+	Limit   int    `json:"limit"`
+	Note    string `json:"note"`
 }
 
 // UpdateModelRequest 更新模型请求
@@ -329,9 +436,9 @@ func HandleCreateModel(c *gin.Context, mm *ModelManager) {
 	}
 	// 校验模型 token base_url
 	ai := &models.OpenAI{
-		Key:                req.Model.Token,
-		Model:              req.Model.Model,
-		BaseUrl:            req.Model.BaseURL,
+		Key:     req.Model.Token,
+		Model:   req.Model.Model,
+		BaseUrl: req.Model.BaseURL,
 	}
 	if !strings.HasSuffix(ai.BaseUrl, "/") {
 		ai.BaseUrl += "/"
@@ -349,13 +456,13 @@ func HandleCreateModel(c *gin.Context, mm *ModelManager) {
 
 	// 4. 创建模型
 	model := &database.Model{
-		ModelID:            req.ModelID,
-		Username:           username,
-		ModelName:          req.Model.Model,
-		Token:              req.Model.Token,
-		BaseURL:            req.Model.BaseURL,
-		Note:               req.Model.Note,
-		Limit:              req.Model.Limit,
+		ModelID:   req.ModelID,
+		Username:  username,
+		ModelName: req.Model.Model,
+		Token:     req.Model.Token,
+		BaseURL:   req.Model.BaseURL,
+		Note:      req.Model.Note,
+		Limit:     req.Model.Limit,
 	}
 
 	err = mm.modelStore.CreateModel(model)

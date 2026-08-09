@@ -34,7 +34,11 @@ import (
 	_ "github.com/Juneoww/AIG_Custom/docs"
 	"github.com/Juneoww/AIG_Custom/internal/gologger"
 	version "github.com/Juneoww/AIG_Custom/internal/options"
+	platformadmin "github.com/Juneoww/AIG_Custom/internal/platform/admin"
+	platformaudit "github.com/Juneoww/AIG_Custom/internal/platform/audit"
 	"github.com/Juneoww/AIG_Custom/internal/platform/identity"
+	platformknowledge "github.com/Juneoww/AIG_Custom/internal/platform/knowledge"
+	platformmodels "github.com/Juneoww/AIG_Custom/internal/platform/models"
 	"github.com/Juneoww/AIG_Custom/pkg/database"
 	"github.com/gin-gonic/gin"
 	swaggerFiles "github.com/swaggo/files"
@@ -76,6 +80,23 @@ func RunWebServer(options *version.Options) {
 		log.Fatalf("身份 Cookie 配置无效: trace_id=system_startup, error=%v", err)
 	}
 	identityService := identity.NewService(identityRepo)
+	auditRepo := platformaudit.NewGormRepository(db)
+	if err := auditRepo.Init(); err != nil {
+		log.Fatalf("初始化审计数据库失败: trace_id=system_startup, error=%v", err)
+	}
+	auditService := platformaudit.NewService(auditRepo)
+	platformModelRepo := platformmodels.NewGormRepository(db)
+	if err := platformModelRepo.Init(); err != nil {
+		log.Fatalf("初始化平台模型数据库失败: trace_id=system_startup, error=%v", err)
+	}
+	modelKeyring, err := platformmodels.LoadKeyringFromEnv()
+	if err != nil {
+		log.Fatalf("模型主密钥配置无效: trace_id=system_startup, error=%v", err)
+	}
+	platformModelService := platformmodels.NewService(platformModelRepo, modelKeyring, auditService)
+	adminHandler := platformadmin.NewHandler(identityService, auditService)
+	knowledgeService := platformknowledge.NewService(auditService)
+	knowledgeHandler := platformknowledge.NewHandler(knowledgeService)
 	taskStore := database.NewTaskStore(db)
 	if err := taskStore.Init(); err != nil {
 		log.Errorf("初始化tasks表失败: trace_id=system_startup, error=%v", err)
@@ -88,14 +109,8 @@ func RunWebServer(options *version.Options) {
 		log.Errorf("初始化models表失败: trace_id=system_startup, error=%v", err)
 
 	}
-	// 自动添加模型
-	modelStore.AutoAddModels()
-
 	// 初始化AgentManager
 	agentManager := NewAgentManager()
-
-	// 初始化ModelManager
-	modelManager := NewModelManager(modelStore)
 
 	// 初始化文件上传配置（支持环境变量）
 	fileConfig := LoadFileUploadConfigFromEnv()
@@ -121,7 +136,8 @@ func RunWebServer(options *version.Options) {
 	// API 版本分组
 	v1 := r.Group("/api/v1")
 	{
-		identity.RegisterRoutes(v1.Group("/auth"), identityService, identityPolicy)
+		identity.RegisterRoutesWithObserver(v1.Group("/auth"), identityService, identityPolicy, auditService)
+		registerPlatformGovernanceRoutes(v1.Group("/platform"), identityService, identityPolicy, adminHandler, platformModelService)
 		v1.GET("/images/:path", func(context *gin.Context) {
 			path := context.Param("path")
 			if strings.Contains(path, "..") {
@@ -138,59 +154,59 @@ func RunWebServer(options *version.Options) {
 			fingerprints := knowledge.Group("/fingerprints")
 			{
 				// 管理功能
-				fingerprints.GET("", identity.RequireRole(identity.RoleAdmin, identity.RoleAuditor), HandleListFingerprints)
-				fingerprints.POST("", identity.RequireRole(identity.RoleAdmin), HandleCreateFingerprint)
-				fingerprints.PUT("/:name", identity.RequireRole(identity.RoleAdmin), HandleEditFingerprint)
-				fingerprints.DELETE("", identity.RequireRole(identity.RoleAdmin), HandleDeleteFingerprint)
+				fingerprints.GET("", identity.RequireRole(identity.RoleAdmin, identity.RoleUser, identity.RoleAuditor), HandleListFingerprints)
+				fingerprints.POST("", knowledgeHandler.Govern(platformknowledge.KindFingerprint, platformknowledge.OperationCreate, HandleCreateFingerprint))
+				fingerprints.PUT("/:name", knowledgeHandler.Govern(platformknowledge.KindFingerprint, platformknowledge.OperationUpdate, HandleEditFingerprint))
+				fingerprints.DELETE("", knowledgeHandler.Govern(platformknowledge.KindFingerprint, platformknowledge.OperationDelete, HandleDeleteFingerprint))
 			}
 			// 漏洞库
 			vulnerabilities := knowledge.Group("/vulnerabilities")
 			{
 				// 管理功能
-				vulnerabilities.GET("", identity.RequireRole(identity.RoleAdmin, identity.RoleAuditor), HandleListVulnerabilities())
-				vulnerabilities.POST("", identity.RequireRole(identity.RoleAdmin), HandleCreateVulnerability())
-				vulnerabilities.PUT("/:cve", identity.RequireRole(identity.RoleAdmin), HandleEditVulnerability)
-				vulnerabilities.DELETE("", identity.RequireRole(identity.RoleAdmin), HandleBatchDeleteVulnerabilities)
+				vulnerabilities.GET("", identity.RequireRole(identity.RoleAdmin, identity.RoleUser, identity.RoleAuditor), HandleListVulnerabilities())
+				vulnerabilities.POST("", knowledgeHandler.Govern(platformknowledge.KindVulnerability, platformknowledge.OperationCreate, HandleCreateVulnerability()))
+				vulnerabilities.PUT("/:cve", knowledgeHandler.Govern(platformknowledge.KindVulnerability, platformknowledge.OperationUpdate, HandleEditVulnerability))
+				vulnerabilities.DELETE("", knowledgeHandler.Govern(platformknowledge.KindVulnerability, platformknowledge.OperationDelete, HandleBatchDeleteVulnerabilities))
 			}
 			// 评测集
 			evaluations := knowledge.Group("/evaluations")
 			{
 				// 管理功能
-				evaluations.GET("/:name", identity.RequireRole(identity.RoleAdmin, identity.RoleAuditor), HandleGetEvaluationDetail)
-				evaluations.GET("", identity.RequireRole(identity.RoleAdmin, identity.RoleAuditor), HandleListEvaluations)
-				evaluations.POST("", identity.RequireRole(identity.RoleAdmin), HandleCreateEvaluation)
-				evaluations.PUT("/:name", identity.RequireRole(identity.RoleAdmin), HandleEditEvaluation)
-				evaluations.DELETE("", identity.RequireRole(identity.RoleAdmin), HandleDeleteEvaluation)
+				evaluations.GET("/:name", identity.RequireRole(identity.RoleAdmin, identity.RoleUser, identity.RoleAuditor), HandleGetEvaluationDetail)
+				evaluations.GET("", identity.RequireRole(identity.RoleAdmin, identity.RoleUser, identity.RoleAuditor), HandleListEvaluations)
+				evaluations.POST("", knowledgeHandler.Govern(platformknowledge.KindEvaluation, platformknowledge.OperationCreate, HandleCreateEvaluation))
+				evaluations.PUT("/:name", knowledgeHandler.Govern(platformknowledge.KindEvaluation, platformknowledge.OperationUpdate, HandleEditEvaluation))
+				evaluations.DELETE("", knowledgeHandler.Govern(platformknowledge.KindEvaluation, platformknowledge.OperationDelete, HandleDeleteEvaluation))
 			}
 			// MCP
 			mcp := knowledge.Group("/mcp")
 			{
-				mcp.GET("names", identity.RequireRole(identity.RoleAdmin, identity.RoleAuditor), GetMcpPluginList)
-				mcp.GET("", identity.RequireRole(identity.RoleAdmin, identity.RoleAuditor), HandleList(MCPROOT, McpLoadFile))
-				mcp.POST("", identity.RequireRole(identity.RoleAdmin), HandleCreate(mcpReadAndSave))
-				mcp.PUT("/:id", identity.RequireRole(identity.RoleAdmin), HandleEdit(mcpUpdateFunc))
-				mcp.DELETE("/:id", identity.RequireRole(identity.RoleAdmin), HandleDelete(mcpDeleteFunc))
+				mcp.GET("names", identity.RequireRole(identity.RoleAdmin, identity.RoleUser, identity.RoleAuditor), GetMcpPluginList)
+				mcp.GET("", identity.RequireRole(identity.RoleAdmin, identity.RoleUser, identity.RoleAuditor), HandleList(MCPROOT, McpLoadFile))
+				mcp.POST("", knowledgeHandler.Govern(platformknowledge.KindMCP, platformknowledge.OperationCreate, HandleCreate(mcpReadAndSave)))
+				mcp.PUT("/:id", knowledgeHandler.Govern(platformknowledge.KindMCP, platformknowledge.OperationUpdate, HandleEdit(mcpUpdateFunc)))
+				mcp.DELETE("/:id", knowledgeHandler.Govern(platformknowledge.KindMCP, platformknowledge.OperationDelete, HandleDelete(mcpDeleteFunc)))
 			}
 			// Prompt Collections
 			collections := knowledge.Group("/prompt_collections")
 			{
-				collections.GET("", identity.RequireRole(identity.RoleAdmin, identity.RoleAuditor), HandleList(PromptCollectionsRoot, promptCollectionLoadFile))
-				collections.POST("", identity.RequireRole(identity.RoleAdmin), HandleCreate(promptCollectionReadAndSave))
-				collections.PUT("/:id", identity.RequireRole(identity.RoleAdmin), HandleEdit(promptCollectionUpdateFunc))
-				collections.DELETE("", identity.RequireRole(identity.RoleAdmin), HandleDelete(promptCollectionDeleteFunc))
+				collections.GET("", identity.RequireRole(identity.RoleAdmin, identity.RoleUser, identity.RoleAuditor), HandleList(PromptCollectionsRoot, promptCollectionLoadFile))
+				collections.POST("", knowledgeHandler.Govern(platformknowledge.KindPromptCollection, platformknowledge.OperationCreate, HandleCreate(promptCollectionReadAndSave)))
+				collections.PUT("/:id", knowledgeHandler.Govern(platformknowledge.KindPromptCollection, platformknowledge.OperationUpdate, HandleEdit(promptCollectionUpdateFunc)))
+				collections.DELETE("", knowledgeHandler.Govern(platformknowledge.KindPromptCollection, platformknowledge.OperationDelete, HandleDelete(promptCollectionDeleteFunc)))
 			}
 			agentConfigs := knowledge.Group("/agent")
 			{
-				agentConfigs.GET("/names", identity.RequireRole(identity.RoleAdmin, identity.RoleAuditor), HandleListAgentNames)
-				agentConfigs.GET("/:name", identity.RequireRole(identity.RoleAdmin, identity.RoleAuditor), HandleGetAgentConfig)
-				agentConfigs.POST("/:name", identity.RequireRole(identity.RoleAdmin), HandleSaveAgentConfig)
-				agentConfigs.DELETE("/:name", identity.RequireRole(identity.RoleAdmin), HandleDeleteAgentConfig)
+				agentConfigs.GET("/names", identity.RequireRole(identity.RoleAdmin, identity.RoleUser, identity.RoleAuditor), HandleListAgentNames)
+				agentConfigs.GET("/:name", identity.RequireRole(identity.RoleAdmin, identity.RoleUser, identity.RoleAuditor), HandleGetAgentConfig)
+				agentConfigs.POST("/:name", knowledgeHandler.Govern(platformknowledge.KindAgentConfig, platformknowledge.OperationUpdate, HandleSaveAgentConfig))
+				agentConfigs.DELETE("/:name", knowledgeHandler.Govern(platformknowledge.KindAgentConfig, platformknowledge.OperationDelete, HandleDeleteAgentConfig))
 				agentConfigs.POST("/connect", identity.RequireRole(identity.RoleAdmin), HandleAgentConnect)
 				agentConfigs.POST("/prompt_test", identity.RequireRole(identity.RoleAdmin), HandleAgentPromptTest)
-				agentConfigs.GET("/template", identity.RequireRole(identity.RoleAdmin, identity.RoleAuditor), HandleAgentTemplate)
+				agentConfigs.GET("/template", identity.RequireRole(identity.RoleAdmin, identity.RoleUser, identity.RoleAuditor), HandleAgentTemplate)
 			}
 			// 算子列表
-			knowledge.GET("/jailbreak", identity.RequireRole(identity.RoleAdmin, identity.RoleAuditor), GetJailBreak)
+			knowledge.GET("/jailbreak", identity.RequireRole(identity.RoleAdmin, identity.RoleUser, identity.RoleAuditor), GetJailBreak)
 		}
 		taskOwnerByID := func(c *gin.Context) string {
 			session, err := taskStore.GetSession(c.Param("id"))
@@ -208,13 +224,6 @@ func RunWebServer(options *version.Options) {
 					return ""
 				}
 				return session.Username
-			}
-			modelOwner := func(c *gin.Context) string {
-				model, err := modelStore.GetModel(c.Param("modelId"))
-				if err != nil {
-					return ""
-				}
-				return model.Username
 			}
 			// 任务管理
 			tasks := appSecurity.Group("/tasks")
@@ -268,30 +277,11 @@ func RunWebServer(options *version.Options) {
 					HandleTerminateTask(c, taskManager)
 				})
 			}
-			// 模型管理
+			// Deprecated compatibility path. It is intentionally backed by the
+			// encrypted platform service and the authenticated Subject, never by
+			// the former username-based legacy handlers.
 			models := appSecurity.Group("/models")
-			{
-				// 获取模型列表接口
-				models.GET("", identity.RequireRole(identity.RoleAdmin, identity.RoleUser, identity.RoleAuditor), func(c *gin.Context) {
-					HandleGetModelList(c, modelManager)
-				})
-				// 获取模型详情接口
-				models.GET("/:modelId", identity.RequireOwnerOrRole(modelOwner, false), func(c *gin.Context) {
-					HandleGetModelDetail(c, modelManager)
-				})
-				// 创建模型接口
-				models.POST("", identity.RequireRole(identity.RoleAdmin, identity.RoleUser), func(c *gin.Context) {
-					HandleCreateModel(c, modelManager)
-				})
-				// 更新模型接口
-				models.PUT("/:modelId", identity.RequireOwnerOrRole(modelOwner, true), func(c *gin.Context) {
-					HandleUpdateModel(c, modelManager)
-				})
-				// 删除模型接口（支持单个和批量）
-				models.DELETE("", identity.RequireRole(identity.RoleAdmin, identity.RoleUser), func(c *gin.Context) {
-					HandleDeleteModel(c, modelManager)
-				})
-			}
+			registerPlatformModelRoutes(models, platformModelService)
 		}
 		// 4. Agent 管理
 		agents := v1.Group("/agents")
@@ -343,7 +333,7 @@ func RunWebServer(options *version.Options) {
 		system := v1.Group("/system")
 		system.Use(setupIdentityMiddleware(identityService, identityPolicy), identity.RequirePasswordChangeCompleted(), identity.RequireCSRF(identityPolicy))
 		{
-			system.POST("/update-data", identity.RequireRole(identity.RoleAdmin), HandleTriggerDataUpdate)
+			system.POST("/update-data", knowledgeHandler.GovernAsync(platformknowledge.KindSystemData, platformknowledge.OperationUpdate, HandleTriggerDataUpdate))
 			system.GET("/update-data", identity.RequireRole(identity.RoleAdmin, identity.RoleAuditor), HandleGetUpdateStatus)
 			system.GET("/version", identity.RequireRole(identity.RoleAdmin, identity.RoleAuditor), HandleVersionCheck)
 		}
@@ -394,4 +384,20 @@ func RunWebServer(options *version.Options) {
 // 配置身份认证中间件
 func setupIdentityMiddleware(service *identity.Service, policy identity.CookiePolicy) gin.HandlerFunc {
 	return identity.Authenticate(service, policy)
+}
+
+func registerPlatformGovernanceRoutes(
+	group *gin.RouterGroup,
+	identityService *identity.Service,
+	identityPolicy identity.CookiePolicy,
+	adminHandler *platformadmin.Handler,
+	modelService *platformmodels.Service,
+) {
+	group.Use(
+		setupIdentityMiddleware(identityService, identityPolicy),
+		identity.RequirePasswordChangeCompleted(),
+		identity.RequireCSRF(identityPolicy),
+	)
+	adminHandler.Register(group.Group("/admin"))
+	registerPlatformModelRoutes(group.Group("/models"), modelService)
 }

@@ -29,6 +29,7 @@ import (
 	"strings"
 
 	"github.com/Juneoww/AIG_Custom/cmd/cli/cmd"
+	platformaudit "github.com/Juneoww/AIG_Custom/internal/platform/audit"
 	"github.com/Juneoww/AIG_Custom/internal/platform/identity"
 	"github.com/Juneoww/AIG_Custom/pkg/database"
 )
@@ -124,10 +125,14 @@ func runCreatePasswordReset(args []string, stdout io.Writer) error {
 	if err := repo.Init(); err != nil {
 		return err
 	}
-	return runCreatePasswordResetForService(context.Background(), identity.NewService(repo), args, stdout)
+	auditRepo := platformaudit.NewGormRepository(db)
+	if err := auditRepo.Init(); err != nil {
+		return err
+	}
+	return runCreatePasswordResetForService(context.Background(), identity.NewService(repo), platformaudit.NewService(auditRepo), args, stdout)
 }
 
-func runCreatePasswordResetForService(ctx context.Context, service *identity.Service, args []string, stdout io.Writer) error {
+func runCreatePasswordResetForService(ctx context.Context, service *identity.Service, recorder platformaudit.Recorder, args []string, stdout io.Writer) error {
 	flags := flag.NewFlagSet("create-password-reset", flag.ContinueOnError)
 	flags.SetOutput(io.Discard)
 	username := flags.String("username", "", "username whose password reset token should be created")
@@ -137,8 +142,21 @@ func runCreatePasswordResetForService(ctx context.Context, service *identity.Ser
 	if flags.NArg() != 0 || strings.TrimSpace(*username) == "" {
 		return errors.New("--username is required")
 	}
-	token, err := service.CreatePasswordResetForUsername(ctx, *username)
+	trimmedUsername := strings.TrimSpace(*username)
+	actor := identity.Subject{Username: "local-operator", Role: identity.RoleAdmin}
+	mutation, err := platformaudit.BeginMutation(ctx, recorder, actor, platformaudit.EventInput{
+		Action: platformaudit.ActionPasswordResetRequested, ResourceType: "user", ResourceID: trimmedUsername,
+		Metadata: map[string]any{"delivery": "local_cli"},
+	})
 	if err != nil {
+		return err
+	}
+	token, err := service.CreatePasswordResetForUsername(ctx, trimmedUsername)
+	if err != nil {
+		_ = mutation.Failed(ctx, "", map[string]any{"delivery": "local_cli"})
+		return err
+	}
+	if err := mutation.Succeeded(ctx, "", map[string]any{"delivery": "local_cli"}); err != nil {
 		return err
 	}
 	fmt.Fprintln(stdout, "SENSITIVE one-time password reset token; deliver securely and do not log or persist it.")

@@ -20,12 +20,13 @@ func TestServerRoutesKeepKnowledgeAppAndSystemRBACGuards(t *testing.T) {
 	require.NoError(t, err)
 
 	for _, route := range []string{
-		"fingerprints.GET(\"\", identity.RequireRole(identity.RoleAdmin, identity.RoleAuditor)",
-		"fingerprints.POST(\"\", identity.RequireRole(identity.RoleAdmin)",
+		"fingerprints.GET(\"\", identity.RequireRole(identity.RoleAdmin, identity.RoleUser, identity.RoleAuditor)",
+		"fingerprints.POST(\"\", knowledgeHandler.Govern(platformknowledge.KindFingerprint",
 		"tasks.GET(\"/:sessionId\", identity.RequireOwnerOrRole(taskOwner, false)",
 		"tasks.PUT(\"/:sessionId\", identity.RequireOwnerOrRole(taskOwner, true)",
+		"registerPlatformModelRoutes(models, platformModelService)",
 		"system.GET(\"/version\", identity.RequireRole(identity.RoleAdmin, identity.RoleAuditor)",
-		"system.POST(\"/update-data\", identity.RequireRole(identity.RoleAdmin)",
+		"system.POST(\"/update-data\", knowledgeHandler.GovernAsync(platformknowledge.KindSystemData",
 	} {
 		require.Contains(t, string(source), route)
 	}

@@ -35,9 +35,24 @@ func TestMigrationAppliesIdentitySchemaAsVersionTwo(t *testing.T) {
 
 	var versions []SchemaMigration
 	require.NoError(t, db.Order("version ASC").Find(&versions).Error)
-	require.Len(t, versions, 2)
+	require.Len(t, versions, 3)
 	assert.Equal(t, int64(1), versions[0].Version)
 	assert.Equal(t, int64(2), versions[1].Version)
+	assert.Equal(t, int64(3), versions[2].Version)
+}
+
+func TestMigrationAppliesGovernanceSchemaAsVersionThree(t *testing.T) {
+	db := openPostgresTestDB(t)
+	resetPostgresTestDB(t, db)
+
+	require.NoError(t, Migrate(db))
+	assert.True(t, db.Migrator().HasTable("audit_events"))
+	assert.True(t, db.Migrator().HasTable("platform_models"))
+
+	var versions []SchemaMigration
+	require.NoError(t, db.Order("version ASC").Find(&versions).Error)
+	require.Len(t, versions, 3)
+	assert.Equal(t, int64(3), versions[2].Version)
 }
 
 func TestDatabaseConfigRejectsMissingDSN(t *testing.T) {
@@ -90,11 +105,13 @@ func TestMigrationIsIdempotentAndRecordsVersion(t *testing.T) {
 
 	var versions []SchemaMigration
 	require.NoError(t, db.Order("version ASC").Find(&versions).Error)
-	require.Len(t, versions, 2)
+	require.Len(t, versions, 3)
 	assert.Equal(t, int64(1), versions[0].Version)
 	assert.Equal(t, int64(2), versions[1].Version)
+	assert.Equal(t, int64(3), versions[2].Version)
 	assert.NotZero(t, versions[0].AppliedAt)
 	assert.NotZero(t, versions[1].AppliedAt)
+	assert.NotZero(t, versions[2].AppliedAt)
 }
 
 func TestMigrationSerializesConcurrentPostgresCalls(t *testing.T) {
@@ -123,9 +140,10 @@ func TestMigrationSerializesConcurrentPostgresCalls(t *testing.T) {
 
 	var versions []SchemaMigration
 	require.NoError(t, first.Order("version ASC").Find(&versions).Error)
-	require.Len(t, versions, 2)
+	require.Len(t, versions, 3)
 	assert.Equal(t, int64(1), versions[0].Version)
 	assert.Equal(t, int64(2), versions[1].Version)
+	assert.Equal(t, int64(3), versions[2].Version)
 	assert.True(t, first.Migrator().HasTable(&User{}))
 	assert.True(t, first.Migrator().HasTable(&Session{}))
 	assert.True(t, first.Migrator().HasTable(&TaskMessage{}))
@@ -134,5 +152,7 @@ func TestMigrationSerializesConcurrentPostgresCalls(t *testing.T) {
 	assert.True(t, first.Migrator().HasTable(&identity.User{}))
 	assert.True(t, first.Migrator().HasTable(&identity.Session{}))
 	assert.True(t, first.Migrator().HasTable(&identity.PasswordReset{}))
+	assert.True(t, first.Migrator().HasTable("audit_events"))
+	assert.True(t, first.Migrator().HasTable("platform_models"))
 	assert.True(t, first.Migrator().HasIndex(&Model{}, "idx_models_username_created"))
 }

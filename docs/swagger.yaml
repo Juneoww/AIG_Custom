@@ -53,6 +53,187 @@ info:
   title: AIG Custom Platform 任务API
   version: "1.0"
 paths:
+  /api/v1/app/models:
+    get:
+      deprecated: true
+      description: Deprecated browser compatibility path. It is protected by the authenticated Subject and delegates to the encrypted platform model service; use /api/v1/platform/models.
+      tags:
+      - models
+      summary: List models through deprecated compatibility facade
+      responses:
+        "200":
+          description: Visible model metadata with masked tokens.
+        "401":
+          description: Unauthenticated.
+  /api/v1/platform/admin/users:
+    get:
+      description: Lists local accounts. Administrator only.
+      tags:
+      - platform-admin
+      summary: List managed users
+      responses:
+        "200":
+          description: User metadata without password hashes.
+        "403":
+          description: Administrator role required.
+    post:
+      description: Creates a local account with an administrator-assigned role and records an audit event. Passwords and hashes are never returned.
+      tags:
+      - platform-admin
+      summary: Create managed user
+      responses:
+        "201":
+          description: User created and audited.
+        "403":
+          description: Administrator role required.
+  /api/v1/platform/admin/users/{userID}/role:
+    put:
+      description: Assigns admin, user, or auditor and records an audit event. Administrator only.
+      tags:
+      - platform-admin
+      summary: Assign user role
+      parameters:
+      - in: path
+        name: userID
+        required: true
+        type: string
+      responses:
+        "204":
+          description: Role assigned and audited.
+        "403":
+          description: Administrator role required.
+  /api/v1/platform/admin/users/{userID}/active:
+    put:
+      description: Enables or disables an account, revokes sessions on disable, and records an audit event. Administrator only.
+      tags:
+      - platform-admin
+      summary: Set account active state
+      parameters:
+      - in: path
+        name: userID
+        required: true
+        type: string
+      responses:
+        "204":
+          description: Account state changed and audited.
+        "403":
+          description: Administrator role required.
+  /api/v1/platform/admin/users/{userID}/password-reset:
+    post:
+      description: Requests a password reset through the configured out-of-band channel and records an audit event. The HTTP response never contains a reset token.
+      tags:
+      - platform-admin
+      summary: Request managed password reset
+      parameters:
+      - in: path
+        name: userID
+        required: true
+        type: string
+      responses:
+        "204":
+          description: Reset requested and audited; no token is returned.
+        "403":
+          description: Administrator role required.
+  /api/v1/platform/admin/audit-events:
+    get:
+      description: Queries append-only sanitized audit events. Governed mutations write a durable pending event before state changes and correlate later success or failure with the same request_id. Administrators and auditors may read; ordinary users are denied.
+      tags:
+      - audit
+      summary: Query audit events
+      responses:
+        "200":
+          description: Sanitized audit event list.
+        "403":
+          description: Admin or auditor role required.
+  /api/v1/platform/models:
+    get:
+      description: Lists visible model metadata. Every token is masked; ciphertext, nonce, and key identifiers are never returned. Users see global and their own private models, auditors see global models, and administrators see governance metadata.
+      tags:
+      - models
+      summary: List governed models
+      responses:
+        "200":
+          description: Visible model metadata with masked tokens.
+        "401":
+          description: Unauthenticated.
+    post:
+      description: Creates an AES-GCM encrypted model configuration. Users may create only private models they own; administrators may create global models; auditors cannot write.
+      tags:
+      - models
+      summary: Create governed model
+      responses:
+        "201":
+          description: Model metadata with a masked token.
+        "403":
+          description: Scope or role is not permitted.
+  /api/v1/platform/models/{modelID}:
+    get:
+      description: Returns authorized model metadata with a masked token. Another user's private model is never disclosed.
+      tags:
+      - models
+      summary: Get governed model
+      parameters:
+      - in: path
+        name: modelID
+        required: true
+        type: string
+      responses:
+        "200":
+          description: Model metadata with masked token.
+        "403":
+          description: Private model belongs to another user.
+        "404":
+          description: Model not found.
+    put:
+      description: Updates an authorized private or global model and audits the change. A masked token value preserves the existing encrypted token.
+      tags:
+      - models
+      summary: Update governed model
+      responses:
+        "200":
+          description: Updated metadata with masked token.
+        "403":
+          description: Write is not permitted.
+    delete:
+      description: Deletes an authorized model and records an audit event.
+      tags:
+      - models
+      summary: Delete governed model
+      responses:
+        "204":
+          description: Model deleted and audited.
+        "403":
+          description: Write is not permitted.
+  /api/v1/platform/models/{modelID}/rotate-encryption:
+    post:
+      description: Re-encrypts a stored token with the active environment-injected master key. Administrator only; plaintext is never returned or logged.
+      tags:
+      - models
+      summary: Rotate model token encryption
+      responses:
+        "204":
+          description: Token re-encrypted and audited.
+        "403":
+          description: Administrator role required.
+  /api/v1/knowledge/fingerprints:
+    get:
+      description: Reads existing fingerprint content for authenticated admin, user, or auditor roles.
+      tags:
+      - knowledge
+      summary: List fingerprints
+      responses:
+        "200":
+          description: Existing fingerprint data in the legacy-compatible format.
+    post:
+      description: Creates fingerprint content through the admin-only governed facade. The original on-disk format is preserved and the change is audited.
+      tags:
+      - knowledge
+      summary: Create fingerprint
+      responses:
+        "200":
+          description: Future scans use the new content; historical report snapshots are unchanged.
+        "403":
+          description: Administrator role required.
   /api/v1/auth/login:
     post:
       consumes:

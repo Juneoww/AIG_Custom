@@ -18,9 +18,9 @@ var (
 )
 
 type CreateUserInput struct {
-	Username, Password string
-	Role               Role
-	MustChangePassword bool
+	ID, Username, Password string
+	Role                   Role
+	MustChangePassword     bool
 }
 type LoginResult struct {
 	Token              string
@@ -46,7 +46,7 @@ func nowUTC() time.Time { return time.Now().UTC() }
 
 func (s *Service) CreateUser(ctx context.Context, input CreateUserInput) (*User, error) {
 	username := strings.TrimSpace(input.Username)
-	if username == "" || input.Role != RoleAdmin && input.Role != RoleUser && input.Role != RoleAuditor {
+	if username == "" || !validRole(input.Role) {
 		return nil, ErrInvalidCredentials
 	}
 	hash, err := HashPassword(input.Password)
@@ -54,11 +54,19 @@ func (s *Service) CreateUser(ctx context.Context, input CreateUserInput) (*User,
 		return nil, err
 	}
 	now := s.now()
-	user := &User{ID: uuid.NewString(), Username: username, PasswordHash: hash, Role: input.Role, Active: true, MustChangePassword: input.MustChangePassword, CreatedAt: now, UpdatedAt: now}
+	userID := strings.TrimSpace(input.ID)
+	if userID == "" {
+		userID = uuid.NewString()
+	}
+	user := &User{ID: userID, Username: username, PasswordHash: hash, Role: input.Role, Active: true, MustChangePassword: input.MustChangePassword, CreatedAt: now, UpdatedAt: now}
 	if err := s.repo.CreateUser(ctx, user); err != nil {
 		return nil, err
 	}
 	return user, nil
+}
+
+func validRole(role Role) bool {
+	return role == RoleAdmin || role == RoleUser || role == RoleAuditor
 }
 func (s *Service) SetActive(ctx context.Context, username string, active bool) error {
 	user, err := s.repo.UserByUsername(ctx, username)
@@ -68,6 +76,39 @@ func (s *Service) SetActive(ctx context.Context, username string, active bool) e
 	user.Active = active
 	user.UpdatedAt = s.now()
 	return s.repo.UpdateUser(ctx, user)
+}
+
+func (s *Service) ListUsers(ctx context.Context) ([]User, error) {
+	return s.repo.ListUsers(ctx)
+}
+
+func (s *Service) SetRole(ctx context.Context, userID string, role Role) error {
+	if !validRole(role) {
+		return ErrInvalidCredentials
+	}
+	user, err := s.repo.UserByID(ctx, userID)
+	if err != nil {
+		return err
+	}
+	user.Role = role
+	user.UpdatedAt = s.now()
+	return s.repo.UpdateUser(ctx, user)
+}
+
+func (s *Service) SetActiveByID(ctx context.Context, userID string, active bool) error {
+	user, err := s.repo.UserByID(ctx, userID)
+	if err != nil {
+		return err
+	}
+	user.Active = active
+	user.UpdatedAt = s.now()
+	if err := s.repo.UpdateUser(ctx, user); err != nil {
+		return err
+	}
+	if !active {
+		return s.repo.RevokeUserSessions(ctx, user.ID)
+	}
+	return nil
 }
 func (s *Service) Authenticate(ctx context.Context, username, password string) (*LoginResult, error) {
 	user, err := s.repo.UserByUsername(ctx, strings.TrimSpace(username))

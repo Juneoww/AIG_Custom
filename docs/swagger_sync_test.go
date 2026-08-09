@@ -58,6 +58,25 @@ func TestGeneratedSwaggerArtifactsStayInSync(t *testing.T) {
 		if !strings.Contains(resetConfirm.(string), "never echoed") {
 			t.Fatal("password-reset confirmation documentation must state that the token is never echoed")
 		}
+		for _, endpoint := range []struct {
+			path, method string
+		}{
+			{"/api/v1/platform/admin/users", "post"},
+			{"/api/v1/platform/admin/audit-events", "get"},
+			{"/api/v1/platform/models", "get"},
+			{"/api/v1/platform/models", "post"},
+			{"/api/v1/platform/models/{modelID}", "get"},
+		} {
+			_ = swaggerValue(t, document, "paths", endpoint.path, endpoint.method)
+		}
+		modelDescription := swaggerValue(t, document, "paths", "/api/v1/platform/models", "get", "description")
+		if !strings.Contains(modelDescription.(string), "masked") {
+			t.Fatal("platform model documentation must state that tokens are masked")
+		}
+		legacyModel := swaggerValue(t, document, "paths", "/api/v1/app/models", "get", "deprecated")
+		if legacyModel != true {
+			t.Fatal("legacy browser model API must be marked deprecated")
+		}
 	}
 }
 

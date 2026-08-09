@@ -70,6 +70,9 @@ func HandleList(root string, loadFile func(filePath string) (interface{}, error)
 }
 func HandleCreate(readAndSave func(content string) error) gin.HandlerFunc {
 	return func(c *gin.Context) {
+		if !requireGovernedKnowledgeMutation(c) {
+			return
+		}
 		var request struct {
 			Content string `json:"content" binding:"required"`
 		}
@@ -88,6 +91,9 @@ func HandleCreate(readAndSave func(content string) error) gin.HandlerFunc {
 // HandleEdit returns a HandlerFunc for edit requests
 func HandleEdit(updateFunc func(id string, content string) error) gin.HandlerFunc {
 	return func(c *gin.Context) {
+		if !requireGovernedKnowledgeMutation(c) {
+			return
+		}
 		name := c.Param("id")
 		if name == "" {
 			c.JSON(http.StatusBadRequest, gin.H{"status": 1, "message": "name must not be empty"})
@@ -114,6 +120,9 @@ func HandleEdit(updateFunc func(id string, content string) error) gin.HandlerFun
 // HandleDelete returns a HandlerFunc for delete requests
 func HandleDelete(deleteFunc func(id string) error) gin.HandlerFunc {
 	return func(c *gin.Context) {
+		if !requireGovernedKnowledgeMutation(c) {
+			return
+		}
 		name := c.Param("id")
 		if name == "" {
 			c.JSON(http.StatusBadRequest, gin.H{"status": 1, "message": "name must not be empty"})
@@ -500,6 +509,9 @@ func testAgentConnectivity(content string) (bool, string, error) {
 }
 
 func HandleSaveAgentConfig(c *gin.Context) {
+	if !requireGovernedKnowledgeMutation(c) {
+		return
+	}
 	username := c.GetString("username")
 	if !validateUsername(username) {
 		username = PublicUser
@@ -587,6 +599,9 @@ func HandleSaveAgentConfig(c *gin.Context) {
 }
 
 func HandleDeleteAgentConfig(c *gin.Context) {
+	if !requireGovernedKnowledgeMutation(c) {
+		return
+	}
 	username := c.GetString("username")
 	if !validateUsername(username) {
 		username = PublicUser

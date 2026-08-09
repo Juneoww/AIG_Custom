@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sort"
 	"sync"
 
 	"gorm.io/gorm"
@@ -14,6 +15,7 @@ var ErrNotFound = errors.New("身份记录不存在")
 type Repository interface {
 	CreateUser(context.Context, *User) error
 	CreateInitialAdministrator(context.Context, *User) (bool, error)
+	ListUsers(context.Context) ([]User, error)
 	UserByUsername(context.Context, string) (*User, error)
 	UserByID(context.Context, string) (*User, error)
 	UpdateUser(context.Context, *User) error
@@ -49,6 +51,11 @@ func (r *GormRepository) Init() error {
 
 func (r *GormRepository) CreateUser(ctx context.Context, user *User) error {
 	return r.db.WithContext(ctx).Create(user).Error
+}
+
+func (r *GormRepository) ListUsers(ctx context.Context) ([]User, error) {
+	var users []User
+	return users, r.db.WithContext(ctx).Order("created_at ASC, id ASC").Find(&users).Error
 }
 
 // CreateInitialAdministrator atomically creates the first administrator.
@@ -157,6 +164,21 @@ func (r *MemoryRepository) CreateUser(_ context.Context, v *User) error {
 	r.users[v.Username] = cloneUser(v)
 	r.usersByID[v.ID] = r.users[v.Username]
 	return nil
+}
+func (r *MemoryRepository) ListUsers(_ context.Context) ([]User, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	users := make([]User, 0, len(r.usersByID))
+	for _, user := range r.usersByID {
+		users = append(users, *cloneUser(user))
+	}
+	sort.Slice(users, func(i, j int) bool {
+		if users[i].CreatedAt.Equal(users[j].CreatedAt) {
+			return users[i].ID < users[j].ID
+		}
+		return users[i].CreatedAt.Before(users[j].CreatedAt)
+	})
+	return users, nil
 }
 func (r *MemoryRepository) CreateInitialAdministrator(_ context.Context, v *User) (bool, error) {
 	r.mu.Lock()

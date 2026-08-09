@@ -72,6 +72,24 @@ AIG Custom Platform 是基于 Tencent Zhuque Lab AI-Infra-Guard（https://github
 
 任务和模型资源均以已认证会话中的主体进行授权：管理员可以跨所有者读取和管理资源，审计员可以跨所有者只读访问，普通用户只能读取和管理本人资源。客户端自带的身份请求头不能授予访问权限。
 
+### 平台治理、审计、模型与知识库
+
+以下端点均要求已认证会话；若账号处于强制改密状态，须先完成改密；状态变更请求还须携带匹配的 CSRF Cookie/请求头。
+
+- `GET|POST /api/v1/platform/admin/users`：管理员列出或创建本地账号；新账号必须改密，响应绝不包含密码或密码哈希。
+- `PUT /api/v1/platform/admin/users/{userID}/role`：管理员分配 `admin`、`user` 或 `auditor` 角色。
+- `PUT /api/v1/platform/admin/users/{userID}/active`：管理员启用或禁用账号；禁用时撤销现有会话。
+- `POST /api/v1/platform/admin/users/{userID}/password-reset`：请求通过带外渠道交付重置令牌，仅返回 `204`，HTTP 与日志均不包含令牌。
+- `GET /api/v1/platform/admin/audit-events`：管理员和审计员查询只追加、已脱敏的审计事件；支持 `action`、`actor_user_id`、`resource_type`、`resource_id` 和 `limit` 过滤。治理变更先写持久化 `pending` 事件，再以同一 `request_id` 关联后续 `success` 或 `failure`；若完成事件暂时写入失败，pending 记录仍可用于对账。
+- `GET|POST /api/v1/platform/models` 与 `GET|PUT|DELETE /api/v1/platform/models/{modelID}`：普通用户只管理本人私有模型并可读取全局模型；管理员管理全局模型并可查看治理元数据；审计员仅可读取全局模型。访问其他普通用户的私有模型返回 `403`。
+- `POST /api/v1/platform/models/{modelID}/rotate-encryption`：管理员使用当前活动主密钥重新加密已存 token。
+
+模型 token 使用 AES-256-GCM，并把模型元数据纳入认证。活动密钥通过 `MODEL_MASTER_KEY_ID` 和 base64 编码的 32 字节 `MODEL_MASTER_KEY` 注入；轮换窗口可通过 `MODEL_PREVIOUS_MASTER_KEYS` 提供“旧 key ID 到 base64 密钥”的 JSON 对象，所有新写入只使用活动密钥。API 始终返回 `"token":"********"`，绝不返回明文、密文、nonce 或密钥材料；禁止记录模型请求体。
+
+现有 `/api/v1/knowledge/*` 的读取格式和扫描协议保持不变。已认证的普通用户、审计员和管理员均可读；仅管理员可修改指纹、漏洞、评测集、MCP/提示词集合和 Agent 配置。每次变更都必须先经过持久化预写审计边界，再调用保持旧格式的 handler；旧写 handler 若被直接挂载会被拒绝。异步系统数据更新会先写 `knowledge.change_requested/pending`，仅在后台任务真实结束后写 `knowledge.changed/success` 或 `failure`。变更仅影响后续扫描，已完成任务与报告快照不变。
+
+当前可触发的审计动作包括登录成功/失败、账号创建/启用/禁用、角色分配、密码重置请求、模型治理，以及规则/知识库或系统数据变更；任务变更、报告导出和系统配置调用方也已有稳定动作常量供后续接入。`/api/v1/app/models` 已弃用并委托给同一套加密、基于 `Subject` 的模型服务，不再信任 `username` 请求头。
+
 ### 1. 文件上传接口
 
 #### 接口信息

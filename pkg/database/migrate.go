@@ -15,6 +15,7 @@
 package database
 
 import (
+	"encoding/json"
 	"fmt"
 	"time"
 
@@ -39,6 +40,7 @@ type migration struct {
 var migrations = []migration{
 	{version: 1, apply: migrateInitialSchema},
 	{version: 2, apply: migrateIdentitySchema},
+	{version: 3, apply: migrateGovernanceSchema},
 }
 
 const migrationAdvisoryLockKey int64 = 301237729
@@ -144,3 +146,46 @@ func migrateIdentitySchema(db *gorm.DB) error {
 		&identityPasswordResetMigration{},
 	)
 }
+
+func migrateGovernanceSchema(db *gorm.DB) error {
+	return db.AutoMigrate(
+		&governanceAuditEventMigration{},
+		&governanceModelMigration{},
+	)
+}
+
+type governanceAuditEventMigration struct {
+	ID            string    `gorm:"primaryKey;column:id"`
+	OccurredAt    time.Time `gorm:"index;not null"`
+	ActorUserID   string    `gorm:"index"`
+	ActorUsername string    `gorm:"index"`
+	ActorRole     string    `gorm:"index"`
+	Action        string    `gorm:"index;not null"`
+	ResourceType  string    `gorm:"index"`
+	ResourceID    string    `gorm:"index"`
+	Outcome       string    `gorm:"index;not null"`
+	ClientIP      string
+	RequestID     string          `gorm:"index"`
+	Metadata      json.RawMessage `gorm:"type:jsonb;not null"`
+}
+
+func (governanceAuditEventMigration) TableName() string { return "audit_events" }
+
+type governanceModelMigration struct {
+	ID             string `gorm:"primaryKey;column:id"`
+	OwnerUserID    string `gorm:"index"`
+	Scope          string `gorm:"index;not null"`
+	Name           string `gorm:"not null"`
+	ProviderModel  string `gorm:"not null"`
+	BaseURL        string `gorm:"not null"`
+	Note           string
+	Limit          int
+	Disabled       bool      `gorm:"not null;default:false"`
+	EncryptedToken []byte    `gorm:"not null"`
+	TokenNonce     []byte    `gorm:"not null"`
+	KeyID          string    `gorm:"not null"`
+	CreatedAt      time.Time `gorm:"not null"`
+	UpdatedAt      time.Time `gorm:"not null"`
+}
+
+func (governanceModelMigration) TableName() string { return "platform_models" }

@@ -1,11 +1,29 @@
 package identity
 
 import (
+	"context"
+	"net"
 	"net/http"
 	"strings"
 
 	"github.com/gin-gonic/gin"
 )
+
+type AuthenticationEvent struct {
+	Username string
+	Subject  Subject
+	Success  bool
+	ClientIP string
+}
+
+type GovernanceCompletion func(context.Context, bool) error
+
+// GovernanceObserver keeps identity independent from the audit package while
+// providing a stable, fail-closed boundary for security-relevant events.
+type GovernanceObserver interface {
+	AuthenticationAttempt(context.Context, AuthenticationEvent) error
+	BeginPasswordReset(context.Context, Subject, string) (GovernanceCompletion, error)
+}
 
 const subjectContextKey = "identity_subject"
 
@@ -57,6 +75,7 @@ func RequireCSRF(policy CookiePolicy) gin.HandlerFunc {
 		c.Next()
 	}
 }
+
 // RequireHTTPS blocks every credential-bearing endpoint unless the request is
 // protected by TLS (or an explicitly trusted TLS-terminating proxy).
 func RequireHTTPS(policy CookiePolicy) gin.HandlerFunc {
@@ -130,6 +149,10 @@ func CanAccessOwnerOrRole(subject Subject, ownerID string, write bool) bool {
 }
 
 func RegisterRoutes(group *gin.RouterGroup, service *Service, policy CookiePolicy) {
+	RegisterRoutesWithObserver(group, service, policy, nil)
+}
+
+func RegisterRoutesWithObserver(group *gin.RouterGroup, service *Service, policy CookiePolicy, observer GovernanceObserver) {
 	policy = policy.normalized()
 	group.Use(RequireHTTPS(policy))
 	group.POST("/login", func(c *gin.Context) {
@@ -143,7 +166,16 @@ func RegisterRoutes(group *gin.RouterGroup, service *Service, policy CookiePolic
 		}
 		login, err := service.Authenticate(c.Request.Context(), input.Username, input.Password)
 		if err != nil {
+			if observer != nil && observer.AuthenticationAttempt(c.Request.Context(), AuthenticationEvent{Username: input.Username, Success: false, ClientIP: requestIP(c.Request)}) != nil {
+				c.Status(http.StatusInternalServerError)
+				return
+			}
 			c.Status(http.StatusUnauthorized)
+			return
+		}
+		if observer != nil && observer.AuthenticationAttempt(c.Request.Context(), AuthenticationEvent{Username: input.Username, Subject: login.Subject, Success: true, ClientIP: requestIP(c.Request)}) != nil {
+			_ = service.RevokeSession(c.Request.Context(), login.Token)
+			c.Status(http.StatusInternalServerError)
 			return
 		}
 		csrfToken, err := randomToken()
@@ -181,9 +213,28 @@ func RegisterRoutes(group *gin.RouterGroup, service *Service, policy CookiePolic
 		c.Status(http.StatusNoContent)
 	})
 	protected.POST("/password-resets/:userID", RequireCSRF(policy), RequireRole(RoleAdmin), func(c *gin.Context) {
+		var completion GovernanceCompletion
+		if observer != nil {
+			subject, _ := CurrentSubject(c)
+			var err error
+			completion, err = observer.BeginPasswordReset(c.Request.Context(), subject, c.Param("userID"))
+			if err != nil {
+				c.Status(http.StatusInternalServerError)
+				return
+			}
+		}
 		if _, err := service.CreatePasswordReset(c.Request.Context(), c.Param("userID")); err != nil {
+			if completion != nil {
+				_ = completion(c.Request.Context(), false)
+			}
 			c.Status(http.StatusNotFound)
 			return
+		}
+		if completion != nil {
+			if err := completion(c.Request.Context(), true); err != nil {
+				c.Status(http.StatusInternalServerError)
+				return
+			}
 		}
 		// 令牌仅交给已配置的带外交付渠道，绝不写入 HTTP 响应或日志。
 		c.Status(http.StatusNoContent)
@@ -220,4 +271,12 @@ func RegisterRoutes(group *gin.RouterGroup, service *Service, policy CookiePolic
 		http.SetCookie(c.Writer, policy.ClearSessionCookie())
 		c.Status(http.StatusNoContent)
 	})
+}
+
+func requestIP(request *http.Request) string {
+	host, _, err := net.SplitHostPort(request.RemoteAddr)
+	if err == nil {
+		return host
+	}
+	return request.RemoteAddr
 }

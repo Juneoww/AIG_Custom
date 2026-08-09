@@ -19,6 +19,7 @@
 package database
 
 import (
+	"fmt"
 	"os"
 	"time"
 
@@ -34,20 +35,31 @@ type ModelParams struct {
 
 // Model 模型表
 type Model struct {
-	ModelID            string   `gorm:"primaryKey;column:model_id" json:"model_id" yaml:"model_id"`                              // 模型ID
-	Username           string   `gorm:"column:username;not null" json:"username" yaml:"-"`                                        // 创建者用户名
-	ModelName          string   `gorm:"column:model_name;not null" json:"model_name" yaml:"model_name"`                           // 模型名称
-	Token              string   `gorm:"column:token;not null" json:"token" yaml:"token"`                                          // API Token
-	BaseURL            string   `gorm:"column:base_url;not null" json:"base_url" yaml:"base_url"`                                 // 基础URL
-	Note               string   `gorm:"column:note" json:"note" yaml:"note,omitempty"`                                            // 备注信息
-	Limit              int      `gorm:"column:limit" json:"limit" yaml:"limit,omitempty"`
-	Default            []string `gorm:"-" json:"default,omitempty" yaml:"default,omitempty"`                                      // 默认字段
-	CreatedAt          int64    `gorm:"column:created_at;not null" json:"created_at" yaml:"-"`                                    // 时间戳毫秒级
-	UpdatedAt          int64    `gorm:"column:updated_at;not null" json:"updated_at" yaml:"-"`                                    // 时间戳毫秒级
+	ModelID   string   `gorm:"primaryKey;column:model_id" json:"model_id" yaml:"model_id"`     // 模型ID
+	Username  string   `gorm:"column:username;not null" json:"username" yaml:"-"`              // 创建者用户名
+	ModelName string   `gorm:"column:model_name;not null" json:"model_name" yaml:"model_name"` // 模型名称
+	Token     string   `gorm:"column:token;not null" json:"-" yaml:"token"`                    // API Token
+	BaseURL   string   `gorm:"column:base_url;not null" json:"base_url" yaml:"base_url"`       // 基础URL
+	Note      string   `gorm:"column:note" json:"note" yaml:"note,omitempty"`                  // 备注信息
+	Limit     int      `gorm:"column:limit" json:"limit" yaml:"limit,omitempty"`
+	Default   []string `gorm:"-" json:"default,omitempty" yaml:"default,omitempty"`   // 默认字段
+	CreatedAt int64    `gorm:"column:created_at;not null" json:"created_at" yaml:"-"` // 时间戳毫秒级
+	UpdatedAt int64    `gorm:"column:updated_at;not null" json:"updated_at" yaml:"-"` // 时间戳毫秒级
 
 	// 关联关系
 	User User `gorm:"foreignKey:Username" json:"user" yaml:"-"`
 }
+
+func (model Model) String() string {
+	masked := ""
+	if model.Token != "" {
+		masked = "********"
+	}
+	return fmt.Sprintf("{ModelID:%q Username:%q ModelName:%q Token:%q BaseURL:%q Note:%q Limit:%d CreatedAt:%d UpdatedAt:%d}",
+		model.ModelID, model.Username, model.ModelName, masked, model.BaseURL, model.Note, model.Limit, model.CreatedAt, model.UpdatedAt)
+}
+
+func (model Model) GoString() string { return model.String() }
 
 // ModelStore 模型数据存储
 type ModelStore struct {

@@ -20,6 +20,7 @@
 package websocket
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io/fs"
@@ -32,6 +33,7 @@ import (
 	"sync"
 	"time"
 
+	platformknowledge "github.com/Juneoww/AIG_Custom/internal/platform/knowledge"
 	"github.com/gin-gonic/gin"
 )
 
@@ -152,6 +154,14 @@ func HandleGetUpdateStatus(c *gin.Context) {
 //	@Success		200	{object}	updateDataResponse
 //	@Router			/api/v1/system/update-data [post]
 func HandleTriggerDataUpdate(c *gin.Context) {
+	if !requireGovernedKnowledgeMutation(c) {
+		return
+	}
+	completion, ok := platformknowledge.CurrentAsyncCompletion(c)
+	if !ok {
+		c.Status(http.StatusInternalServerError)
+		return
+	}
 	req := UpdateDataRequest{}
 	_ = c.ShouldBindJSON(&req)
 
@@ -168,6 +178,7 @@ func HandleTriggerDataUpdate(c *gin.Context) {
 			Message: "sync already running",
 			Data:    snap,
 		})
+		_ = completion(context.WithoutCancel(c.Request.Context()), false, map[string]any{"reason": "already_running", "files_updated": snap.FilesUpdated})
 		return
 	}
 	updateStatus = &UpdateStatus{
@@ -178,7 +189,7 @@ func HandleTriggerDataUpdate(c *gin.Context) {
 	}
 	updateMu.Unlock()
 
-	go runDataUpdate(ref, dirs)
+	go runDataUpdate(ref, dirs, completion)
 
 	updateMu.Lock()
 	snap := *updateStatus
@@ -194,7 +205,7 @@ func HandleTriggerDataUpdate(c *gin.Context) {
 // Core sync logic
 // ---------------------------------------------------------------------------
 
-func runDataUpdate(ref, dirs string) {
+func runDataUpdate(ref, dirs string, completion platformknowledge.AsyncCompletion) {
 	setStatus := func(msg string, filesUpdated int) {
 		updateMu.Lock()
 		updateStatus.Message = msg
@@ -212,6 +223,7 @@ func runDataUpdate(ref, dirs string) {
 		updateStatus.Message = msg
 		updateStatus.FilesUpdated = filesUpdated
 		updateMu.Unlock()
+		_ = completion(context.Background(), success, map[string]any{"files_updated": filesUpdated})
 	}
 
 	// 1. Create a temporary directory for the clone.
