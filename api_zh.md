@@ -80,7 +80,8 @@ AIG Custom Platform 是基于 Tencent Zhuque Lab AI-Infra-Guard（https://github
 - `PUT /api/v1/platform/admin/users/{userID}/role`：管理员分配 `admin`、`user` 或 `auditor` 角色。
 - `PUT /api/v1/platform/admin/users/{userID}/active`：管理员启用或禁用账号；禁用时撤销现有会话。
 - `POST /api/v1/platform/admin/users/{userID}/password-reset`：请求通过带外渠道交付重置令牌，仅返回 `204`，HTTP 与日志均不包含令牌。
-- `GET /api/v1/platform/admin/audit-events`：管理员和审计员查询只追加、已脱敏的审计事件；支持 `action`、`actor_user_id`、`resource_type`、`resource_id` 和 `limit` 过滤。治理变更先写持久化 `pending` 事件，再以同一 `request_id` 关联后续 `success` 或 `failure`；若完成事件暂时写入失败，pending 记录仍可用于对账。
+- `GET /api/v1/platform/admin/audit-events`：管理员和审计员查询只追加、已脱敏的审计事件；支持 `action`、`actor_user_id`、`resource_type`、`resource_id` 和 `limit` 过滤。治理变更先写持久化 `pending` 事件，再以同一 `request_id` 关联后续 `success` 或 `failure`。业务变更完成后先将结果持久写入 outbox，再追加最终审计事件，因此追加故障不会改变已经成功的业务响应。
+- `POST /api/v1/platform/admin/audit-events/reconcile`：管理员重试持久化完成 outbox；稳定事件 ID 保证重复对账不产生重复审计事件，响应返回本次完成数量。
 - `GET|POST /api/v1/platform/models` 与 `GET|PUT|DELETE /api/v1/platform/models/{modelID}`：普通用户只管理本人私有模型并可读取全局模型；管理员管理全局模型并可查看治理元数据；审计员仅可读取全局模型。访问其他普通用户的私有模型返回 `403`。
 - `POST /api/v1/platform/models/{modelID}/rotate-encryption`：管理员使用当前活动主密钥重新加密已存 token。
 

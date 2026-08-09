@@ -68,6 +68,15 @@
                 "responses": {"200": {"description": "Sanitized audit event list."}, "403": {"description": "Admin or auditor role required."}}
             }
         },
+        "/api/v1/platform/admin/audit-events/reconcile": {
+            "post": {
+                "description": "Retries durable audit completion outbox entries whose final append previously failed. Delivery uses a stable event identifier, so repeated reconciliation does not duplicate audit events. Administrator only.",
+                "tags": ["audit"],
+                "summary": "Reconcile pending audit completions",
+                "parameters": [{"in": "query", "name": "limit", "type": "integer"}],
+                "responses": {"200": {"description": "Number of completion events reconciled."}, "403": {"description": "Administrator role required."}}
+            }
+        },
         "/api/v1/platform/models": {
             "get": {
                 "description": "Lists visible model metadata. Every token is masked; ciphertext, nonce, and key identifiers are never returned. Users see global and their own private models, auditors see global models, and administrators see governance metadata.",

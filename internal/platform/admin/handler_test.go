@@ -34,6 +34,26 @@ func (repository *failingAdminAuditRepository) List(ctx context.Context, filter 
 	return repository.delegate.List(ctx, filter)
 }
 
+func (repository *failingAdminAuditRepository) EnqueueCompletion(ctx context.Context, completion *audit.CompletionOutbox) error {
+	return repository.delegate.EnqueueCompletion(ctx, completion)
+}
+
+func (repository *failingAdminAuditRepository) Completion(ctx context.Context, id string) (*audit.CompletionOutbox, error) {
+	return repository.delegate.Completion(ctx, id)
+}
+
+func (repository *failingAdminAuditRepository) ListPendingCompletions(ctx context.Context, limit int) ([]audit.CompletionOutbox, error) {
+	return repository.delegate.ListPendingCompletions(ctx, limit)
+}
+
+func (repository *failingAdminAuditRepository) UpdateCompletion(ctx context.Context, completion *audit.CompletionOutbox) error {
+	return repository.delegate.UpdateCompletion(ctx, completion)
+}
+
+func (repository *failingAdminAuditRepository) EventExists(ctx context.Context, id string) (bool, error) {
+	return repository.delegate.EventExists(ctx, id)
+}
+
 func TestAdminUserLifecycleAlwaysWritesAuditEvents(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	ctx := context.Background()
@@ -103,6 +123,8 @@ func TestAuditorCannotMutateUsersEvenWhenHandlerIsMountedWithoutRoleMiddleware(t
 		"username": "forbidden", "password": "temporary-password", "role": "user",
 	})
 	assert.Equal(t, http.StatusForbidden, response.Code)
+	reconcile := performJSON(t, router, login.Token, http.MethodPost, "/admin/audit-events/reconcile", nil)
+	assert.Equal(t, http.StatusForbidden, reconcile.Code)
 	events, queryErr := auditService.Query(ctx, identity.Subject{Role: identity.RoleAdmin}, audit.Filter{})
 	require.NoError(t, queryErr)
 	assert.Empty(t, events)
@@ -126,6 +148,50 @@ func TestAdminMutationDoesNotStartWhenDurableAuditIntentFails(t *testing.T) {
 	assert.Equal(t, http.StatusInternalServerError, response.Code)
 	_, err = identityService.Authenticate(ctx, "never-created", "temporary-password")
 	assert.ErrorIs(t, err, identity.ErrInvalidCredentials)
+}
+
+func TestAdminCreateStaysSuccessfulWhenCompletionAppendFailsAndReconciles(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	ctx := context.Background()
+	identityService := identity.NewService(identity.NewMemoryRepository())
+	_, err := identityService.CreateUser(ctx, identity.CreateUserInput{Username: "admin", Password: "secret", Role: identity.RoleAdmin})
+	require.NoError(t, err)
+	login, err := identityService.Authenticate(ctx, "admin", "secret")
+	require.NoError(t, err)
+	delegate := audit.NewMemoryRepository()
+	auditService := audit.NewService(&failingAdminAuditRepository{delegate: delegate, failOn: 2})
+	router := gin.New()
+	NewHandler(identityService, auditService).Register(router.Group("/admin", identity.Authenticate(identityService, identity.CookiePolicy{})))
+
+	response := performJSON(t, router, login.Token, http.MethodPost, "/admin/users", map[string]any{
+		"username": "durable-user", "password": "temporary-password", "role": "user",
+	})
+	require.Equal(t, http.StatusCreated, response.Code, response.Body.String())
+	_, err = identityService.Authenticate(ctx, "durable-user", "temporary-password")
+	require.NoError(t, err)
+	events, err := delegate.List(ctx, audit.Filter{})
+	require.NoError(t, err)
+	require.Len(t, events, 1)
+	assert.Equal(t, audit.OutcomePending, events[0].Outcome)
+	pending, err := auditService.PendingCompletions(ctx, identity.Subject{Role: identity.RoleAdmin}, 10)
+	require.NoError(t, err)
+	require.Len(t, pending, 1)
+
+	reconcile := performJSON(t, router, login.Token, http.MethodPost, "/admin/audit-events/reconcile?limit=10", nil)
+	require.Equal(t, http.StatusOK, reconcile.Code, reconcile.Body.String())
+	var result struct {
+		Reconciled int `json:"reconciled"`
+	}
+	require.NoError(t, json.Unmarshal(reconcile.Body.Bytes(), &result))
+	assert.Equal(t, 1, result.Reconciled)
+	reconcile = performJSON(t, router, login.Token, http.MethodPost, "/admin/audit-events/reconcile?limit=10", nil)
+	require.Equal(t, http.StatusOK, reconcile.Code, reconcile.Body.String())
+	require.NoError(t, json.Unmarshal(reconcile.Body.Bytes(), &result))
+	assert.Zero(t, result.Reconciled)
+	events, err = delegate.List(ctx, audit.Filter{})
+	require.NoError(t, err)
+	require.Len(t, events, 2)
+	assert.Equal(t, audit.OutcomeSuccess, events[1].Outcome)
 }
 
 func performJSON(t *testing.T, router http.Handler, sessionToken, method, path string, body any) *httptest.ResponseRecorder {

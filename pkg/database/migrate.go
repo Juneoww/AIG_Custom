@@ -150,6 +150,7 @@ func migrateIdentitySchema(db *gorm.DB) error {
 func migrateGovernanceSchema(db *gorm.DB) error {
 	return db.AutoMigrate(
 		&governanceAuditEventMigration{},
+		&governanceAuditCompletionMigration{},
 		&governanceModelMigration{},
 	)
 }
@@ -170,6 +171,26 @@ type governanceAuditEventMigration struct {
 }
 
 func (governanceAuditEventMigration) TableName() string { return "audit_events" }
+
+type governanceAuditCompletionMigration struct {
+	ID            string `gorm:"primaryKey;column:id"`
+	EventID       string `gorm:"uniqueIndex;not null"`
+	RequestID     string `gorm:"index;not null"`
+	ActorUserID   string `gorm:"index"`
+	ActorUsername string `gorm:"index"`
+	ActorRole     string `gorm:"index"`
+	Action        string `gorm:"index;not null"`
+	ResourceType  string `gorm:"index"`
+	ResourceID    string `gorm:"index"`
+	Outcome       string `gorm:"index;not null"`
+	ClientIP      string
+	Metadata      json.RawMessage `gorm:"type:jsonb;not null"`
+	CreatedAt     time.Time       `gorm:"index;not null"`
+	Attempts      int             `gorm:"not null;default:0"`
+	DeliveredAt   *time.Time      `gorm:"index"`
+}
+
+func (governanceAuditCompletionMigration) TableName() string { return "audit_completion_outbox" }
 
 type governanceModelMigration struct {
 	ID             string `gorm:"primaryKey;column:id"`

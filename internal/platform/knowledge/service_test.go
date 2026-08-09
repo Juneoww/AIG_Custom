@@ -25,6 +25,22 @@ func (recorder *failOnRecord) Record(ctx context.Context, subject identity.Subje
 	return recorder.delegate.Record(ctx, subject, input)
 }
 
+func (recorder *failOnRecord) PersistCompletion(ctx context.Context, subject identity.Subject, input audit.EventInput) (string, error) {
+	delegate, ok := recorder.delegate.(audit.CompletionRecorder)
+	if !ok {
+		return "", errors.New("delegate does not support completion persistence")
+	}
+	return delegate.PersistCompletion(ctx, subject, input)
+}
+
+func (recorder *failOnRecord) DeliverCompletion(ctx context.Context, id string) error {
+	delegate, ok := recorder.delegate.(audit.CompletionRecorder)
+	if !ok {
+		return errors.New("delegate does not support completion delivery")
+	}
+	return delegate.DeliverCompletion(ctx, id)
+}
+
 func TestOnlyAdministratorCanChangeKnowledgeAndEveryChangeIsAudited(t *testing.T) {
 	ctx := context.Background()
 	auditService := audit.NewService(audit.NewMemoryRepository())

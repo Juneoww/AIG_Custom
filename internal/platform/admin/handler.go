@@ -27,6 +27,7 @@ func (handler *Handler) Register(group *gin.RouterGroup) {
 	group.PUT("/users/:userID/active", handler.setActive)
 	group.POST("/users/:userID/password-reset", handler.resetPassword)
 	group.GET("/audit-events", handler.listAuditEvents)
+	group.POST("/audit-events/reconcile", handler.reconcileAuditEvents)
 }
 
 func (handler *Handler) listUsers(c *gin.Context) {
@@ -188,6 +189,24 @@ func (handler *Handler) listAuditEvents(c *gin.Context) {
 		return
 	}
 	c.JSON(http.StatusOK, events)
+}
+
+func (handler *Handler) reconcileAuditEvents(c *gin.Context) {
+	subject, ok := requireAdmin(c)
+	if !ok {
+		return
+	}
+	limit, _ := strconv.Atoi(c.Query("limit"))
+	reconciled, err := handler.audits.Reconcile(c.Request.Context(), subject, limit)
+	if errors.Is(err, audit.ErrForbidden) {
+		c.Status(http.StatusForbidden)
+		return
+	}
+	if err != nil {
+		c.Status(http.StatusInternalServerError)
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"reconciled": reconciled})
 }
 
 func requireAdmin(c *gin.Context) (identity.Subject, bool) {

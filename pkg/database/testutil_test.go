@@ -39,6 +39,7 @@ func resetPostgresTestDB(t *testing.T, db *gorm.DB) {
 	t.Helper()
 	require.NoError(t, db.Migrator().DropTable(
 		"platform_models",
+		"audit_completion_outbox",
 		"audit_events",
 		&identityPasswordResetMigration{},
 		&identitySessionMigration{},

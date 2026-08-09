@@ -70,3 +70,25 @@ type Filter struct {
 	ResourceID   string
 	Limit        int
 }
+
+// CompletionOutbox durably stores a mutation result before the final
+// append-only audit event is delivered. It contains only sanitized metadata.
+type CompletionOutbox struct {
+	ID            string          `gorm:"primaryKey;column:id" json:"id"`
+	EventID       string          `gorm:"uniqueIndex;not null" json:"event_id"`
+	RequestID     string          `gorm:"index;not null" json:"request_id"`
+	ActorUserID   string          `gorm:"index" json:"actor_user_id,omitempty"`
+	ActorUsername string          `gorm:"index" json:"actor_username,omitempty"`
+	ActorRole     string          `gorm:"index" json:"actor_role,omitempty"`
+	Action        Action          `gorm:"index;not null" json:"action"`
+	ResourceType  string          `gorm:"index" json:"resource_type,omitempty"`
+	ResourceID    string          `gorm:"index" json:"resource_id,omitempty"`
+	Outcome       Outcome         `gorm:"index;not null" json:"outcome"`
+	ClientIP      string          `json:"client_ip,omitempty"`
+	Metadata      json.RawMessage `gorm:"type:jsonb;not null" json:"metadata"`
+	CreatedAt     time.Time       `gorm:"index;not null" json:"created_at"`
+	Attempts      int             `gorm:"not null;default:0" json:"attempts"`
+	DeliveredAt   *time.Time      `gorm:"index" json:"delivered_at,omitempty"`
+}
+
+func (CompletionOutbox) TableName() string { return "audit_completion_outbox" }

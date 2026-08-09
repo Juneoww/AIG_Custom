@@ -51,6 +51,7 @@ func TestMigrationCLIIsIdempotent(t *testing.T) {
 	require.True(t, db.Migrator().HasTable(&identity.Session{}))
 	require.True(t, db.Migrator().HasTable(&identity.PasswordReset{}))
 	require.True(t, db.Migrator().HasTable("audit_events"))
+	require.True(t, db.Migrator().HasTable("audit_completion_outbox"))
 	require.True(t, db.Migrator().HasTable("platform_models"))
 
 	role := "aig_runtime_" + strings.ReplaceAll(uuid.NewString(), "-", "")

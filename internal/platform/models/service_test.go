@@ -20,12 +20,58 @@ type failingModelRecorder struct {
 	calls    int
 }
 
+type failingModelAuditRepository struct {
+	delegate *audit.MemoryRepository
+	failOn   int
+	calls    int
+}
+
+func (repository *failingModelAuditRepository) Append(ctx context.Context, event *audit.Event) error {
+	repository.calls++
+	if repository.calls == repository.failOn {
+		return errors.New("injected audit append failure")
+	}
+	return repository.delegate.Append(ctx, event)
+}
+
+func (repository *failingModelAuditRepository) List(ctx context.Context, filter audit.Filter) ([]audit.Event, error) {
+	return repository.delegate.List(ctx, filter)
+}
+
+func (repository *failingModelAuditRepository) EnqueueCompletion(ctx context.Context, completion *audit.CompletionOutbox) error {
+	return repository.delegate.EnqueueCompletion(ctx, completion)
+}
+
+func (repository *failingModelAuditRepository) Completion(ctx context.Context, id string) (*audit.CompletionOutbox, error) {
+	return repository.delegate.Completion(ctx, id)
+}
+
+func (repository *failingModelAuditRepository) ListPendingCompletions(ctx context.Context, limit int) ([]audit.CompletionOutbox, error) {
+	return repository.delegate.ListPendingCompletions(ctx, limit)
+}
+
+func (repository *failingModelAuditRepository) UpdateCompletion(ctx context.Context, completion *audit.CompletionOutbox) error {
+	return repository.delegate.UpdateCompletion(ctx, completion)
+}
+
+func (repository *failingModelAuditRepository) EventExists(ctx context.Context, id string) (bool, error) {
+	return repository.delegate.EventExists(ctx, id)
+}
+
 func (recorder *failingModelRecorder) Record(ctx context.Context, subject identity.Subject, input audit.EventInput) error {
 	recorder.calls++
 	if recorder.calls == recorder.failOn {
 		return errors.New("injected audit failure")
 	}
 	return recorder.delegate.Record(ctx, subject, input)
+}
+
+func (recorder *failingModelRecorder) PersistCompletion(ctx context.Context, subject identity.Subject, input audit.EventInput) (string, error) {
+	return recorder.delegate.(audit.CompletionRecorder).PersistCompletion(ctx, subject, input)
+}
+
+func (recorder *failingModelRecorder) DeliverCompletion(ctx context.Context, id string) error {
+	return recorder.delegate.(audit.CompletionRecorder).DeliverCompletion(ctx, id)
 }
 
 func TestPrivateAndGlobalModelVisibilityAndWrites(t *testing.T) {
@@ -134,6 +180,37 @@ func TestModelMutationDoesNotStartWhenDurableAuditIntentFails(t *testing.T) {
 	models, listErr := repository.List(ctx)
 	require.NoError(t, listErr)
 	assert.Empty(t, models)
+}
+
+func TestModelCreateStaysSuccessfulWhenCompletionAppendFailsAndReconciles(t *testing.T) {
+	ctx := context.Background()
+	modelRepository := NewMemoryRepository()
+	auditRepository := audit.NewMemoryRepository()
+	auditService := audit.NewService(&failingModelAuditRepository{delegate: auditRepository, failOn: 2})
+	service := NewService(modelRepository, mustTestKeyring(t, "current", bytesOf(7), nil), auditService)
+	owner := identity.Subject{UserID: "owner-id", Role: identity.RoleUser}
+
+	created, err := service.Create(ctx, owner, CreateInput{Name: "durable-model", Token: "plain-token", Scope: ScopePrivate})
+	require.NoError(t, err)
+	assert.NotEmpty(t, created.ID)
+	models, err := modelRepository.List(ctx)
+	require.NoError(t, err)
+	require.Len(t, models, 1)
+	events, err := auditRepository.List(ctx, audit.Filter{})
+	require.NoError(t, err)
+	require.Len(t, events, 1)
+	assert.Equal(t, audit.OutcomePending, events[0].Outcome)
+	pending, err := auditService.PendingCompletions(ctx, identity.Subject{Role: identity.RoleAdmin}, 10)
+	require.NoError(t, err)
+	require.Len(t, pending, 1)
+
+	reconciled, err := auditService.Reconcile(ctx, identity.Subject{Role: identity.RoleAdmin}, 10)
+	require.NoError(t, err)
+	assert.Equal(t, 1, reconciled)
+	events, err = auditRepository.List(ctx, audit.Filter{})
+	require.NoError(t, err)
+	require.Len(t, events, 2)
+	assert.Equal(t, audit.OutcomeSuccess, events[1].Outcome)
 }
 
 func mustTestKeyring(t *testing.T, activeID string, active []byte, previous map[string][]byte) *Keyring {

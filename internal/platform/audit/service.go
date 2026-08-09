@@ -19,12 +19,21 @@ type Recorder interface {
 	Record(context.Context, identity.Subject, EventInput) error
 }
 
+// CompletionRecorder persists mutation results before attempting delivery to
+// the append-only audit stream. Delivery failures are therefore retryable and
+// never need to rewrite a successful business response.
+type CompletionRecorder interface {
+	Recorder
+	PersistCompletion(context.Context, identity.Subject, EventInput) (string, error)
+	DeliverCompletion(context.Context, string) error
+}
+
 // Mutation is a durable write-ahead audit ticket. The pending event is stored
 // before the governed state change begins, so a later audit outage cannot
 // leave an otherwise invisible mutation. Completion events share RequestID and
 // can be reconciled if their append temporarily fails.
 type Mutation struct {
-	recorder         Recorder
+	recorder         CompletionRecorder
 	actor            identity.Subject
 	input            EventInput
 	completionAction Action
@@ -51,6 +60,10 @@ func beginMutation(ctx context.Context, recorder Recorder, actor identity.Subjec
 	if recorder == nil {
 		return nil, errors.New("治理审计服务未配置")
 	}
+	completionRecorder, ok := recorder.(CompletionRecorder)
+	if !ok {
+		return nil, errors.New("治理审计服务未配置持久化完成投递")
+	}
 	if input.RequestID == "" {
 		input.RequestID = uuid.NewString()
 	}
@@ -59,7 +72,7 @@ func beginMutation(ctx context.Context, recorder Recorder, actor identity.Subjec
 	if err := recorder.Record(ctx, actor, input); err != nil {
 		return nil, err
 	}
-	return &Mutation{recorder: recorder, actor: actor, input: input, completionAction: completionAction}, nil
+	return &Mutation{recorder: completionRecorder, actor: actor, input: input, completionAction: completionAction}, nil
 }
 
 func (mutation *Mutation) Succeeded(ctx context.Context, resourceID string, metadata map[string]any) error {
@@ -78,7 +91,14 @@ func (mutation *Mutation) complete(ctx context.Context, outcome Outcome, phase, 
 		input.ResourceID = resourceID
 	}
 	input.Metadata = withPhase(metadata, phase)
-	return mutation.recorder.Record(ctx, mutation.actor, input)
+	completionID, err := mutation.recorder.PersistCompletion(ctx, mutation.actor, input)
+	if err != nil {
+		return err
+	}
+	// Once the completion is durable, delivery is best-effort for this request.
+	// A failed append remains in the outbox for the explicit Reconcile boundary.
+	_ = mutation.recorder.DeliverCompletion(ctx, completionID)
+	return nil
 }
 
 func withPhase(metadata map[string]any, phase string) map[string]any {
@@ -91,11 +111,7 @@ func withPhase(metadata map[string]any, phase string) map[string]any {
 }
 
 func (service *Service) Record(ctx context.Context, actor identity.Subject, input EventInput) error {
-	normalizedMetadata, err := normalizeMetadata(input.Metadata)
-	if err != nil {
-		return err
-	}
-	metadata, err := json.Marshal(sanitizeMap(normalizedMetadata))
+	metadata, err := sanitizedMetadata(input.Metadata)
 	if err != nil {
 		return err
 	}
@@ -118,6 +134,119 @@ func (service *Service) Record(ctx context.Context, actor identity.Subject, inpu
 		Metadata:      metadata,
 	}
 	return service.repository.Append(ctx, event)
+}
+
+func (service *Service) PersistCompletion(ctx context.Context, actor identity.Subject, input EventInput) (string, error) {
+	repository, err := service.completionRepository()
+	if err != nil {
+		return "", err
+	}
+	metadata, err := sanitizedMetadata(input.Metadata)
+	if err != nil {
+		return "", err
+	}
+	completion := &CompletionOutbox{
+		ID: uuid.NewString(), EventID: uuid.NewString(), RequestID: input.RequestID,
+		ActorUserID: actor.UserID, ActorUsername: actor.Username, ActorRole: string(actor.Role),
+		Action: input.Action, ResourceType: input.ResourceType, ResourceID: input.ResourceID,
+		Outcome: input.Outcome, ClientIP: input.ClientIP, Metadata: metadata, CreatedAt: service.now(),
+	}
+	if err := repository.EnqueueCompletion(ctx, completion); err != nil {
+		return "", err
+	}
+	return completion.ID, nil
+}
+
+func (service *Service) DeliverCompletion(ctx context.Context, completionID string) error {
+	repository, err := service.completionRepository()
+	if err != nil {
+		return err
+	}
+	completion, err := repository.Completion(ctx, completionID)
+	if err != nil {
+		return err
+	}
+	if completion.DeliveredAt != nil {
+		return nil
+	}
+	completion.Attempts++
+	exists, err := repository.EventExists(ctx, completion.EventID)
+	if err != nil {
+		_ = repository.UpdateCompletion(ctx, completion)
+		return err
+	}
+	if !exists {
+		event := &Event{
+			ID: completion.EventID, OccurredAt: completion.CreatedAt,
+			ActorUserID: completion.ActorUserID, ActorUsername: completion.ActorUsername, ActorRole: completion.ActorRole,
+			Action: completion.Action, ResourceType: completion.ResourceType, ResourceID: completion.ResourceID,
+			Outcome: completion.Outcome, ClientIP: completion.ClientIP, RequestID: completion.RequestID,
+			Metadata: append([]byte(nil), completion.Metadata...),
+		}
+		if err := service.repository.Append(ctx, event); err != nil {
+			exists, existsErr := repository.EventExists(ctx, completion.EventID)
+			if existsErr != nil || !exists {
+				_ = repository.UpdateCompletion(ctx, completion)
+				return err
+			}
+		}
+	}
+	deliveredAt := service.now()
+	completion.DeliveredAt = &deliveredAt
+	return repository.UpdateCompletion(ctx, completion)
+}
+
+func (service *Service) PendingCompletions(ctx context.Context, subject identity.Subject, limit int) ([]CompletionOutbox, error) {
+	if !identity.HasAnyRole(subject, identity.RoleAdmin, identity.RoleAuditor) {
+		return nil, ErrForbidden
+	}
+	repository, err := service.completionRepository()
+	if err != nil {
+		return nil, err
+	}
+	return repository.ListPendingCompletions(ctx, limit)
+}
+
+func (service *Service) Reconcile(ctx context.Context, subject identity.Subject, limit int) (int, error) {
+	if subject.Role != identity.RoleAdmin {
+		return 0, ErrForbidden
+	}
+	repository, err := service.completionRepository()
+	if err != nil {
+		return 0, err
+	}
+	pending, err := repository.ListPendingCompletions(ctx, limit)
+	if err != nil {
+		return 0, err
+	}
+	delivered := 0
+	var firstErr error
+	for index := range pending {
+		if err := service.DeliverCompletion(ctx, pending[index].ID); err != nil {
+			if firstErr == nil {
+				firstErr = err
+			}
+			continue
+		}
+		delivered++
+	}
+	return delivered, firstErr
+}
+
+func (service *Service) completionRepository() (CompletionRepository, error) {
+	repository, ok := service.repository.(CompletionRepository)
+	if !ok {
+		return nil, errors.New("审计仓库未配置完成投递 outbox")
+	}
+	return repository, nil
+}
+
+func sanitizedMetadata(input map[string]any) (json.RawMessage, error) {
+	normalizedMetadata, err := normalizeMetadata(input)
+	if err != nil {
+		return nil, err
+	}
+	return json.Marshal(sanitizeMap(normalizedMetadata))
 }
 
 func normalizeMetadata(input map[string]any) (map[string]any, error) {

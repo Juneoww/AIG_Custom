@@ -29,6 +29,26 @@ func (repository *failOnAppendRepository) List(ctx context.Context, filter Filte
 	return repository.delegate.List(ctx, filter)
 }
 
+func (repository *failOnAppendRepository) EnqueueCompletion(ctx context.Context, completion *CompletionOutbox) error {
+	return repository.delegate.EnqueueCompletion(ctx, completion)
+}
+
+func (repository *failOnAppendRepository) Completion(ctx context.Context, id string) (*CompletionOutbox, error) {
+	return repository.delegate.Completion(ctx, id)
+}
+
+func (repository *failOnAppendRepository) ListPendingCompletions(ctx context.Context, limit int) ([]CompletionOutbox, error) {
+	return repository.delegate.ListPendingCompletions(ctx, limit)
+}
+
+func (repository *failOnAppendRepository) UpdateCompletion(ctx context.Context, completion *CompletionOutbox) error {
+	return repository.delegate.UpdateCompletion(ctx, completion)
+}
+
+func (repository *failOnAppendRepository) EventExists(ctx context.Context, id string) (bool, error) {
+	return repository.delegate.EventExists(ctx, id)
+}
+
 func TestServiceRecordsQueryableSanitizedEvents(t *testing.T) {
 	repository := NewMemoryRepository()
 	service := NewService(repository)
@@ -100,7 +120,7 @@ func TestAuthenticationAttemptsHaveStableAuditBoundary(t *testing.T) {
 	assert.Equal(t, ActionLoginFailure, events[1].Action)
 }
 
-func TestMutationIntentIsDurableBeforeStateChangeAndSurvivesCompletionFailure(t *testing.T) {
+func TestMutationCompletionFailureQueuesDurableOutboxAndReconcilesIdempotently(t *testing.T) {
 	ctx := context.Background()
 	actor := identity.Subject{UserID: "admin-id", Role: identity.RoleAdmin}
 
@@ -112,11 +132,32 @@ func TestMutationIntentIsDurableBeforeStateChangeAndSurvivesCompletionFailure(t 
 	completionFailure := NewService(&failOnAppendRepository{delegate: delegate, failOn: 2})
 	mutation, err := BeginMutation(ctx, completionFailure, actor, EventInput{Action: ActionKnowledgeChanged, ResourceType: "fingerprint", ResourceID: "demo"})
 	require.NoError(t, err)
-	assert.Error(t, mutation.Succeeded(ctx, "", nil))
+	require.NoError(t, mutation.Succeeded(ctx, "", map[string]any{"token": "completion-secret"}), "a persisted completion must not turn a successful mutation into an API error")
 
 	events, err := delegate.List(ctx, Filter{})
 	require.NoError(t, err)
 	require.Len(t, events, 1)
 	assert.Equal(t, OutcomePending, events[0].Outcome)
 	assert.NotEmpty(t, events[0].RequestID, "pending intent correlates later completion or reconciliation")
+	pending, err := completionFailure.PendingCompletions(ctx, actor, 10)
+	require.NoError(t, err)
+	require.Len(t, pending, 1)
+	assert.Equal(t, events[0].RequestID, pending[0].RequestID)
+	assert.NotContains(t, string(pending[0].Metadata), "completion-secret")
+	assert.Contains(t, string(pending[0].Metadata), RedactedValue)
+
+	reconciled, err := completionFailure.Reconcile(ctx, actor, 10)
+	require.NoError(t, err)
+	assert.Equal(t, 1, reconciled)
+	events, err = delegate.List(ctx, Filter{})
+	require.NoError(t, err)
+	require.Len(t, events, 2)
+	assert.Equal(t, OutcomeSuccess, events[1].Outcome)
+	assert.Equal(t, events[0].RequestID, events[1].RequestID)
+	reconciled, err = completionFailure.Reconcile(ctx, actor, 10)
+	require.NoError(t, err)
+	assert.Zero(t, reconciled)
+	events, err = delegate.List(ctx, Filter{})
+	require.NoError(t, err)
+	assert.Len(t, events, 2, "reconciliation must not duplicate a delivered completion")
 }

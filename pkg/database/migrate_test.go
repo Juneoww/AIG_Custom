@@ -47,6 +47,7 @@ func TestMigrationAppliesGovernanceSchemaAsVersionThree(t *testing.T) {
 
 	require.NoError(t, Migrate(db))
 	assert.True(t, db.Migrator().HasTable("audit_events"))
+	assert.True(t, db.Migrator().HasTable("audit_completion_outbox"))
 	assert.True(t, db.Migrator().HasTable("platform_models"))
 
 	var versions []SchemaMigration
@@ -153,6 +154,7 @@ func TestMigrationSerializesConcurrentPostgresCalls(t *testing.T) {
 	assert.True(t, first.Migrator().HasTable(&identity.Session{}))
 	assert.True(t, first.Migrator().HasTable(&identity.PasswordReset{}))
 	assert.True(t, first.Migrator().HasTable("audit_events"))
+	assert.True(t, first.Migrator().HasTable("audit_completion_outbox"))
 	assert.True(t, first.Migrator().HasTable("platform_models"))
 	assert.True(t, first.Migrator().HasIndex(&Model{}, "idx_models_username_created"))
 }

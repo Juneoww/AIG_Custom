@@ -2,6 +2,7 @@ package knowledge
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -13,7 +14,45 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestGovernBuffersLegacySuccessUntilAuditCompletion(t *testing.T) {
+type failingKnowledgeAuditRepository struct {
+	delegate *audit.MemoryRepository
+	failOn   int
+	calls    int
+}
+
+func (repository *failingKnowledgeAuditRepository) Append(ctx context.Context, event *audit.Event) error {
+	repository.calls++
+	if repository.calls == repository.failOn {
+		return errors.New("injected audit append failure")
+	}
+	return repository.delegate.Append(ctx, event)
+}
+
+func (repository *failingKnowledgeAuditRepository) List(ctx context.Context, filter audit.Filter) ([]audit.Event, error) {
+	return repository.delegate.List(ctx, filter)
+}
+
+func (repository *failingKnowledgeAuditRepository) EnqueueCompletion(ctx context.Context, completion *audit.CompletionOutbox) error {
+	return repository.delegate.EnqueueCompletion(ctx, completion)
+}
+
+func (repository *failingKnowledgeAuditRepository) Completion(ctx context.Context, id string) (*audit.CompletionOutbox, error) {
+	return repository.delegate.Completion(ctx, id)
+}
+
+func (repository *failingKnowledgeAuditRepository) ListPendingCompletions(ctx context.Context, limit int) ([]audit.CompletionOutbox, error) {
+	return repository.delegate.ListPendingCompletions(ctx, limit)
+}
+
+func (repository *failingKnowledgeAuditRepository) UpdateCompletion(ctx context.Context, completion *audit.CompletionOutbox) error {
+	return repository.delegate.UpdateCompletion(ctx, completion)
+}
+
+func (repository *failingKnowledgeAuditRepository) EventExists(ctx context.Context, id string) (bool, error) {
+	return repository.delegate.EventExists(ctx, id)
+}
+
+func TestGovernKeepsLegacySuccessWhenCompletionAppendFailsAndReconciles(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	ctx := context.Background()
 	identityService := identity.NewService(identity.NewMemoryRepository())
@@ -22,12 +61,12 @@ func TestGovernBuffersLegacySuccessUntilAuditCompletion(t *testing.T) {
 	login, err := identityService.Authenticate(ctx, "admin", "secret")
 	require.NoError(t, err)
 	auditRepository := audit.NewMemoryRepository()
-	recorder := &failOnRecord{delegate: audit.NewService(auditRepository), failOn: 2}
+	auditService := audit.NewService(&failingKnowledgeAuditRepository{delegate: auditRepository, failOn: 2})
 	mutated := false
 
 	router := gin.New()
 	router.POST("/knowledge", identity.Authenticate(identityService, identity.CookiePolicy{}),
-		NewHandler(NewService(recorder)).Govern(KindFingerprint, OperationUpdate, func(c *gin.Context) {
+		NewHandler(NewService(auditService)).Govern(KindFingerprint, OperationUpdate, func(c *gin.Context) {
 			mutated = true
 			c.JSON(http.StatusOK, gin.H{"message": "legacy success"})
 		}))
@@ -37,12 +76,22 @@ func TestGovernBuffersLegacySuccessUntilAuditCompletion(t *testing.T) {
 	router.ServeHTTP(response, request)
 
 	assert.True(t, mutated)
-	assert.Equal(t, http.StatusInternalServerError, response.Code)
-	assert.NotContains(t, response.Body.String(), "legacy success")
+	assert.Equal(t, http.StatusOK, response.Code)
+	assert.Contains(t, response.Body.String(), "legacy success")
 	events, err := auditRepository.List(ctx, audit.Filter{})
 	require.NoError(t, err)
 	require.Len(t, events, 1)
 	assert.Equal(t, audit.OutcomePending, events[0].Outcome)
+	pending, err := auditService.PendingCompletions(ctx, identity.Subject{Role: identity.RoleAdmin}, 10)
+	require.NoError(t, err)
+	require.Len(t, pending, 1)
+	reconciled, err := auditService.Reconcile(ctx, identity.Subject{Role: identity.RoleAdmin}, 10)
+	require.NoError(t, err)
+	assert.Equal(t, 1, reconciled)
+	events, err = auditRepository.List(ctx, audit.Filter{})
+	require.NoError(t, err)
+	require.Len(t, events, 2)
+	assert.Equal(t, audit.OutcomeSuccess, events[1].Outcome)
 }
 
 func TestGovernAsyncRecordsCompletionOnlyAfterBackgroundResult(t *testing.T) {
