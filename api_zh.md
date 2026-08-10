@@ -81,13 +81,14 @@ AIG Custom Platform 是基于 Tencent Zhuque Lab AI-Infra-Guard（https://github
 - `PUT /api/v1/platform/admin/users/{userID}/active`：管理员启用或禁用账号；禁用时撤销现有会话。
 - `POST /api/v1/platform/admin/users/{userID}/password-reset`：请求通过带外渠道交付重置令牌，仅返回 `204`，HTTP 与日志均不包含令牌。
 - `GET /api/v1/platform/admin/audit-events`：管理员和审计员查询只追加、已脱敏的审计事件；支持 `action`、`actor_user_id`、`resource_type`、`resource_id` 和 `limit` 过滤。治理变更先写持久化 `pending` 事件，再以同一 `request_id` 关联后续 `success` 或 `failure`。业务变更完成后先将结果持久写入 outbox，再追加最终审计事件，因此追加故障不会改变已经成功的业务响应。
+- `POST /api/v1/platform/admin/audit-events/prepared/{requestID}/finalize`：管理员核实旧文件变更的真实结果后，显式恢复处于 `prepared` 的文件型变更；请求体为 `{"outcome":"success|failure","metadata":{...}}`。恢复会沿用同一请求的稳定 outbox/event 标识，绝不会再次执行文件变更。同一结果可幂等重试，冲突结果返回 `409`。`request_id` 可从审计事件查询或安全的 `X-Audit-Request-ID` 响应头取得；审计员和普通用户不能完成恢复。
 - `POST /api/v1/platform/admin/audit-events/reconcile`：管理员重试持久化完成 outbox；稳定事件 ID 保证重复对账不产生重复审计事件，响应返回本次完成数量。
 - `GET|POST /api/v1/platform/models` 与 `GET|PUT|DELETE /api/v1/platform/models/{modelID}`：普通用户只管理本人私有模型并可读取全局模型；管理员管理全局模型并可查看治理元数据；审计员仅可读取全局模型。访问其他普通用户的私有模型返回 `403`。
 - `POST /api/v1/platform/models/{modelID}/rotate-encryption`：管理员使用当前活动主密钥重新加密已存 token。
 
 模型 token 使用 AES-256-GCM，并把模型元数据纳入认证。活动密钥通过 `MODEL_MASTER_KEY_ID` 和 base64 编码的 32 字节 `MODEL_MASTER_KEY` 注入；轮换窗口可通过 `MODEL_PREVIOUS_MASTER_KEYS` 提供“旧 key ID 到 base64 密钥”的 JSON 对象，所有新写入只使用活动密钥。API 始终返回 `"token":"********"`，绝不返回明文、密文、nonce 或密钥材料；禁止记录模型请求体。
 
-现有 `/api/v1/knowledge/*` 的读取格式和扫描协议保持不变。已认证的普通用户、审计员和管理员均可读；仅管理员可修改指纹、漏洞、评测集、MCP/提示词集合和 Agent 配置。每次变更都必须先经过持久化预写审计边界，再调用保持旧格式的 handler；旧写 handler 若被直接挂载会被拒绝。异步系统数据更新会先写 `knowledge.change_requested/pending`，仅在后台任务真实结束后写 `knowledge.changed/success` 或 `failure`。变更仅影响后续扫描，已完成任务与报告快照不变。
+现有 `/api/v1/knowledge/*` 的读取格式和扫描协议保持不变。已认证的普通用户、审计员和管理员均可读；仅管理员可修改指纹、漏洞、评测集、MCP/提示词集合和 Agent 配置。每次变更都必须先经过持久化预写审计边界，再调用保持旧格式的 handler；旧写 handler 若被直接挂载会被拒绝。若文件变更已成功，但其 `prepared` 审计意图暂时无法完成持久化，原成功响应保持不变，且只增加 `X-Audit-Request-ID`；管理员核实真实结果后先调用 prepared-finalize 接口，再执行 reconcile。内部错误和元数据不会写入响应。异步系统数据更新会先写 `knowledge.change_requested/pending`，仅在后台任务真实结束后写 `knowledge.changed/success` 或 `failure`。变更仅影响后续扫描，已完成任务与报告快照不变。
 
 当前可触发的审计动作包括登录成功/失败、账号创建/启用/禁用、角色分配、密码重置请求、模型治理，以及规则/知识库或系统数据变更；任务变更、报告导出和系统配置调用方也已有稳定动作常量供后续接入。`/api/v1/app/models` 已弃用并委托给同一套加密、基于 `Subject` 的模型服务，不再信任 `username` 请求头。
 

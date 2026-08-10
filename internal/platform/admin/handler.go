@@ -1,6 +1,7 @@
 package admin
 
 import (
+	"context"
 	"errors"
 	"net/http"
 	"strconv"
@@ -27,6 +28,7 @@ func (handler *Handler) Register(group *gin.RouterGroup) {
 	group.PUT("/users/:userID/active", handler.setActive)
 	group.POST("/users/:userID/password-reset", handler.resetPassword)
 	group.GET("/audit-events", handler.listAuditEvents)
+	group.POST("/audit-events/prepared/:requestID/finalize", handler.finalizePreparedAuditEvent)
 	group.POST("/audit-events/reconcile", handler.reconcileAuditEvents)
 }
 
@@ -65,15 +67,19 @@ func (handler *Handler) createUser(c *gin.Context) {
 		c.Status(http.StatusInternalServerError)
 		return
 	}
-	user, err := handler.users.CreateUser(c.Request.Context(), identity.CreateUserInput{
-		ID: targetUserID, Username: request.Username, Password: request.Password, Role: request.Role, MustChangePassword: true,
+	var user *identity.User
+	var businessErr error
+	err = mutation.Run(c.Request.Context(), targetUserID, metadata, func(transactionContext context.Context) error {
+		user, businessErr = handler.users.CreateUser(transactionContext, identity.CreateUserInput{
+			ID: targetUserID, Username: request.Username, Password: request.Password, Role: request.Role, MustChangePassword: true,
+		})
+		return businessErr
 	})
-	if err != nil {
-		_ = mutation.Failed(c.Request.Context(), targetUserID, metadata)
+	if businessErr != nil {
 		c.Status(http.StatusBadRequest)
 		return
 	}
-	if err := mutation.Succeeded(c.Request.Context(), user.ID, metadata); err != nil {
+	if err != nil {
 		c.Status(http.StatusInternalServerError)
 		return
 	}
@@ -98,12 +104,16 @@ func (handler *Handler) assignRole(c *gin.Context) {
 		c.Status(http.StatusInternalServerError)
 		return
 	}
-	if err := handler.users.SetRole(c.Request.Context(), c.Param("userID"), request.Role); err != nil {
-		_ = mutation.Failed(c.Request.Context(), "", metadata)
-		respondIdentityError(c, err)
+	var businessErr error
+	err = mutation.Run(c.Request.Context(), "", metadata, func(transactionContext context.Context) error {
+		businessErr = handler.users.SetRole(transactionContext, c.Param("userID"), request.Role)
+		return businessErr
+	})
+	if businessErr != nil {
+		respondIdentityError(c, businessErr)
 		return
 	}
-	if err := mutation.Succeeded(c.Request.Context(), "", metadata); err != nil {
+	if err != nil {
 		c.Status(http.StatusInternalServerError)
 		return
 	}
@@ -132,12 +142,16 @@ func (handler *Handler) setActive(c *gin.Context) {
 		c.Status(http.StatusInternalServerError)
 		return
 	}
-	if err := handler.users.SetActiveByID(c.Request.Context(), c.Param("userID"), *request.Active); err != nil {
-		_ = mutation.Failed(c.Request.Context(), "", metadata)
-		respondIdentityError(c, err)
+	var businessErr error
+	err = mutation.Run(c.Request.Context(), "", metadata, func(transactionContext context.Context) error {
+		businessErr = handler.users.SetActiveByID(transactionContext, c.Param("userID"), *request.Active)
+		return businessErr
+	})
+	if businessErr != nil {
+		respondIdentityError(c, businessErr)
 		return
 	}
-	if err := mutation.Succeeded(c.Request.Context(), "", metadata); err != nil {
+	if err != nil {
 		c.Status(http.StatusInternalServerError)
 		return
 	}
@@ -156,12 +170,16 @@ func (handler *Handler) resetPassword(c *gin.Context) {
 		c.Status(http.StatusInternalServerError)
 		return
 	}
-	if _, err := handler.users.CreatePasswordReset(c.Request.Context(), c.Param("userID")); err != nil {
-		_ = mutation.Failed(c.Request.Context(), "", nil)
-		respondIdentityError(c, err)
+	var businessErr error
+	err = mutation.Run(c.Request.Context(), "", nil, func(transactionContext context.Context) error {
+		_, businessErr = handler.users.CreatePasswordReset(transactionContext, c.Param("userID"))
+		return businessErr
+	})
+	if businessErr != nil {
+		respondIdentityError(c, businessErr)
 		return
 	}
-	if err := mutation.Succeeded(c.Request.Context(), "", nil); err != nil {
+	if err != nil {
 		c.Status(http.StatusInternalServerError)
 		return
 	}
@@ -207,6 +225,33 @@ func (handler *Handler) reconcileAuditEvents(c *gin.Context) {
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{"reconciled": reconciled})
+}
+
+func (handler *Handler) finalizePreparedAuditEvent(c *gin.Context) {
+	subject, ok := requireAdmin(c)
+	if !ok {
+		return
+	}
+	var request FinalizePreparedAuditRequest
+	if err := c.ShouldBindJSON(&request); err != nil {
+		c.Status(http.StatusBadRequest)
+		return
+	}
+	_, err := handler.audits.FinalizePrepared(c.Request.Context(), subject, c.Param("requestID"), request.Outcome, request.Metadata)
+	switch {
+	case errors.Is(err, audit.ErrForbidden):
+		c.Status(http.StatusForbidden)
+	case errors.Is(err, audit.ErrInvalidCompletionOutcome):
+		c.Status(http.StatusBadRequest)
+	case errors.Is(err, audit.ErrCompletionNotFound):
+		c.Status(http.StatusNotFound)
+	case errors.Is(err, audit.ErrCompletionConflict):
+		c.Status(http.StatusConflict)
+	case err != nil:
+		c.Status(http.StatusInternalServerError)
+	default:
+		c.Status(http.StatusNoContent)
+	}
 }
 
 func requireAdmin(c *gin.Context) (identity.Subject, bool) {

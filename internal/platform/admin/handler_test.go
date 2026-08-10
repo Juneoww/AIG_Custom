@@ -11,6 +11,7 @@ import (
 
 	"github.com/Juneoww/AIG_Custom/internal/platform/audit"
 	"github.com/Juneoww/AIG_Custom/internal/platform/identity"
+	"github.com/Juneoww/AIG_Custom/internal/platform/knowledge"
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -20,6 +21,45 @@ type failingAdminAuditRepository struct {
 	delegate *audit.MemoryRepository
 	failOn   int
 	calls    int
+}
+
+type failFirstReadyAdminAuditRepository struct {
+	delegate   *audit.MemoryRepository
+	readyCalls int
+}
+
+func (repository *failFirstReadyAdminAuditRepository) Append(ctx context.Context, event *audit.Event) error {
+	return repository.delegate.Append(ctx, event)
+}
+
+func (repository *failFirstReadyAdminAuditRepository) List(ctx context.Context, filter audit.Filter) ([]audit.Event, error) {
+	return repository.delegate.List(ctx, filter)
+}
+
+func (repository *failFirstReadyAdminAuditRepository) EnqueueCompletion(ctx context.Context, completion *audit.CompletionOutbox) error {
+	if completion.State == audit.CompletionStateReady {
+		repository.readyCalls++
+		if repository.readyCalls == 1 {
+			return errors.New("injected ready finalize failure")
+		}
+	}
+	return repository.delegate.EnqueueCompletion(ctx, completion)
+}
+
+func (repository *failFirstReadyAdminAuditRepository) Completion(ctx context.Context, id string) (*audit.CompletionOutbox, error) {
+	return repository.delegate.Completion(ctx, id)
+}
+
+func (repository *failFirstReadyAdminAuditRepository) ListPendingCompletions(ctx context.Context, limit int) ([]audit.CompletionOutbox, error) {
+	return repository.delegate.ListPendingCompletions(ctx, limit)
+}
+
+func (repository *failFirstReadyAdminAuditRepository) UpdateCompletion(ctx context.Context, completion *audit.CompletionOutbox) error {
+	return repository.delegate.UpdateCompletion(ctx, completion)
+}
+
+func (repository *failFirstReadyAdminAuditRepository) EventExists(ctx context.Context, id string) (bool, error) {
+	return repository.delegate.EventExists(ctx, id)
 }
 
 func (repository *failingAdminAuditRepository) Append(ctx context.Context, event *audit.Event) error {
@@ -192,6 +232,81 @@ func TestAdminCreateStaysSuccessfulWhenCompletionAppendFailsAndReconciles(t *tes
 	require.NoError(t, err)
 	require.Len(t, events, 2)
 	assert.Equal(t, audit.OutcomeSuccess, events[1].Outcome)
+}
+
+func TestAdminFinalizesPreparedKnowledgeCompletionWithoutRepeatingFileMutation(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	ctx := context.Background()
+	identityService := identity.NewService(identity.NewMemoryRepository())
+	type account struct {
+		user  *identity.User
+		login *identity.LoginResult
+	}
+	accounts := map[identity.Role]account{}
+	for _, role := range []identity.Role{identity.RoleAdmin, identity.RoleAuditor, identity.RoleUser} {
+		user, err := identityService.CreateUser(ctx, identity.CreateUserInput{Username: string(role), Password: "secret", Role: role})
+		require.NoError(t, err)
+		login, err := identityService.Authenticate(ctx, user.Username, "secret")
+		require.NoError(t, err)
+		accounts[role] = account{user: user, login: login}
+	}
+
+	delegate := audit.NewMemoryRepository()
+	auditRepository := &failFirstReadyAdminAuditRepository{delegate: delegate}
+	auditService := audit.NewService(auditRepository)
+	knowledgeService := knowledge.NewService(auditService)
+	mutations := 0
+	adminAccount := accounts[identity.RoleAdmin]
+	router := gin.New()
+	authenticate := identity.Authenticate(identityService, identity.CookiePolicy{})
+	router.POST("/knowledge", authenticate,
+		knowledge.NewHandler(knowledgeService).Govern(knowledge.KindFingerprint, knowledge.OperationUpdate, func(c *gin.Context) {
+			mutations++
+			c.JSON(http.StatusOK, gin.H{"message": "legacy success"})
+		}))
+	NewHandler(identityService, auditService).Register(router.Group("/admin", authenticate))
+	mutation := performJSON(t, router, adminAccount.login.Token, http.MethodPost, "/knowledge", nil)
+	require.Equal(t, http.StatusOK, mutation.Code, mutation.Body.String())
+	assert.Contains(t, mutation.Body.String(), "legacy success")
+	assert.Equal(t, 1, mutations)
+	requestID := mutation.Header().Get(knowledge.AuditRequestIDHeader)
+	require.NotEmpty(t, requestID)
+
+	list := performJSON(t, router, adminAccount.login.Token, http.MethodGet, "/admin/audit-events?action=knowledge.changed", nil)
+	require.Equal(t, http.StatusOK, list.Code, list.Body.String())
+	var pending []audit.Event
+	require.NoError(t, json.Unmarshal(list.Body.Bytes(), &pending))
+	require.Len(t, pending, 1)
+	assert.Equal(t, requestID, pending[0].RequestID)
+
+	finalizePath := "/admin/audit-events/prepared/" + requestID + "/finalize"
+	for _, role := range []identity.Role{identity.RoleAuditor, identity.RoleUser} {
+		response := performJSON(t, router, accounts[role].login.Token, http.MethodPost, finalizePath, map[string]any{"outcome": "success"})
+		assert.Equal(t, http.StatusForbidden, response.Code)
+	}
+	missing := performJSON(t, router, adminAccount.login.Token, http.MethodPost, "/admin/audit-events/prepared/missing/finalize", map[string]any{"outcome": "success"})
+	assert.Equal(t, http.StatusNotFound, missing.Code)
+	invalid := performJSON(t, router, adminAccount.login.Token, http.MethodPost, finalizePath, map[string]any{"outcome": "pending"})
+	assert.Equal(t, http.StatusBadRequest, invalid.Code)
+
+	finalized := performJSON(t, router, adminAccount.login.Token, http.MethodPost, finalizePath, map[string]any{
+		"outcome": "success", "metadata": map[string]any{"files_updated": 1, "api_token": "must-be-redacted"},
+	})
+	require.Equal(t, http.StatusNoContent, finalized.Code, finalized.Body.String())
+	retried := performJSON(t, router, adminAccount.login.Token, http.MethodPost, finalizePath, map[string]any{"outcome": "success"})
+	assert.Equal(t, http.StatusNoContent, retried.Code)
+	conflict := performJSON(t, router, adminAccount.login.Token, http.MethodPost, finalizePath, map[string]any{"outcome": "failure"})
+	assert.Equal(t, http.StatusConflict, conflict.Code)
+	assert.Equal(t, 1, mutations, "recovery finalizes audit state and never repeats the legacy file mutation")
+
+	reconcile := performJSON(t, router, adminAccount.login.Token, http.MethodPost, "/admin/audit-events/reconcile?limit=10", nil)
+	require.Equal(t, http.StatusOK, reconcile.Code, reconcile.Body.String())
+	events, err := delegate.List(ctx, audit.Filter{})
+	require.NoError(t, err)
+	require.Len(t, events, 2)
+	assert.Equal(t, audit.OutcomeSuccess, events[1].Outcome)
+	assert.Equal(t, requestID, events[1].RequestID)
+	assert.NotContains(t, string(events[1].Metadata), "must-be-redacted")
 }
 
 func performJSON(t *testing.T, router http.Handler, sessionToken, method, path string, body any) *httptest.ResponseRecorder {

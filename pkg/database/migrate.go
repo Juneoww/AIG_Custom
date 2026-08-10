@@ -41,6 +41,7 @@ var migrations = []migration{
 	{version: 1, apply: migrateInitialSchema},
 	{version: 2, apply: migrateIdentitySchema},
 	{version: 3, apply: migrateGovernanceSchema},
+	{version: 4, apply: migrateAuditCompletionSchema},
 }
 
 const migrationAdvisoryLockKey int64 = 301237729
@@ -150,7 +151,6 @@ func migrateIdentitySchema(db *gorm.DB) error {
 func migrateGovernanceSchema(db *gorm.DB) error {
 	return db.AutoMigrate(
 		&governanceAuditEventMigration{},
-		&governanceAuditCompletionMigration{},
 		&governanceModelMigration{},
 	)
 }
@@ -175,7 +175,7 @@ func (governanceAuditEventMigration) TableName() string { return "audit_events" 
 type governanceAuditCompletionMigration struct {
 	ID            string `gorm:"primaryKey;column:id"`
 	EventID       string `gorm:"uniqueIndex;not null"`
-	RequestID     string `gorm:"index;not null"`
+	RequestID     string `gorm:"uniqueIndex;not null"`
 	ActorUserID   string `gorm:"index"`
 	ActorUsername string `gorm:"index"`
 	ActorRole     string `gorm:"index"`
@@ -185,12 +185,57 @@ type governanceAuditCompletionMigration struct {
 	Outcome       string `gorm:"index;not null"`
 	ClientIP      string
 	Metadata      json.RawMessage `gorm:"type:jsonb;not null"`
+	State         string          `gorm:"index;not null;default:ready"`
 	CreatedAt     time.Time       `gorm:"index;not null"`
+	ReadyAt       *time.Time      `gorm:"index"`
 	Attempts      int             `gorm:"not null;default:0"`
 	DeliveredAt   *time.Time      `gorm:"index"`
 }
 
 func (governanceAuditCompletionMigration) TableName() string { return "audit_completion_outbox" }
+
+func migrateAuditCompletionSchema(db *gorm.DB) error {
+	if !db.Migrator().HasTable(&governanceAuditCompletionMigration{}) {
+		if err := db.AutoMigrate(&governanceAuditCompletionMigration{}); err != nil {
+			return err
+		}
+	}
+	// Version 0c6b created this table inside v3 with a non-unique request_id
+	// index and random completion IDs. Retried writes could therefore leave
+	// duplicates. Repair that released shape explicitly before replacing the
+	// index; GORM must not infer whether the existing same-named index is unique.
+	statements := []string{
+		`ALTER TABLE audit_completion_outbox ADD COLUMN IF NOT EXISTS state text`,
+		`ALTER TABLE audit_completion_outbox ADD COLUMN IF NOT EXISTS ready_at timestamp with time zone`,
+		`UPDATE audit_completion_outbox SET state = 'ready' WHERE state IS NULL OR btrim(state) = ''`,
+		`UPDATE audit_completion_outbox SET ready_at = created_at WHERE state = 'ready' AND ready_at IS NULL`,
+		`ALTER TABLE audit_completion_outbox ALTER COLUMN state SET DEFAULT 'ready'`,
+		`ALTER TABLE audit_completion_outbox ALTER COLUMN state SET NOT NULL`,
+		`WITH ranked AS (
+			SELECT id, row_number() OVER (
+				PARTITION BY request_id
+				ORDER BY (delivered_at IS NOT NULL) DESC,
+				         delivered_at DESC NULLS LAST,
+				         created_at DESC,
+				         id DESC
+			) AS row_number
+			FROM audit_completion_outbox
+		)
+		DELETE FROM audit_completion_outbox AS completion
+		USING ranked
+		WHERE completion.id = ranked.id AND ranked.row_number > 1`,
+		`DROP INDEX IF EXISTS idx_audit_completion_outbox_request_id`,
+		`CREATE UNIQUE INDEX idx_audit_completion_outbox_request_id ON audit_completion_outbox(request_id)`,
+		`CREATE INDEX IF NOT EXISTS idx_audit_completion_outbox_state ON audit_completion_outbox(state)`,
+		`CREATE INDEX IF NOT EXISTS idx_audit_completion_outbox_ready_at ON audit_completion_outbox(ready_at)`,
+	}
+	for _, statement := range statements {
+		if err := db.Exec(statement).Error; err != nil {
+			return err
+		}
+	}
+	return nil
+}
 
 type governanceModelMigration struct {
 	ID             string `gorm:"primaryKey;column:id"`

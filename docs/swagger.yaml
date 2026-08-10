@@ -145,6 +145,44 @@ paths:
           description: Sanitized audit event list.
         "403":
           description: Admin or auditor role required.
+  /api/v1/platform/admin/audit-events/prepared/{requestID}/finalize:
+    post:
+      description: Administrator-only recovery for a prepared file-backed mutation after an operator verifies its real outcome. It promotes the existing request to the same stable outbox and event identity without repeating the file mutation. Retrying the same outcome is idempotent; a conflicting outcome returns 409. The request_id is obtained from the audit-event query or the safe X-Audit-Request-ID header returned when a successful legacy mutation needs recovery.
+      tags:
+      - audit
+      summary: Finalize a prepared audit completion
+      parameters:
+      - in: path
+        name: requestID
+        required: true
+        type: string
+      - in: body
+        name: body
+        required: true
+        schema:
+          type: object
+          required:
+          - outcome
+          properties:
+            outcome:
+              type: string
+              enum:
+              - success
+              - failure
+            metadata:
+              type: object
+              additionalProperties: true
+      responses:
+        "204":
+          description: The prepared completion is durably ready for reconciliation.
+        "400":
+          description: Invalid outcome or request body.
+        "403":
+          description: Administrator role required.
+        "404":
+          description: Prepared request not found.
+        "409":
+          description: The request was already finalized with a different outcome.
   /api/v1/platform/admin/audit-events/reconcile:
     post:
       description: Retries durable audit completion outbox entries whose final append previously failed. Delivery uses a stable event identifier, so repeated reconciliation does not duplicate audit events. Administrator only.
@@ -247,6 +285,10 @@ paths:
       responses:
         "200":
           description: Future scans use the new content; historical report snapshots are unchanged.
+          headers:
+            X-Audit-Request-ID:
+              type: string
+              description: Present only when the file mutation succeeded but its prepared audit completion needs explicit administrator finalization; no internal error or metadata is exposed.
         "403":
           description: Administrator role required.
   /api/v1/auth/login:

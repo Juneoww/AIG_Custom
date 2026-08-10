@@ -43,10 +43,11 @@ func TestMigrationCLIIsIdempotent(t *testing.T) {
 
 	var versions []SchemaMigration
 	require.NoError(t, db.Order("version ASC").Find(&versions).Error)
-	require.Len(t, versions, 3)
+	require.Len(t, versions, 4)
 	require.Equal(t, int64(1), versions[0].Version)
 	require.Equal(t, int64(2), versions[1].Version)
 	require.Equal(t, int64(3), versions[2].Version)
+	require.Equal(t, int64(4), versions[3].Version)
 	require.True(t, db.Migrator().HasTable(&identity.User{}))
 	require.True(t, db.Migrator().HasTable(&identity.Session{}))
 	require.True(t, db.Migrator().HasTable(&identity.PasswordReset{}))

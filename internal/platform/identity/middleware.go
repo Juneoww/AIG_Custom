@@ -18,11 +18,20 @@ type AuthenticationEvent struct {
 
 type GovernanceCompletion func(context.Context, bool) error
 
+type GovernedMutation func(context.Context) error
+
 // GovernanceObserver keeps identity independent from the audit package while
 // providing a stable, fail-closed boundary for security-relevant events.
 type GovernanceObserver interface {
 	AuthenticationAttempt(context.Context, AuthenticationEvent) error
 	BeginPasswordReset(context.Context, Subject, string) (GovernanceCompletion, error)
+}
+
+// TransactionalGovernanceObserver is implemented by governance recorders that
+// can commit an identity mutation and its durable completion in one unit of
+// work. The legacy observer boundary remains available for non-database tests.
+type TransactionalGovernanceObserver interface {
+	GovernPasswordReset(context.Context, Subject, string, GovernedMutation) error
 }
 
 const subjectContextKey = "identity_subject"
@@ -213,6 +222,26 @@ func RegisterRoutesWithObserver(group *gin.RouterGroup, service *Service, policy
 		c.Status(http.StatusNoContent)
 	})
 	protected.POST("/password-resets/:userID", RequireCSRF(policy), RequireRole(RoleAdmin), func(c *gin.Context) {
+		var businessErr error
+		apply := func(mutationContext context.Context) error {
+			_, businessErr = service.CreatePasswordReset(mutationContext, c.Param("userID"))
+			return businessErr
+		}
+		if transactional, ok := observer.(TransactionalGovernanceObserver); ok {
+			subject, _ := CurrentSubject(c)
+			err := transactional.GovernPasswordReset(c.Request.Context(), subject, c.Param("userID"), apply)
+			if businessErr != nil {
+				c.Status(http.StatusNotFound)
+				return
+			}
+			if err != nil {
+				c.Status(http.StatusInternalServerError)
+				return
+			}
+			// 令牌仅交给已配置的带外交付渠道，绝不写入 HTTP 响应或日志。
+			c.Status(http.StatusNoContent)
+			return
+		}
 		var completion GovernanceCompletion
 		if observer != nil {
 			subject, _ := CurrentSubject(c)
@@ -223,7 +252,7 @@ func RegisterRoutesWithObserver(group *gin.RouterGroup, service *Service, policy
 				return
 			}
 		}
-		if _, err := service.CreatePasswordReset(c.Request.Context(), c.Param("userID")); err != nil {
+		if err := apply(c.Request.Context()); err != nil {
 			if completion != nil {
 				_ = completion(c.Request.Context(), false)
 			}

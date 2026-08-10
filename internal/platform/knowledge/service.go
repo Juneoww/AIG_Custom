@@ -8,7 +8,22 @@ import (
 	"github.com/Juneoww/AIG_Custom/internal/platform/identity"
 )
 
-var ErrForbidden = errors.New("仅管理员可修改规则与知识库")
+var (
+	ErrForbidden            = errors.New("仅管理员可修改规则与知识库")
+	ErrPendingAuditRecovery = errors.New("规则或知识库变更已完成，审计结果待管理员恢复")
+)
+
+// PendingAuditRecoveryError is returned only after the file-backed mutation
+// has completed but promotion of its already-durable prepared audit intent has
+// failed. Its public message omits the storage error and mutation metadata.
+type PendingAuditRecoveryError struct {
+	RequestID string
+	cause     error
+}
+
+func (err *PendingAuditRecoveryError) Error() string { return ErrPendingAuditRecovery.Error() }
+
+func (err *PendingAuditRecoveryError) Unwrap() error { return ErrPendingAuditRecovery }
 
 type Kind string
 
@@ -56,11 +71,17 @@ func (service *Service) Apply(ctx context.Context, subject identity.Subject, cha
 	if err != nil {
 		return err
 	}
+	if err := mutation.Prepare(ctx); err != nil {
+		return err
+	}
 	if err := mutate(); err != nil {
 		_ = mutation.Failed(ctx, "", map[string]any{"operation": change.Operation})
 		return err
 	}
-	return mutation.Succeeded(ctx, "", map[string]any{"operation": change.Operation})
+	if err := mutation.Succeeded(ctx, "", map[string]any{"operation": change.Operation}); err != nil {
+		return &PendingAuditRecoveryError{RequestID: mutation.RequestID(), cause: err}
+	}
+	return nil
 }
 
 func (service *Service) BeginAsync(ctx context.Context, subject identity.Subject, change Change) (AsyncCompletion, error) {
@@ -72,6 +93,9 @@ func (service *Service) BeginAsync(ctx context.Context, subject identity.Subject
 		Metadata: map[string]any{"operation": change.Operation},
 	}, audit.ActionKnowledgeChanged)
 	if err != nil {
+		return nil, err
+	}
+	if err := mutation.Prepare(ctx); err != nil {
 		return nil, err
 	}
 	return func(completionContext context.Context, success bool, metadata map[string]any) error {

@@ -1,13 +1,16 @@
 package audit
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
 	"sort"
 	"sync"
 
+	"github.com/Juneoww/AIG_Custom/internal/platform/txcontext"
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 )
 
 type Repository interface {
@@ -25,12 +28,18 @@ type CompletionRepository interface {
 
 var (
 	ErrCompletionNotFound = errors.New("审计完成投递不存在")
+	ErrCompletionConflict = errors.New("审计完成投递状态冲突")
+	ErrCompletionNotReady = errors.New("审计完成投递尚未就绪")
 	ErrEventAlreadyExists = errors.New("审计事件已存在")
 )
 
 type GormRepository struct{ db *gorm.DB }
 
 func NewGormRepository(db *gorm.DB) *GormRepository { return &GormRepository{db: db} }
+
+// TransactionDB exposes the shared database handle to the governance service,
+// which is the sole owner of transaction lifecycle orchestration.
+func (repository *GormRepository) TransactionDB() *gorm.DB { return repository.db }
 
 func (repository *GormRepository) Init() error {
 	if repository == nil || repository.db == nil {
@@ -46,11 +55,11 @@ func (repository *GormRepository) Init() error {
 }
 
 func (repository *GormRepository) Append(ctx context.Context, event *Event) error {
-	return repository.db.WithContext(ctx).Create(event).Error
+	return txcontext.Gorm(ctx, repository.db).Create(event).Error
 }
 
 func (repository *GormRepository) List(ctx context.Context, filter Filter) ([]Event, error) {
-	query := repository.db.WithContext(ctx).Model(&Event{}).Order("occurred_at ASC, id ASC")
+	query := txcontext.Gorm(ctx, repository.db).Model(&Event{}).Order("occurred_at ASC, id ASC")
 	if filter.Action != "" {
 		query = query.Where("action = ?", filter.Action)
 	}
@@ -69,12 +78,35 @@ func (repository *GormRepository) List(ctx context.Context, filter Filter) ([]Ev
 }
 
 func (repository *GormRepository) EnqueueCompletion(ctx context.Context, completion *CompletionOutbox) error {
-	return repository.db.WithContext(ctx).Create(completion).Error
+	result := txcontext.Gorm(ctx, repository.db).Clauses(clause.OnConflict{
+		Columns: []clause.Column{{Name: "id"}},
+		DoUpdates: clause.AssignmentColumns([]string{
+			"actor_user_id", "actor_username", "actor_role", "action", "resource_type", "resource_id",
+			"outcome", "client_ip", "metadata", "state", "ready_at",
+		}),
+		Where: clause.Where{Exprs: []clause.Expression{
+			clause.Eq{Column: clause.Column{Table: clause.CurrentTable, Name: "state"}, Value: CompletionStatePrepared},
+		}},
+	}).Create(completion)
+	if result.Error != nil {
+		return result.Error
+	}
+	if result.RowsAffected > 0 {
+		return nil
+	}
+	existing, err := repository.Completion(ctx, completion.ID)
+	if err != nil {
+		return err
+	}
+	if completionRetryCompatible(existing, completion) {
+		return nil
+	}
+	return ErrCompletionConflict
 }
 
 func (repository *GormRepository) Completion(ctx context.Context, id string) (*CompletionOutbox, error) {
 	var completion CompletionOutbox
-	if err := repository.db.WithContext(ctx).Where("id = ?", id).First(&completion).Error; err != nil {
+	if err := txcontext.Gorm(ctx, repository.db).Where("id = ?", id).First(&completion).Error; err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			return nil, ErrCompletionNotFound
 		}
@@ -85,12 +117,12 @@ func (repository *GormRepository) Completion(ctx context.Context, id string) (*C
 
 func (repository *GormRepository) ListPendingCompletions(ctx context.Context, limit int) ([]CompletionOutbox, error) {
 	var completions []CompletionOutbox
-	err := repository.db.WithContext(ctx).Where("delivered_at IS NULL").Order("created_at ASC, id ASC").Limit(normalizedLimit(limit)).Find(&completions).Error
+	err := txcontext.Gorm(ctx, repository.db).Where("delivered_at IS NULL").Order("created_at ASC, id ASC").Limit(normalizedLimit(limit)).Find(&completions).Error
 	return completions, err
 }
 
 func (repository *GormRepository) UpdateCompletion(ctx context.Context, completion *CompletionOutbox) error {
-	result := repository.db.WithContext(ctx).Save(completion)
+	result := txcontext.Gorm(ctx, repository.db).Save(completion)
 	if result.Error != nil {
 		return result.Error
 	}
@@ -102,7 +134,7 @@ func (repository *GormRepository) UpdateCompletion(ctx context.Context, completi
 
 func (repository *GormRepository) EventExists(ctx context.Context, id string) (bool, error) {
 	var count int64
-	err := repository.db.WithContext(ctx).Model(&Event{}).Where("id = ?", id).Count(&count).Error
+	err := txcontext.Gorm(ctx, repository.db).Model(&Event{}).Where("id = ?", id).Count(&count).Error
 	return count > 0, err
 }
 
@@ -137,6 +169,10 @@ func cloneCompletion(completion *CompletionOutbox) *CompletionOutbox {
 		deliveredAt := *completion.DeliveredAt
 		copy.DeliveredAt = &deliveredAt
 	}
+	if completion.ReadyAt != nil {
+		readyAt := *completion.ReadyAt
+		copy.ReadyAt = &readyAt
+	}
 	return &copy
 }
 
@@ -146,11 +182,41 @@ func (repository *MemoryRepository) EnqueueCompletion(_ context.Context, complet
 	if repository.completions == nil {
 		repository.completions = map[string]*CompletionOutbox{}
 	}
-	if _, exists := repository.completions[completion.ID]; exists {
-		return errors.New("审计完成投递已存在")
+	existing, exists := repository.completions[completion.ID]
+	if exists {
+		if existing.State == CompletionStatePrepared {
+			if !completionIdentityCompatible(existing, completion) {
+				return ErrCompletionConflict
+			}
+			updated := cloneCompletion(completion)
+			updated.CreatedAt = existing.CreatedAt
+			repository.completions[completion.ID] = updated
+			return nil
+		}
+		if completionRetryCompatible(existing, completion) {
+			return nil
+		}
+		return ErrCompletionConflict
 	}
 	repository.completions[completion.ID] = cloneCompletion(completion)
 	return nil
+}
+
+func completionRetryCompatible(existing, desired *CompletionOutbox) bool {
+	if !completionIdentityCompatible(existing, desired) {
+		return false
+	}
+	if desired.State == CompletionStatePrepared && existing.State == CompletionStateReady {
+		return true
+	}
+	return existing.State == desired.State && existing.Outcome == desired.Outcome && bytes.Equal(existing.Metadata, desired.Metadata)
+}
+
+func completionIdentityCompatible(existing, desired *CompletionOutbox) bool {
+	return existing.ID == desired.ID && existing.EventID == desired.EventID && existing.RequestID == desired.RequestID &&
+		existing.ActorUserID == desired.ActorUserID && existing.ActorUsername == desired.ActorUsername && existing.ActorRole == desired.ActorRole &&
+		existing.Action == desired.Action && existing.ResourceType == desired.ResourceType && existing.ResourceID == desired.ResourceID &&
+		existing.ClientIP == desired.ClientIP
 }
 
 func (repository *MemoryRepository) Completion(_ context.Context, id string) (*CompletionOutbox, error) {

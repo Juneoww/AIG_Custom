@@ -11,6 +11,7 @@ import (
 
 	"github.com/Juneoww/AIG_Custom/internal/platform/audit"
 	"github.com/Juneoww/AIG_Custom/internal/platform/identity"
+	"github.com/Juneoww/AIG_Custom/internal/platform/txcontext"
 	"github.com/google/uuid"
 	"gorm.io/gorm"
 )
@@ -44,12 +45,12 @@ func (repository *GormRepository) Init() error {
 }
 
 func (repository *GormRepository) Create(ctx context.Context, model *Model) error {
-	return repository.db.WithContext(ctx).Create(model).Error
+	return txcontext.Gorm(ctx, repository.db).Create(model).Error
 }
 
 func (repository *GormRepository) Get(ctx context.Context, id string) (*Model, error) {
 	var model Model
-	if err := repository.db.WithContext(ctx).Where("id = ?", id).First(&model).Error; err != nil {
+	if err := txcontext.Gorm(ctx, repository.db).Where("id = ?", id).First(&model).Error; err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			return nil, ErrNotFound
 		}
@@ -60,11 +61,11 @@ func (repository *GormRepository) Get(ctx context.Context, id string) (*Model, e
 
 func (repository *GormRepository) List(ctx context.Context) ([]Model, error) {
 	var models []Model
-	return models, repository.db.WithContext(ctx).Order("created_at ASC, id ASC").Find(&models).Error
+	return models, txcontext.Gorm(ctx, repository.db).Order("created_at ASC, id ASC").Find(&models).Error
 }
 
 func (repository *GormRepository) Update(ctx context.Context, model *Model) error {
-	result := repository.db.WithContext(ctx).Save(model)
+	result := txcontext.Gorm(ctx, repository.db).Save(model)
 	if result.Error != nil {
 		return result.Error
 	}
@@ -75,7 +76,7 @@ func (repository *GormRepository) Update(ctx context.Context, model *Model) erro
 }
 
 func (repository *GormRepository) Delete(ctx context.Context, id string) error {
-	result := repository.db.WithContext(ctx).Delete(&Model{}, "id = ?", id)
+	result := txcontext.Gorm(ctx, repository.db).Delete(&Model{}, "id = ?", id)
 	if result.Error != nil {
 		return result.Error
 	}
@@ -198,11 +199,9 @@ func (service *Service) Create(ctx context.Context, subject identity.Subject, in
 	if err != nil {
 		return View{}, err
 	}
-	if err := service.repository.Create(ctx, model); err != nil {
-		_ = mutation.Failed(ctx, "", modelAuditMetadata(model))
-		return View{}, err
-	}
-	if err := mutation.Succeeded(ctx, "", modelAuditMetadata(model)); err != nil {
+	if err := mutation.Run(ctx, "", modelAuditMetadata(model), func(transactionContext context.Context) error {
+		return service.repository.Create(transactionContext, model)
+	}); err != nil {
 		return View{}, err
 	}
 	return viewOf(model), nil
@@ -272,11 +271,9 @@ func (service *Service) Update(ctx context.Context, subject identity.Subject, id
 	if err != nil {
 		return View{}, err
 	}
-	if err := service.repository.Update(ctx, model); err != nil {
-		_ = mutation.Failed(ctx, "", modelAuditMetadata(model))
-		return View{}, err
-	}
-	if err := mutation.Succeeded(ctx, "", modelAuditMetadata(model)); err != nil {
+	if err := mutation.Run(ctx, "", modelAuditMetadata(model), func(transactionContext context.Context) error {
+		return service.repository.Update(transactionContext, model)
+	}); err != nil {
 		return View{}, err
 	}
 	return viewOf(model), nil
@@ -294,11 +291,9 @@ func (service *Service) Delete(ctx context.Context, subject identity.Subject, id
 	if err != nil {
 		return err
 	}
-	if err := service.repository.Delete(ctx, id); err != nil {
-		_ = mutation.Failed(ctx, "", modelAuditMetadata(model))
-		return err
-	}
-	return mutation.Succeeded(ctx, "", modelAuditMetadata(model))
+	return mutation.Run(ctx, "", modelAuditMetadata(model), func(transactionContext context.Context) error {
+		return service.repository.Delete(transactionContext, id)
+	})
 }
 
 func (service *Service) RotateEncryption(ctx context.Context, subject identity.Subject, id string) error {
@@ -321,11 +316,9 @@ func (service *Service) RotateEncryption(ctx context.Context, subject identity.S
 	if err != nil {
 		return err
 	}
-	if err := service.repository.Update(ctx, model); err != nil {
-		_ = mutation.Failed(ctx, "", modelAuditMetadata(model))
-		return err
-	}
-	return mutation.Succeeded(ctx, "", modelAuditMetadata(model))
+	return mutation.Run(ctx, "", modelAuditMetadata(model), func(transactionContext context.Context) error {
+		return service.repository.Update(transactionContext, model)
+	})
 }
 
 func canRead(subject identity.Subject, model *Model) bool {

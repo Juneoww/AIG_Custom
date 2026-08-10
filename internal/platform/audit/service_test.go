@@ -17,6 +17,59 @@ type failOnAppendRepository struct {
 	calls    int
 }
 
+type ambiguousCompletionRepository struct {
+	delegate  *MemoryRepository
+	uncertain bool
+}
+
+type ambiguousTransactionRecorder struct {
+	*Service
+	transactions int
+}
+
+func (recorder *ambiguousTransactionRecorder) WithinTransaction(ctx context.Context, apply func(context.Context) error) error {
+	recorder.transactions++
+	if err := apply(ctx); err != nil {
+		return err
+	}
+	return errors.New("transaction commit acknowledgement is uncertain")
+}
+
+func (repository *ambiguousCompletionRepository) Append(ctx context.Context, event *Event) error {
+	return repository.delegate.Append(ctx, event)
+}
+
+func (repository *ambiguousCompletionRepository) List(ctx context.Context, filter Filter) ([]Event, error) {
+	return repository.delegate.List(ctx, filter)
+}
+
+func (repository *ambiguousCompletionRepository) EnqueueCompletion(ctx context.Context, completion *CompletionOutbox) error {
+	if err := repository.delegate.EnqueueCompletion(ctx, completion); err != nil {
+		return err
+	}
+	if !repository.uncertain {
+		repository.uncertain = true
+		return errors.New("completion commit result is uncertain")
+	}
+	return nil
+}
+
+func (repository *ambiguousCompletionRepository) Completion(ctx context.Context, id string) (*CompletionOutbox, error) {
+	return repository.delegate.Completion(ctx, id)
+}
+
+func (repository *ambiguousCompletionRepository) ListPendingCompletions(ctx context.Context, limit int) ([]CompletionOutbox, error) {
+	return repository.delegate.ListPendingCompletions(ctx, limit)
+}
+
+func (repository *ambiguousCompletionRepository) UpdateCompletion(ctx context.Context, completion *CompletionOutbox) error {
+	return repository.delegate.UpdateCompletion(ctx, completion)
+}
+
+func (repository *ambiguousCompletionRepository) EventExists(ctx context.Context, id string) (bool, error) {
+	return repository.delegate.EventExists(ctx, id)
+}
+
 func (repository *failOnAppendRepository) Append(ctx context.Context, event *Event) error {
 	repository.calls++
 	if repository.calls == repository.failOn {
@@ -160,4 +213,151 @@ func TestMutationCompletionFailureQueuesDurableOutboxAndReconcilesIdempotently(t
 	events, err = delegate.List(ctx, Filter{})
 	require.NoError(t, err)
 	assert.Len(t, events, 2, "reconciliation must not duplicate a delivered completion")
+}
+
+func TestPersistCompletionRetryUsesStableOpaqueIDsAfterUncertainCommit(t *testing.T) {
+	ctx := context.Background()
+	actor := identity.Subject{UserID: "admin-id", Role: identity.RoleAdmin}
+	delegate := NewMemoryRepository()
+	service := NewService(&ambiguousCompletionRepository{delegate: delegate})
+	input := EventInput{
+		RequestID: "request-visible-correlation-id",
+		Action:    ActionModelCreated, ResourceType: "model", ResourceID: "model-id",
+		Outcome: OutcomeSuccess, Metadata: map[string]any{"phase": "succeeded"},
+	}
+
+	_, err := service.PersistCompletion(ctx, actor, input)
+	require.Error(t, err)
+	pending, err := service.PendingCompletions(ctx, actor, 10)
+	require.NoError(t, err)
+	require.Len(t, pending, 1)
+	first := pending[0]
+	assert.NotEqual(t, input.RequestID, first.ID)
+	assert.NotEqual(t, input.RequestID, first.EventID)
+
+	retriedID, err := service.PersistCompletion(ctx, actor, input)
+	require.NoError(t, err)
+	assert.Equal(t, first.ID, retriedID)
+	pending, err = service.PendingCompletions(ctx, actor, 10)
+	require.NoError(t, err)
+	require.Len(t, pending, 1)
+	assert.Equal(t, first.EventID, pending[0].EventID)
+
+	require.NoError(t, service.DeliverCompletion(ctx, retriedID))
+	require.NoError(t, service.DeliverCompletion(ctx, retriedID))
+	events, err := delegate.List(ctx, Filter{})
+	require.NoError(t, err)
+	assert.Len(t, events, 1)
+}
+
+func TestMutationRunTreatsUncertainCommitAsSuccessOnlyWhenStableCompletionIsReady(t *testing.T) {
+	ctx := context.Background()
+	actor := identity.Subject{UserID: "admin-id", Role: identity.RoleAdmin}
+	repository := NewMemoryRepository()
+	recorder := &ambiguousTransactionRecorder{Service: NewService(repository)}
+	const requestID = "uncertain-transaction-request"
+	mutation, err := BeginMutation(ctx, recorder, actor, EventInput{
+		RequestID: requestID, Action: ActionModelCreated, ResourceType: "model", ResourceID: "model-id",
+	})
+	require.NoError(t, err)
+	businessCalls := 0
+
+	err = mutation.Run(ctx, "", map[string]any{"scope": "global"}, func(context.Context) error {
+		businessCalls++
+		return nil
+	})
+	require.NoError(t, err)
+	assert.Equal(t, 1, businessCalls)
+	assert.Equal(t, 1, recorder.transactions)
+
+	completion, err := repository.Completion(ctx, stableCompletionID(requestID, "outbox"))
+	require.NoError(t, err)
+	assert.Equal(t, CompletionStateReady, completion.State)
+	assert.NotNil(t, completion.DeliveredAt)
+	events, err := repository.List(ctx, Filter{})
+	require.NoError(t, err)
+	require.Len(t, events, 2)
+	assert.Equal(t, OutcomePending, events[0].Outcome)
+	assert.Equal(t, OutcomeSuccess, events[1].Outcome)
+	assert.Equal(t, events[0].RequestID, events[1].RequestID)
+}
+
+func TestPreparedCompletionIsVisibleButReconcileDoesNotDeliverIt(t *testing.T) {
+	ctx := context.Background()
+	actor := identity.Subject{UserID: "admin-id", Role: identity.RoleAdmin}
+	repository := NewMemoryRepository()
+	service := NewService(repository)
+	mutation, err := BeginMutation(ctx, service, actor, EventInput{
+		Action: ActionKnowledgeChanged, ResourceType: "fingerprint", ResourceID: "demo",
+	})
+	require.NoError(t, err)
+	require.NoError(t, mutation.Prepare(ctx))
+
+	pending, err := service.PendingCompletions(ctx, actor, 10)
+	require.NoError(t, err)
+	require.Len(t, pending, 1)
+	assert.Equal(t, CompletionStatePrepared, pending[0].State)
+	reconciled, err := service.Reconcile(ctx, actor, 10)
+	require.NoError(t, err)
+	assert.Zero(t, reconciled)
+	events, err := repository.List(ctx, Filter{})
+	require.NoError(t, err)
+	require.Len(t, events, 1)
+	assert.Equal(t, OutcomePending, events[0].Outcome)
+
+	require.NoError(t, mutation.Succeeded(ctx, "", nil))
+	events, err = repository.List(ctx, Filter{})
+	require.NoError(t, err)
+	require.Len(t, events, 2)
+	assert.Equal(t, OutcomeSuccess, events[1].Outcome)
+}
+
+func TestFinalizePreparedRecoversOneCompletionWithoutRepeatingTheBusinessMutation(t *testing.T) {
+	ctx := context.Background()
+	actor := identity.Subject{UserID: "original-admin", Username: "original", Role: identity.RoleAdmin}
+	recoveryAdmin := identity.Subject{UserID: "recovery-admin", Username: "recovery", Role: identity.RoleAdmin}
+	repository := NewMemoryRepository()
+	service := NewService(repository)
+	const requestID = "knowledge-recovery-request"
+	mutation, err := BeginMutation(ctx, service, actor, EventInput{
+		RequestID: requestID, Action: ActionKnowledgeChanged, ResourceType: "fingerprint", ResourceID: "demo",
+		Metadata: map[string]any{"operation": "update"},
+	})
+	require.NoError(t, err)
+	require.NoError(t, mutation.Prepare(ctx))
+
+	completionID, err := service.FinalizePrepared(ctx, recoveryAdmin, requestID, OutcomeSuccess, map[string]any{
+		"files_updated": 1,
+		"api_token":     "must-be-redacted",
+	})
+	require.NoError(t, err)
+	assert.Equal(t, stableCompletionID(requestID, "outbox"), completionID)
+	// A recovery client can safely retry the same result, even if it no longer
+	// has the original metadata payload.
+	retriedID, err := service.FinalizePrepared(ctx, recoveryAdmin, requestID, OutcomeSuccess, nil)
+	require.NoError(t, err)
+	assert.Equal(t, completionID, retriedID)
+
+	_, err = service.FinalizePrepared(ctx, recoveryAdmin, requestID, OutcomeFailure, nil)
+	assert.ErrorIs(t, err, ErrCompletionConflict)
+	_, err = service.FinalizePrepared(ctx, recoveryAdmin, "missing-request", OutcomeSuccess, nil)
+	assert.ErrorIs(t, err, ErrCompletionNotFound)
+	_, err = service.FinalizePrepared(ctx, recoveryAdmin, requestID, OutcomePending, nil)
+	assert.ErrorIs(t, err, ErrInvalidCompletionOutcome)
+	for _, subject := range []identity.Subject{{Role: identity.RoleAuditor}, {Role: identity.RoleUser}} {
+		_, err = service.FinalizePrepared(ctx, subject, requestID, OutcomeSuccess, nil)
+		assert.ErrorIs(t, err, ErrForbidden)
+	}
+
+	reconciled, err := service.Reconcile(ctx, recoveryAdmin, 10)
+	require.NoError(t, err)
+	assert.Equal(t, 1, reconciled)
+	events, err := repository.List(ctx, Filter{})
+	require.NoError(t, err)
+	require.Len(t, events, 2)
+	assert.Equal(t, OutcomeSuccess, events[1].Outcome)
+	assert.Equal(t, actor.UserID, events[1].ActorUserID, "recovery preserves the original mutation actor")
+	assert.Equal(t, requestID, events[1].RequestID)
+	assert.NotContains(t, string(events[1].Metadata), "must-be-redacted")
+	assert.Contains(t, string(events[1].Metadata), RedactedValue)
 }

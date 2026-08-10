@@ -17,6 +17,38 @@ type failOnRecord struct {
 	calls    int
 }
 
+type completionIntentFailingRepository struct {
+	delegate *audit.MemoryRepository
+}
+
+func (repository *completionIntentFailingRepository) Append(ctx context.Context, event *audit.Event) error {
+	return repository.delegate.Append(ctx, event)
+}
+
+func (repository *completionIntentFailingRepository) List(ctx context.Context, filter audit.Filter) ([]audit.Event, error) {
+	return repository.delegate.List(ctx, filter)
+}
+
+func (repository *completionIntentFailingRepository) EnqueueCompletion(context.Context, *audit.CompletionOutbox) error {
+	return errors.New("injected completion intent failure")
+}
+
+func (repository *completionIntentFailingRepository) Completion(ctx context.Context, id string) (*audit.CompletionOutbox, error) {
+	return repository.delegate.Completion(ctx, id)
+}
+
+func (repository *completionIntentFailingRepository) ListPendingCompletions(ctx context.Context, limit int) ([]audit.CompletionOutbox, error) {
+	return repository.delegate.ListPendingCompletions(ctx, limit)
+}
+
+func (repository *completionIntentFailingRepository) UpdateCompletion(ctx context.Context, completion *audit.CompletionOutbox) error {
+	return repository.delegate.UpdateCompletion(ctx, completion)
+}
+
+func (repository *completionIntentFailingRepository) EventExists(ctx context.Context, id string) (bool, error) {
+	return repository.delegate.EventExists(ctx, id)
+}
+
 func (recorder *failOnRecord) Record(ctx context.Context, subject identity.Subject, input audit.EventInput) error {
 	recorder.calls++
 	if recorder.calls == recorder.failOn {
@@ -104,7 +136,50 @@ func TestKnowledgeMutationRequiresDurableAuditIntentBeforeChangingContent(t *tes
 		return nil
 	})
 	assert.Error(t, err)
+	assert.NotErrorIs(t, err, ErrPendingAuditRecovery)
 	assert.Equal(t, "old", content)
+}
+
+func TestKnowledgeMutationDoesNotStartWhenCompletionIntentCannotBePrepared(t *testing.T) {
+	ctx := context.Background()
+	admin := identity.Subject{UserID: "admin-id", Role: identity.RoleAdmin}
+	content := "old"
+	auditRepository := audit.NewMemoryRepository()
+	auditService := audit.NewService(&completionIntentFailingRepository{delegate: auditRepository})
+	service := NewService(auditService)
+
+	err := service.Apply(ctx, admin, Change{Kind: KindFingerprint, Operation: OperationUpdate, ResourceID: "demo"}, func() error {
+		content = "new"
+		return nil
+	})
+	require.Error(t, err)
+	assert.NotErrorIs(t, err, ErrPendingAuditRecovery)
+	assert.Equal(t, "old", content)
+	events, listErr := auditRepository.List(ctx, audit.Filter{})
+	require.NoError(t, listErr)
+	require.Len(t, events, 1)
+	assert.Equal(t, audit.OutcomePending, events[0].Outcome)
+}
+
+func TestKnowledgeBusinessFailureRemainsTheOriginalError(t *testing.T) {
+	ctx := context.Background()
+	admin := identity.Subject{UserID: "admin-id", Role: identity.RoleAdmin}
+	repository := audit.NewMemoryRepository()
+	service := NewService(audit.NewService(repository))
+	businessErr := errors.New("legacy mutation rejected")
+	mutations := 0
+
+	err := service.Apply(ctx, admin, Change{Kind: KindFingerprint, Operation: OperationUpdate, ResourceID: "demo"}, func() error {
+		mutations++
+		return businessErr
+	})
+	assert.ErrorIs(t, err, businessErr)
+	assert.NotErrorIs(t, err, ErrPendingAuditRecovery)
+	assert.Equal(t, 1, mutations)
+	events, listErr := repository.List(ctx, audit.Filter{})
+	require.NoError(t, listErr)
+	require.Len(t, events, 2)
+	assert.Equal(t, audit.OutcomeFailure, events[1].Outcome)
 }
 
 func TestAsyncKnowledgeAuditSeparatesRequestFromActualCompletion(t *testing.T) {

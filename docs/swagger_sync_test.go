@@ -63,6 +63,7 @@ func TestGeneratedSwaggerArtifactsStayInSync(t *testing.T) {
 		}{
 			{"/api/v1/platform/admin/users", "post"},
 			{"/api/v1/platform/admin/audit-events", "get"},
+			{"/api/v1/platform/admin/audit-events/prepared/{requestID}/finalize", "post"},
 			{"/api/v1/platform/admin/audit-events/reconcile", "post"},
 			{"/api/v1/platform/models", "get"},
 			{"/api/v1/platform/models", "post"},

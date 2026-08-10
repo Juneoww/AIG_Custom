@@ -3,6 +3,7 @@ package admin
 import (
 	"time"
 
+	"github.com/Juneoww/AIG_Custom/internal/platform/audit"
 	"github.com/Juneoww/AIG_Custom/internal/platform/identity"
 )
 
@@ -18,6 +19,11 @@ type AssignRoleRequest struct {
 
 type SetActiveRequest struct {
 	Active *bool `json:"active" binding:"required"`
+}
+
+type FinalizePreparedAuditRequest struct {
+	Outcome  audit.Outcome  `json:"outcome" binding:"required"`
+	Metadata map[string]any `json:"metadata,omitempty"`
 }
 
 type UserResponse struct {

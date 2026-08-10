@@ -151,12 +151,13 @@ func runCreatePasswordResetForService(ctx context.Context, service *identity.Ser
 	if err != nil {
 		return err
 	}
-	token, err := service.CreatePasswordResetForUsername(ctx, trimmedUsername)
+	var token string
+	err = mutation.Run(ctx, "", map[string]any{"delivery": "local_cli"}, func(transactionContext context.Context) error {
+		var resetErr error
+		token, resetErr = service.CreatePasswordResetForUsername(transactionContext, trimmedUsername)
+		return resetErr
+	})
 	if err != nil {
-		_ = mutation.Failed(ctx, "", map[string]any{"delivery": "local_cli"})
-		return err
-	}
-	if err := mutation.Succeeded(ctx, "", map[string]any{"delivery": "local_cli"}); err != nil {
 		return err
 	}
 	fmt.Fprintln(stdout, "SENSITIVE one-time password reset token; deliver securely and do not log or persist it.")

@@ -7,6 +7,7 @@ import (
 	"sort"
 	"sync"
 
+	"github.com/Juneoww/AIG_Custom/internal/platform/txcontext"
 	"gorm.io/gorm"
 )
 
@@ -50,12 +51,12 @@ func (r *GormRepository) Init() error {
 }
 
 func (r *GormRepository) CreateUser(ctx context.Context, user *User) error {
-	return r.db.WithContext(ctx).Create(user).Error
+	return txcontext.Gorm(ctx, r.db).Create(user).Error
 }
 
 func (r *GormRepository) ListUsers(ctx context.Context) ([]User, error) {
 	var users []User
-	return users, r.db.WithContext(ctx).Order("created_at ASC, id ASC").Find(&users).Error
+	return users, txcontext.Gorm(ctx, r.db).Order("created_at ASC, id ASC").Find(&users).Error
 }
 
 // CreateInitialAdministrator atomically creates the first administrator.
@@ -85,54 +86,54 @@ func (r *GormRepository) CreateInitialAdministrator(ctx context.Context, user *U
 }
 func (r *GormRepository) UserByUsername(ctx context.Context, username string) (*User, error) {
 	var user User
-	if err := r.db.WithContext(ctx).Where("username = ?", username).First(&user).Error; err != nil {
+	if err := txcontext.Gorm(ctx, r.db).Where("username = ?", username).First(&user).Error; err != nil {
 		return nil, mapNotFound(err)
 	}
 	return &user, nil
 }
 func (r *GormRepository) UserByID(ctx context.Context, id string) (*User, error) {
 	var user User
-	if err := r.db.WithContext(ctx).Where("id = ?", id).First(&user).Error; err != nil {
+	if err := txcontext.Gorm(ctx, r.db).Where("id = ?", id).First(&user).Error; err != nil {
 		return nil, mapNotFound(err)
 	}
 	return &user, nil
 }
 func (r *GormRepository) UpdateUser(ctx context.Context, user *User) error {
-	return r.db.WithContext(ctx).Save(user).Error
+	return txcontext.Gorm(ctx, r.db).Save(user).Error
 }
 func (r *GormRepository) HasAdministrator(ctx context.Context) (bool, error) {
 	var count int64
-	err := r.db.WithContext(ctx).Model(&User{}).Where("role = ?", RoleAdmin).Count(&count).Error
+	err := txcontext.Gorm(ctx, r.db).Model(&User{}).Where("role = ?", RoleAdmin).Count(&count).Error
 	return count > 0, err
 }
 func (r *GormRepository) CreateSession(ctx context.Context, session *Session) error {
-	return r.db.WithContext(ctx).Create(session).Error
+	return txcontext.Gorm(ctx, r.db).Create(session).Error
 }
 func (r *GormRepository) SessionByTokenHash(ctx context.Context, hash string) (*Session, error) {
 	var session Session
-	if err := r.db.WithContext(ctx).Where("token_hash = ?", hash).First(&session).Error; err != nil {
+	if err := txcontext.Gorm(ctx, r.db).Where("token_hash = ?", hash).First(&session).Error; err != nil {
 		return nil, mapNotFound(err)
 	}
 	return &session, nil
 }
 func (r *GormRepository) UpdateSession(ctx context.Context, session *Session) error {
-	return r.db.WithContext(ctx).Save(session).Error
+	return txcontext.Gorm(ctx, r.db).Save(session).Error
 }
 func (r *GormRepository) RevokeUserSessions(ctx context.Context, userID string) error {
-	return r.db.WithContext(ctx).Model(&Session{}).Where("user_id = ? AND revoked_at IS NULL", userID).Update("revoked_at", gorm.Expr("CURRENT_TIMESTAMP")).Error
+	return txcontext.Gorm(ctx, r.db).Model(&Session{}).Where("user_id = ? AND revoked_at IS NULL", userID).Update("revoked_at", gorm.Expr("CURRENT_TIMESTAMP")).Error
 }
 func (r *GormRepository) CreatePasswordReset(ctx context.Context, reset *PasswordReset) error {
-	return r.db.WithContext(ctx).Create(reset).Error
+	return txcontext.Gorm(ctx, r.db).Create(reset).Error
 }
 func (r *GormRepository) PasswordResetByHash(ctx context.Context, hash string) (*PasswordReset, error) {
 	var reset PasswordReset
-	if err := r.db.WithContext(ctx).Where("token_hash = ?", hash).First(&reset).Error; err != nil {
+	if err := txcontext.Gorm(ctx, r.db).Where("token_hash = ?", hash).First(&reset).Error; err != nil {
 		return nil, mapNotFound(err)
 	}
 	return &reset, nil
 }
 func (r *GormRepository) UpdatePasswordReset(ctx context.Context, reset *PasswordReset) error {
-	return r.db.WithContext(ctx).Save(reset).Error
+	return txcontext.Gorm(ctx, r.db).Save(reset).Error
 }
 func mapNotFound(err error) error {
 	if errors.Is(err, gorm.ErrRecordNotFound) {

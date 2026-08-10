@@ -34,6 +34,13 @@ const (
 	OutcomeFailure Outcome = "failure"
 )
 
+type CompletionState string
+
+const (
+	CompletionStatePrepared CompletionState = "prepared"
+	CompletionStateReady    CompletionState = "ready"
+)
+
 // Event is append-only governance evidence. It deliberately has no secret
 // fields and exposes no update/delete API through its repository.
 type Event struct {
@@ -76,7 +83,7 @@ type Filter struct {
 type CompletionOutbox struct {
 	ID            string          `gorm:"primaryKey;column:id" json:"id"`
 	EventID       string          `gorm:"uniqueIndex;not null" json:"event_id"`
-	RequestID     string          `gorm:"index;not null" json:"request_id"`
+	RequestID     string          `gorm:"uniqueIndex;not null" json:"request_id"`
 	ActorUserID   string          `gorm:"index" json:"actor_user_id,omitempty"`
 	ActorUsername string          `gorm:"index" json:"actor_username,omitempty"`
 	ActorRole     string          `gorm:"index" json:"actor_role,omitempty"`
@@ -86,7 +93,9 @@ type CompletionOutbox struct {
 	Outcome       Outcome         `gorm:"index;not null" json:"outcome"`
 	ClientIP      string          `json:"client_ip,omitempty"`
 	Metadata      json.RawMessage `gorm:"type:jsonb;not null" json:"metadata"`
+	State         CompletionState `gorm:"index;not null;default:ready" json:"state"`
 	CreatedAt     time.Time       `gorm:"index;not null" json:"created_at"`
+	ReadyAt       *time.Time      `gorm:"index" json:"ready_at,omitempty"`
 	Attempts      int             `gorm:"not null;default:0" json:"attempts"`
 	DeliveredAt   *time.Time      `gorm:"index" json:"delivered_at,omitempty"`
 }

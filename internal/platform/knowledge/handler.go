@@ -17,6 +17,8 @@ const governedMutationContextKey = "platform_knowledge_governed_mutation"
 
 const asyncCompletionContextKey = "platform_knowledge_async_completion"
 
+const AuditRequestIDHeader = "X-Audit-Request-ID"
+
 type Handler struct{ service *Service }
 
 func NewHandler(service *Service) *Handler { return &Handler{service: service} }
@@ -43,12 +45,17 @@ func (handler *Handler) Govern(kind Kind, operation Operation, next gin.HandlerF
 			return nil
 		})
 		c.Writer = originalWriter
+		var pendingRecovery *PendingAuditRecoveryError
 		switch {
 		case errors.Is(err, ErrForbidden):
 			if !c.Writer.Written() {
 				c.Status(http.StatusForbidden)
 			}
 		case errors.Is(err, errLegacyMutationRejected):
+			bufferedWriter.commit()
+			return
+		case errors.As(err, &pendingRecovery):
+			bufferedWriter.Header().Set(AuditRequestIDHeader, pendingRecovery.RequestID)
 			bufferedWriter.commit()
 			return
 		case err != nil:
@@ -83,13 +90,15 @@ func (handler *Handler) GovernAsync(kind Kind, operation Operation, next gin.Han
 		completed := false
 		wrappedCompletion := AsyncCompletion(func(completionContext context.Context, success bool, metadata map[string]any) error {
 			completionMu.Lock()
+			defer completionMu.Unlock()
 			if completed {
-				completionMu.Unlock()
 				return nil
 			}
+			if err := completion(completionContext, success, metadata); err != nil {
+				return err
+			}
 			completed = true
-			completionMu.Unlock()
-			return completion(completionContext, success, metadata)
+			return nil
 		})
 		c.Set(governedMutationContextKey, true)
 		c.Set(asyncCompletionContextKey, wrappedCompletion)
