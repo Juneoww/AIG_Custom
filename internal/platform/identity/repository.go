@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"sort"
 	"sync"
+	"time"
 
 	"github.com/Juneoww/AIG_Custom/internal/platform/txcontext"
 	"gorm.io/gorm"
@@ -19,7 +20,9 @@ type Repository interface {
 	ListUsers(context.Context) ([]User, error)
 	UserByUsername(context.Context, string) (*User, error)
 	UserByID(context.Context, string) (*User, error)
-	UpdateUser(context.Context, *User) error
+	UpdateUserRole(context.Context, string, Role, time.Time) error
+	UpdateUserActive(context.Context, string, bool, time.Time) error
+	UpdateUserPassword(context.Context, string, string, bool, time.Time) error
 	HasAdministrator(context.Context) (bool, error)
 	CreateSession(context.Context, *Session) error
 	SessionByTokenHash(context.Context, string) (*Session, error)
@@ -98,8 +101,33 @@ func (r *GormRepository) UserByID(ctx context.Context, id string) (*User, error)
 	}
 	return &user, nil
 }
-func (r *GormRepository) UpdateUser(ctx context.Context, user *User) error {
-	return txcontext.Gorm(ctx, r.db).Save(user).Error
+func (r *GormRepository) UpdateUserRole(ctx context.Context, userID string, role Role, updatedAt time.Time) error {
+	return mapUpdateResult(txcontext.Gorm(ctx, r.db).Model(&User{}).Where("id = ?", userID).Updates(map[string]interface{}{
+		"role":       role,
+		"updated_at": updatedAt,
+	}))
+}
+func (r *GormRepository) UpdateUserActive(ctx context.Context, userID string, active bool, updatedAt time.Time) error {
+	return mapUpdateResult(txcontext.Gorm(ctx, r.db).Model(&User{}).Where("id = ?", userID).Updates(map[string]interface{}{
+		"active":     active,
+		"updated_at": updatedAt,
+	}))
+}
+func (r *GormRepository) UpdateUserPassword(ctx context.Context, userID, passwordHash string, mustChangePassword bool, updatedAt time.Time) error {
+	return mapUpdateResult(txcontext.Gorm(ctx, r.db).Model(&User{}).Where("id = ?", userID).Updates(map[string]interface{}{
+		"password_hash":        passwordHash,
+		"must_change_password": mustChangePassword,
+		"updated_at":           updatedAt,
+	}))
+}
+func mapUpdateResult(result *gorm.DB) error {
+	if result.Error != nil {
+		return result.Error
+	}
+	if result.RowsAffected == 0 {
+		return ErrNotFound
+	}
+	return nil
 }
 func (r *GormRepository) HasAdministrator(ctx context.Context) (bool, error) {
 	var count int64
@@ -214,14 +242,38 @@ func (r *MemoryRepository) UserByID(_ context.Context, id string) (*User, error)
 	}
 	return cloneUser(v), nil
 }
-func (r *MemoryRepository) UpdateUser(_ context.Context, v *User) error {
+func (r *MemoryRepository) UpdateUserRole(_ context.Context, userID string, role Role, updatedAt time.Time) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if _, ok := r.usersByID[v.ID]; !ok {
+	user, ok := r.usersByID[userID]
+	if !ok {
 		return ErrNotFound
 	}
-	r.users[v.Username] = cloneUser(v)
-	r.usersByID[v.ID] = r.users[v.Username]
+	user.Role = role
+	user.UpdatedAt = updatedAt
+	return nil
+}
+func (r *MemoryRepository) UpdateUserActive(_ context.Context, userID string, active bool, updatedAt time.Time) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	user, ok := r.usersByID[userID]
+	if !ok {
+		return ErrNotFound
+	}
+	user.Active = active
+	user.UpdatedAt = updatedAt
+	return nil
+}
+func (r *MemoryRepository) UpdateUserPassword(_ context.Context, userID, passwordHash string, mustChangePassword bool, updatedAt time.Time) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	user, ok := r.usersByID[userID]
+	if !ok {
+		return ErrNotFound
+	}
+	user.PasswordHash = passwordHash
+	user.MustChangePassword = mustChangePassword
+	user.UpdatedAt = updatedAt
 	return nil
 }
 func (r *MemoryRepository) HasAdministrator(_ context.Context) (bool, error) {

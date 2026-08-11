@@ -33,10 +33,155 @@ import (
 	"trpc.group/trpc-go/trpc-go/log"
 )
 
-// registerPlatformModelRoutes exposes the encrypted platform model service.
-// The legacy handlers below remain available only as an internal engine
-// compatibility implementation and are no longer mounted for browsers.
+// registerPlatformModelRoutes preserves the application model API contract
+// while routing every operation through encrypted platform storage.
 func registerPlatformModelRoutes(group *gin.RouterGroup, service *platformmodels.Service) {
+	group.GET("", func(c *gin.Context) {
+		subject, ok := identity.CurrentSubject(c)
+		if !ok {
+			c.Status(http.StatusUnauthorized)
+			return
+		}
+		views, err := service.List(c.Request.Context(), subject)
+		if err != nil {
+			respondLegacyPlatformModelError(c, err, "获取模型列表失败")
+			return
+		}
+		result := make([]gin.H, 0, len(views))
+		for _, view := range views {
+			result = append(result, legacyPlatformModelView(view))
+		}
+		c.JSON(http.StatusOK, gin.H{"status": 0, "message": "获取模型列表成功", "data": result})
+	})
+	group.GET("/:modelId", func(c *gin.Context) {
+		subject, ok := identity.CurrentSubject(c)
+		if !ok {
+			c.Status(http.StatusUnauthorized)
+			return
+		}
+		view, err := service.Get(c.Request.Context(), subject, c.Param("modelId"))
+		if err != nil {
+			respondLegacyPlatformModelError(c, err, "模型不存在")
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"status": 0, "message": "获取模型详情成功", "data": legacyPlatformModelView(view)})
+	})
+	group.POST("", func(c *gin.Context) {
+		subject, ok := identity.CurrentSubject(c)
+		if !ok {
+			c.Status(http.StatusUnauthorized)
+			return
+		}
+		var request CreateModelRequest
+		if err := c.ShouldBindJSON(&request); err != nil || strings.TrimSpace(request.ModelID) == "" ||
+			strings.TrimSpace(request.Model.Model) == "" || request.Model.Token == "" || strings.TrimSpace(request.Model.BaseURL) == "" {
+			respondLegacyPlatformModelError(c, platformmodels.ErrInvalid, "请求参数错误")
+			return
+		}
+		if request.Model.Limit == 0 {
+			request.Model.Limit = 1000
+		}
+		scope, err := legacyPlatformModelScope(subject)
+		if err != nil {
+			respondLegacyPlatformModelError(c, err, "无权创建模型")
+			return
+		}
+		_, err = service.CreateWithCompatibilityID(c.Request.Context(), subject, request.ModelID, platformmodels.CreateInput{
+			Name: request.ModelID, ProviderModel: request.Model.Model, BaseURL: request.Model.BaseURL,
+			Token: request.Model.Token, Scope: scope, Note: request.Model.Note, Limit: request.Model.Limit,
+		})
+		if err != nil {
+			respondLegacyPlatformModelError(c, err, "模型创建失败")
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"status": 0, "message": "模型创建成功", "data": nil})
+	})
+	group.PUT("/:modelId", func(c *gin.Context) {
+		subject, ok := identity.CurrentSubject(c)
+		if !ok {
+			c.Status(http.StatusUnauthorized)
+			return
+		}
+		var request UpdateModelRequest
+		if err := c.ShouldBindJSON(&request); err != nil {
+			respondLegacyPlatformModelError(c, platformmodels.ErrInvalid, "请求参数错误")
+			return
+		}
+		input := platformmodels.UpdateInput{
+			ProviderModel: &request.Model.Model,
+			Note:          &request.Model.Note,
+			Limit:         &request.Model.Limit,
+		}
+		if request.Model.BaseURL != "" {
+			input.BaseURL = &request.Model.BaseURL
+		}
+		if request.Model.Token != "" && request.Model.Token != platformmodels.MaskedToken {
+			input.Token = &request.Model.Token
+		}
+		if _, err := service.Update(c.Request.Context(), subject, c.Param("modelId"), input); err != nil {
+			respondLegacyPlatformModelError(c, err, "模型更新失败")
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"status": 0, "message": "模型更新成功", "data": nil})
+	})
+	group.DELETE("", func(c *gin.Context) {
+		subject, ok := identity.CurrentSubject(c)
+		if !ok {
+			c.Status(http.StatusUnauthorized)
+			return
+		}
+		var request DeleteModelRequest
+		if err := c.ShouldBindJSON(&request); err != nil || len(request.ModelIDs) == 0 {
+			respondLegacyPlatformModelError(c, platformmodels.ErrInvalid, "模型ID列表不能为空")
+			return
+		}
+		for _, id := range request.ModelIDs {
+			if err := service.CheckWritable(c.Request.Context(), subject, id); err != nil {
+				respondLegacyPlatformModelError(c, err, "检查模型权限失败")
+				return
+			}
+		}
+		for _, id := range request.ModelIDs {
+			if err := service.Delete(c.Request.Context(), subject, id); err != nil {
+				respondLegacyPlatformModelError(c, err, "删除模型失败")
+				return
+			}
+		}
+		c.JSON(http.StatusOK, gin.H{"status": 0, "message": "删除成功", "data": nil})
+	})
+}
+
+func legacyPlatformModelScope(subject identity.Subject) (platformmodels.Scope, error) {
+	switch subject.Role {
+	case identity.RoleAdmin:
+		return platformmodels.ScopeGlobal, nil
+	case identity.RoleUser:
+		return platformmodels.ScopePrivate, nil
+	default:
+		return "", platformmodels.ErrForbidden
+	}
+}
+
+func legacyPlatformModelView(view platformmodels.View) gin.H {
+	return gin.H{
+		"model_id": view.ID,
+		"model": gin.H{
+			"model": view.ProviderModel, "token": platformmodels.MaskedToken,
+			"base_url": view.BaseURL, "note": view.Note, "limit": view.Limit,
+		},
+	}
+}
+
+func respondLegacyPlatformModelError(c *gin.Context, err error, message string) {
+	if errors.Is(err, platformmodels.ErrForbidden) {
+		c.Status(http.StatusForbidden)
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"status": 1, "message": message, "data": nil})
+}
+
+// registerGovernanceModelRoutes exposes the new flat platform contract.
+func registerGovernanceModelRoutes(group *gin.RouterGroup, service *platformmodels.Service) {
 	group.GET("", func(c *gin.Context) {
 		subject, ok := identity.CurrentSubject(c)
 		if !ok {

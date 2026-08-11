@@ -25,6 +25,9 @@ services:
     environment:
       DB_DRIVER: postgres
       DB_DSN: ${DB_DSN:?set a URL-encoded DB_DSN before deployment}
+      MODEL_MASTER_KEY_ID: ${MODEL_MASTER_KEY_ID:-}
+      MODEL_MASTER_KEY: ${MODEL_MASTER_KEY:-}
+      MODEL_PREVIOUS_MASTER_KEYS: ${MODEL_PREVIOUS_MASTER_KEYS:-}
     depends_on:
       postgres:
         condition: service_healthy
@@ -42,6 +45,9 @@ services:
       UPLOAD_DIR: /app/uploads
       DB_DRIVER: postgres
       DB_DSN: ${DB_DSN:?set a URL-encoded DB_DSN before deployment}
+      MODEL_MASTER_KEY_ID: ${MODEL_MASTER_KEY_ID:-}
+      MODEL_MASTER_KEY: ${MODEL_MASTER_KEY:-}
+      MODEL_PREVIOUS_MASTER_KEYS: ${MODEL_PREVIOUS_MASTER_KEYS:-}
       TZ: Asia/Shanghai
     volumes:
       - ./data:/app/data

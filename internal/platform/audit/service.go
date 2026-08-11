@@ -403,7 +403,7 @@ func (service *Service) Reconcile(ctx context.Context, subject identity.Subject,
 	if err != nil {
 		return 0, err
 	}
-	pending, err := repository.ListPendingCompletions(ctx, limit)
+	pending, err := repository.ListReadyCompletions(ctx, limit)
 	if err != nil {
 		return 0, err
 	}

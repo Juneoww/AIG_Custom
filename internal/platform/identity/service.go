@@ -73,9 +73,7 @@ func (s *Service) SetActive(ctx context.Context, username string, active bool) e
 	if err != nil {
 		return err
 	}
-	user.Active = active
-	user.UpdatedAt = s.now()
-	return s.repo.UpdateUser(ctx, user)
+	return s.repo.UpdateUserActive(ctx, user.ID, active, s.now())
 }
 
 func (s *Service) ListUsers(ctx context.Context) ([]User, error) {
@@ -86,27 +84,15 @@ func (s *Service) SetRole(ctx context.Context, userID string, role Role) error {
 	if !validRole(role) {
 		return ErrInvalidCredentials
 	}
-	user, err := s.repo.UserByID(ctx, userID)
-	if err != nil {
-		return err
-	}
-	user.Role = role
-	user.UpdatedAt = s.now()
-	return s.repo.UpdateUser(ctx, user)
+	return s.repo.UpdateUserRole(ctx, userID, role, s.now())
 }
 
 func (s *Service) SetActiveByID(ctx context.Context, userID string, active bool) error {
-	user, err := s.repo.UserByID(ctx, userID)
-	if err != nil {
-		return err
-	}
-	user.Active = active
-	user.UpdatedAt = s.now()
-	if err := s.repo.UpdateUser(ctx, user); err != nil {
+	if err := s.repo.UpdateUserActive(ctx, userID, active, s.now()); err != nil {
 		return err
 	}
 	if !active {
-		return s.repo.RevokeUserSessions(ctx, user.ID)
+		return s.repo.RevokeUserSessions(ctx, userID)
 	}
 	return nil
 }
@@ -181,8 +167,7 @@ func (s *Service) ChangePassword(ctx context.Context, userID, oldPassword, newPa
 	if err != nil {
 		return err
 	}
-	user.PasswordHash, user.MustChangePassword, user.UpdatedAt = hash, false, s.now()
-	if err := s.repo.UpdateUser(ctx, user); err != nil {
+	if err := s.repo.UpdateUserPassword(ctx, user.ID, hash, false, s.now()); err != nil {
 		return err
 	}
 	return s.repo.RevokeUserSessions(ctx, user.ID)
@@ -223,9 +208,8 @@ func (s *Service) ResetPassword(ctx context.Context, token, temporaryPassword st
 		return err
 	}
 	now := s.now()
-	user.PasswordHash, user.MustChangePassword, user.UpdatedAt = hash, true, now
 	reset.UsedAt = &now
-	if err := s.repo.UpdateUser(ctx, user); err != nil {
+	if err := s.repo.UpdateUserPassword(ctx, user.ID, hash, true, now); err != nil {
 		return err
 	}
 	if err := s.repo.UpdatePasswordReset(ctx, reset); err != nil {

@@ -39,7 +39,41 @@ const docTemplate = `{
                 "description": "Deprecated browser compatibility path. It is protected by the authenticated Subject and delegates to the encrypted platform model service; use /api/v1/platform/models.",
                 "tags": ["models"],
                 "summary": "List models through deprecated compatibility facade",
-                "responses": {"200": {"description": "Visible model metadata with masked tokens."}, "401": {"description": "Unauthenticated."}}
+                "responses": {"200": {"description": "Visible model metadata with masked tokens.", "schema": {"$ref": "#/definitions/websocket.LegacyModelListEnvelope"}}, "401": {"description": "Unauthenticated."}}
+            },
+            "post": {
+                "deprecated": true,
+                "description": "Deprecated browser compatibility path. Accepts the nested legacy request, stores the token only through authenticated encryption, and returns the legacy HTTP 200 status/message/data envelope. Use POST /api/v1/platform/models for new clients.",
+                "tags": ["models"],
+                "summary": "Create a model through deprecated compatibility facade",
+                "parameters": [{"in": "body", "name": "body", "required": true, "schema": {"$ref": "#/definitions/websocket.LegacyModelCreateRequest"}}],
+                "responses": {"200": {"description": "Legacy mutation envelope; status is zero on success or one for validation/application errors.", "schema": {"$ref": "#/definitions/websocket.LegacyModelMutationEnvelope"}}, "401": {"description": "Unauthenticated."}, "403": {"description": "Auditor role cannot create models."}}
+            },
+            "delete": {
+                "deprecated": true,
+                "description": "Deprecated collection-delete compatibility path. Accepts model_ids and returns the legacy HTTP 200 status/message/data envelope. Authorization is checked for every model before deletion.",
+                "tags": ["models"],
+                "summary": "Delete models through deprecated compatibility facade",
+                "parameters": [{"in": "body", "name": "body", "required": true, "schema": {"$ref": "#/definitions/websocket.LegacyModelDeleteRequest"}}],
+                "responses": {"200": {"description": "Legacy mutation envelope; status is zero on success or one for validation/application errors.", "schema": {"$ref": "#/definitions/websocket.LegacyModelMutationEnvelope"}}, "401": {"description": "Unauthenticated."}, "403": {"description": "Subject cannot delete one or more requested models."}}
+            }
+        },
+        "/api/v1/app/models/{modelId}": {
+            "get": {
+                "deprecated": true,
+                "description": "Deprecated browser compatibility path. Returns the nested legacy model view and always masks the token. Use GET /api/v1/platform/models/{modelID} for new clients.",
+                "tags": ["models"],
+                "summary": "Get a model through deprecated compatibility facade",
+                "parameters": [{"in": "path", "maxLength": 128, "name": "modelId", "required": true, "type": "string"}],
+                "responses": {"200": {"description": "Legacy detail envelope; application errors also use HTTP 200 with status one.", "schema": {"$ref": "#/definitions/websocket.LegacyModelDetailEnvelope"}}, "401": {"description": "Unauthenticated."}, "403": {"description": "Subject cannot read this private model."}}
+            },
+            "put": {
+                "deprecated": true,
+                "description": "Deprecated browser compatibility path. Accepts the nested legacy update request; an omitted or masked token preserves the encrypted token. Returns the legacy HTTP 200 status/message/data envelope.",
+                "tags": ["models"],
+                "summary": "Update a model through deprecated compatibility facade",
+                "parameters": [{"in": "path", "maxLength": 128, "name": "modelId", "required": true, "type": "string"}, {"in": "body", "name": "body", "required": true, "schema": {"$ref": "#/definitions/websocket.LegacyModelUpdateRequest"}}],
+                "responses": {"200": {"description": "Legacy mutation envelope; status is zero on success or one for validation/application errors.", "schema": {"$ref": "#/definitions/websocket.LegacyModelMutationEnvelope"}}, "401": {"description": "Unauthenticated."}, "403": {"description": "Subject cannot update this model."}}
             }
         },
         "/api/v1/platform/admin/users": {
@@ -508,6 +542,51 @@ const docTemplate = `{
                     "example": 0
                 }
             }
+        },
+        "websocket.LegacyModelCreateRequest": {
+            "description": "Deprecated browser request shape retained for compatibility. The model object is required and its token is accepted only as write-only secret input.",
+            "type": "object",
+            "required": ["model_id", "model"],
+            "properties": {"model": {"$ref": "#/definitions/websocket.LegacyModelInfo"}, "model_id": {"description": "Compatibility model ID. Path separators and identifiers longer than 128 characters are rejected.", "type": "string", "maxLength": 128}}
+        },
+        "websocket.LegacyModelDeleteRequest": {
+            "type": "object",
+            "required": ["model_ids"],
+            "properties": {"model_ids": {"description": "Compatibility model IDs to delete as one legacy collection request.", "type": "array", "minItems": 1, "items": {"type": "string", "maxLength": 128}}}
+        },
+        "websocket.LegacyModelDetailEnvelope": {
+            "type": "object",
+            "properties": {"data": {"$ref": "#/definitions/websocket.LegacyModelView"}, "message": {"type": "string"}, "status": {"description": "Legacy application status. Zero means success; validation and not-found errors use one while retaining HTTP 200.", "type": "integer"}}
+        },
+        "websocket.LegacyModelInfo": {
+            "type": "object",
+            "required": ["model", "token", "base_url"],
+            "properties": {"base_url": {"type": "string"}, "limit": {"type": "integer"}, "model": {"type": "string"}, "note": {"type": "string"}, "token": {"description": "Write-only plaintext token. It is authenticated-encrypted before storage and is never returned.", "type": "string", "format": "password"}}
+        },
+        "websocket.LegacyModelListEnvelope": {
+            "type": "object",
+            "properties": {"data": {"type": "array", "items": {"$ref": "#/definitions/websocket.LegacyModelView"}}, "message": {"type": "string"}, "status": {"description": "Legacy application status. Zero means success.", "type": "integer"}}
+        },
+        "websocket.LegacyModelMutationEnvelope": {
+            "type": "object",
+            "properties": {"data": {"description": "Null for legacy create, update, and collection-delete responses.", "type": "object", "x-nullable": true}, "message": {"type": "string"}, "status": {"description": "Legacy application status. Zero means success; validation and not-found errors use one while retaining HTTP 200.", "type": "integer"}}
+        },
+        "websocket.LegacyModelUpdateInfo": {
+            "type": "object",
+            "properties": {"base_url": {"type": "string"}, "limit": {"type": "integer"}, "model": {"type": "string"}, "note": {"type": "string"}, "token": {"description": "Optional write-only replacement token. Omit it or send the mask sentinel to preserve the stored token.", "type": "string", "format": "password"}}
+        },
+        "websocket.LegacyModelUpdateRequest": {
+            "type": "object",
+            "required": ["model"],
+            "properties": {"model": {"$ref": "#/definitions/websocket.LegacyModelUpdateInfo"}}
+        },
+        "websocket.LegacyModelView": {
+            "type": "object",
+            "properties": {"model": {"$ref": "#/definitions/websocket.LegacyModelViewInfo"}, "model_id": {"type": "string"}}
+        },
+        "websocket.LegacyModelViewInfo": {
+            "type": "object",
+            "properties": {"base_url": {"type": "string"}, "limit": {"type": "integer"}, "model": {"type": "string"}, "note": {"type": "string"}, "token": {"description": "Always masked as ********; plaintext, ciphertext, nonce, and key identifiers are never exposed.", "type": "string", "example": "********"}}
         },
         "websocket.TaskCreateResponse": {
             "type": "object",

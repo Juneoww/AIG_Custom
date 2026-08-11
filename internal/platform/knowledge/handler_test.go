@@ -55,6 +55,9 @@ func (repository *retryableCompletionRepository) Completion(ctx context.Context,
 func (repository *retryableCompletionRepository) ListPendingCompletions(ctx context.Context, limit int) ([]audit.CompletionOutbox, error) {
 	return repository.delegate.ListPendingCompletions(ctx, limit)
 }
+func (repository *retryableCompletionRepository) ListReadyCompletions(ctx context.Context, limit int) ([]audit.CompletionOutbox, error) {
+	return repository.delegate.ListReadyCompletions(ctx, limit)
+}
 
 func (repository *retryableCompletionRepository) UpdateCompletion(ctx context.Context, completion *audit.CompletionOutbox) error {
 	return repository.delegate.UpdateCompletion(ctx, completion)
@@ -86,6 +89,9 @@ func (repository *failingKnowledgeAuditRepository) Completion(ctx context.Contex
 
 func (repository *failingKnowledgeAuditRepository) ListPendingCompletions(ctx context.Context, limit int) ([]audit.CompletionOutbox, error) {
 	return repository.delegate.ListPendingCompletions(ctx, limit)
+}
+func (repository *failingKnowledgeAuditRepository) ListReadyCompletions(ctx context.Context, limit int) ([]audit.CompletionOutbox, error) {
+	return repository.delegate.ListReadyCompletions(ctx, limit)
 }
 
 func (repository *failingKnowledgeAuditRepository) UpdateCompletion(ctx context.Context, completion *audit.CompletionOutbox) error {

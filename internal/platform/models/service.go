@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"regexp"
 	"sort"
 	"strings"
 	"sync"
@@ -21,6 +22,10 @@ var (
 	ErrNotFound  = errors.New("模型配置不存在")
 	ErrInvalid   = errors.New("模型配置无效")
 )
+
+const maxCompatibilityModelIDLength = 128
+
+var compatibilityModelIDPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$`)
 
 type Repository interface {
 	Create(context.Context, *Model) error
@@ -168,6 +173,21 @@ func NewService(repository Repository, keyring *Keyring, audits audit.Recorder) 
 }
 
 func (service *Service) Create(ctx context.Context, subject identity.Subject, input CreateInput) (View, error) {
+	return service.create(ctx, subject, uuid.NewString(), input)
+}
+
+// CreateWithCompatibilityID preserves the stable model IDs used by the
+// legacy application API while keeping storage in the encrypted platform
+// table. IDs are deliberately bounded before reaching database queries.
+func (service *Service) CreateWithCompatibilityID(ctx context.Context, subject identity.Subject, id string, input CreateInput) (View, error) {
+	id = strings.TrimSpace(id)
+	if !validCompatibilityModelID(id) {
+		return View{}, ErrInvalid
+	}
+	return service.create(ctx, subject, id, input)
+}
+
+func (service *Service) create(ctx context.Context, subject identity.Subject, id string, input CreateInput) (View, error) {
 	input.Name = strings.TrimSpace(input.Name)
 	input.ProviderModel = strings.TrimSpace(input.ProviderModel)
 	input.BaseURL = strings.TrimSpace(input.BaseURL)
@@ -189,7 +209,7 @@ func (service *Service) Create(ctx context.Context, subject identity.Subject, in
 		return View{}, ErrForbidden
 	}
 	now := service.now()
-	model := &Model{ID: uuid.NewString(), OwnerUserID: ownerID, Scope: input.Scope, Name: input.Name,
+	model := &Model{ID: id, OwnerUserID: ownerID, Scope: input.Scope, Name: input.Name,
 		ProviderModel: input.ProviderModel, BaseURL: input.BaseURL, Note: input.Note, Limit: input.Limit,
 		CreatedAt: now, UpdatedAt: now}
 	if err := service.keyring.SealToken(model, input.Token); err != nil {
@@ -205,6 +225,19 @@ func (service *Service) Create(ctx context.Context, subject identity.Subject, in
 		return View{}, err
 	}
 	return viewOf(model), nil
+}
+
+// CheckWritable is used by compatibility collection operations to authorize
+// every ID before any mutation begins.
+func (service *Service) CheckWritable(ctx context.Context, subject identity.Subject, id string) error {
+	model, err := service.repository.Get(ctx, id)
+	if err != nil {
+		return err
+	}
+	if !canWrite(subject, model) {
+		return ErrForbidden
+	}
+	return nil
 }
 
 func (service *Service) Get(ctx context.Context, subject identity.Subject, id string) (View, error) {

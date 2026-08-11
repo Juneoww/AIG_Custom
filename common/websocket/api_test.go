@@ -55,6 +55,7 @@ func newTestTaskManager(t *testing.T) (*TaskManager, func()) {
 	cfg := database.NewConfig(dsn + "&search_path=" + schema)
 	db, err := database.InitDB(cfg)
 	require.NoError(t, err)
+	require.NoError(t, database.Migrate(db), "test fixtures must run the CLI-owned migration path before runtime stores initialize")
 
 	ts := database.NewTaskStore(db)
 	require.NoError(t, ts.Init())

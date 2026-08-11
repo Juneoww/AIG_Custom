@@ -31,6 +31,7 @@ import (
 	"github.com/Juneoww/AIG_Custom/cmd/cli/cmd"
 	platformaudit "github.com/Juneoww/AIG_Custom/internal/platform/audit"
 	"github.com/Juneoww/AIG_Custom/internal/platform/identity"
+	platformmodels "github.com/Juneoww/AIG_Custom/internal/platform/models"
 	"github.com/Juneoww/AIG_Custom/pkg/database"
 )
 
@@ -71,7 +72,10 @@ func runMigrate() error {
 	}
 	defer sqlDB.Close()
 
-	return database.Migrate(db)
+	if err := database.Migrate(db); err != nil {
+		return err
+	}
+	return platformmodels.MigrateLegacyModelsFromEnvironment(context.Background(), db)
 }
 
 func runBootstrapAdmin() error {

@@ -19,7 +19,9 @@
 package websocket
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"mime"
@@ -36,6 +38,7 @@ import (
 
 	"github.com/Juneoww/AIG_Custom/common/agent"
 	"github.com/Juneoww/AIG_Custom/internal/platform/identity"
+	platformmodels "github.com/Juneoww/AIG_Custom/internal/platform/models"
 
 	"github.com/Juneoww/AIG_Custom/pkg/database"
 	"github.com/gin-gonic/gin"
@@ -62,9 +65,22 @@ type TaskManager struct {
 	agentManager    *AgentManager                 // 新增：引用 AgentManager
 	taskStore       *database.TaskStore           // 新增：引用 TaskStore
 	modelStore      *database.ModelStore          // 新增：引用 ModelStore
-	fileConfig      *FileUploadConfig             // 新增：文件上传配置
-	sseManager      *SSEManager                   // 新增：SSE管理器
-	dispatchCounter uint64                        // round-robin 计数器（原子操作）
+	modelResolver   taskModelResolver
+	yamlModels      taskYAMLModelSource
+	fileConfig      *FileUploadConfig // 新增：文件上传配置
+	sseManager      *SSEManager       // 新增：SSE管理器
+	dispatchCounter uint64            // round-robin 计数器（原子操作）
+}
+
+type taskModelResolver interface {
+	Resolve(context.Context, string, string) (*platformmodels.ScannerModel, error)
+	ResolveDefault(context.Context, string) (*platformmodels.ScannerModel, error)
+	Describe(context.Context, string, string) (string, error)
+}
+
+type taskYAMLModelSource interface {
+	GetYamlModel(string) *database.Model
+	LoadYamlModels() ([]*database.Model, error)
 }
 
 func NewTaskManager(agentManager *AgentManager, taskStore *database.TaskStore, modelStore *database.ModelStore, fileConfig *FileUploadConfig, sseManager *SSEManager) *TaskManager {
@@ -79,8 +95,93 @@ func NewTaskManager(agentManager *AgentManager, taskStore *database.TaskStore, m
 		agentManager: agentManager, // 注入 AgentManager
 		taskStore:    taskStore,    // 注入 TaskStore
 		modelStore:   modelStore,   // 注入 ModelStore
-		fileConfig:   fileConfig,   // 注入文件上传配置
-		sseManager:   sseManager,   // 注入SSE管理器
+		yamlModels:   modelStore,
+		fileConfig:   fileConfig, // 注入文件上传配置
+		sseManager:   sseManager, // 注入SSE管理器
+	}
+}
+
+func (tm *TaskManager) SetModelResolver(resolver taskModelResolver) {
+	if tm != nil {
+		tm.modelResolver = resolver
+	}
+}
+
+func (tm *TaskManager) SetYAMLModelSource(source taskYAMLModelSource) {
+	if tm != nil {
+		tm.yamlModels = source
+	}
+}
+
+func (tm *TaskManager) resolveTaskModel(ctx context.Context, username, modelID string) (*database.ModelParams, error) {
+	if tm == nil || tm.modelResolver == nil {
+		return nil, errors.New("模型解析器不可用")
+	}
+	resolved, err := tm.modelResolver.Resolve(ctx, username, modelID)
+	if err == nil {
+		return scannerModelParams(resolved), nil
+	}
+	if !errors.Is(err, platformmodels.ErrNotFound) || tm.yamlModels == nil {
+		return nil, err
+	}
+	yamlModel := tm.yamlModels.GetYamlModel(modelID)
+	if yamlModel == nil {
+		return nil, platformmodels.ErrNotFound
+	}
+	resolved, err = platformmodels.NewScannerModel(yamlModel.ModelName, yamlModel.Token, yamlModel.BaseURL, yamlModel.Limit)
+	if err != nil {
+		return nil, err
+	}
+	return scannerModelParams(resolved), nil
+}
+
+func (tm *TaskManager) resolveDefaultTaskModel(ctx context.Context, username string) (*database.ModelParams, error) {
+	if tm == nil || tm.modelResolver == nil {
+		return nil, nil
+	}
+	resolved, err := tm.modelResolver.ResolveDefault(ctx, username)
+	if err == nil {
+		return scannerModelParams(resolved), nil
+	}
+	if !errors.Is(err, platformmodels.ErrNotFound) || tm.yamlModels == nil {
+		return nil, err
+	}
+	yamlModels, loadErr := tm.yamlModels.LoadYamlModels()
+	if loadErr != nil {
+		return nil, loadErr
+	}
+	for _, yamlModel := range yamlModels {
+		resolved, resolveErr := platformmodels.NewScannerModel(yamlModel.ModelName, yamlModel.Token, yamlModel.BaseURL, yamlModel.Limit)
+		if resolveErr == nil {
+			return scannerModelParams(resolved), nil
+		}
+	}
+	return nil, nil
+}
+
+func (tm *TaskManager) resolveTaskModelName(ctx context.Context, username, modelID string) string {
+	if tm == nil || tm.modelResolver == nil {
+		return ""
+	}
+	name, err := tm.modelResolver.Describe(ctx, username, modelID)
+	if err == nil {
+		return name
+	}
+	if !errors.Is(err, platformmodels.ErrNotFound) || tm.yamlModels == nil {
+		return ""
+	}
+	if yamlModel := tm.yamlModels.GetYamlModel(modelID); yamlModel != nil {
+		return yamlModel.ModelName
+	}
+	return ""
+}
+
+func scannerModelParams(model *platformmodels.ScannerModel) *database.ModelParams {
+	if model == nil {
+		return nil
+	}
+	return &database.ModelParams{
+		Model: model.ProviderModel(), Token: model.Token(), BaseUrl: model.BaseURL(), Limit: model.Limit(),
 	}
 }
 
@@ -292,15 +393,10 @@ func (tm *TaskManager) dispatchTask(sessionId string, traceID string) error {
 		enhancedParams[k] = v
 	}
 	addModel := func(modelId string) (*database.ModelParams, error) {
-		model, err := tm.modelStore.GetModel(modelId)
+		model, err := tm.resolveTaskModel(context.Background(), task.Username, modelId)
 		if err != nil {
-			// 检查是否是记录不存在的错误
-			if err.Error() == "record not found" {
-				log.Errorf("模型不存在: trace_id=%s, sessionId=%s, modelID=%s", traceID, sessionId, modelId)
-				return nil, fmt.Errorf("模型ID '%s' 不存在，请检查模型配置", modelId)
-			}
-			log.Errorf("获取模型信息失败: trace_id=%s, sessionId=%s, modelID=%s, error=%v", traceID, sessionId, modelId, err)
-			return nil, fmt.Errorf("获取模型信息失败: %v", err)
+			log.Errorf("模型解析失败: trace_id=%s, sessionId=%s, modelID=%s", traceID, sessionId, modelId)
+			return nil, fmt.Errorf("模型ID '%s' 不存在或不可用", modelId)
 		}
 		// 测试模型是否有效
 		//ai := models.NewOpenAI(model.Token, model.ModelName, model.BaseURL)
@@ -309,13 +405,7 @@ func (tm *TaskManager) dispatchTask(sessionId string, traceID string) error {
 		//	log.Errorf("模型无效: trace_id=%s, sessionId=%s, modelID=%s, error=%v", traceID, sessionId, modelId, err)
 		//	return nil, fmt.Errorf("模型无效: %v", err)
 		//}
-		p := database.ModelParams{
-			Model:              model.ModelName,
-			Token:              model.Token,
-			BaseUrl:            model.BaseURL,
-			Limit:              model.Limit,
-		}
-		return &p, nil
+		return model, nil
 	}
 	if task.Params != nil {
 		if modelID, exists := task.Params["model_id"]; exists {
@@ -1248,10 +1338,7 @@ func (tm *TaskManager) generateTaskTitle(req *TaskCreateRequest) string {
 	if modelID, exists := req.Params["model_id"]; exists {
 		switch v := modelID.(type) {
 		case string:
-			model, err := tm.modelStore.GetModel(v)
-			if err == nil {
-				ModelName = model.ModelName
-			}
+			ModelName = tm.resolveTaskModelName(context.Background(), req.Username, v)
 		case []interface{}:
 			modelStr := make([]string, 0)
 			for _, mid := range v {
@@ -1259,9 +1346,8 @@ func (tm *TaskManager) generateTaskTitle(req *TaskCreateRequest) string {
 				if !ok {
 					continue
 				}
-				model, err := tm.modelStore.GetModel(mid)
-				if err == nil {
-					modelStr = append(modelStr, model.ModelName)
+				if modelName := tm.resolveTaskModelName(context.Background(), req.Username, mid); modelName != "" {
+					modelStr = append(modelStr, modelName)
 				}
 			}
 			ModelName = strings.Join(modelStr, ",")

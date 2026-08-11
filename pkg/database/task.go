@@ -96,9 +96,9 @@ func (s *TaskStore) ResetRunningTasks() error {
 	}).Error
 }
 
-// Init 执行版本化数据库迁移。
+// Init 只读校验运行时所需数据库架构。
 func (s *TaskStore) Init() error {
-	return Migrate(s.db)
+	return ValidateRuntimeSchema(s.db)
 }
 
 // createIndexes 创建查询优化索引

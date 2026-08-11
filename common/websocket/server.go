@@ -71,24 +71,19 @@ func RunWebServer(options *version.Options) {
 	if err != nil {
 		log.Fatalf("数据库初始化失败: trace_id=system_startup, error=%v", err)
 	}
-	identityRepo := identity.NewGormRepository(db)
-	if err := identityRepo.Init(); err != nil {
-		log.Fatalf("初始化身份数据库失败: trace_id=system_startup, error=%v", err)
+	stores, err := initializeRuntimeDatastores(db)
+	if err != nil {
+		log.Fatalf("初始化运行时数据库失败: trace_id=system_startup, error=%v", err)
 	}
+	identityRepo := stores.identityRepository
 	identityPolicy, err := identity.CookiePolicyFromEnv()
 	if err != nil {
 		log.Fatalf("身份 Cookie 配置无效: trace_id=system_startup, error=%v", err)
 	}
 	identityService := identity.NewService(identityRepo)
-	auditRepo := platformaudit.NewGormRepository(db)
-	if err := auditRepo.Init(); err != nil {
-		log.Fatalf("初始化审计数据库失败: trace_id=system_startup, error=%v", err)
-	}
+	auditRepo := stores.auditRepository
 	auditService := platformaudit.NewService(auditRepo)
-	platformModelRepo := platformmodels.NewGormRepository(db)
-	if err := platformModelRepo.Init(); err != nil {
-		log.Fatalf("初始化平台模型数据库失败: trace_id=system_startup, error=%v", err)
-	}
+	platformModelRepo := stores.platformModelRepository
 	modelKeyring, err := platformmodels.LoadKeyringFromEnv()
 	if err != nil {
 		log.Fatalf("模型主密钥配置无效: trace_id=system_startup, error=%v", err)
@@ -97,18 +92,8 @@ func RunWebServer(options *version.Options) {
 	adminHandler := platformadmin.NewHandler(identityService, auditService)
 	knowledgeService := platformknowledge.NewService(auditService)
 	knowledgeHandler := platformknowledge.NewHandler(knowledgeService)
-	taskStore := database.NewTaskStore(db)
-	if err := taskStore.Init(); err != nil {
-		log.Errorf("初始化tasks表失败: trace_id=system_startup, error=%v", err)
-		log.Fatalf("初始化tasks表失败: %v", err)
-	}
-
-	// 初始化模型存储
-	modelStore := database.NewModelStore(db)
-	if err := modelStore.Init(); err != nil {
-		log.Errorf("初始化models表失败: trace_id=system_startup, error=%v", err)
-
-	}
+	taskStore := stores.taskStore
+	modelStore := stores.modelStore
 	// 初始化AgentManager
 	agentManager := NewAgentManager()
 
@@ -125,6 +110,7 @@ func RunWebServer(options *version.Options) {
 	sseManager := NewSSEManager()
 
 	taskManager := NewTaskManager(agentManager, taskStore, modelStore, fileConfig, sseManager)
+	taskManager.SetModelResolver(platformmodels.NewScannerResolver(platformModelRepo, identityRepo, modelKeyring))
 	err = taskManager.taskStore.ResetRunningTasks()
 	if err != nil {
 		log.Fatalf("重置运行中的任务失败: %v", err)
@@ -399,5 +385,5 @@ func registerPlatformGovernanceRoutes(
 		identity.RequireCSRF(identityPolicy),
 	)
 	adminHandler.Register(group.Group("/admin"))
-	registerPlatformModelRoutes(group.Group("/models"), modelService)
+	registerGovernanceModelRoutes(group.Group("/models"), modelService)
 }

@@ -50,7 +50,7 @@ func NewAgentStore(db *gorm.DB) *AgentStore {
 
 // Init 执行版本化数据库迁移。
 func (s *AgentStore) Init() error {
-	return Migrate(s.db)
+	return ValidateRuntimeSchema(s.db)
 }
 
 // Register 注册或更新agent信息

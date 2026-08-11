@@ -53,6 +53,9 @@ func (repository *failFirstReadyAdminAuditRepository) Completion(ctx context.Con
 func (repository *failFirstReadyAdminAuditRepository) ListPendingCompletions(ctx context.Context, limit int) ([]audit.CompletionOutbox, error) {
 	return repository.delegate.ListPendingCompletions(ctx, limit)
 }
+func (repository *failFirstReadyAdminAuditRepository) ListReadyCompletions(ctx context.Context, limit int) ([]audit.CompletionOutbox, error) {
+	return repository.delegate.ListReadyCompletions(ctx, limit)
+}
 
 func (repository *failFirstReadyAdminAuditRepository) UpdateCompletion(ctx context.Context, completion *audit.CompletionOutbox) error {
 	return repository.delegate.UpdateCompletion(ctx, completion)
@@ -84,6 +87,9 @@ func (repository *failingAdminAuditRepository) Completion(ctx context.Context, i
 
 func (repository *failingAdminAuditRepository) ListPendingCompletions(ctx context.Context, limit int) ([]audit.CompletionOutbox, error) {
 	return repository.delegate.ListPendingCompletions(ctx, limit)
+}
+func (repository *failingAdminAuditRepository) ListReadyCompletions(ctx context.Context, limit int) ([]audit.CompletionOutbox, error) {
+	return repository.delegate.ListReadyCompletions(ctx, limit)
 }
 
 func (repository *failingAdminAuditRepository) UpdateCompletion(ctx context.Context, completion *audit.CompletionOutbox) error {

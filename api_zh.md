@@ -88,9 +88,11 @@ AIG Custom Platform 是基于 Tencent Zhuque Lab AI-Infra-Guard（https://github
 
 模型 token 使用 AES-256-GCM，并把模型元数据纳入认证。活动密钥通过 `MODEL_MASTER_KEY_ID` 和 base64 编码的 32 字节 `MODEL_MASTER_KEY` 注入；轮换窗口可通过 `MODEL_PREVIOUS_MASTER_KEYS` 提供“旧 key ID 到 base64 密钥”的 JSON 对象，所有新写入只使用活动密钥。API 始终返回 `"token":"********"`，绝不返回明文、密文、nonce 或密钥材料；禁止记录模型请求体。
 
+只有 `aig migrate` 可以执行数据库 DDL。版本化 schema 到达 v4 后，该命令会在同一 PostgreSQL 事务中把旧明文 `models` 表的行导入加密平台存储，并删除对应明文行。旧表非空时必须提供 `MODEL_MASTER_KEY_ID` 和有效的 32 字节 base64 `MODEL_MASTER_KEY`；旧表为空时允许不配置模型密钥，只执行 schema 迁移。生产 `webserver` 启动仍必须配置活动模型密钥。运行时数据存储初始化只读校验 schema 版本、必要表/索引和旧明文行；schema 过旧/不完整或仍有明文旧行时会失败关闭并提示运行 `aig migrate`，绝不会创建或修改表。
+
 现有 `/api/v1/knowledge/*` 的读取格式和扫描协议保持不变。已认证的普通用户、审计员和管理员均可读；仅管理员可修改指纹、漏洞、评测集、MCP/提示词集合和 Agent 配置。每次变更都必须先经过持久化预写审计边界，再调用保持旧格式的 handler；旧写 handler 若被直接挂载会被拒绝。若文件变更已成功，但其 `prepared` 审计意图暂时无法完成持久化，原成功响应保持不变，且只增加 `X-Audit-Request-ID`；管理员核实真实结果后先调用 prepared-finalize 接口，再执行 reconcile。内部错误和元数据不会写入响应。异步系统数据更新会先写 `knowledge.change_requested/pending`，仅在后台任务真实结束后写 `knowledge.changed/success` 或 `failure`。变更仅影响后续扫描，已完成任务与报告快照不变。
 
-当前可触发的审计动作包括登录成功/失败、账号创建/启用/禁用、角色分配、密码重置请求、模型治理，以及规则/知识库或系统数据变更；任务变更、报告导出和系统配置调用方也已有稳定动作常量供后续接入。`/api/v1/app/models` 已弃用并委托给同一套加密、基于 `Subject` 的模型服务，不再信任 `username` 请求头。
+当前可触发的审计动作包括登录成功/失败、账号创建/启用/禁用、角色分配、密码重置请求、模型治理，以及规则/知识库或系统数据变更；任务变更、报告导出和系统配置调用方也已有稳定动作常量供后续接入。`/api/v1/app/models` 已弃用并委托给同一套加密、基于 `Subject` 的模型服务，不再信任 `username` 请求头。兼容门面保留嵌套请求体和 `{status,message,data}` 响应：GET、POST、PUT 和集合 DELETE 成功均返回 HTTP `200`；参数/不存在等应用错误也返回 HTTP `200` 且 `status: 1`，未认证返回 `401`，Subject 无权访问返回 `403`。兼容响应中的模型 token 始终脱敏。新客户端应使用独立的扁平 `/api/v1/platform/models` API。
 
 ### 1. 文件上传接口
 
@@ -624,6 +626,8 @@ curl -X POST http://localhost:8088/api/v1/app/taskapi/tasks \
 ---
 
 ## 模型管理 API
+
+> **已弃用的兼容 API。** 本节端点保留浏览器契约：`/api/v1/app/models` 的 `GET`/`POST`/集合 `DELETE`，以及 `/api/v1/app/models/{modelId}` 的详情 `GET`/`PUT`。请求必须使用登录会话建立的 `Subject`，变更请求还必须通过 CSRF 校验；`username` 请求头会被忽略。POST/PUT 保留嵌套 `model` 对象，DELETE 保留 `{ "model_ids": [...] }`，所有操作使用上述旧 HTTP `200` envelope；列表和详情返回的 token 永远是 `********`。非弃用的扁平契约请使用 `/api/v1/platform/models`。
 
 ### 1. 获取模型列表
 

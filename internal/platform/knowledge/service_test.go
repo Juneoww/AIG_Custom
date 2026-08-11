@@ -40,6 +40,9 @@ func (repository *completionIntentFailingRepository) Completion(ctx context.Cont
 func (repository *completionIntentFailingRepository) ListPendingCompletions(ctx context.Context, limit int) ([]audit.CompletionOutbox, error) {
 	return repository.delegate.ListPendingCompletions(ctx, limit)
 }
+func (repository *completionIntentFailingRepository) ListReadyCompletions(ctx context.Context, limit int) ([]audit.CompletionOutbox, error) {
+	return repository.delegate.ListReadyCompletions(ctx, limit)
+}
 
 func (repository *completionIntentFailingRepository) UpdateCompletion(ctx context.Context, completion *audit.CompletionOutbox) error {
 	return repository.delegate.UpdateCompletion(ctx, completion)

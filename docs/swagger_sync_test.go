@@ -79,7 +79,104 @@ func TestGeneratedSwaggerArtifactsStayInSync(t *testing.T) {
 		if legacyModel != true {
 			t.Fatal("legacy browser model API must be marked deprecated")
 		}
+		for _, endpoint := range []struct {
+			path, method, responseRef string
+		}{
+			{"/api/v1/app/models", "get", "#/definitions/websocket.LegacyModelListEnvelope"},
+			{"/api/v1/app/models", "post", "#/definitions/websocket.LegacyModelMutationEnvelope"},
+			{"/api/v1/app/models", "delete", "#/definitions/websocket.LegacyModelMutationEnvelope"},
+			{"/api/v1/app/models/{modelId}", "get", "#/definitions/websocket.LegacyModelDetailEnvelope"},
+			{"/api/v1/app/models/{modelId}", "put", "#/definitions/websocket.LegacyModelMutationEnvelope"},
+		} {
+			if swaggerValue(t, document, "paths", endpoint.path, endpoint.method, "deprecated") != true {
+				t.Fatalf("legacy model %s %s must be marked deprecated", endpoint.method, endpoint.path)
+			}
+			responseRef := swaggerValue(t, document, "paths", endpoint.path, endpoint.method, "responses", "200", "schema", "$ref")
+			if responseRef != endpoint.responseRef {
+				t.Fatalf("legacy model %s %s response schema = %v, want %s", endpoint.method, endpoint.path, responseRef, endpoint.responseRef)
+			}
+		}
+		for _, request := range []struct {
+			path, method, requestRef string
+		}{
+			{"/api/v1/app/models", "post", "#/definitions/websocket.LegacyModelCreateRequest"},
+			{"/api/v1/app/models", "delete", "#/definitions/websocket.LegacyModelDeleteRequest"},
+			{"/api/v1/app/models/{modelId}", "put", "#/definitions/websocket.LegacyModelUpdateRequest"},
+		} {
+			if bodyRef := swaggerBodyParameterRef(t, document, request.path, request.method); bodyRef != request.requestRef {
+				t.Fatalf("legacy model %s %s request schema = %s, want %s", request.method, request.path, bodyRef, request.requestRef)
+			}
+		}
+		if modelRef := swaggerValue(t, document, "definitions", "websocket.LegacyModelCreateRequest", "properties", "model", "$ref"); modelRef != "#/definitions/websocket.LegacyModelInfo" {
+			t.Fatalf("legacy create request must preserve nested model shape, got %v", modelRef)
+		}
+		if dataRef := swaggerValue(t, document, "definitions", "websocket.LegacyModelDetailEnvelope", "properties", "data", "$ref"); dataRef != "#/definitions/websocket.LegacyModelView" {
+			t.Fatalf("legacy detail response must preserve nested envelope, got %v", dataRef)
+		}
+		if modelRef := swaggerValue(t, document, "definitions", "websocket.LegacyModelView", "properties", "model", "$ref"); modelRef != "#/definitions/websocket.LegacyModelViewInfo" {
+			t.Fatalf("legacy response must preserve nested model shape, got %v", modelRef)
+		}
+		maskedToken := swaggerValue(t, document, "definitions", "websocket.LegacyModelViewInfo", "properties", "token", "description")
+		if !strings.Contains(strings.ToLower(maskedToken.(string)), "masked") {
+			t.Fatal("legacy model response token must be documented as masked")
+		}
 	}
+}
+
+func TestAPIGuidesDocumentLegacyModelAndMigrationBoundaries(t *testing.T) {
+	for _, guide := range []struct {
+		path     string
+		required []string
+	}{
+		{
+			path: "../api.md",
+			required: []string{
+				"/api/v1/app/models/{modelId}", "collection DELETE", "{status,message,data}",
+				"HTTP `200`", "`401`", "`403`", "masked", "/api/v1/platform/models",
+				"Only `aig migrate` may apply database DDL", "schema reaches v4", "empty legacy table",
+			},
+		},
+		{
+			path: "../api_zh.md",
+			required: []string{
+				"/api/v1/app/models/{modelId}", "集合 DELETE", "{status,message,data}",
+				"HTTP `200`", "`401`", "`403`", "始终脱敏", "/api/v1/platform/models",
+				"只有 `aig migrate` 可以执行数据库 DDL", "schema 到达 v4", "旧表为空",
+			},
+		},
+	} {
+		contents, err := os.ReadFile(guide.path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, required := range guide.required {
+			if !strings.Contains(string(contents), required) {
+				t.Errorf("%s does not document %q", guide.path, required)
+			}
+		}
+	}
+}
+
+func swaggerBodyParameterRef(t *testing.T, document interface{}, path, method string) string {
+	t.Helper()
+	parameters, ok := swaggerValue(t, document, "paths", path, method, "parameters").([]interface{})
+	if !ok {
+		t.Fatalf("Swagger parameters at %s.%s are not an array", path, method)
+	}
+	for _, parameter := range parameters {
+		object, ok := parameter.(map[string]interface{})
+		if !ok || object["in"] != "body" {
+			continue
+		}
+		schema, ok := object["schema"].(map[string]interface{})
+		if !ok {
+			t.Fatalf("Swagger body schema at %s.%s is not an object", path, method)
+		}
+		ref, _ := schema["$ref"].(string)
+		return ref
+	}
+	t.Fatalf("Swagger body parameter at %s.%s is missing", path, method)
+	return ""
 }
 
 func swaggerValue(t *testing.T, document interface{}, path ...string) interface{} {

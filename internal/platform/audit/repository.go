@@ -22,6 +22,7 @@ type CompletionRepository interface {
 	EnqueueCompletion(context.Context, *CompletionOutbox) error
 	Completion(context.Context, string) (*CompletionOutbox, error)
 	ListPendingCompletions(context.Context, int) ([]CompletionOutbox, error)
+	ListReadyCompletions(context.Context, int) ([]CompletionOutbox, error)
 	UpdateCompletion(context.Context, *CompletionOutbox) error
 	EventExists(context.Context, string) (bool, error)
 }
@@ -118,6 +119,16 @@ func (repository *GormRepository) Completion(ctx context.Context, id string) (*C
 func (repository *GormRepository) ListPendingCompletions(ctx context.Context, limit int) ([]CompletionOutbox, error) {
 	var completions []CompletionOutbox
 	err := txcontext.Gorm(ctx, repository.db).Where("delivered_at IS NULL").Order("created_at ASC, id ASC").Limit(normalizedLimit(limit)).Find(&completions).Error
+	return completions, err
+}
+
+func (repository *GormRepository) ListReadyCompletions(ctx context.Context, limit int) ([]CompletionOutbox, error) {
+	var completions []CompletionOutbox
+	err := txcontext.Gorm(ctx, repository.db).
+		Where("delivered_at IS NULL AND state = ?", CompletionStateReady).
+		Order("created_at ASC, id ASC").
+		Limit(normalizedLimit(limit)).
+		Find(&completions).Error
 	return completions, err
 }
 
@@ -235,6 +246,27 @@ func (repository *MemoryRepository) ListPendingCompletions(_ context.Context, li
 	completions := make([]CompletionOutbox, 0, len(repository.completions))
 	for _, completion := range repository.completions {
 		if completion.DeliveredAt == nil {
+			completions = append(completions, *cloneCompletion(completion))
+		}
+	}
+	sort.Slice(completions, func(i, j int) bool {
+		if completions[i].CreatedAt.Equal(completions[j].CreatedAt) {
+			return completions[i].ID < completions[j].ID
+		}
+		return completions[i].CreatedAt.Before(completions[j].CreatedAt)
+	})
+	if len(completions) > normalizedLimit(limit) {
+		completions = completions[:normalizedLimit(limit)]
+	}
+	return completions, nil
+}
+
+func (repository *MemoryRepository) ListReadyCompletions(_ context.Context, limit int) ([]CompletionOutbox, error) {
+	repository.mu.Lock()
+	defer repository.mu.Unlock()
+	completions := make([]CompletionOutbox, 0, len(repository.completions))
+	for _, completion := range repository.completions {
+		if completion.DeliveredAt == nil && completion.State == CompletionStateReady {
 			completions = append(completions, *cloneCompletion(completion))
 		}
 	}

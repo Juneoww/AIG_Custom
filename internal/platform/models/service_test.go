@@ -49,6 +49,9 @@ func (repository *failingModelAuditRepository) Completion(ctx context.Context, i
 func (repository *failingModelAuditRepository) ListPendingCompletions(ctx context.Context, limit int) ([]audit.CompletionOutbox, error) {
 	return repository.delegate.ListPendingCompletions(ctx, limit)
 }
+func (repository *failingModelAuditRepository) ListReadyCompletions(ctx context.Context, limit int) ([]audit.CompletionOutbox, error) {
+	return repository.delegate.ListReadyCompletions(ctx, limit)
+}
 
 func (repository *failingModelAuditRepository) UpdateCompletion(ctx context.Context, completion *audit.CompletionOutbox) error {
 	return repository.delegate.UpdateCompletion(ctx, completion)

@@ -61,6 +61,9 @@ func (repository *ambiguousCompletionRepository) Completion(ctx context.Context,
 func (repository *ambiguousCompletionRepository) ListPendingCompletions(ctx context.Context, limit int) ([]CompletionOutbox, error) {
 	return repository.delegate.ListPendingCompletions(ctx, limit)
 }
+func (repository *ambiguousCompletionRepository) ListReadyCompletions(ctx context.Context, limit int) ([]CompletionOutbox, error) {
+	return repository.delegate.ListReadyCompletions(ctx, limit)
+}
 
 func (repository *ambiguousCompletionRepository) UpdateCompletion(ctx context.Context, completion *CompletionOutbox) error {
 	return repository.delegate.UpdateCompletion(ctx, completion)
@@ -92,6 +95,9 @@ func (repository *failOnAppendRepository) Completion(ctx context.Context, id str
 
 func (repository *failOnAppendRepository) ListPendingCompletions(ctx context.Context, limit int) ([]CompletionOutbox, error) {
 	return repository.delegate.ListPendingCompletions(ctx, limit)
+}
+func (repository *failOnAppendRepository) ListReadyCompletions(ctx context.Context, limit int) ([]CompletionOutbox, error) {
+	return repository.delegate.ListReadyCompletions(ctx, limit)
 }
 
 func (repository *failOnAppendRepository) UpdateCompletion(ctx context.Context, completion *CompletionOutbox) error {

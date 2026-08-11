@@ -62,6 +62,9 @@ func (repository *completionEnqueueFailingAuditRepository) Completion(ctx contex
 func (repository *completionEnqueueFailingAuditRepository) ListPendingCompletions(ctx context.Context, limit int) ([]audit.CompletionOutbox, error) {
 	return repository.delegate.ListPendingCompletions(ctx, limit)
 }
+func (repository *completionEnqueueFailingAuditRepository) ListReadyCompletions(ctx context.Context, limit int) ([]audit.CompletionOutbox, error) {
+	return repository.delegate.ListReadyCompletions(ctx, limit)
+}
 
 func (repository *completionEnqueueFailingAuditRepository) UpdateCompletion(ctx context.Context, completion *audit.CompletionOutbox) error {
 	return repository.delegate.UpdateCompletion(ctx, completion)
@@ -93,6 +96,9 @@ func (repository *completionAppendFailingAuditRepository) Completion(ctx context
 
 func (repository *completionAppendFailingAuditRepository) ListPendingCompletions(ctx context.Context, limit int) ([]audit.CompletionOutbox, error) {
 	return repository.delegate.ListPendingCompletions(ctx, limit)
+}
+func (repository *completionAppendFailingAuditRepository) ListReadyCompletions(ctx context.Context, limit int) ([]audit.CompletionOutbox, error) {
+	return repository.delegate.ListReadyCompletions(ctx, limit)
 }
 
 func (repository *completionAppendFailingAuditRepository) UpdateCompletion(ctx context.Context, completion *audit.CompletionOutbox) error {
