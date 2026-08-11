@@ -40,8 +40,10 @@ var requiredRuntimeTables = []string{
 }
 
 type runtimeIndexRequirement struct {
-	model any
-	name  string
+	model  any
+	name   string
+	table  string
+	unique bool
 }
 
 var requiredRuntimeIndexes = []runtimeIndexRequirement{
@@ -51,7 +53,7 @@ var requiredRuntimeIndexes = []runtimeIndexRequirement{
 	{model: &TaskMessage{}, name: "idx_taskmessages_session_timestamp"},
 	{model: &TaskMessage{}, name: "idx_taskmessages_session_type"},
 	{model: &Model{}, name: "idx_models_username_created"},
-	{model: &governanceAuditCompletionMigration{}, name: "idx_audit_completion_outbox_request_id"},
+	{model: &governanceAuditCompletionMigration{}, name: "idx_audit_completion_outbox_request_id", table: "audit_completion_outbox", unique: true},
 	{model: &governanceAuditCompletionMigration{}, name: "idx_audit_completion_outbox_state"},
 	{model: &governanceAuditCompletionMigration{}, name: "idx_audit_completion_outbox_ready_at"},
 }
@@ -91,6 +93,16 @@ func ValidateRuntimeSchema(db *gorm.DB) error {
 
 	missingIndexes := make([]string, 0)
 	for _, requirement := range requiredRuntimeIndexes {
+		if requirement.unique {
+			valid, err := postgresRuntimeUniqueIndexValid(db, requirement.table, requirement.name)
+			if err != nil {
+				return runtimeMigrationRequiredError(fmt.Sprintf("读取索引 %s 失败: %v", requirement.name, err))
+			}
+			if !valid {
+				missingIndexes = append(missingIndexes, requirement.name)
+			}
+			continue
+		}
 		if !db.Migrator().HasIndex(requirement.model, requirement.name) {
 			missingIndexes = append(missingIndexes, requirement.name)
 		}
@@ -107,6 +119,26 @@ func ValidateRuntimeSchema(db *gorm.DB) error {
 	}
 
 	return nil
+}
+
+func postgresRuntimeUniqueIndexValid(db *gorm.DB, table, index string) (bool, error) {
+	const query = `
+SELECT count(*) > 0
+FROM pg_catalog.pg_class AS table_definition
+JOIN pg_catalog.pg_namespace AS table_namespace ON table_namespace.oid = table_definition.relnamespace
+JOIN pg_catalog.pg_index AS index_definition ON index_definition.indrelid = table_definition.oid
+JOIN pg_catalog.pg_class AS index_name ON index_name.oid = index_definition.indexrelid
+WHERE table_namespace.nspname = current_schema()
+  AND table_definition.relname = ?
+  AND index_name.relname = ?
+  AND index_definition.indisunique
+  AND index_definition.indisvalid
+  AND index_definition.indisready`
+	var valid bool
+	if err := db.Raw(query, table, index).Scan(&valid).Error; err != nil {
+		return false, err
+	}
+	return valid, nil
 }
 
 func runtimeMigrationRequiredError(reason string) error {

@@ -50,6 +50,13 @@ func TestLegacyModelHTTPContractUsesEncryptedPlatformStorage(t *testing.T) {
 	keyring, err := platformmodels.NewKeyring("compat-key", bytes.Repeat([]byte{0x42}, 32), nil)
 	require.NoError(t, err)
 	modelService := platformmodels.NewService(modelRepository, keyring, platformaudit.NewService(auditRepository))
+	yamlModelID := "yaml-readonly"
+	yamlToken := "yaml-compat-plaintext-token"
+	yamlDefaults := []string{"mcp_scan", "model_jailbreak"}
+	yamlSource := &stubYAMLModelSource{models: []*database.Model{{
+		ModelID: yamlModelID, ModelName: "yaml-provider", Token: yamlToken,
+		BaseURL: "https://yaml.invalid/v1", Note: "read only", Limit: 19, Default: yamlDefaults,
+	}}}
 
 	user, err := identityService.CreateUser(ctx, identity.CreateUserInput{
 		Username: "legacy-user", Password: "temporary-password", Role: identity.RoleUser, MustChangePassword: true,
@@ -67,7 +74,7 @@ func TestLegacyModelHTTPContractUsesEncryptedPlatformStorage(t *testing.T) {
 		identity.RequirePasswordChangeCompleted(),
 		identity.RequireCSRF(identity.CookiePolicy{}),
 	)
-	registerPlatformModelRoutes(models, modelService)
+	registerPlatformModelRoutes(models, modelService, yamlSource)
 
 	modelID := "legacy-model-01"
 	secondID := "legacy-model-02"
@@ -109,7 +116,8 @@ func TestLegacyModelHTTPContractUsesEncryptedPlatformStorage(t *testing.T) {
 	var listEnvelope struct {
 		Status int `json:"status"`
 		Data   []struct {
-			ModelID string `json:"model_id"`
+			ModelID string   `json:"model_id"`
+			Default []string `json:"default"`
 			Model   struct {
 				Model   string `json:"model"`
 				Token   string `json:"token"`
@@ -121,17 +129,39 @@ func TestLegacyModelHTTPContractUsesEncryptedPlatformStorage(t *testing.T) {
 	}
 	require.NoError(t, json.Unmarshal(listed.Body.Bytes(), &listEnvelope))
 	require.Equal(t, 0, listEnvelope.Status)
-	require.Len(t, listEnvelope.Data, 1)
-	assert.Equal(t, modelID, listEnvelope.Data[0].ModelID)
-	assert.Equal(t, "gpt-legacy", listEnvelope.Data[0].Model.Model)
-	assert.Equal(t, platformmodels.MaskedToken, listEnvelope.Data[0].Model.Token)
+	require.Len(t, listEnvelope.Data, 2)
+	listedByID := make(map[string]struct {
+		Default []string
+		Model   string
+		Token   string
+	})
+	for _, item := range listEnvelope.Data {
+		listedByID[item.ModelID] = struct {
+			Default []string
+			Model   string
+			Token   string
+		}{Default: item.Default, Model: item.Model.Model, Token: item.Model.Token}
+	}
+	platformListed, ok := listedByID[modelID]
+	require.True(t, ok)
+	assert.NotNil(t, platformListed.Default, "platform compatibility default must be an explicit empty string array")
+	assert.Empty(t, platformListed.Default)
+	assert.Equal(t, "gpt-legacy", platformListed.Model)
+	assert.Equal(t, platformmodels.MaskedToken, platformListed.Token)
+	yamlListed, ok := listedByID[yamlModelID]
+	require.True(t, ok)
+	assert.Equal(t, yamlDefaults, yamlListed.Default)
+	assert.Equal(t, "yaml-provider", yamlListed.Model)
+	assert.Equal(t, platformmodels.MaskedToken, yamlListed.Token)
 	assert.NotContains(t, listed.Body.String(), plaintextToken)
+	assert.NotContains(t, listed.Body.String(), yamlToken)
 	detail := governanceRequest(t, router, login.Token, http.MethodGet, "/api/v1/app/models/"+modelID, nil)
 	require.Equal(t, http.StatusOK, detail.Code, detail.Body.String())
 	var detailEnvelope struct {
 		Status int `json:"status"`
 		Data   struct {
-			ModelID string `json:"model_id"`
+			ModelID string          `json:"model_id"`
+			Default json.RawMessage `json:"default"`
 			Model   struct {
 				Token string `json:"token"`
 			} `json:"model"`
@@ -141,7 +171,36 @@ func TestLegacyModelHTTPContractUsesEncryptedPlatformStorage(t *testing.T) {
 	assert.Equal(t, 0, detailEnvelope.Status)
 	assert.Equal(t, modelID, detailEnvelope.Data.ModelID)
 	assert.Equal(t, platformmodels.MaskedToken, detailEnvelope.Data.Model.Token)
+	assert.JSONEq(t, `[]`, string(detailEnvelope.Data.Default))
 	assert.NotContains(t, detail.Body.String(), plaintextToken)
+
+	yamlDetail := governanceRequest(t, router, login.Token, http.MethodGet, "/api/v1/app/models/"+yamlModelID, nil)
+	require.Equal(t, http.StatusOK, yamlDetail.Code, yamlDetail.Body.String())
+	require.NoError(t, json.Unmarshal(yamlDetail.Body.Bytes(), &detailEnvelope))
+	assert.Equal(t, 0, detailEnvelope.Status)
+	assert.Equal(t, yamlModelID, detailEnvelope.Data.ModelID)
+	assert.Equal(t, platformmodels.MaskedToken, detailEnvelope.Data.Model.Token)
+	assert.JSONEq(t, `["mcp_scan","model_jailbreak"]`, string(detailEnvelope.Data.Default))
+	assert.NotContains(t, yamlDetail.Body.String(), yamlToken)
+
+	yamlUpdate := governanceRequest(t, router, login.Token, http.MethodPut, "/api/v1/app/models/"+yamlModelID, map[string]any{
+		"model": map[string]any{"model": "must-not-change", "token": "must-not-persist", "base_url": "https://write.invalid/v1"},
+	})
+	require.Equal(t, http.StatusOK, yamlUpdate.Code, yamlUpdate.Body.String())
+	assertLegacyEnvelope(t, yamlUpdate.Body.Bytes(), 1, nil)
+	assert.NotContains(t, yamlUpdate.Body.String(), "must-not-persist")
+	yamlDelete := governanceRequest(t, router, login.Token, http.MethodDelete, "/api/v1/app/models", map[string]any{
+		"model_ids": []string{yamlModelID},
+	})
+	require.Equal(t, http.StatusOK, yamlDelete.Code, yamlDelete.Body.String())
+	assertLegacyEnvelope(t, yamlDelete.Body.Bytes(), 1, nil)
+	_, err = modelRepository.Get(ctx, yamlModelID)
+	assert.ErrorIs(t, err, platformmodels.ErrNotFound)
+	require.NoError(t, db.Model(&database.Model{}).Where("model_id = ?", yamlModelID).Count(&legacyRowCount).Error)
+	assert.Zero(t, legacyRowCount, "YAML compatibility reads must never create plaintext legacy rows")
+	yamlDetailAfterWrites := governanceRequest(t, router, login.Token, http.MethodGet, "/api/v1/app/models/"+yamlModelID, nil)
+	require.Equal(t, http.StatusOK, yamlDetailAfterWrites.Code, yamlDetailAfterWrites.Body.String())
+	assert.NotContains(t, yamlDetailAfterWrites.Body.String(), "must-not-change")
 
 	updated := governanceRequest(t, router, login.Token, http.MethodPut, "/api/v1/app/models/"+modelID, map[string]any{
 		"model": map[string]any{

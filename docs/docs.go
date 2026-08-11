@@ -36,7 +36,7 @@ const docTemplate = `{
         "/api/v1/app/models": {
             "get": {
                 "deprecated": true,
-                "description": "Deprecated browser compatibility path. It is protected by the authenticated Subject and delegates to the encrypted platform model service; use /api/v1/platform/models.",
+                "description": "Deprecated browser compatibility path. It is protected by the authenticated Subject, delegates platform records to encrypted storage, and appends read-only YAML models with masked tokens and preserved default string arrays. Platform records return an empty default array. Use /api/v1/platform/models for new clients.",
                 "tags": ["models"],
                 "summary": "List models through deprecated compatibility facade",
                 "responses": {"200": {"description": "Visible model metadata with masked tokens.", "schema": {"$ref": "#/definitions/websocket.LegacyModelListEnvelope"}}, "401": {"description": "Unauthenticated."}}
@@ -61,7 +61,7 @@ const docTemplate = `{
         "/api/v1/app/models/{modelId}": {
             "get": {
                 "deprecated": true,
-                "description": "Deprecated browser compatibility path. Returns the nested legacy model view and always masks the token. Use GET /api/v1/platform/models/{modelID} for new clients.",
+                "description": "Deprecated browser compatibility path. Returns an authorized encrypted platform model or falls back to a read-only YAML model when the ID is absent from platform storage. The token is always masked and default is always a string array. Use GET /api/v1/platform/models/{modelID} for new clients.",
                 "tags": ["models"],
                 "summary": "Get a model through deprecated compatibility facade",
                 "parameters": [{"in": "path", "maxLength": 128, "name": "modelId", "required": true, "type": "string"}],
@@ -582,7 +582,7 @@ const docTemplate = `{
         },
         "websocket.LegacyModelView": {
             "type": "object",
-            "properties": {"model": {"$ref": "#/definitions/websocket.LegacyModelViewInfo"}, "model_id": {"type": "string"}}
+            "properties": {"default": {"description": "Task-type identifiers copied from a read-only YAML model. Encrypted platform models return an explicit empty array.", "type": "array", "items": {"type": "string"}}, "model": {"$ref": "#/definitions/websocket.LegacyModelViewInfo"}, "model_id": {"type": "string"}}
         },
         "websocket.LegacyModelViewInfo": {
             "type": "object",

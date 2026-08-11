@@ -19,6 +19,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 
 	"github.com/Juneoww/AIG_Custom/internal/platform/identity"
@@ -110,6 +111,12 @@ func (resolver *ScannerResolver) ResolveDefault(ctx context.Context, username st
 	if err != nil {
 		return nil, err
 	}
+	sort.SliceStable(models, func(left, right int) bool {
+		if models[left].CreatedAt.Equal(models[right].CreatedAt) {
+			return models[left].ID > models[right].ID
+		}
+		return models[left].CreatedAt.After(models[right].CreatedAt)
+	})
 	for index := range models {
 		resolved, resolveErr := resolver.resolveAuthorized(user, &models[index])
 		if resolveErr == nil {

@@ -92,7 +92,7 @@ Only `aig migrate` may apply database DDL. After the versioned schema reaches v4
 
 Existing `/api/v1/knowledge/*` read formats and scanner protocols are unchanged. Authenticated users, auditors, and administrators may read; only administrators may mutate fingerprints, vulnerabilities, evaluation data, MCP/prompt collections, or Agent configuration. Every change passes through a durable write-ahead audit boundary before the legacy format-preserving handler runs. A direct mount of a legacy write handler is rejected. If the file mutation succeeds but its prepared audit intent cannot be finalized immediately, the original successful response is preserved and includes only `X-Audit-Request-ID`; an administrator verifies the real outcome and calls the prepared-finalize endpoint before reconciliation. Internal errors and metadata are never returned. The asynchronous system-data update records `knowledge.change_requested/pending` immediately and records `knowledge.changed/success` or `failure` only when its background work actually finishes. Changes affect future scans only; completed task/report snapshots remain unchanged.
 
-Audited actions currently include successful and failed login, account creation/enable/disable, role assignment, password reset requests, model governance, and rule/knowledge or system-data changes. Stable action constants also exist for later task changes, report exports, and system configuration callers. `/api/v1/app/models` is deprecated and delegates to the same encrypted Subject-based model service; it no longer trusts a `username` header. The compatibility facade preserves its nested request bodies and `{status,message,data}` envelopes: successful GET, POST, PUT, and collection DELETE operations return HTTP `200`; validation/not-found application errors also return HTTP `200` with `status: 1`, while missing authentication returns `401` and forbidden Subject access returns `403`. Every model token in a compatibility response is masked. New clients should use the independent flat `/api/v1/platform/models` API.
+Audited actions currently include successful and failed login, account creation/enable/disable, role assignment, password reset requests, model governance, and rule/knowledge or system-data changes. Stable action constants also exist for later task changes, report exports, and system configuration callers. `/api/v1/app/models` is deprecated and delegates to the same encrypted Subject-based model service; it no longer trusts a `username` header. The compatibility facade preserves its nested request bodies and `{status,message,data}` envelopes: successful GET, POST, PUT, and collection DELETE operations return HTTP `200`; validation/not-found application errors also return HTTP `200` with `status: 1`, while missing authentication returns `401` and forbidden Subject access returns `403`. List and detail reads also expose the existing read-only YAML models without copying them into either database table. Their task-type `default` string arrays are preserved; encrypted platform models return `default: []`. Every model token in a compatibility response is masked, and YAML IDs cannot be updated or deleted through this facade. New clients should use the independent flat `/api/v1/platform/models` API.
 
 ### 1. File Upload Interface
 
@@ -631,7 +631,7 @@ curl -X POST http://localhost:8088/api/v1/app/taskapi/tasks \
 
 ## Model Management API
 
-> **Deprecated compatibility API.** The endpoints in this section preserve the browser contract (`GET`/`POST`/collection `DELETE` on `/api/v1/app/models`, and detail `GET`/`PUT` on `/api/v1/app/models/{modelId}`). Requests require the authenticated session Subject and CSRF protection for mutations; a `username` header is ignored. POST and PUT keep the nested `model` object, DELETE keeps `{ "model_ids": [...] }`, and all operations use the legacy HTTP `200` envelope described above. Tokens returned by list/detail are always `********`. Use `/api/v1/platform/models` for the non-deprecated flat contract.
+> **Deprecated compatibility API.** The endpoints in this section preserve the browser contract (`GET`/`POST`/collection `DELETE` on `/api/v1/app/models`, and detail `GET`/`PUT` on `/api/v1/app/models/{modelId}`). Requests require the authenticated session Subject and CSRF protection for mutations; a `username` header is ignored. POST and PUT keep the nested `model` object, DELETE keeps `{ "model_ids": [...] }`, and all operations use the legacy HTTP `200` envelope described above. List/detail merge read-only YAML models, preserve their `default` string arrays, and return an empty array for encrypted platform models. Tokens are always `********`; YAML models cannot be mutated. Use `/api/v1/platform/models` for the non-deprecated flat contract.
 
 ### 1. Get Model List
 
@@ -650,7 +650,7 @@ curl -X POST http://localhost:8088/api/v1/app/taskapi/tasks \
 | model.base_url | string | Base URL |
 | model.note | string | Note information |
 | model.limit | integer | Request limit |
-| default | array | Default field (only for YAML configuration models) |
+| default | array | Task-type defaults from YAML; encrypted platform models return an empty array |
 
 #### Python Example
 ```python
@@ -697,7 +697,8 @@ curl -X GET http://localhost:8088/api/v1/app/models \
         "base_url": "https://api.openai.com/v1",
         "note": "GPT-4 Model",
         "limit": 1000
-      }
+      },
+      "default": []
     },
     {
       "model_id": "system_default",
@@ -736,7 +737,7 @@ curl -X GET http://localhost:8088/api/v1/app/models \
 | model.base_url | string | Base URL |
 | model.note | string | Note information |
 | model.limit | integer | Request limit |
-| default | array | Default field (only for YAML configuration models) |
+| default | array | Task-type defaults from YAML; encrypted platform models return an empty array |
 
 #### Python Example
 ```python
@@ -778,7 +779,8 @@ curl -X GET http://localhost:8088/api/v1/app/models/gpt4-model \
       "base_url": "https://api.openai.com/v1",
       "note": "GPT-4 Model",
       "limit": 1000
-    }
+    },
+    "default": []
   }
 }
 ```

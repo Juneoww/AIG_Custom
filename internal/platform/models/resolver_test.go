@@ -23,6 +23,7 @@ import (
 	"os"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/Juneoww/AIG_Custom/internal/platform/audit"
 	"github.com/Juneoww/AIG_Custom/internal/platform/identity"
@@ -107,6 +108,57 @@ func TestScannerResolverUsesEncryptedModelsAndFreshIdentityAuthorization(t *test
 	assert.ErrorIs(t, err, ErrForbidden)
 	_, err = resolver.Resolve(ctx, alice.Username, "missing-model")
 	assert.ErrorIs(t, err, ErrNotFound)
+}
+
+func TestScannerResolverDefaultChoosesNewestAuthorizedPlatformModel(t *testing.T) {
+	db := openScannerResolverTestDB(t)
+	ctx := context.Background()
+	identityRepository := identity.NewGormRepository(db)
+	require.NoError(t, identityRepository.Init())
+	identityService := identity.NewService(identityRepository)
+	auditRepository := audit.NewGormRepository(db)
+	require.NoError(t, auditRepository.Init())
+	modelRepository := NewGormRepository(db)
+	require.NoError(t, modelRepository.Init())
+	keyring, err := NewKeyring("default-order-key", bytes.Repeat([]byte{0x52}, 32), nil)
+	require.NoError(t, err)
+	service := NewService(modelRepository, keyring, audit.NewService(auditRepository))
+
+	alice := createResolverUser(t, identityService, "default-alice", identity.RoleUser)
+	bob := createResolverUser(t, identityService, "default-bob", identity.RoleUser)
+	charlie := createResolverUser(t, identityService, "default-charlie", identity.RoleUser)
+	aliceSubject := subjectOfResolverUser(alice)
+	bobSubject := subjectOfResolverUser(bob)
+	base := time.Date(2026, time.August, 11, 1, 0, 0, 0, time.UTC)
+	create := func(subject identity.Subject, id, token string, createdAt time.Time) View {
+		t.Helper()
+		service.now = func() time.Time { return createdAt }
+		view, createErr := service.CreateWithCompatibilityID(ctx, subject, id, CreateInput{
+			Name: id, ProviderModel: id + "-provider", BaseURL: "https://models.invalid/v1",
+			Token: token, Scope: ScopePrivate,
+		})
+		require.NoError(t, createErr)
+		return view
+	}
+
+	create(aliceSubject, "alice-old", "old-token", base)
+	create(aliceSubject, "alice-new-a", "new-a-token", base.Add(time.Minute))
+	wanted := create(aliceSubject, "alice-new-z", "new-z-token", base.Add(time.Minute))
+	create(bobSubject, "bob-newer", "bob-token", base.Add(2*time.Minute))
+	disabled := create(aliceSubject, "alice-disabled", "disabled-token", base.Add(3*time.Minute))
+	disabledValue := true
+	service.now = func() time.Time { return base.Add(4 * time.Minute) }
+	_, err = service.Update(ctx, aliceSubject, disabled.ID, UpdateInput{Disabled: &disabledValue})
+	require.NoError(t, err)
+
+	resolver := NewScannerResolver(modelRepository, identityRepository, keyring)
+	resolved, err := resolver.ResolveDefault(ctx, alice.Username)
+	require.NoError(t, err)
+	assert.Equal(t, wanted.ProviderModel, resolved.ProviderModel())
+	assert.Equal(t, "new-z-token", resolved.Token(), "equal creation times must use ID DESC as the stable tie-break")
+
+	_, err = resolver.ResolveDefault(ctx, charlie.Username)
+	assert.ErrorIs(t, err, ErrNotFound, "no authorized platform model must leave the YAML fallback boundary open")
 }
 
 func createResolverUser(t *testing.T, service *identity.Service, username string, role identity.Role) *identity.User {

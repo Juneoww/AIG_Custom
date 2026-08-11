@@ -267,7 +267,7 @@ func RunWebServer(options *version.Options) {
 			// encrypted platform service and the authenticated Subject, never by
 			// the former username-based legacy handlers.
 			models := appSecurity.Group("/models")
-			registerPlatformModelRoutes(models, platformModelService)
+			registerPlatformModelRoutes(models, platformModelService, modelStore)
 		}
 		// 4. Agent 管理
 		agents := v1.Group("/agents")

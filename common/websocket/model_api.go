@@ -35,7 +35,7 @@ import (
 
 // registerPlatformModelRoutes preserves the application model API contract
 // while routing every operation through encrypted platform storage.
-func registerPlatformModelRoutes(group *gin.RouterGroup, service *platformmodels.Service) {
+func registerPlatformModelRoutes(group *gin.RouterGroup, service *platformmodels.Service, yamlModels taskYAMLModelSource) {
 	group.GET("", func(c *gin.Context) {
 		subject, ok := identity.CurrentSubject(c)
 		if !ok {
@@ -51,6 +51,14 @@ func registerPlatformModelRoutes(group *gin.RouterGroup, service *platformmodels
 		for _, view := range views {
 			result = append(result, legacyPlatformModelView(view))
 		}
+		if yamlModels != nil {
+			configured, _ := yamlModels.LoadYamlModels()
+			for _, model := range configured {
+				if model != nil {
+					result = append(result, legacyYAMLModelView(model))
+				}
+			}
+		}
 		c.JSON(http.StatusOK, gin.H{"status": 0, "message": "获取模型列表成功", "data": result})
 	})
 	group.GET("/:modelId", func(c *gin.Context) {
@@ -59,8 +67,15 @@ func registerPlatformModelRoutes(group *gin.RouterGroup, service *platformmodels
 			c.Status(http.StatusUnauthorized)
 			return
 		}
-		view, err := service.Get(c.Request.Context(), subject, c.Param("modelId"))
+		modelID := c.Param("modelId")
+		view, err := service.Get(c.Request.Context(), subject, modelID)
 		if err != nil {
+			if errors.Is(err, platformmodels.ErrNotFound) && yamlModels != nil {
+				if model := yamlModels.GetYamlModel(modelID); model != nil {
+					c.JSON(http.StatusOK, gin.H{"status": 0, "message": "获取模型详情成功", "data": legacyYAMLModelView(model)})
+					return
+				}
+			}
 			respondLegacyPlatformModelError(c, err, "模型不存在")
 			return
 		}
@@ -165,9 +180,22 @@ func legacyPlatformModelScope(subject identity.Subject) (platformmodels.Scope, e
 func legacyPlatformModelView(view platformmodels.View) gin.H {
 	return gin.H{
 		"model_id": view.ID,
+		"default":  []string{},
 		"model": gin.H{
 			"model": view.ProviderModel, "token": platformmodels.MaskedToken,
 			"base_url": view.BaseURL, "note": view.Note, "limit": view.Limit,
+		},
+	}
+}
+
+func legacyYAMLModelView(model *database.Model) gin.H {
+	defaults := append([]string{}, model.Default...)
+	return gin.H{
+		"model_id": model.ModelID,
+		"default":  defaults,
+		"model": gin.H{
+			"model": model.ModelName, "token": platformmodels.MaskedToken,
+			"base_url": model.BaseURL, "note": model.Note, "limit": model.Limit,
 		},
 	}
 }

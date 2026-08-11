@@ -116,6 +116,16 @@ func TestGeneratedSwaggerArtifactsStayInSync(t *testing.T) {
 		if modelRef := swaggerValue(t, document, "definitions", "websocket.LegacyModelView", "properties", "model", "$ref"); modelRef != "#/definitions/websocket.LegacyModelViewInfo" {
 			t.Fatalf("legacy response must preserve nested model shape, got %v", modelRef)
 		}
+		if defaultType := swaggerValue(t, document, "definitions", "websocket.LegacyModelView", "properties", "default", "type"); defaultType != "array" {
+			t.Fatalf("legacy response default must be a string array, got %v", defaultType)
+		}
+		if itemType := swaggerValue(t, document, "definitions", "websocket.LegacyModelView", "properties", "default", "items", "type"); itemType != "string" {
+			t.Fatalf("legacy response default items must be strings, got %v", itemType)
+		}
+		defaultDescription := swaggerValue(t, document, "definitions", "websocket.LegacyModelView", "properties", "default", "description")
+		if !strings.Contains(defaultDescription.(string), "YAML") || !strings.Contains(defaultDescription.(string), "empty array") {
+			t.Fatal("legacy response default must document YAML values and the platform empty-array behavior")
+		}
 		maskedToken := swaggerValue(t, document, "definitions", "websocket.LegacyModelViewInfo", "properties", "token", "description")
 		if !strings.Contains(strings.ToLower(maskedToken.(string)), "masked") {
 			t.Fatal("legacy model response token must be documented as masked")
