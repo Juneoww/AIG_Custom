@@ -480,8 +480,6 @@ func (tm *TaskManager) dispatchTask(sessionId string, traceID string) error {
 			CountryIsoCode: task.CountryIsoCode,
 		},
 	}
-	log.Infof("任务分配消息: trace_id=%s, sessionId=%s, taskMsg=%+v", traceID, sessionId, taskMsg)
-
 	// 7. 直接发送给 Agent（简化：无重试，无额外健康检查）
 	selectedAgent.stateMu.RLock()
 	agentID := selectedAgent.agentID
@@ -494,6 +492,7 @@ func (tm *TaskManager) dispatchTask(sessionId string, traceID string) error {
 		tm.taskStore.UpdateSessionAssignedAgent(task.SessionID, "")
 		return fmt.Errorf("选中的Agent已不活跃: %s", agentID)
 	}
+	log.Infof("任务分配消息已构造: trace_id=%s, sessionId=%s, taskType=%s, agentId=%s", traceID, sessionId, task.Task, agentID)
 
 	// 设置写超时并直接发送
 	selectedAgent.conn.SetWriteDeadline(time.Now().Add(writeWait))
