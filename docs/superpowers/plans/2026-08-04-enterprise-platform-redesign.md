@@ -162,31 +162,31 @@ git commit -m "feat: add local authentication and rbac core"
 - Create: `internal/platform/knowledge/handler.go`, `service.go`, `service_test.go`
 - Modify: `common/websocket/model_api.go`, `common/websocket/knowledge_api.go`, `common/websocket/knowledge2_api.go`, `common/websocket/server.go`, `api.md`, `api_zh.md`, `docs/swagger.yaml`
 
-- [ ] **Step 1: 写入失败测试：管理员用户/角色变更必须审计，模型密钥不能出现在 API 响应**
+- [x] **Step 1: 写入失败测试：管理员用户/角色变更必须审计，模型密钥不能出现在 API 响应**
 
 测试管理员创建用户、分配角色、禁用、重置密码；审计员不能写；普通用户无法读取别人私有模型；全局模型仅管理员可写；模型 token 在列表、详情、日志序列化中永不明文出现。另测试仅管理员可修改现有指纹、漏洞与知识库内容，每次变更均写审计；普通用户/审计员不能写；既有已完成任务/报告仍读取其快照而不被规则变更影响。
 
-- [ ] **Step 2: 运行测试并确认失败**
+- [x] **Step 2: 运行测试并确认失败**
 
 Run: `powershell -ExecutionPolicy Bypass -File scripts/docker-go-test.ps1 -Packages './internal/platform/admin','./internal/platform/audit','./internal/platform/models','./internal/platform/knowledge'`
 
 Expected: FAIL，包不存在。
 
-- [ ] **Step 3: 实现后台与审计服务**
+- [x] **Step 3: 实现后台与审计服务**
 
 实现受控的用户、角色、密码重置、审计查询 API；审计事件包括登录成功/失败、角色与账号变更、任务变更、报告导出、系统配置和规则/知识库内容变更。用由环境变量注入、可轮换的主密钥加密模型 token；正常用户仅管理本人私有模型，管理员管理全局模型并仅看密钥掩码。新增 `internal/platform/knowledge` 作为既有规则和知识库读写的受控门面：保持现有文件格式与扫描协议，管理员修改只影响后续扫描，服务层为每次写入记录审计。
 
-- [ ] **Step 4: 迁移并替换旧模型 API 的信任来源**
+- [x] **Step 4: 迁移并替换旧模型 API 的信任来源**
 
 将现有 `model_api.go`、`knowledge_api.go` 和 `knowledge2_api.go` 变为内部兼容实现或由平台 handler 调用，删除请求头用户名依赖；新平台规则/知识库端点经过管理员授权和审计，路由与 Swagger 文档将旧端点标记为 internal/deprecated，浏览器无法绕过平台权限直接调用。
 
-- [ ] **Step 5: 运行 API 回归测试**
+- [x] **Step 5: 运行 API 回归测试**
 
 Run: `powershell -ExecutionPolicy Bypass -File scripts/docker-go-test.ps1 -Packages './internal/platform/admin','./internal/platform/audit','./internal/platform/models','./internal/platform/knowledge','./common/websocket'`
 
 Expected: PASS，且响应快照不包含 token。
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add internal/platform/admin internal/platform/audit internal/platform/models internal/platform/knowledge common/websocket/model_api.go common/websocket/knowledge_api.go common/websocket/knowledge2_api.go common/websocket/server.go api.md api_zh.md docs/swagger.yaml
