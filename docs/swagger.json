@@ -18,7 +18,7 @@
             },
             "post": {
                 "deprecated": true,
-                "description": "Deprecated browser compatibility path. Accepts the nested legacy request, stores the token only through authenticated encryption, and returns the legacy HTTP 200 status/message/data envelope. Use POST /api/v1/platform/models for new clients.",
+                "description": "Deprecated browser compatibility path. Accepts the nested legacy request, stores the token only through authenticated encryption, and returns the legacy HTTP 200 status/message/data envelope. Before any mutation it loads the read-only YAML source once; a matching trimmed ID cannot shadow a YAML model and returns status one, while a source error fails closed with status one and no database or audit mutation. Use POST /api/v1/platform/models for new clients.",
                 "tags": ["models"],
                 "summary": "Create a model through deprecated compatibility facade",
                 "parameters": [{"in": "body", "name": "body", "required": true, "schema": {"$ref": "#/definitions/websocket.LegacyModelCreateRequest"}}],

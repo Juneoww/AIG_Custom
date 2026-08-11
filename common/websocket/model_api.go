@@ -96,9 +96,19 @@ func registerPlatformModelRoutes(group *gin.RouterGroup, service *platformmodels
 		if request.Model.Limit == 0 {
 			request.Model.Limit = 1000
 		}
+		request.ModelID = strings.TrimSpace(request.ModelID)
 		scope, err := legacyPlatformModelScope(subject)
 		if err != nil {
 			respondLegacyPlatformModelError(c, err, "无权创建模型")
+			return
+		}
+		configured, err := loadLegacyYAMLModel(yamlModels, request.ModelID)
+		if err != nil {
+			respondLegacyPlatformModelError(c, platformmodels.ErrInvalid, "模型配置读取失败")
+			return
+		}
+		if configured != nil {
+			respondLegacyPlatformModelError(c, platformmodels.ErrInvalid, "模型已存在")
 			return
 		}
 		_, err = service.CreateWithCompatibilityID(c.Request.Context(), subject, request.ModelID, platformmodels.CreateInput{
@@ -164,6 +174,25 @@ func registerPlatformModelRoutes(group *gin.RouterGroup, service *platformmodels
 		}
 		c.JSON(http.StatusOK, gin.H{"status": 0, "message": "删除成功", "data": nil})
 	})
+}
+
+// loadLegacyYAMLModel takes one immutable source snapshot so the collision
+// check cannot silently degrade to "not found" or race a second YAML load.
+func loadLegacyYAMLModel(source taskYAMLModelSource, modelID string) (*database.Model, error) {
+	if source == nil {
+		return nil, nil
+	}
+	configured, err := source.LoadYamlModels()
+	if err != nil {
+		return nil, err
+	}
+	modelID = strings.TrimSpace(modelID)
+	for _, model := range configured {
+		if model != nil && strings.TrimSpace(model.ModelID) == modelID {
+			return model, nil
+		}
+	}
+	return nil, nil
 }
 
 func legacyPlatformModelScope(subject identity.Subject) (platformmodels.Scope, error) {

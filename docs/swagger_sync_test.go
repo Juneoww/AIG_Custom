@@ -79,6 +79,12 @@ func TestGeneratedSwaggerArtifactsStayInSync(t *testing.T) {
 		if legacyModel != true {
 			t.Fatal("legacy browser model API must be marked deprecated")
 		}
+		legacyCreateDescription := swaggerValue(t, document, "paths", "/api/v1/app/models", "post", "description").(string)
+		for _, required := range []string{"read-only YAML", "cannot shadow", "fails closed", "status one"} {
+			if !strings.Contains(legacyCreateDescription, required) {
+				t.Fatalf("legacy model create documentation must contain %q", required)
+			}
+		}
 		for _, endpoint := range []struct {
 			path, method, responseRef string
 		}{
@@ -143,6 +149,7 @@ func TestAPIGuidesDocumentLegacyModelAndMigrationBoundaries(t *testing.T) {
 			required: []string{
 				"/api/v1/app/models/{modelId}", "collection DELETE", "{status,message,data}",
 				"HTTP `200`", "`401`", "`403`", "masked", "/api/v1/platform/models",
+				"cannot shadow", "fails closed",
 				"Only `aig migrate` may apply database DDL", "schema reaches v4", "empty legacy table",
 			},
 		},
@@ -151,6 +158,7 @@ func TestAPIGuidesDocumentLegacyModelAndMigrationBoundaries(t *testing.T) {
 			required: []string{
 				"/api/v1/app/models/{modelId}", "集合 DELETE", "{status,message,data}",
 				"HTTP `200`", "`401`", "`403`", "始终脱敏", "/api/v1/platform/models",
+				"不能遮蔽", "失败关闭",
 				"只有 `aig migrate` 可以执行数据库 DDL", "schema 到达 v4", "旧表为空",
 			},
 		},

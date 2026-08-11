@@ -18,6 +18,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/url"
@@ -101,6 +102,7 @@ func TestLegacyModelHTTPContractUsesEncryptedPlatformStorage(t *testing.T) {
 		NewAgentManager(), database.NewTaskStore(db), database.NewModelStore(db), nil, NewSSEManager(),
 	)
 	taskManager.SetModelResolver(platformmodels.NewScannerResolver(modelRepository, identityRepository, keyring))
+	taskManager.SetYAMLModelSource(yamlSource)
 	scannerParams, err := taskManager.resolveTaskModel(ctx, user.Username, modelID)
 	require.NoError(t, err)
 	assert.Equal(t, "gpt-legacy", scannerParams.Model)
@@ -183,6 +185,50 @@ func TestLegacyModelHTTPContractUsesEncryptedPlatformStorage(t *testing.T) {
 	assert.JSONEq(t, `["mcp_scan","model_jailbreak"]`, string(detailEnvelope.Data.Default))
 	assert.NotContains(t, yamlDetail.Body.String(), yamlToken)
 
+	mutationCountsBeforeCollision := countLegacyModelMutationRows(t, db)
+	yamlLoadsBeforeCollision := yamlSource.loadCalls
+	yamlGetsBeforeCollision := yamlSource.getCalls
+	collisionToken := "yaml-shadow-plaintext-token"
+	collisionBaseURL := "https://yaml-shadow.invalid/v1"
+	collision := governanceRequest(t, router, login.Token, http.MethodPost, "/api/v1/app/models", map[string]any{
+		"model_id": "  " + yamlModelID + "  ",
+		"model": map[string]any{
+			"model": "must-not-shadow-yaml", "token": collisionToken, "base_url": collisionBaseURL,
+		},
+	})
+	require.Equal(t, http.StatusOK, collision.Code, collision.Body.String())
+	var collisionEnvelope struct {
+		Status  int    `json:"status"`
+		Message string `json:"message"`
+	}
+	require.NoError(t, json.Unmarshal(collision.Body.Bytes(), &collisionEnvelope))
+	assert.Equal(t, 1, collisionEnvelope.Status)
+	assert.Contains(t, collisionEnvelope.Message, "已存在")
+	assert.NotContains(t, collision.Body.String(), collisionToken)
+	assert.NotContains(t, collision.Body.String(), collisionBaseURL)
+	assert.NotContains(t, collision.Body.String(), yamlToken)
+	assert.Equal(t, yamlLoadsBeforeCollision+1, yamlSource.loadCalls, "POST must inspect the shared YAML source exactly once")
+	assert.Equal(t, yamlGetsBeforeCollision, yamlSource.getCalls, "POST must not reload YAML after its single snapshot")
+	assert.Equal(t, mutationCountsBeforeCollision, countLegacyModelMutationRows(t, db))
+	_, err = modelRepository.Get(ctx, yamlModelID)
+	assert.ErrorIs(t, err, platformmodels.ErrNotFound)
+	assert.Equal(t, yamlModelID, yamlSource.models[0].ModelID)
+	assert.Equal(t, yamlToken, yamlSource.models[0].Token)
+	assert.Equal(t, yamlDefaults, yamlSource.models[0].Default)
+
+	yamlScannerParams, err := taskManager.resolveTaskModel(ctx, user.Username, yamlModelID)
+	require.NoError(t, err)
+	assert.Equal(t, "yaml-provider", yamlScannerParams.Model)
+	assert.Equal(t, yamlToken, yamlScannerParams.Token)
+	otherUser, err := identityService.CreateUser(ctx, identity.CreateUserInput{
+		Username: "other-yaml-user", Password: "ready-password", Role: identity.RoleUser,
+	})
+	require.NoError(t, err)
+	otherYAMLScannerParams, err := taskManager.resolveTaskModel(ctx, otherUser.Username, yamlModelID)
+	require.NoError(t, err)
+	assert.Equal(t, "yaml-provider", otherYAMLScannerParams.Model)
+	assert.Equal(t, yamlToken, otherYAMLScannerParams.Token)
+
 	yamlUpdate := governanceRequest(t, router, login.Token, http.MethodPut, "/api/v1/app/models/"+yamlModelID, map[string]any{
 		"model": map[string]any{"model": "must-not-change", "token": "must-not-persist", "base_url": "https://write.invalid/v1"},
 	})
@@ -255,6 +301,78 @@ func TestLegacyModelHTTPContractUsesEncryptedPlatformStorage(t *testing.T) {
 	require.Equal(t, http.StatusOK, invalidID.Code, invalidID.Body.String())
 	assertLegacyEnvelope(t, invalidID.Body.Bytes(), 1, nil)
 	assert.NotContains(t, invalidID.Body.String(), "invalid-id-token")
+}
+
+func TestLegacyModelCreateFailsClosedWhenYAMLSourceCannotLoad(t *testing.T) {
+	db := openLegacyModelCompatibilityDB(t)
+	ctx := context.Background()
+	identityRepository := identity.NewGormRepository(db)
+	require.NoError(t, identityRepository.Init())
+	identityService := identity.NewService(identityRepository)
+	auditRepository := platformaudit.NewGormRepository(db)
+	require.NoError(t, auditRepository.Init())
+	modelRepository := platformmodels.NewGormRepository(db)
+	require.NoError(t, modelRepository.Init())
+	keyring, err := platformmodels.NewKeyring("compat-key", bytes.Repeat([]byte{0x43}, 32), nil)
+	require.NoError(t, err)
+	modelService := platformmodels.NewService(modelRepository, keyring, platformaudit.NewService(auditRepository))
+	yamlLoadError := errors.New("yaml-source-sensitive-detail")
+	yamlSource := &stubYAMLModelSource{loadErr: yamlLoadError}
+
+	user, err := identityService.CreateUser(ctx, identity.CreateUserInput{
+		Username: "yaml-error-user", Password: "temporary-password", Role: identity.RoleUser, MustChangePassword: true,
+	})
+	require.NoError(t, err)
+	require.NoError(t, identityService.ChangePassword(ctx, user.ID, "temporary-password", "ready-password"))
+	login, err := identityService.Authenticate(ctx, user.Username, "ready-password")
+	require.NoError(t, err)
+
+	gin.SetMode(gin.TestMode)
+	router := gin.New()
+	models := router.Group("/api/v1/app/models")
+	models.Use(
+		setupIdentityMiddleware(identityService, identity.CookiePolicy{}),
+		identity.RequirePasswordChangeCompleted(),
+		identity.RequireCSRF(identity.CookiePolicy{}),
+	)
+	registerPlatformModelRoutes(models, modelService, yamlSource)
+
+	before := countLegacyModelMutationRows(t, db)
+	plaintextToken := "yaml-load-error-token"
+	baseURL := "https://yaml-load-error.invalid/v1"
+	response := governanceRequest(t, router, login.Token, http.MethodPost, "/api/v1/app/models", map[string]any{
+		"model_id": "must-not-create",
+		"model": map[string]any{
+			"model": "must-not-create", "token": plaintextToken, "base_url": baseURL,
+		},
+	})
+	require.Equal(t, http.StatusOK, response.Code, response.Body.String())
+	assertLegacyEnvelope(t, response.Body.Bytes(), 1, nil)
+	assert.NotContains(t, response.Body.String(), yamlLoadError.Error())
+	assert.NotContains(t, response.Body.String(), plaintextToken)
+	assert.NotContains(t, response.Body.String(), baseURL)
+	assert.Equal(t, 1, yamlSource.loadCalls)
+	assert.Zero(t, yamlSource.getCalls)
+	assert.Equal(t, before, countLegacyModelMutationRows(t, db))
+	_, err = modelRepository.Get(ctx, "must-not-create")
+	assert.ErrorIs(t, err, platformmodels.ErrNotFound)
+}
+
+type legacyModelMutationRows struct {
+	PlatformModels int64
+	LegacyModels   int64
+	AuditEvents    int64
+	AuditOutbox    int64
+}
+
+func countLegacyModelMutationRows(t *testing.T, db *gorm.DB) legacyModelMutationRows {
+	t.Helper()
+	var counts legacyModelMutationRows
+	require.NoError(t, db.Model(&platformmodels.Model{}).Count(&counts.PlatformModels).Error)
+	require.NoError(t, db.Model(&database.Model{}).Count(&counts.LegacyModels).Error)
+	require.NoError(t, db.Model(&platformaudit.Event{}).Count(&counts.AuditEvents).Error)
+	require.NoError(t, db.Model(&platformaudit.CompletionOutbox{}).Count(&counts.AuditOutbox).Error)
+	return counts
 }
 
 func assertLegacyEnvelope(t *testing.T, payload []byte, expectedStatus int, expectedData any) {

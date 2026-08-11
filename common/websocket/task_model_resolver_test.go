@@ -72,9 +72,15 @@ func TestTaskModelResolverPreservesAuthorizedYAMLFallbackForDirectDefaultAndTitl
 	assert.ErrorIs(t, err, platformmodels.ErrForbidden, "identity rejection must not fall through to YAML")
 }
 
-type stubYAMLModelSource struct{ models []*database.Model }
+type stubYAMLModelSource struct {
+	models    []*database.Model
+	loadErr   error
+	loadCalls int
+	getCalls  int
+}
 
 func (source *stubYAMLModelSource) GetYamlModel(modelID string) *database.Model {
+	source.getCalls++
 	for _, model := range source.models {
 		if model.ModelID == modelID {
 			copy := *model
@@ -85,6 +91,10 @@ func (source *stubYAMLModelSource) GetYamlModel(modelID string) *database.Model 
 }
 
 func (source *stubYAMLModelSource) LoadYamlModels() ([]*database.Model, error) {
+	source.loadCalls++
+	if source.loadErr != nil {
+		return nil, source.loadErr
+	}
 	models := make([]*database.Model, 0, len(source.models))
 	for _, model := range source.models {
 		copy := *model
