@@ -227,7 +227,7 @@ Run: `powershell -ExecutionPolicy Bypass -File scripts/docker-go-test.ps1 -Packa
 
 Expected: PASS；给定既有任务输入仍生成相同类型任务与引擎事件。
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```bash
 git add internal/platform/tasks common/websocket/task.go common/websocket/task_manager.go common/websocket/agent.go common/websocket/server.go common/websocket/api_test.go cmd/agent/main.go common/agent/agent.go common/agent/agent_test.go
@@ -316,7 +316,7 @@ Expected: FAIL，控制台工程不存在。
 
 Expected: PASS，构建产物可被 `go:embed` 编译。
 
-- [x] **Step 7: Commit**
+- [ ] **Step 7: Commit**
 
 ```bash
 git add web/console scripts/docker-console.ps1 common/websocket/static common/websocket/server.go .gitignore
