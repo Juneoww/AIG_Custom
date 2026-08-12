@@ -93,6 +93,96 @@ func TestRuntimeSchemaRejectsMissingDispatchClaimColumnWithoutDDL(t *testing.T) 
 	assert.False(t, db.Migrator().HasColumn("platform_tasks", "dispatch_claim_token"), "runtime validation must not repair schema")
 }
 
+func TestRuntimeSchemaRejectsMissingReportTablesWithoutDDL(t *testing.T) {
+	db := openPostgresTestDB(t)
+	for _, table := range []string{"report_snapshots", "report_brand_settings"} {
+		t.Run(table, func(t *testing.T) {
+			resetPostgresTestDB(t, db)
+			require.NoError(t, Migrate(db))
+			require.NoError(t, db.Migrator().DropTable(table))
+			beforeVersions := migrationVersions(t, db)
+
+			err := ValidateRuntimeSchema(db)
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), "aig migrate")
+			assert.Equal(t, beforeVersions, migrationVersions(t, db))
+			assert.False(t, db.Migrator().HasTable(table), "runtime validation must not recreate tables")
+		})
+	}
+}
+
+func TestRuntimeSchemaRejectsMissingReportColumnsWithoutDDL(t *testing.T) {
+	db := openPostgresTestDB(t)
+	columns := map[string][]string{
+		"report_snapshots": {
+			"task_id", "owner_user_id", "task_type", "completed_at", "created_at",
+			"raw_result", "risk_summary", "render_data", "brand_snapshot",
+		},
+		"report_brand_settings": {
+			"product_name", "primary_color", "logo", "logo_mime", "watermark", "updated_by", "updated_at",
+		},
+	}
+	for table, tableColumns := range columns {
+		for _, column := range tableColumns {
+			t.Run(table+"/"+column, func(t *testing.T) {
+				resetPostgresTestDB(t, db)
+				require.NoError(t, Migrate(db))
+				require.NoError(t, db.Exec(fmt.Sprintf("ALTER TABLE %s DROP COLUMN %s", table, column)).Error)
+				beforeVersions := migrationVersions(t, db)
+				beforeCatalog := reportRuntimeCatalogState(t, db)
+
+				err := ValidateRuntimeSchema(db)
+				require.Error(t, err)
+				assert.Contains(t, err.Error(), table+"."+column)
+				assert.Equal(t, beforeVersions, migrationVersions(t, db), "runtime validation must not update migration history")
+				assert.Equal(t, beforeCatalog, reportRuntimeCatalogState(t, db), "runtime validation must not repair report catalog objects")
+				assert.False(t, db.Migrator().HasColumn(table, column))
+			})
+		}
+	}
+}
+
+func TestRuntimeSchemaRejectsMissingReportTrendIndexesWithoutDDL(t *testing.T) {
+	db := openPostgresTestDB(t)
+	for _, index := range []string{"idx_report_snapshots_completed_at", "idx_report_snapshots_owner_completed_at"} {
+		t.Run(index, func(t *testing.T) {
+			resetPostgresTestDB(t, db)
+			require.NoError(t, Migrate(db))
+			require.NoError(t, db.Exec("DROP INDEX IF EXISTS "+index).Error)
+			beforeVersions := migrationVersions(t, db)
+			beforeCatalog := reportRuntimeCatalogState(t, db)
+
+			err := ValidateRuntimeSchema(db)
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), index)
+			assert.Equal(t, beforeVersions, migrationVersions(t, db), "runtime validation must not update migration history")
+			assert.Equal(t, beforeCatalog, reportRuntimeCatalogState(t, db), "runtime validation must not repair report catalog objects")
+			assert.False(t, db.Migrator().HasIndex(&reportSnapshotMigration{}, index))
+		})
+	}
+}
+
+func reportRuntimeCatalogState(t *testing.T, db *gorm.DB) []string {
+	t.Helper()
+	var rows []struct {
+		Object string `gorm:"column:object"`
+	}
+	require.NoError(t, db.Raw(`
+SELECT 'column:' || table_name || '.' || column_name AS object
+FROM information_schema.columns
+WHERE table_schema = current_schema() AND table_name IN ('report_snapshots', 'report_brand_settings')
+UNION ALL
+SELECT 'index:' || tablename || '.' || indexname AS object
+FROM pg_catalog.pg_indexes
+WHERE schemaname = current_schema() AND tablename IN ('report_snapshots', 'report_brand_settings')
+ORDER BY object`).Scan(&rows).Error)
+	objects := make([]string, len(rows))
+	for index, row := range rows {
+		objects[index] = row.Object
+	}
+	return objects
+}
+
 func TestRuntimeSchemaRequiresUniqueCompletionRequestIndexWithoutDDL(t *testing.T) {
 	db := openPostgresTestDB(t)
 	for _, fixture := range []struct {

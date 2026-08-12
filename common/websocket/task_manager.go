@@ -424,7 +424,11 @@ func (tm *TaskManager) GetTaskStatus(ctx context.Context, sessionID string) (pla
 	default:
 		return platformtasks.EngineStatus{}, fmt.Errorf("engine task has invalid status")
 	}
-	return platformtasks.EngineStatus{State: state}, nil
+	status := platformtasks.EngineStatus{State: state}
+	if session.CompletedAt != nil {
+		status.CompletedAt = time.UnixMilli(*session.CompletedAt).UTC()
+	}
+	return status, nil
 }
 
 func (tm *TaskManager) GetResult(ctx context.Context, sessionID string) (json.RawMessage, error) {

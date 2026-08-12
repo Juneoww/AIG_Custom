@@ -234,7 +234,10 @@ func (service *Service) WithinTransaction(ctx context.Context, apply func(contex
 	if !ok || provider.TransactionDB() == nil {
 		return apply(ctx)
 	}
-	return provider.TransactionDB().WithContext(ctx).Transaction(func(transaction *gorm.DB) error {
+	// Honor a connection or transaction already carried by the caller. This is
+	// required by session-scoped coordination such as trusted engine-event
+	// advisory locks, while the audit service remains the transaction owner.
+	return txcontext.Gorm(ctx, provider.TransactionDB()).Transaction(func(transaction *gorm.DB) error {
 		return apply(txcontext.WithGorm(ctx, transaction))
 	})
 }

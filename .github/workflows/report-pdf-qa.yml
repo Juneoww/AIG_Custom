@@ -1,0 +1,37 @@
+name: Report PDF interoperability
+
+on:
+  pull_request:
+    paths:
+      - "internal/platform/reports/**"
+      - "go.mod"
+      - "go.sum"
+      - ".github/workflows/report-pdf-qa.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  poppler-validation:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.23.2"
+          cache: true
+
+      - name: Install Poppler validation tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y poppler-utils
+
+      - name: Validate embedded fonts, Unicode text and multipage output
+        env:
+          AIG_REQUIRE_POPPLER: "1"
+        run: go test ./internal/platform/reports -run '^TestPDFRendererProducesPopplerReadableMultiPageUnicodeDocument$' -count=1 -v

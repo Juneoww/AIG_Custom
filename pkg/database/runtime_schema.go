@@ -23,7 +23,7 @@ import (
 
 // LatestSchemaVersion is the schema version required by the running server.
 // Schema changes are applied only by the explicit `aig migrate` command.
-const LatestSchemaVersion int64 = 6
+const LatestSchemaVersion int64 = 7
 
 var requiredRuntimeTables = []string{
 	"users",
@@ -39,6 +39,18 @@ var requiredRuntimeTables = []string{
 	"platform_models",
 	"platform_tasks",
 	"platform_attachments",
+	"report_snapshots",
+	"report_brand_settings",
+}
+
+var requiredRuntimeColumns = map[string][]string{
+	"report_snapshots": {
+		"task_id", "owner_user_id", "task_type", "completed_at", "created_at",
+		"raw_result", "risk_summary", "render_data", "brand_snapshot",
+	},
+	"report_brand_settings": {
+		"product_name", "primary_color", "logo", "logo_mime", "watermark", "updated_by", "updated_at",
+	},
 }
 
 type runtimeIndexRequirement struct {
@@ -64,6 +76,9 @@ var requiredRuntimeIndexes = []runtimeIndexRequirement{
 	{model: &platformTaskMigration{}, name: "idx_platform_tasks_status"},
 	{model: &platformAttachmentMigration{}, name: "idx_platform_attachments_owner_created"},
 	{model: &platformAttachmentMigration{}, name: "idx_platform_attachments_storage_name", table: "platform_attachments", unique: true},
+	{model: &reportSnapshotMigration{}, name: "ux_report_snapshots_task_id", table: "report_snapshots", unique: true},
+	{model: &reportSnapshotMigration{}, name: "idx_report_snapshots_completed_at"},
+	{model: &reportSnapshotMigration{}, name: "idx_report_snapshots_owner_completed_at"},
 }
 
 // ValidateRuntimeSchema performs read-only validation of the complete schema
@@ -100,6 +115,13 @@ func ValidateRuntimeSchema(db *gorm.DB) error {
 	}
 	if !db.Migrator().HasColumn("platform_tasks", "dispatch_claim_token") {
 		return runtimeMigrationRequiredError("platform_tasks 缺少 dispatch_claim_token")
+	}
+	for table, columns := range requiredRuntimeColumns {
+		for _, column := range columns {
+			if !db.Migrator().HasColumn(table, column) {
+				return runtimeMigrationRequiredError(fmt.Sprintf("缺少列 %s.%s", table, column))
+			}
+		}
 	}
 
 	missingIndexes := make([]string, 0)

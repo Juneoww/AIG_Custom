@@ -2,6 +2,7 @@ package tasks
 
 import (
 	"context"
+	"database/sql/driver"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -16,6 +17,7 @@ import (
 
 	"github.com/Juneoww/AIG_Custom/internal/platform/audit"
 	"github.com/Juneoww/AIG_Custom/internal/platform/identity"
+	"github.com/Juneoww/AIG_Custom/internal/platform/reports"
 	"github.com/Juneoww/AIG_Custom/internal/platform/txcontext"
 	"github.com/google/uuid"
 	"gorm.io/gorm"
@@ -39,6 +41,11 @@ var (
 
 var taskIDNamespace = uuid.MustParse("87c68739-a2fc-413d-8e22-ed74960bfab9")
 
+const (
+	completedResultRecoveryBatchSize = 100
+	defaultRecoveryItemTimeout       = 5 * time.Second
+)
+
 type Repository interface {
 	CreateOrGet(context.Context, *Task) (*Task, bool, error)
 	ClaimDispatch(context.Context, string, time.Time, time.Time) (string, bool, error)
@@ -51,22 +58,40 @@ type Repository interface {
 	Get(context.Context, string) (*Task, error)
 	GetByEngineSessionID(context.Context, string) (*Task, error)
 	List(context.Context) ([]Task, error)
+	ListRecoverable(context.Context, string, int) ([]Task, error)
 }
 
 type Service struct {
-	repository  Repository
-	engine      EngineAdapter
-	audits      audit.Recorder
-	attachments *AttachmentService
-	now         func() time.Time
+	repository          Repository
+	engine              EngineAdapter
+	audits              audit.Recorder
+	attachments         *AttachmentService
+	reportSnapshots     reportSnapshotter
+	now                 func() time.Time
+	recoveryItemTimeout time.Duration
+	recoveryMu          sync.Mutex
+	recoveryAfterID     string
+}
+
+type reportSnapshotter interface {
+	Prepare(context.Context, reports.CompletedTask) (*reports.Snapshot, error)
+	Persist(context.Context, *reports.Snapshot) error
+}
+
+type engineEventCoordinator interface {
+	WithinEngineEventLock(context.Context, string, func(context.Context) error) error
 }
 
 func NewService(repository Repository, engine EngineAdapter, audits audit.Recorder) *Service {
-	return &Service{repository: repository, engine: engine, audits: audits, now: func() time.Time { return time.Now().UTC() }}
+	return &Service{repository: repository, engine: engine, audits: audits, now: func() time.Time { return time.Now().UTC() }, recoveryItemTimeout: defaultRecoveryItemTimeout}
 }
 
 func (service *Service) SetAttachmentService(attachments *AttachmentService) {
 	service.attachments = attachments
+}
+
+func (service *Service) SetReportSnapshotService(snapshotter reportSnapshotter) {
+	service.reportSnapshots = snapshotter
 }
 
 func (service *Service) Create(ctx context.Context, subject identity.Subject, input CreateInput) (View, error) {
@@ -468,6 +493,42 @@ func (service *Service) RecordEngineEvent(ctx context.Context, engineSessionID s
 	if isTerminalStatus(task.Status) {
 		return nil
 	}
+	var snapshot *reports.Snapshot
+	if state == EngineStateSucceeded && service.reportSnapshots != nil {
+		engineStatus, statusErr := service.engine.GetTaskStatus(ctx, task.EngineSessionID)
+		if statusErr != nil || engineStatus.State != EngineStateSucceeded || engineStatus.CompletedAt.IsZero() {
+			return errors.New("无法确认任务完成时间")
+		}
+		completedAt := engineStatus.CompletedAt.UTC()
+		rawResult, resultErr := service.engine.GetResult(ctx, task.EngineSessionID)
+		if resultErr != nil {
+			return errors.New("无法生成任务报告快照")
+		}
+		snapshot, resultErr = service.reportSnapshots.Prepare(ctx, reports.CompletedTask{
+			TaskID: task.ID, OwnerUserID: task.OwnerUserID, TaskType: task.TaskType,
+			RawResult: rawResult, CompletedAt: completedAt,
+		})
+		if resultErr != nil {
+			return errors.New("无法生成任务报告快照")
+		}
+	}
+	apply := func(lockContext context.Context) error {
+		current, currentErr := service.repository.GetByEngineSessionID(lockContext, engineSessionID)
+		if errors.Is(currentErr, ErrNotFound) || currentErr == nil && isTerminalStatus(current.Status) {
+			return nil
+		}
+		if currentErr != nil {
+			return currentErr
+		}
+		return service.recordEngineEventMutation(lockContext, current, to, sanitizedReason, snapshot)
+	}
+	if coordinator, ok := service.repository.(engineEventCoordinator); ok {
+		return coordinator.WithinEngineEventLock(ctx, engineSessionID, apply)
+	}
+	return apply(ctx)
+}
+
+func (service *Service) recordEngineEventMutation(ctx context.Context, task *Task, to Status, sanitizedReason string, snapshot *reports.Snapshot) error {
 	system := identity.Subject{UserID: "system", Username: "internal-agent", Role: identity.RoleAdmin}
 	mutation, err := audit.BeginMutation(ctx, service.audits, system, audit.EventInput{
 		Action: audit.ActionTaskChanged, ResourceType: "task", ResourceID: task.ID,
@@ -477,6 +538,18 @@ func (service *Service) RecordEngineEvent(ctx context.Context, engineSessionID s
 	}
 	var transitionErr error
 	err = mutation.Run(ctx, task.ID, map[string]any{"status": to, "reason": sanitizedReason}, func(transactionContext context.Context) error {
+		if snapshot != nil {
+			if persistErr := service.reportSnapshots.Persist(transactionContext, snapshot); persistErr != nil {
+				if errors.Is(persistErr, reports.ErrSnapshotExists) {
+					// Snapshot uniqueness is keyed by this task ID, so a conflict here
+					// means another trusted reconciler already persisted this task's
+					// immutable snapshot. Continue the same task-status CAS.
+				} else {
+					transitionErr = errors.New("无法保存任务报告快照")
+					return transitionErr
+				}
+			}
+		}
 		var transitioned bool
 		transitioned, transitionErr = service.repository.TransitionStatus(
 			transactionContext, task.ID,
@@ -495,6 +568,68 @@ func (service *Service) RecordEngineEvent(ctx context.Context, engineSessionID s
 		return transitionErr
 	}
 	return err
+}
+
+// ReconcileCompletedEngineResults closes the gap between durable engine completion
+// and the platform task/audit transaction. It only trusts the engine adapter's
+// persisted status and result; callers never provide result data to this method.
+func (service *Service) ReconcileCompletedEngineResults(ctx context.Context) error {
+	service.recoveryMu.Lock()
+	defer service.recoveryMu.Unlock()
+	failed := false
+	tasks, err := service.repository.ListRecoverable(ctx, service.recoveryAfterID, completedResultRecoveryBatchSize)
+	if err != nil {
+		return err
+	}
+	if len(tasks) == 0 && service.recoveryAfterID != "" {
+		service.recoveryAfterID = ""
+		tasks, err = service.repository.ListRecoverable(ctx, "", completedResultRecoveryBatchSize)
+		if err != nil {
+			return err
+		}
+	}
+	for _, task := range tasks {
+		itemContext, cancel := context.WithTimeout(ctx, service.recoveryItemTimeout)
+		status, statusErr := service.engine.GetTaskStatus(itemContext, task.EngineSessionID)
+		if statusErr == nil && status.State == EngineStateSucceeded {
+			statusErr = service.RecordEngineEvent(itemContext, task.EngineSessionID, EngineStateSucceeded, "")
+		}
+		cancel()
+		if statusErr != nil {
+			failed = true
+		}
+	}
+	if len(tasks) == completedResultRecoveryBatchSize {
+		service.recoveryAfterID = tasks[len(tasks)-1].ID
+	} else {
+		service.recoveryAfterID = ""
+	}
+	if failed {
+		return errors.New("部分任务结果恢复失败")
+	}
+	return nil
+}
+
+// GetCompletedTask is the trusted source used only by report backfill. It
+// deliberately accepts a platform task ID rather than browser-supplied result data.
+func (service *Service) GetCompletedTask(ctx context.Context, taskID string) (reports.CompletedTask, error) {
+	task, err := service.repository.Get(ctx, taskID)
+	if err != nil {
+		return reports.CompletedTask{}, err
+	}
+	if task.Status != StatusSucceeded {
+		return reports.CompletedTask{}, ErrInvalid
+	}
+	engineStatus, err := service.engine.GetTaskStatus(ctx, task.EngineSessionID)
+	if err != nil || engineStatus.State != EngineStateSucceeded || engineStatus.CompletedAt.IsZero() {
+		return reports.CompletedTask{}, errors.New("无法确认任务完成时间")
+	}
+	rawResult, err := service.engine.GetResult(ctx, task.EngineSessionID)
+	if err != nil {
+		return reports.CompletedTask{}, errors.New("无法读取任务结果")
+	}
+	return reports.CompletedTask{TaskID: task.ID, OwnerUserID: task.OwnerUserID, TaskType: task.TaskType,
+		RawResult: append(json.RawMessage(nil), rawResult...), CompletedAt: engineStatus.CompletedAt.UTC()}, nil
 }
 
 func sanitizeEngineFailureReason(reason string) string {
@@ -621,6 +756,49 @@ func (repository *GormRepository) TransitionStatus(ctx context.Context, id strin
 	return result.RowsAffected == 1, result.Error
 }
 
+// WithinEngineEventLock serializes one trusted engine session across service
+// instances. All work uses one physical connection so the session lock does
+// not consume an extra pool slot; audit.Service still owns the business
+// transaction opened on that connection.
+func (repository *GormRepository) WithinEngineEventLock(ctx context.Context, engineSessionID string, apply func(context.Context) error) (resultErr error) {
+	if repository == nil || repository.db == nil || apply == nil {
+		return ErrInvalid
+	}
+	database, err := repository.db.DB()
+	if err != nil {
+		return err
+	}
+	connection, err := database.Conn(ctx)
+	if err != nil {
+		return err
+	}
+	defer connection.Close()
+	lockKey := "platform-task-engine-event:" + engineSessionID
+	if _, err = connection.ExecContext(ctx, "SELECT pg_advisory_lock(hashtextextended($1, 0))", lockKey); err != nil {
+		return err
+	}
+	defer func() {
+		unlockContext, cancel := context.WithTimeout(context.WithoutCancel(ctx), defaultRecoveryItemTimeout)
+		defer cancel()
+		var unlocked bool
+		unlockErr := connection.QueryRowContext(unlockContext,
+			"SELECT pg_advisory_unlock(hashtextextended($1, 0))", lockKey,
+		).Scan(&unlocked)
+		if unlockErr == nil && unlocked {
+			return
+		}
+		// Never return a physical connection with an unknown session-lock state
+		// to the pool. database/sql discards it when Raw returns ErrBadConn.
+		_ = connection.Raw(func(any) error { return driver.ErrBadConn })
+		if resultErr == nil {
+			resultErr = errors.New("释放任务事件锁失败")
+		}
+	}()
+	lockedDB := repository.db.Session(&gorm.Session{Context: ctx, NewDB: true})
+	lockedDB.Statement.ConnPool = connection
+	return apply(txcontext.WithGorm(ctx, lockedDB))
+}
+
 func (repository *GormRepository) Get(ctx context.Context, id string) (*Task, error) {
 	var task Task
 	if err := txcontext.Gorm(ctx, repository.db).Where("id = ?", id).First(&task).Error; err != nil {
@@ -646,6 +824,21 @@ func (repository *GormRepository) GetByEngineSessionID(ctx context.Context, engi
 func (repository *GormRepository) List(ctx context.Context) ([]Task, error) {
 	var tasks []Task
 	err := txcontext.Gorm(ctx, repository.db).Order("created_at ASC, id ASC").Find(&tasks).Error
+	return tasks, err
+}
+
+func (repository *GormRepository) ListRecoverable(ctx context.Context, afterID string, limit int) ([]Task, error) {
+	query := txcontext.Gorm(ctx, repository.db).
+		Where("status NOT IN ? AND engine_session_id <> ''", []Status{StatusCancelled, StatusSucceeded, StatusEngineFailed}).
+		Order("id ASC")
+	if afterID != "" {
+		query = query.Where("id > ?", afterID)
+	}
+	if limit <= 0 || limit > completedResultRecoveryBatchSize {
+		limit = completedResultRecoveryBatchSize
+	}
+	var tasks []Task
+	err := query.Limit(limit).Find(&tasks).Error
 	return tasks, err
 }
 
@@ -1278,6 +1471,26 @@ func (repository *MemoryRepository) List(_ context.Context) ([]Task, error) {
 		}
 		return tasks[left].CreatedAt.Before(tasks[right].CreatedAt)
 	})
+	return tasks, nil
+}
+
+func (repository *MemoryRepository) ListRecoverable(_ context.Context, afterID string, limit int) ([]Task, error) {
+	repository.mu.Lock()
+	defer repository.mu.Unlock()
+	if limit <= 0 || limit > completedResultRecoveryBatchSize {
+		limit = completedResultRecoveryBatchSize
+	}
+	tasks := make([]Task, 0, limit)
+	for _, task := range repository.tasks {
+		if task.ID <= afterID || isTerminalStatus(task.Status) || task.EngineSessionID == "" {
+			continue
+		}
+		tasks = append(tasks, *cloneTask(task))
+	}
+	sort.Slice(tasks, func(left, right int) bool { return tasks[left].ID < tasks[right].ID })
+	if len(tasks) > limit {
+		tasks = tasks[:limit]
+	}
 	return tasks, nil
 }
 

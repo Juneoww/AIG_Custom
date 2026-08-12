@@ -18,8 +18,10 @@ import (
 	"fmt"
 
 	platformaudit "github.com/Juneoww/AIG_Custom/internal/platform/audit"
+	platformbrand "github.com/Juneoww/AIG_Custom/internal/platform/brand"
 	"github.com/Juneoww/AIG_Custom/internal/platform/identity"
 	platformmodels "github.com/Juneoww/AIG_Custom/internal/platform/models"
+	platformreports "github.com/Juneoww/AIG_Custom/internal/platform/reports"
 	platformtasks "github.com/Juneoww/AIG_Custom/internal/platform/tasks"
 	"github.com/Juneoww/AIG_Custom/pkg/database"
 	"gorm.io/gorm"
@@ -30,6 +32,8 @@ type runtimeDatastores struct {
 	auditRepository         *platformaudit.GormRepository
 	platformModelRepository *platformmodels.GormRepository
 	platformTaskRepository  *platformtasks.GormRepository
+	reportRepository        *platformreports.GormRepository
+	brandRepository         *platformbrand.GormRepository
 	taskStore               *database.TaskStore
 	modelStore              *database.ModelStore
 	agentStore              *database.AgentStore
@@ -48,6 +52,8 @@ func initializeRuntimeDatastores(db *gorm.DB) (*runtimeDatastores, error) {
 		auditRepository:         platformaudit.NewGormRepository(db),
 		platformModelRepository: platformmodels.NewGormRepository(db),
 		platformTaskRepository:  platformtasks.NewGormRepository(db),
+		reportRepository:        platformreports.NewGormRepository(db),
+		brandRepository:         platformbrand.NewGormRepository(db),
 		taskStore:               database.NewTaskStore(db),
 		modelStore:              database.NewModelStore(db),
 		agentStore:              database.NewAgentStore(db),
@@ -60,6 +66,8 @@ func initializeRuntimeDatastores(db *gorm.DB) (*runtimeDatastores, error) {
 		{name: "audit", init: stores.auditRepository.Init},
 		{name: "platform models", init: stores.platformModelRepository.Init},
 		{name: "platform tasks", init: stores.platformTaskRepository.Init},
+		{name: "reports", init: stores.reportRepository.Init},
+		{name: "brand", init: stores.brandRepository.Init},
 		{name: "tasks", init: stores.taskStore.Init},
 		{name: "models", init: stores.modelStore.Init},
 		{name: "agents", init: stores.agentStore.Init},

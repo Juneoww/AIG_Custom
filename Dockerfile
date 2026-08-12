@@ -44,6 +44,9 @@ WORKDIR /app
 COPY --from=builder /app/ai-infra-guard .
 COPY --from=builder /app/trpc_go.yaml .
 COPY --from=builder /app/CHANGELOG.md .
+COPY --from=builder /app/LICENSE /app/licenses/LICENSE
+COPY --from=builder /app/internal/platform/reports/assets/DROID_FONT_LICENSE.txt /app/licenses/DROID_FONT_LICENSE.txt
+COPY --from=builder /app/internal/platform/reports/assets/THIRD_PARTY_NOTICES.txt /app/licenses/THIRD_PARTY_NOTICES.txt
 
 # 复制数据文件到容器中
 COPY --from=builder /app/data ./data

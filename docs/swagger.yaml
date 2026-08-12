@@ -1,5 +1,319 @@
 basePath: /
 definitions:
+  brand.Config:
+    description: Current mutable brand configuration. Logo bytes are returned only by the brand API and are never copied into report list or detail payloads.
+    properties:
+      logo:
+        description: Base64-encoded PNG or JPEG bytes. An empty string means that no logo is configured.
+        format: byte
+        type: string
+      logo_mime:
+        description: Empty when logo is empty; otherwise image/png or image/jpeg.
+        enum:
+        - ""
+        - image/png
+        - image/jpeg
+        type: string
+      primary_color:
+        description: Six-digit hexadecimal primary color.
+        example: '#1677FF'
+        pattern: ^#[0-9A-Fa-f]{6}$
+        type: string
+      product_name:
+        maxLength: 128
+        type: string
+      updated_at:
+        format: date-time
+        readOnly: true
+        type: string
+      updated_by:
+        description: Authenticated administrator user ID that last changed the configuration.
+        readOnly: true
+        type: string
+      watermark:
+        maxLength: 64
+        type: string
+    required:
+    - product_name
+    - primary_color
+    - logo
+    - logo_mime
+    - watermark
+    type: object
+  brand.UpdateRequest:
+    properties:
+      logo:
+        description: Optional base64-encoded PNG or JPEG no larger than 1 MiB after decoding, at most 4096 pixels on either axis and 16,777,216 pixels total. Empty clears the logo.
+        format: byte
+        type: string
+      logo_mime:
+        description: Must match the decoded image; empty when logo is empty.
+        enum:
+        - ""
+        - image/png
+        - image/jpeg
+        type: string
+      primary_color:
+        example: '#1677FF'
+        pattern: ^#[0-9A-Fa-f]{6}$
+        type: string
+      product_name:
+        maxLength: 128
+        type: string
+      watermark:
+        maxLength: 64
+        type: string
+    required:
+    - product_name
+    - primary_color
+    - logo
+    - logo_mime
+    - watermark
+    type: object
+  reports.BackfillRequest:
+    properties:
+      task_id:
+        description: Trusted completed platform task whose missing immutable report snapshot should be generated.
+        maxLength: 128
+        minLength: 1
+        type: string
+    required:
+    - task_id
+    type: object
+  reports.ReportDetail:
+    description: Safe immutable online report. It contains only the frozen RenderModel and public report metadata, never raw_result, render_data, owner_user_id, Logo bytes, paths, or mutable brand records.
+    properties:
+      completed_at:
+        format: date-time
+        type: string
+      created_at:
+        description: Immutable report generation time.
+        format: date-time
+        type: string
+      id:
+        type: string
+      render:
+        $ref: '#/definitions/reports.RenderModel'
+      risk:
+        $ref: '#/definitions/reports.RiskSummary'
+      task_id:
+        type: string
+      task_type:
+        type: string
+    required:
+    - id
+    - task_id
+    - task_type
+    - completed_at
+    - created_at
+    - risk
+    - render
+    type: object
+  reports.ReportSummary:
+    description: Bounded safe report-list item. Stored raw results, render JSON, owner IDs, Logo bytes, and mutable brand metadata are omitted.
+    properties:
+      brand_product_name:
+        type: string
+      completed_at:
+        format: date-time
+        type: string
+      created_at:
+        format: date-time
+        type: string
+      id:
+        type: string
+      risk:
+        $ref: '#/definitions/reports.RiskSummary'
+      task_id:
+        type: string
+      task_type:
+        type: string
+    required:
+    - id
+    - task_id
+    - task_type
+    - completed_at
+    - created_at
+    - risk
+    - brand_product_name
+    type: object
+  reports.RenderModel:
+    description: Versioned presentation model frozen when the snapshot is created. Online detail and every PDF retry consume this same immutable value.
+    properties:
+      completed_at:
+        format: date-time
+        type: string
+      conclusion:
+        type: string
+      coverage:
+        type: string
+      generated_at:
+        format: date-time
+        type: string
+      mapping_version:
+        type: string
+      primary_color:
+        type: string
+      product_name:
+        type: string
+      recommendations:
+        items:
+          type: string
+        type: array
+      render_version:
+        example: report-render-v2
+        type: string
+      risk:
+        $ref: '#/definitions/reports.RiskSummary'
+      risk_distribution:
+        $ref: '#/definitions/reports.RiskDistribution'
+      risk_trend:
+        description: Exactly 30 immutable, zero-filled UTC calendar-day buckets ending on generated_at's UTC date.
+        items:
+          $ref: '#/definitions/reports.TrendPoint'
+        maxItems: 30
+        minItems: 30
+        type: array
+      score_explanation:
+        type: string
+      task_id:
+        type: string
+      task_type:
+        type: string
+      technical_findings:
+        items:
+          $ref: '#/definitions/reports.TechnicalFinding'
+        type: array
+      top_risks:
+        items:
+          $ref: '#/definitions/reports.TopRisk'
+        type: array
+      watermark:
+        description: Frozen watermark text used by online and PDF rendering.
+        type: string
+    required:
+    - render_version
+    - mapping_version
+    - generated_at
+    - completed_at
+    - task_id
+    - task_type
+    - product_name
+    - primary_color
+    - watermark
+    - risk
+    - score_explanation
+    - risk_trend
+    - risk_distribution
+    - top_risks
+    - technical_findings
+    - recommendations
+    - coverage
+    - conclusion
+    type: object
+  reports.RiskDistribution:
+    properties:
+      high:
+        minimum: 0
+        type: integer
+      low:
+        minimum: 0
+        type: integer
+      medium:
+        minimum: 0
+        type: integer
+    required:
+    - high
+    - medium
+    - low
+    type: object
+  reports.RiskSummary:
+    properties:
+      high:
+        minimum: 0
+        type: integer
+      low:
+        minimum: 0
+        type: integer
+      mapping_version:
+        example: risk-v2
+        type: string
+      medium:
+        minimum: 0
+        type: integer
+      score:
+        maximum: 100
+        minimum: 0
+        type: integer
+    required:
+    - mapping_version
+    - high
+    - medium
+    - low
+    - score
+    type: object
+  reports.TechnicalFinding:
+    properties:
+      evidence:
+        type: string
+      impact:
+        type: string
+      remediation:
+        type: string
+      title:
+        type: string
+    required:
+    - title
+    - evidence
+    - impact
+    - remediation
+    type: object
+  reports.TopRisk:
+    properties:
+      count:
+        minimum: 0
+        type: integer
+      impact:
+        type: string
+      remediation:
+        type: string
+      severity:
+        enum:
+        - high
+        - medium
+        - low
+        type: string
+    required:
+    - severity
+    - count
+    - impact
+    - remediation
+    type: object
+  reports.TrendPoint:
+    properties:
+      completed:
+        minimum: 0
+        type: integer
+      date:
+        description: UTC day bucket represented at 00:00:00Z.
+        format: date-time
+        type: string
+      high:
+        minimum: 0
+        type: integer
+      low:
+        minimum: 0
+        type: integer
+      medium:
+        minimum: 0
+        type: integer
+    required:
+    - date
+    - completed
+    - high
+    - medium
+    - low
+    type: object
   websocket.APIResponse:
     properties:
       data:
@@ -180,6 +494,190 @@ info:
   title: AIG Custom Platform 任务API
   version: "1.0"
 paths:
+  /api/v1/platform/admin/reports/backfill:
+    post:
+      consumes:
+      - application/json
+      description: An administrator-only repair for a trusted completed task with a missing snapshot. Requires Cookie authentication, the password-change gate, and CSRF. The operation never accepts browser-supplied raw engine results, is idempotent for an existing snapshot, and records durable pending/completion audit state through the outbox.
+      parameters:
+      - in: body
+        name: backfill
+        required: true
+        schema:
+          $ref: '#/definitions/reports.BackfillRequest'
+      produces:
+      - application/json
+      responses:
+        "201":
+          description: Created or recovered immutable safe report detail.
+          schema:
+            $ref: '#/definitions/reports.ReportDetail'
+        "400":
+          description: Missing, malformed, oversized, or invalid task ID.
+        "401":
+          description: Unauthenticated.
+        "403":
+          description: Administrator role, completed password change, or valid CSRF token required.
+        "500":
+          description: Trusted completed task, report generation, persistence, or durable audit unavailable; internal details are not exposed.
+      summary: Backfill a missing immutable report snapshot
+      tags:
+      - platform-reports
+  /api/v1/platform/brand:
+    get:
+      description: Returns the current mutable brand configuration to an authenticated user, auditor, or administrator. Brand changes affect future report snapshots only and never rewrite historical reports.
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: Current brand configuration.
+          schema:
+            $ref: '#/definitions/brand.Config'
+        "401":
+          description: Unauthenticated.
+      summary: Get current report brand
+      tags:
+      - platform-brand
+    put:
+      consumes:
+      - application/json
+      description: An administrator-only brand update requiring Cookie authentication, the password-change gate, and CSRF. The optional Logo must be a decoded PNG or JPEG no larger than 1 MiB, no wider or taller than 4096 pixels, and no more than 16,777,216 pixels; declared MIME must match. The governed change records durable audit state and affects future snapshots only.
+      parameters:
+      - in: body
+        name: brand
+        required: true
+        schema:
+          $ref: '#/definitions/brand.UpdateRequest'
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: Updated current brand configuration.
+          schema:
+            $ref: '#/definitions/brand.Config'
+        "400":
+          description: Invalid product name, six-digit color, Logo size, image type, MIME, dimensions, or request size.
+        "401":
+          description: Unauthenticated.
+        "403":
+          description: Administrator role, completed password change, or valid CSRF token required.
+        "500":
+          description: Persistence or durable audit unavailable; internal details are not exposed.
+      summary: Update governed report brand
+      tags:
+      - platform-brand
+  /api/v1/platform/reports:
+    get:
+      description: Returns a paginated safe summary list. Users see only their own reports; auditors and administrators have global read access. page defaults to 1, page_size defaults to 20 and is capped at 100. Stored raw engine results, render JSON, owner IDs, Logo bytes, paths, and mutable brand metadata are never exposed.
+      parameters:
+      - default: 1
+        in: query
+        maximum: 1000
+        minimum: 1
+        name: page
+        type: integer
+      - default: 20
+        in: query
+        maximum: 100
+        minimum: 1
+        name: page_size
+        type: integer
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: Authorized safe summary page.
+          schema:
+            items:
+              $ref: '#/definitions/reports.ReportSummary'
+            type: array
+        "400":
+          description: Invalid page or page_size.
+        "401":
+          description: Unauthenticated.
+        "403":
+          description: Role cannot list reports.
+      summary: List authorized immutable reports
+      tags:
+      - platform-reports
+  /api/v1/platform/reports/trends:
+    get:
+      description: Returns server-computed, zero-filled UTC calendar-day buckets including the current UTC day. days defaults to 30 and cannot exceed 30. Users receive only their own aggregate; auditors and administrators receive the global aggregate. A snapshot's immutable RenderModel separately freezes exactly 30 day buckets for historical online/PDF consistency.
+      parameters:
+      - default: 30
+        in: query
+        maximum: 30
+        minimum: 1
+        name: days
+        type: integer
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: Requested fixed UTC buckets.
+          schema:
+            items:
+              $ref: '#/definitions/reports.TrendPoint'
+            type: array
+        "400":
+          description: days is outside 1 through 30.
+        "401":
+          description: Unauthenticated.
+        "403":
+          description: Role cannot read report trends.
+      summary: Get authorized server-side report trend
+      tags:
+      - platform-reports
+  /api/v1/platform/reports/{reportID}:
+    get:
+      description: Returns the safe immutable RenderModel for one report. Users read only their own reports; auditors and administrators have global read access. raw engine results, stored render JSON, Logo bytes, owner IDs, paths, and mutable brand records are never exposed.
+      parameters:
+      - in: path
+        name: reportID
+        required: true
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: Authorized immutable report detail.
+          schema:
+            $ref: '#/definitions/reports.ReportDetail'
+        "401":
+          description: Unauthenticated.
+        "403":
+          description: Role cannot read reports.
+        "404":
+          description: Report not found or not visible to the user.
+      summary: Get safe immutable report detail
+      tags:
+      - platform-reports
+  /api/v1/platform/reports/{reportID}/exports/pdf:
+    post:
+      description: Exports a PDF from the same immutable snapshot used by online detail; retries never recompute engine results or use current branding. Users export only their own reports; auditors and administrators have global export access. Requires Cookie authentication, the password-change gate, and CSRF. Every attempt records durable pending and completion audit state; failed append delivery remains recoverable in the outbox.
+      parameters:
+      - in: path
+        name: reportID
+        required: true
+        type: string
+      produces:
+      - application/pdf
+      responses:
+        "200":
+          description: PDF rendered from the same immutable snapshot.
+          schema:
+            type: file
+        "401":
+          description: Unauthenticated.
+        "403":
+          description: Report ownership/read role, completed password change, or valid CSRF token required.
+        "404":
+          description: Report not found or not visible to the user.
+        "500":
+          description: Render or durable audit completion failed; raw findings, paths, and internal errors are not exposed.
+      summary: Export an audited immutable report PDF
+      tags:
+      - platform-reports
   /api/v1/app/models:
     get:
       deprecated: true

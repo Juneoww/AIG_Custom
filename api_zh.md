@@ -59,7 +59,36 @@ AIG Custom Platform 是基于 Tencent Zhuque Lab AI-Infra-Guard（https://github
 
 独立受治理模型 API 是 `/api/v1/platform/models`。已弃用的 `/api/v1/app/models/{modelId}` facade 仅保留模型兼容：集合 DELETE 与嵌套请求体继续使用 `{status,message,data}` envelope 和 HTTP `200` 应用错误约定。响应凭据始终脱敏。YAML 模型 ID 不能遮蔽加密平台行；YAML 加载失败时，在数据库或审计变更前失败关闭。
 
-只有 `aig migrate` 可以执行数据库 DDL。全新或升级后的 PostgreSQL schema 到达 v6；runtime 启动只做校验。迁移可安全处理旧表为空的情况，且不依赖 runtime AutoMigrate。
+只有 `aig migrate` 可以执行数据库 DDL。全新或升级后的 PostgreSQL schema 到达 v7；runtime 启动只做校验。迁移可安全处理旧表为空的情况，且不依赖 runtime AutoMigrate。
+
+## 不可变报告与品牌 API
+
+以下接口均使用 Cookie 中的认证 Subject，并经过首次改密门禁。普通用户只能读取和导出本人报告；审计员可以全局只读与导出，但不能变更；管理员可以全局读取/导出，并可治理品牌或补建缺失快照。浏览器提交的身份请求头和原始引擎结果一律不可信。
+
+### 报告列表、趋势与详情
+
+- `GET /api/v1/platform/reports?page=1&page_size=20` 返回分页安全摘要。`page` 从 1 开始；`page_size` 默认 20、最大 100。摘要仅包含报告/任务 ID、时间、风险摘要与快照中的产品名。
+- `GET /api/v1/platform/reports/trends?days=30` 返回服务端计算、补零且包含当天的 UTC 自然日桶；`days` 范围为 1 到 30。浏览器不得从不完整列表自行推导趋势。
+- `GET /api/v1/platform/reports/{reportID}` 返回安全详情，其中 `render` 是任务完成时保存的不可变 RenderModel。
+
+不可变 `report-render-v2` RenderModel 固化风险映射版本、生成/完成时间、任务元数据、产品名/主色/水印、风险评分及评分说明、风险分布、`risk_trend` 中 30 个固定 UTC 日桶、Top 风险、含证据/影响/修复的技术发现、建议、覆盖范围和结论。技术发现仅按四类可信引擎的显式 schema 白名单映射，完成脱敏和严重度排序后最多保留 50 条；提示词、会话、附件、截图、凭据、URL 查询参数和用户绝对路径都不会进入 RenderModel。在线详情与自动分页 PDF 重试只消费同一个模型。列表与详情契约明确分离：绝不暴露原始引擎结果与 Logo 字节，也不暴露存储的 `render_data`、owner ID、文件路径或当前可变品牌记录。列表仅接受 `page=1..1000`、`page_size=1..100`（默认 20）。
+
+读取成功返回 `200`；分页或趋势参数无效返回 `400`；未认证返回 `401`；角色不支持返回 `403`；报告不存在或对普通用户不可见返回 `404`。
+
+### 受审计 PDF 导出
+
+`POST /api/v1/platform/reports/{reportID}/exports/pdf` 必须携带匹配的 `X-CSRF-Token`。成功以 `200 application/pdf` 返回，始终从同一不可变快照渲染，不重新读取引擎或当前品牌。每次导出均使用持久化 pending/completion 审计 outbox，完成事件投递失败可被对账恢复且不会泄露敏感结果。授权失败使用 `401`/`403`，不存在或不可见使用 `404`，渲染或持久化完成失败使用脱敏 `500`。
+
+### 管理员补建
+
+`POST /api/v1/platform/admin/reports/backfill` 接收 `{ "task_id": "..." }`，仅管理员可用且要求 CSRF，成功以 `201` 返回安全不可变详情。它只能为可信的已完成平台任务补建缺失快照，不接受浏览器结果，也不重写已有报告。无效输入返回 `400`，未认证返回 `401`，角色或 CSRF 不足返回 `403`，补建失败返回脱敏 `500`；整个治理操作均被持久化审计。
+
+### 当前品牌
+
+- `GET /api/v1/platform/brand` 对已认证普通用户、审计员和管理员开放，返回当前产品名（最多 128 个 Unicode 字符）、主色、可选 Logo、水印（最多 64 个 Unicode 字符）与更新元数据。
+- `PUT /api/v1/platform/brand` 仅管理员可用、要求 CSRF 并记录持久化审计；更新只影响未来快照，历史报告继续保留当时品牌。
+
+主色必须为 `#RRGGBB`。Logo 必须是声明 MIME 与解码格式一致的真实 PNG 或 JPEG，解码后不大于 1 MiB，任一边不超过 4096 像素，总像素不超过 16,777,216；空 Logo 会同时清空 MIME。无效数据返回 `400`，未认证返回 `401`，角色或 CSRF 不足返回 `403`，持久化/审计失败返回脱敏 `500`。
 
 ## 模型管理 API
 

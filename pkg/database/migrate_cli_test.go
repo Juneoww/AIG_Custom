@@ -43,13 +43,10 @@ func TestMigrationCLIIsIdempotent(t *testing.T) {
 
 	var versions []SchemaMigration
 	require.NoError(t, db.Order("version ASC").Find(&versions).Error)
-	require.Len(t, versions, 6)
-	require.Equal(t, int64(1), versions[0].Version)
-	require.Equal(t, int64(2), versions[1].Version)
-	require.Equal(t, int64(3), versions[2].Version)
-	require.Equal(t, int64(4), versions[3].Version)
-	require.Equal(t, int64(5), versions[4].Version)
-	require.Equal(t, int64(6), versions[5].Version)
+	require.Len(t, versions, int(LatestSchemaVersion))
+	for index, version := range versions {
+		require.Equal(t, int64(index+1), version.Version)
+	}
 	require.True(t, db.Migrator().HasTable(&identity.User{}))
 	require.True(t, db.Migrator().HasTable(&identity.Session{}))
 	require.True(t, db.Migrator().HasTable(&identity.PasswordReset{}))
@@ -58,6 +55,8 @@ func TestMigrationCLIIsIdempotent(t *testing.T) {
 	require.True(t, db.Migrator().HasTable("platform_models"))
 	require.True(t, db.Migrator().HasTable("platform_tasks"))
 	require.True(t, db.Migrator().HasTable("platform_attachments"))
+	require.True(t, db.Migrator().HasTable("report_snapshots"))
+	require.True(t, db.Migrator().HasTable("report_brand_settings"))
 
 	role := "aig_runtime_" + strings.ReplaceAll(uuid.NewString(), "-", "")
 	password := "runtime-test-password"

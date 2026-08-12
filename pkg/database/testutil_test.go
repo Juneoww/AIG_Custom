@@ -38,6 +38,8 @@ func openPostgresTestDB(t *testing.T) *gorm.DB {
 func resetPostgresTestDB(t *testing.T, db *gorm.DB) {
 	t.Helper()
 	require.NoError(t, db.Migrator().DropTable(
+		"report_brand_settings",
+		"report_snapshots",
 		"platform_attachments",
 		"platform_tasks",
 		"platform_models",

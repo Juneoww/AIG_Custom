@@ -65,9 +65,11 @@ func TestTaskManagerPlatformSubmitPreservesLegacyEnginePayloadAndPrivateSession(
 func TestTaskManagerPlatformStatusAndResultUseEngineSessionMapping(t *testing.T) {
 	taskManager, cleanup := newTestTaskManager(t)
 	defer cleanup()
+	completedAt := time.Date(2026, 8, 10, 9, 30, 0, 0, time.UTC)
+	completedAtMillis := completedAt.UnixMilli()
 	require.NoError(t, taskManager.taskStore.CreateSession(&database.Session{
 		ID: "mapped-engine-session", Username: "alice", TaskType: "mcp_scan", Content: "scan",
-		Status: TaskStatusDone, Share: false,
+		Status: TaskStatusDone, Share: false, CompletedAt: &completedAtMillis,
 	}))
 	require.NoError(t, taskManager.taskStore.StoreEvent(
 		"result-1", "mapped-engine-session", WSMsgTypeResultUpdate,
@@ -77,6 +79,7 @@ func TestTaskManagerPlatformStatusAndResultUseEngineSessionMapping(t *testing.T)
 	status, err := taskManager.GetTaskStatus(context.Background(), "mapped-engine-session")
 	require.NoError(t, err)
 	assert.Equal(t, platformtasks.EngineStateSucceeded, status.State)
+	assert.Equal(t, completedAt, status.CompletedAt)
 	result, err := taskManager.GetResult(context.Background(), "mapped-engine-session")
 	require.NoError(t, err)
 	assert.JSONEq(t, `{"result":{"safe":true}}`, string(result))

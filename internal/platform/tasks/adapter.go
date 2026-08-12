@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"time"
 )
 
 type EngineState string
@@ -27,7 +28,8 @@ type EngineTask struct {
 }
 
 type EngineStatus struct {
-	State EngineState
+	State       EngineState
+	CompletedAt time.Time
 }
 
 type EngineAdapter interface {

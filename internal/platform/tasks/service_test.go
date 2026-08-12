@@ -27,7 +27,9 @@ import (
 type recordingEngine struct {
 	submits     atomic.Int64
 	statusReads atomic.Int64
+	resultReads atomic.Int64
 	err         error
+	resultErr   error
 	mu          sync.Mutex
 	status      map[string]EngineStatus
 	results     map[string]json.RawMessage
@@ -93,6 +95,31 @@ type blockingCancelEngine struct {
 	releaseCancel chan struct{}
 }
 
+type recoveryTimeoutEngine struct {
+	statusReads atomic.Int64
+	statuses    map[string]EngineStatus
+}
+
+func (*recoveryTimeoutEngine) SubmitTask(context.Context, EngineTask) (string, error) {
+	return "", ErrEngineTaskNotFound
+}
+func (engine *recoveryTimeoutEngine) GetTaskStatus(ctx context.Context, sessionID string) (EngineStatus, error) {
+	engine.statusReads.Add(1)
+	if sessionID == "engine-blocked" {
+		<-ctx.Done()
+		return EngineStatus{}, ctx.Err()
+	}
+	status, ok := engine.statuses[sessionID]
+	if !ok {
+		return EngineStatus{}, ErrEngineTaskNotFound
+	}
+	return status, nil
+}
+func (*recoveryTimeoutEngine) GetResult(context.Context, string) (json.RawMessage, error) {
+	return nil, ErrResultNotReady
+}
+func (*recoveryTimeoutEngine) CancelTask(context.Context, string) error { return nil }
+
 func (engine *blockingCancelEngine) CancelTask(context.Context, string) error {
 	close(engine.cancelEntered)
 	<-engine.releaseCancel
@@ -100,13 +127,77 @@ func (engine *blockingCancelEngine) CancelTask(context.Context, string) error {
 }
 
 func (engine *recordingEngine) GetResult(_ context.Context, sessionID string) (json.RawMessage, error) {
+	engine.resultReads.Add(1)
 	engine.mu.Lock()
 	defer engine.mu.Unlock()
+	if engine.resultErr != nil {
+		return nil, engine.resultErr
+	}
 	result, ok := engine.results[sessionID]
 	if !ok {
 		return nil, ErrResultNotReady
 	}
 	return append(json.RawMessage(nil), result...), nil
+}
+
+func TestCompletedResultRecoveryFiltersTerminalTasksAndContinuesAfterOneTimedOutEngine(t *testing.T) {
+	ctx := context.Background()
+	repository := NewMemoryRepository()
+	for index := 0; index < 250; index++ {
+		status := StatusSucceeded
+		if index%2 == 1 {
+			status = StatusCancelled
+		}
+		_, _, err := repository.CreateOrGet(ctx, &Task{
+			ID: fmt.Sprintf("terminal-%03d", index), OwnerUserID: "alice", IdempotencyKey: fmt.Sprintf("terminal-%03d", index),
+			EngineSessionID: fmt.Sprintf("terminal-engine-%03d", index), Status: status,
+		})
+		require.NoError(t, err)
+	}
+	for _, task := range []Task{
+		{ID: "recoverable-001", OwnerUserID: "alice", IdempotencyKey: "recoverable-001", EngineSessionID: "engine-blocked", Status: StatusRunning},
+		{ID: "recoverable-002", OwnerUserID: "alice", IdempotencyKey: "recoverable-002", EngineSessionID: "engine-success", Status: StatusRunning},
+		{ID: "no-engine-session", OwnerUserID: "alice", IdempotencyKey: "no-engine-session", Status: StatusRunning},
+	} {
+		candidate := task
+		_, _, err := repository.CreateOrGet(ctx, &candidate)
+		require.NoError(t, err)
+	}
+
+	listed, err := repository.ListRecoverable(ctx, "", completedResultRecoveryBatchSize)
+	require.NoError(t, err)
+	require.Len(t, listed, 2, "terminal tasks and tasks without an engine session must be filtered by the repository")
+	engine := &recoveryTimeoutEngine{statuses: map[string]EngineStatus{"engine-success": {State: EngineStateSucceeded}}}
+	service := NewService(repository, engine, audit.NewService(audit.NewMemoryRepository()))
+	service.recoveryItemTimeout = 10 * time.Millisecond
+
+	err = service.ReconcileCompletedEngineResults(ctx)
+	require.Error(t, err, "a timed-out item is reported without aborting the bounded pass")
+	stored, err := repository.Get(ctx, "recoverable-002")
+	require.NoError(t, err)
+	assert.Equal(t, StatusSucceeded, stored.Status, "a later durable completion must still converge")
+	assert.Equal(t, int64(2), engine.statusReads.Load(), "filtered terminal and empty-session tasks must not reach the engine")
+}
+
+func TestCompletedResultRecoveryProcessesAtMostOneKeysetBatchPerPass(t *testing.T) {
+	ctx := context.Background()
+	repository := NewMemoryRepository()
+	engine := &recoveryTimeoutEngine{statuses: map[string]EngineStatus{}}
+	for index := 0; index < completedResultRecoveryBatchSize*2+5; index++ {
+		id := fmt.Sprintf("bounded-%03d", index)
+		engineID := "engine-" + id
+		engine.statuses[engineID] = EngineStatus{State: EngineStateRunning}
+		_, _, err := repository.CreateOrGet(ctx, &Task{
+			ID: id, OwnerUserID: "alice", IdempotencyKey: id, EngineSessionID: engineID, Status: StatusRunning,
+		})
+		require.NoError(t, err)
+	}
+	service := NewService(repository, engine, audit.NewService(audit.NewMemoryRepository()))
+
+	require.NoError(t, service.ReconcileCompletedEngineResults(ctx))
+	assert.Equal(t, int64(completedResultRecoveryBatchSize), engine.statusReads.Load())
+	require.NoError(t, service.ReconcileCompletedEngineResults(ctx))
+	assert.Equal(t, int64(completedResultRecoveryBatchSize*2), engine.statusReads.Load(), "the next pass advances the keyset cursor")
 }
 
 func (engine *recordingEngine) CancelTask(context.Context, string) error { return nil }

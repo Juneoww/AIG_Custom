@@ -185,6 +185,168 @@ func TestGeneratedSwaggerArtifactsStayInSync(t *testing.T) {
 	}
 }
 
+func TestSwaggerDocumentsImmutableReportAndBrandContracts(t *testing.T) {
+	embedded := decodeSwaggerJSON(t, []byte(SwaggerInfo.ReadDoc()))
+	jsonData, err := os.ReadFile("swagger.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	jsonDocument := decodeSwaggerJSON(t, jsonData)
+	yamlData, err := os.ReadFile("swagger.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var yamlDocument interface{}
+	if err := yaml.Unmarshal(yamlData, &yamlDocument); err != nil {
+		t.Fatal(err)
+	}
+	normalizedYAML, err := json.Marshal(yamlDocument)
+	if err != nil {
+		t.Fatal(err)
+	}
+	yamlDocument = decodeSwaggerJSON(t, normalizedYAML)
+
+	for name, document := range map[string]interface{}{
+		"embedded": embedded,
+		"json":     jsonDocument,
+		"yaml":     yamlDocument,
+	} {
+		t.Run(name, func(t *testing.T) {
+			endpoints := []struct {
+				path, method, responseStatus, responseRef string
+				arrayResponse                             bool
+				requiredStatuses                          []string
+				descriptionTerms                          []string
+			}{
+				{
+					path: "/api/v1/platform/reports", method: "get", responseStatus: "200", responseRef: "#/definitions/reports.ReportSummary", arrayResponse: true,
+					requiredStatuses: []string{"200", "400", "401", "403"},
+					descriptionTerms: []string{"page", "page_size", "Users", "auditors", "administrators", "safe summary", "raw engine results", "Logo bytes"},
+				},
+				{
+					path: "/api/v1/platform/reports/trends", method: "get", responseStatus: "200", responseRef: "#/definitions/reports.TrendPoint", arrayResponse: true,
+					requiredStatuses: []string{"200", "400", "401", "403"},
+					descriptionTerms: []string{"UTC", "30", "Users", "auditors", "administrators"},
+				},
+				{
+					path: "/api/v1/platform/reports/{reportID}", method: "get", responseStatus: "200", responseRef: "#/definitions/reports.ReportDetail",
+					requiredStatuses: []string{"200", "401", "403", "404"},
+					descriptionTerms: []string{"immutable RenderModel", "raw engine results", "Logo bytes", "Users", "auditors", "administrators"},
+				},
+				{
+					path: "/api/v1/platform/admin/reports/backfill", method: "post", responseStatus: "201", responseRef: "#/definitions/reports.ReportDetail",
+					requiredStatuses: []string{"201", "400", "401", "403", "500"},
+					descriptionTerms: []string{"administrator", "CSRF", "durable", "audit", "missing snapshot"},
+				},
+				{
+					path: "/api/v1/platform/brand", method: "get", responseStatus: "200", responseRef: "#/definitions/brand.Config",
+					requiredStatuses: []string{"200", "401"},
+					descriptionTerms: []string{"authenticated", "user", "auditor", "administrator"},
+				},
+				{
+					path: "/api/v1/platform/brand", method: "put", responseStatus: "200", responseRef: "#/definitions/brand.Config",
+					requiredStatuses: []string{"200", "400", "401", "403", "500"},
+					descriptionTerms: []string{"administrator", "CSRF", "1 MiB", "PNG", "JPEG", "4096", "audit"},
+				},
+			}
+			for _, endpoint := range endpoints {
+				operation := swaggerValue(t, document, "paths", endpoint.path, endpoint.method).(map[string]interface{})
+				description, _ := operation["description"].(string)
+				for _, term := range endpoint.descriptionTerms {
+					if !strings.Contains(description, term) {
+						t.Errorf("%s %s description does not contain %q", endpoint.method, endpoint.path, term)
+					}
+				}
+				responses, ok := operation["responses"].(map[string]interface{})
+				if !ok {
+					t.Fatalf("%s %s responses are missing", endpoint.method, endpoint.path)
+				}
+				for _, status := range endpoint.requiredStatuses {
+					if _, ok := responses[status]; !ok {
+						t.Errorf("%s %s does not document status %s", endpoint.method, endpoint.path, status)
+					}
+				}
+				responseSchema := swaggerValue(t, document, "paths", endpoint.path, endpoint.method, "responses", endpoint.responseStatus, "schema")
+				if endpoint.arrayResponse {
+					if itemRef := swaggerNestedRef(t, responseSchema, "items"); itemRef != endpoint.responseRef {
+						t.Errorf("%s %s response item schema = %q, want %q", endpoint.method, endpoint.path, itemRef, endpoint.responseRef)
+					}
+				} else if responseRef := swaggerNestedRef(t, responseSchema); responseRef != endpoint.responseRef {
+					t.Errorf("%s %s response schema = %q, want %q", endpoint.method, endpoint.path, responseRef, endpoint.responseRef)
+				}
+			}
+
+			pdf := swaggerValue(t, document, "paths", "/api/v1/platform/reports/{reportID}/exports/pdf", "post").(map[string]interface{})
+			pdfDescription, _ := pdf["description"].(string)
+			for _, term := range []string{"CSRF", "Users", "auditors", "administrators", "durable", "pending", "completion", "outbox", "same immutable snapshot"} {
+				if !strings.Contains(pdfDescription, term) {
+					t.Errorf("PDF export description does not contain %q", term)
+				}
+			}
+			for _, status := range []string{"200", "401", "403", "404", "500"} {
+				_ = swaggerValue(t, pdf, "responses", status)
+			}
+			if schemaType := swaggerValue(t, pdf, "responses", "200", "schema", "type"); schemaType != "file" {
+				t.Errorf("PDF success schema type = %v, want file", schemaType)
+			}
+
+			if bodyRef := swaggerBodyParameterRef(t, document, "/api/v1/platform/admin/reports/backfill", "post"); bodyRef != "#/definitions/reports.BackfillRequest" {
+				t.Errorf("backfill body schema = %q", bodyRef)
+			}
+			if bodyRef := swaggerBodyParameterRef(t, document, "/api/v1/platform/brand", "put"); bodyRef != "#/definitions/brand.UpdateRequest" {
+				t.Errorf("brand update body schema = %q", bodyRef)
+			}
+
+			for _, definition := range []string{"reports.ReportSummary", "reports.ReportDetail", "reports.RenderModel"} {
+				properties := swaggerValue(t, document, "definitions", definition, "properties").(map[string]interface{})
+				for _, forbidden := range []string{"raw_result", "render_data", "owner_user_id", "logo", "updated_by"} {
+					if _, exists := properties[forbidden]; exists {
+						t.Errorf("safe wire definition %s exposes %s", definition, forbidden)
+					}
+				}
+			}
+			if renderRef := swaggerNestedRef(t, swaggerValue(t, document, "definitions", "reports.ReportDetail", "properties", "render")); renderRef != "#/definitions/reports.RenderModel" {
+				t.Errorf("report detail render schema = %q", renderRef)
+			}
+			renderProperties := swaggerValue(t, document, "definitions", "reports.RenderModel", "properties").(map[string]interface{})
+			for _, required := range []string{
+				"render_version", "mapping_version", "generated_at", "completed_at", "task_id", "task_type",
+				"product_name", "primary_color", "watermark", "risk", "score_explanation", "risk_trend",
+				"risk_distribution", "top_risks", "technical_findings", "recommendations", "coverage", "conclusion",
+			} {
+				if _, exists := renderProperties[required]; !exists {
+					t.Errorf("immutable RenderModel does not document %s", required)
+				}
+			}
+			trendSchema := renderProperties["risk_trend"]
+			if min := swaggerValue(t, trendSchema, "minItems"); min != float64(30) && min != 30 {
+				t.Errorf("RenderModel risk_trend minItems = %v, want 30", min)
+			}
+			if max := swaggerValue(t, trendSchema, "maxItems"); max != float64(30) && max != 30 {
+				t.Errorf("RenderModel risk_trend maxItems = %v, want 30", max)
+			}
+			if itemRef := swaggerNestedRef(t, trendSchema, "items"); itemRef != "#/definitions/reports.TrendPoint" {
+				t.Errorf("RenderModel risk_trend item schema = %q", itemRef)
+			}
+			if pageSizeMax := swaggerParameterValue(t, document, "/api/v1/platform/reports", "get", "page_size", "maximum"); pageSizeMax != float64(100) && pageSizeMax != 100 {
+				t.Errorf("page_size maximum = %v, want 100", pageSizeMax)
+			}
+			if pageMax := swaggerParameterValue(t, document, "/api/v1/platform/reports", "get", "page", "maximum"); pageMax != float64(1000) && pageMax != 1000 {
+				t.Errorf("page maximum = %v, want 1000", pageMax)
+			}
+			for _, definition := range []string{"brand.Config", "brand.UpdateRequest"} {
+				properties := swaggerValue(t, document, "definitions", definition, "properties").(map[string]interface{})
+				for property, want := range map[string]int{"product_name": 128, "watermark": 64} {
+					value := swaggerValue(t, properties[property], "maxLength")
+					if value != float64(want) && value != want {
+						t.Errorf("%s.%s maxLength = %v, want %d", definition, property, value, want)
+					}
+				}
+			}
+		})
+	}
+}
+
 func TestAPIGuidesDocumentLegacyModelAndMigrationBoundaries(t *testing.T) {
 	for _, guide := range []struct {
 		path     string
@@ -196,8 +358,12 @@ func TestAPIGuidesDocumentLegacyModelAndMigrationBoundaries(t *testing.T) {
 				"/api/v1/app/models/{modelId}", "collection DELETE", "{status,message,data}",
 				"HTTP `200`", "`401`", "`403`", "masked", "/api/v1/platform/models",
 				"cannot shadow", "fails closed",
-				"Only `aig migrate` may apply database DDL", "schema reaches v6", "empty legacy table",
+				"Only `aig migrate` may apply database DDL", "schema reaches v7", "empty legacy table",
 				"/api/v1/platform/tasks", "Idempotency-Key", "opaque attachment IDs", "410 Gone", "password-change and CSRF checks",
+				"/api/v1/platform/reports", "page_size", "safe summary", "immutable RenderModel", "30 fixed UTC day buckets",
+				"/api/v1/platform/reports/{reportID}/exports/pdf", "durable pending/completion audit outbox",
+				"/api/v1/platform/admin/reports/backfill", "/api/v1/platform/brand", "PNG or JPEG", "1 MiB", "4096",
+				"raw engine results and Logo bytes are never exposed",
 			},
 		},
 		{
@@ -206,8 +372,12 @@ func TestAPIGuidesDocumentLegacyModelAndMigrationBoundaries(t *testing.T) {
 				"/api/v1/app/models/{modelId}", "集合 DELETE", "{status,message,data}",
 				"HTTP `200`", "`401`", "`403`", "始终脱敏", "/api/v1/platform/models",
 				"不能遮蔽", "失败关闭",
-				"只有 `aig migrate` 可以执行数据库 DDL", "schema 到达 v6", "旧表为空",
+				"只有 `aig migrate` 可以执行数据库 DDL", "schema 到达 v7", "旧表为空",
 				"/api/v1/platform/tasks", "Idempotency-Key", "opaque 附件 ID", "410 Gone", "首次改密与 CSRF 校验",
+				"/api/v1/platform/reports", "page_size", "安全摘要", "不可变 RenderModel", "30 个固定 UTC 日桶",
+				"/api/v1/platform/reports/{reportID}/exports/pdf", "持久化 pending/completion 审计 outbox",
+				"/api/v1/platform/admin/reports/backfill", "/api/v1/platform/brand", "PNG 或 JPEG", "1 MiB", "4096",
+				"绝不暴露原始引擎结果与 Logo 字节",
 			},
 		},
 	} {
@@ -256,6 +426,42 @@ func swaggerBodyParameterRef(t *testing.T, document interface{}, path, method st
 	}
 	t.Fatalf("Swagger body parameter at %s.%s is missing", path, method)
 	return ""
+}
+
+func swaggerNestedRef(t *testing.T, value interface{}, path ...string) string {
+	t.Helper()
+	for _, key := range path {
+		object, ok := value.(map[string]interface{})
+		if !ok {
+			t.Fatalf("Swagger nested value at %s is not an object", strings.Join(path, "."))
+		}
+		value, ok = object[key]
+		if !ok {
+			t.Fatalf("Swagger nested value at %s is missing", strings.Join(path, "."))
+		}
+	}
+	object, ok := value.(map[string]interface{})
+	if !ok {
+		t.Fatal("Swagger schema is not an object")
+	}
+	ref, _ := object["$ref"].(string)
+	return ref
+}
+
+func swaggerParameterValue(t *testing.T, document interface{}, path, method, parameterName, field string) interface{} {
+	t.Helper()
+	parameters, ok := swaggerValue(t, document, "paths", path, method, "parameters").([]interface{})
+	if !ok {
+		t.Fatalf("Swagger parameters at %s.%s are not an array", path, method)
+	}
+	for _, parameter := range parameters {
+		object, ok := parameter.(map[string]interface{})
+		if ok && object["name"] == parameterName {
+			return object[field]
+		}
+	}
+	t.Fatalf("Swagger parameter %s at %s.%s is missing", parameterName, path, method)
+	return nil
 }
 
 func swaggerValue(t *testing.T, document interface{}, path ...string) interface{} {

@@ -23,11 +23,13 @@
 package websocket
 
 import (
+	"context"
 	"embed"
 	"mime"
 	"net/http"
 	"os"
 	"path/filepath"
+	"time"
 
 	"github.com/Juneoww/AIG_Custom/common/trpc"
 	_ "github.com/Juneoww/AIG_Custom/docs"
@@ -35,9 +37,11 @@ import (
 	version "github.com/Juneoww/AIG_Custom/internal/options"
 	platformadmin "github.com/Juneoww/AIG_Custom/internal/platform/admin"
 	platformaudit "github.com/Juneoww/AIG_Custom/internal/platform/audit"
+	platformbrand "github.com/Juneoww/AIG_Custom/internal/platform/brand"
 	"github.com/Juneoww/AIG_Custom/internal/platform/identity"
 	platformknowledge "github.com/Juneoww/AIG_Custom/internal/platform/knowledge"
 	platformmodels "github.com/Juneoww/AIG_Custom/internal/platform/models"
+	platformreports "github.com/Juneoww/AIG_Custom/internal/platform/reports"
 	platformtasks "github.com/Juneoww/AIG_Custom/internal/platform/tasks"
 	"github.com/Juneoww/AIG_Custom/pkg/database"
 	"github.com/gin-gonic/gin"
@@ -125,12 +129,24 @@ func RunWebServer(options *version.Options) {
 	}
 	platformTaskService := platformtasks.NewService(stores.platformTaskRepository, taskManager, auditService)
 	platformTaskService.SetAttachmentService(attachmentService)
+	brandService := platformbrand.NewGovernedService(stores.brandRepository, auditService)
+	reportRenderer, err := platformreports.NewEmbeddedPDFRenderer()
+	if err != nil {
+		log.Fatalf("初始化报告 PDF 渲染器失败: trace_id=system_startup")
+	}
+	reportService := platformreports.NewGovernedService(
+		stores.reportRepository, brandService, auditService, reportRenderer, platformTaskService,
+	)
+	platformTaskService.SetReportSnapshotService(reportService)
 	taskManager.SetPlatformTaskEventSink(platformTaskService)
 	platformTaskHandler := platformtasks.NewHandler(platformTaskService, attachmentService)
+	reportHandler := platformreports.NewHandler(reportService)
+	brandHandler := platformbrand.NewHandler(brandService)
 	err = taskManager.taskStore.ResetRunningTasks()
 	if err != nil {
 		log.Fatalf("重置运行中的任务失败: %v", err)
 	}
+	go startCompletedResultRecovery(context.Background(), 30*time.Second, newRecoveryTicker, platformTaskService.ReconcileCompletedEngineResults)
 
 	// 将 TaskManager 注入到 AgentManager
 	agentManager.SetTaskManager(taskManager)
@@ -139,7 +155,9 @@ func RunWebServer(options *version.Options) {
 	v1 := r.Group("/api/v1")
 	{
 		identity.RegisterRoutesWithObserver(v1.Group("/auth"), identityService, identityPolicy, auditService)
-		registerPlatformGovernanceRoutes(v1.Group("/platform"), identityService, identityPolicy, adminHandler, platformModelService, platformTaskHandler)
+		platformGroup := v1.Group("/platform")
+		registerPlatformGovernanceRoutes(platformGroup, identityService, identityPolicy, adminHandler, platformModelService, platformTaskHandler)
+		registerPlatformReportRoutes(platformGroup, reportHandler, brandHandler)
 		// 1. 知识库模块
 		knowledge := v1.Group("/knowledge")
 		knowledge.Use(setupIdentityMiddleware(identityService, identityPolicy), identity.RequirePasswordChangeCompleted(), identity.RequireCSRF(identityPolicy))
@@ -312,4 +330,58 @@ func registerPlatformGovernanceRoutes(
 	if len(taskHandlers) > 0 && taskHandlers[0] != nil {
 		taskHandlers[0].Register(group.Group("/tasks"))
 	}
+}
+
+func registerPlatformReportRoutes(group *gin.RouterGroup, reportHandler *platformreports.Handler, brandHandler *platformbrand.Handler) {
+	if reportHandler != nil {
+		reportHandler.Register(group)
+	}
+	if brandHandler != nil {
+		brandHandler.Register(group)
+	}
+}
+
+func runCompletedResultRecovery(ctx context.Context, ticks <-chan time.Time, reconcile func(context.Context) error) {
+	if reconcile == nil {
+		return
+	}
+	run := func() {
+		if err := reconcile(ctx); err != nil {
+			log.Warnf("平台任务结果恢复未完全完成: trace_id=system_startup")
+		}
+	}
+	run()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticks:
+			run()
+		}
+	}
+}
+
+type recoveryTicker interface {
+	Chan() <-chan time.Time
+	Stop()
+}
+
+type standardRecoveryTicker struct{ *time.Ticker }
+
+func (ticker standardRecoveryTicker) Chan() <-chan time.Time { return ticker.C }
+
+func newRecoveryTicker(interval time.Duration) recoveryTicker {
+	return standardRecoveryTicker{Ticker: time.NewTicker(interval)}
+}
+
+func startCompletedResultRecovery(ctx context.Context, interval time.Duration, newTicker func(time.Duration) recoveryTicker, reconcile func(context.Context) error) {
+	if newTicker == nil {
+		return
+	}
+	ticker := newTicker(interval)
+	if ticker == nil {
+		return
+	}
+	defer ticker.Stop()
+	runCompletedResultRecovery(ctx, ticker.Chan(), reconcile)
 }

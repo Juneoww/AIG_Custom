@@ -59,7 +59,36 @@ Platform tasks use `GET /api/v1/platform/tasks`, `POST /api/v1/platform/tasks`, 
 
 The independently governed model API is `/api/v1/platform/models`. The deprecated `/api/v1/app/models/{modelId}` facade remains only for model compatibility: collection DELETE and its nested request bodies retain the `{status,message,data}` envelope and HTTP `200` application-error convention. Response credentials are masked. YAML model IDs cannot shadow encrypted platform rows, and YAML loading fails closed before any database or audit mutation.
 
-Only `aig migrate` may apply database DDL. A fresh or upgraded PostgreSQL database schema reaches v6; runtime startup only validates it. Migration safely handles an empty legacy table and never relies on runtime AutoMigrate.
+Only `aig migrate` may apply database DDL. A fresh or upgraded PostgreSQL database schema reaches v7; runtime startup only validates it. Migration safely handles an empty legacy table and never relies on runtime AutoMigrate.
+
+## Immutable Reports and Brand API
+
+All endpoints below use the authenticated Cookie Subject and the completed-password-change gate. A user may read and export only their own reports. An auditor has global read/export access but cannot mutate data. An administrator has global read/export access and may govern branding or backfill a missing snapshot. Browser-provided identity headers and raw engine results are never trusted.
+
+### Report list, trend, and detail
+
+- `GET /api/v1/platform/reports?page=1&page_size=20` returns a paginated safe summary. `page` starts at 1; `page_size` defaults to 20 and is capped at 100. A summary contains only report/task identifiers, timestamps, risk summary, and the frozen product name.
+- `GET /api/v1/platform/reports/trends?days=30` returns server-computed, zero-filled UTC calendar-day buckets including the current UTC day. `days` accepts 1 through 30. The browser must not derive this aggregate from a partial list.
+- `GET /api/v1/platform/reports/{reportID}` returns a safe detail whose `render` value is the immutable RenderModel stored with the completed task.
+
+The immutable `report-render-v2` RenderModel freezes the risk mapping version, generated/completed times, task metadata, product/color/watermark, risk score and score explanation, risk distribution, exactly 30 fixed UTC day buckets in `risk_trend`, Top risks, technical findings with evidence/impact/remediation, recommendations, coverage, and conclusion. Technical findings are explicitly mapped from the four trusted engine schemas, redacted, severity-ordered, and capped at 50; prompts, conversations, attachments, screenshots, credentials, URL queries, and user paths are never copied into the render model. Online detail and paginated PDF retries consume that same model. The list and detail contracts are deliberately separate: raw engine results and Logo bytes are never exposed, nor are stored `render_data`, owner IDs, file paths, or mutable brand records. List pagination accepts `page=1..1000` and `page_size=1..100` (default 20).
+
+Successful reads return `200`. Invalid pagination or trend ranges return `400`; missing authentication returns `401`; an unsupported role returns `403`; a missing or user-invisible report returns `404`.
+
+### Audited PDF export
+
+`POST /api/v1/platform/reports/{reportID}/exports/pdf` requires the matching `X-CSRF-Token`. It returns `application/pdf` with `200`, renders from the same frozen snapshot, and never re-reads the engine or current brand. Every export attempt uses a durable pending/completion audit outbox so completion delivery can be reconciled without exposing sensitive results. Authorization failures use `401`/`403`, an absent or invisible report uses `404`, and render or durable-completion failures use a sanitized `500`.
+
+### Administrator backfill
+
+`POST /api/v1/platform/admin/reports/backfill` accepts `{ "task_id": "..." }`, requires administrator role and CSRF, and returns a safe immutable detail with `201`. It may create only a missing snapshot for a trusted completed platform task; it never accepts browser-supplied results and never rewrites an existing report. Invalid input returns `400`, missing authentication `401`, insufficient role or CSRF `403`, and a sanitized repair failure `500`. The governed operation is durably audited.
+
+### Current brand
+
+- `GET /api/v1/platform/brand` is available to authenticated users, auditors, and administrators and returns the current product name (up to 128 Unicode characters), primary color, optional Logo, watermark (up to 64 Unicode characters), and update metadata.
+- `PUT /api/v1/platform/brand` is administrator-only, requires CSRF, and records a durable audit trail. It changes future snapshots only; historical reports retain their frozen brand.
+
+The primary color must be `#RRGGBB`. A Logo must be a real PNG or JPEG whose declared MIME matches the decoded image, no larger than 1 MiB, no more than 4096 pixels on either axis, and no more than 16,777,216 total pixels. An empty logo clears its MIME. Invalid data returns `400`, missing authentication `401`, insufficient role or CSRF `403`, and persistence/audit failures a sanitized `500`.
 
 ## Model Management API
 

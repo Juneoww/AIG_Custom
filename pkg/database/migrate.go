@@ -44,6 +44,7 @@ var migrations = []migration{
 	{version: 4, apply: migrateAuditCompletionSchema},
 	{version: 5, apply: migratePlatformTaskSchema},
 	{version: 6, apply: migratePlatformTaskDispatchClaimSchema},
+	{version: 7, apply: migrateReportSchema},
 }
 
 const migrationAdvisoryLockKey int64 = 301237729
@@ -315,4 +316,47 @@ func migratePlatformTaskSchema(db *gorm.DB) error {
 
 func migratePlatformTaskDispatchClaimSchema(db *gorm.DB) error {
 	return db.Exec(`ALTER TABLE platform_tasks ADD COLUMN IF NOT EXISTS dispatch_claim_token text NOT NULL DEFAULT ''`).Error
+}
+
+type reportSnapshotMigration struct {
+	ID            string          `gorm:"primaryKey;column:id"`
+	TaskID        string          `gorm:"not null;uniqueIndex:ux_report_snapshots_task_id;column:task_id"`
+	OwnerUserID   string          `gorm:"not null;index;column:owner_user_id"`
+	TaskType      string          `gorm:"not null;column:task_type"`
+	CompletedAt   time.Time       `gorm:"not null;column:completed_at"`
+	CreatedAt     time.Time       `gorm:"not null;column:created_at"`
+	RawResult     json.RawMessage `gorm:"type:jsonb;not null;column:raw_result"`
+	RiskSummary   json.RawMessage `gorm:"type:jsonb;not null;column:risk_summary"`
+	RenderData    json.RawMessage `gorm:"type:jsonb;not null;column:render_data"`
+	BrandSnapshot json.RawMessage `gorm:"type:jsonb;not null;column:brand_snapshot"`
+}
+
+func (reportSnapshotMigration) TableName() string { return "report_snapshots" }
+
+type reportBrandSettingMigration struct {
+	ID           string    `gorm:"primaryKey;column:id"`
+	ProductName  string    `gorm:"not null;column:product_name"`
+	PrimaryColor string    `gorm:"not null;column:primary_color"`
+	Logo         []byte    `gorm:"not null;column:logo"`
+	LogoMIME     string    `gorm:"not null;column:logo_mime"`
+	Watermark    string    `gorm:"not null;column:watermark"`
+	UpdatedBy    string    `gorm:"not null;column:updated_by"`
+	UpdatedAt    time.Time `gorm:"not null;column:updated_at"`
+}
+
+func (reportBrandSettingMigration) TableName() string { return "report_brand_settings" }
+
+func migrateReportSchema(db *gorm.DB) error {
+	if err := db.AutoMigrate(&reportSnapshotMigration{}, &reportBrandSettingMigration{}); err != nil {
+		return err
+	}
+	for _, statement := range []string{
+		`CREATE INDEX idx_report_snapshots_completed_at ON report_snapshots(completed_at DESC)`,
+		`CREATE INDEX idx_report_snapshots_owner_completed_at ON report_snapshots(owner_user_id, completed_at DESC)`,
+	} {
+		if err := db.Exec(statement).Error; err != nil {
+			return err
+		}
+	}
+	return nil
 }
