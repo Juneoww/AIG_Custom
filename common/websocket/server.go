@@ -28,7 +28,6 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
-	"strings"
 
 	"github.com/Juneoww/AIG_Custom/common/trpc"
 	_ "github.com/Juneoww/AIG_Custom/docs"
@@ -39,6 +38,7 @@ import (
 	"github.com/Juneoww/AIG_Custom/internal/platform/identity"
 	platformknowledge "github.com/Juneoww/AIG_Custom/internal/platform/knowledge"
 	platformmodels "github.com/Juneoww/AIG_Custom/internal/platform/models"
+	platformtasks "github.com/Juneoww/AIG_Custom/internal/platform/tasks"
 	"github.com/Juneoww/AIG_Custom/pkg/database"
 	"github.com/gin-gonic/gin"
 	swaggerFiles "github.com/swaggo/files"
@@ -94,8 +94,12 @@ func RunWebServer(options *version.Options) {
 	knowledgeHandler := platformknowledge.NewHandler(knowledgeService)
 	taskStore := stores.taskStore
 	modelStore := stores.modelStore
+	internalAgentToken, err := LoadInternalAgentTokenFromEnv()
+	if err != nil {
+		log.Fatalf("内部 Agent 认证配置无效: trace_id=system_startup, error=%v", err)
+	}
 	// 初始化AgentManager
-	agentManager := NewAgentManager()
+	agentManager := NewAgentManager(internalAgentToken)
 
 	// 初始化文件上传配置（支持环境变量）
 	fileConfig := LoadFileUploadConfigFromEnv()
@@ -111,6 +115,18 @@ func RunWebServer(options *version.Options) {
 
 	taskManager := NewTaskManager(agentManager, taskStore, modelStore, fileConfig, sseManager)
 	taskManager.SetModelResolver(platformmodels.NewScannerResolver(platformModelRepo, identityRepo, modelKeyring))
+	attachmentConfig, err := platformtasks.LoadAttachmentConfigFromEnv(fileConfig.UploadDir)
+	if err != nil {
+		log.Fatalf("附件大小配置无效: trace_id=system_startup, error=%v", err)
+	}
+	attachmentService, err := platformtasks.NewAttachmentService(stores.platformTaskRepository, attachmentConfig, auditService)
+	if err != nil {
+		log.Fatalf("初始化私有附件服务失败: trace_id=system_startup, error=%v", err)
+	}
+	platformTaskService := platformtasks.NewService(stores.platformTaskRepository, taskManager, auditService)
+	platformTaskService.SetAttachmentService(attachmentService)
+	taskManager.SetPlatformTaskEventSink(platformTaskService)
+	platformTaskHandler := platformtasks.NewHandler(platformTaskService, attachmentService)
 	err = taskManager.taskStore.ResetRunningTasks()
 	if err != nil {
 		log.Fatalf("重置运行中的任务失败: %v", err)
@@ -123,15 +139,7 @@ func RunWebServer(options *version.Options) {
 	v1 := r.Group("/api/v1")
 	{
 		identity.RegisterRoutesWithObserver(v1.Group("/auth"), identityService, identityPolicy, auditService)
-		registerPlatformGovernanceRoutes(v1.Group("/platform"), identityService, identityPolicy, adminHandler, platformModelService)
-		v1.GET("/images/:path", func(context *gin.Context) {
-			path := context.Param("path")
-			if strings.Contains(path, "..") {
-				context.String(403, "Forbidden")
-				return
-			}
-			context.File(filepath.Join("uploads", path))
-		})
+		registerPlatformGovernanceRoutes(v1.Group("/platform"), identityService, identityPolicy, adminHandler, platformModelService, platformTaskHandler)
 		// 1. 知识库模块
 		knowledge := v1.Group("/knowledge")
 		knowledge.Use(setupIdentityMiddleware(identityService, identityPolicy), identity.RequirePasswordChangeCompleted(), identity.RequireCSRF(identityPolicy))
@@ -194,75 +202,16 @@ func RunWebServer(options *version.Options) {
 			// 算子列表
 			knowledge.GET("/jailbreak", identity.RequireRole(identity.RoleAdmin, identity.RoleUser, identity.RoleAuditor), GetJailBreak)
 		}
-		taskOwnerByID := func(c *gin.Context) string {
-			session, err := taskStore.GetSession(c.Param("id"))
-			if err != nil {
-				return ""
-			}
-			return session.Username
-		}
+		v1.POST("/app/tasks/:sessionId/downloadFile", agentManager.RequireInternalToken(), func(c *gin.Context) {
+			HandleInternalTaskDownload(c, taskManager)
+		})
+		v1.POST("/app/tasks/:sessionId/uploadFile", agentManager.RequireInternalToken(), func(c *gin.Context) {
+			HandleInternalTaskUpload(c, attachmentService)
+		})
 		appSecurity := v1.Group("/app")
 		{
 			appSecurity.Use(setupIdentityMiddleware(identityService, identityPolicy), identity.RequirePasswordChangeCompleted(), identity.RequireCSRF(identityPolicy))
-			taskOwner := func(c *gin.Context) string {
-				session, err := taskStore.GetSession(c.Param("sessionId"))
-				if err != nil {
-					return ""
-				}
-				return session.Username
-			}
-			// 任务管理
-			tasks := appSecurity.Group("/tasks")
-			{
-				// 获取任务列表接口
-				tasks.GET("", identity.RequireRole(identity.RoleAdmin, identity.RoleUser, identity.RoleAuditor), func(c *gin.Context) {
-					HandleGetTaskList(c, taskManager)
-				})
-				// 获取任务详情接口
-				tasks.GET("/:sessionId", identity.RequireOwnerOrRole(taskOwner, false), func(c *gin.Context) {
-					HandleGetTaskDetail(c, taskManager)
-				})
-				// 分享任务接口
-				tasks.POST("/share", identity.RequireRole(identity.RoleAdmin, identity.RoleUser), func(c *gin.Context) {
-					HandleShare(c, taskManager)
-				})
-				// SSE接口
-				tasks.GET("/sse/:sessionId", identity.RequireOwnerOrRole(taskOwner, false), func(c *gin.Context) {
-					HandleTaskSSE(c, taskManager)
-				})
-				// 新建任务接口
-				tasks.POST("", identity.RequireRole(identity.RoleAdmin, identity.RoleUser), func(c *gin.Context) {
-					HandleTaskCreate(c, taskManager)
-				})
-				// 文件上传接口（完整文件上传）
-				tasks.POST("/uploadFile", identity.RequireRole(identity.RoleAdmin, identity.RoleUser), func(c *gin.Context) {
-					HandleUploadFile(c, taskManager)
-				})
-				// 分片上传接口
-				tasks.POST("/uploadChunk", identity.RequireRole(identity.RoleAdmin, identity.RoleUser), func(c *gin.Context) {
-					HandleUploadFileChunk(c, taskManager)
-				})
-				// 合并分片接口
-				tasks.POST("/mergeChunks", identity.RequireRole(identity.RoleAdmin, identity.RoleUser), func(c *gin.Context) {
-					HandleMergeFileChunks(c, taskManager)
-				})
-				// 文件下载接口
-				tasks.POST("/:sessionId/downloadFile", identity.RequireOwnerOrRole(taskOwner, true), func(c *gin.Context) {
-					HandleDownloadFile(c, taskManager)
-				})
-				// 编辑任务接口
-				tasks.PUT("/:sessionId", identity.RequireOwnerOrRole(taskOwner, true), func(c *gin.Context) {
-					HandleUpdateTask(c, taskManager)
-				})
-				// 删除任务接口
-				tasks.DELETE("/:sessionId", identity.RequireOwnerOrRole(taskOwner, true), func(c *gin.Context) {
-					HandleDeleteTask(c, taskManager)
-				})
-				// 终止任务接口
-				tasks.POST("/:sessionId/terminate", identity.RequireOwnerOrRole(taskOwner, true), func(c *gin.Context) {
-					HandleTerminateTask(c, taskManager)
-				})
-			}
+			registerRetiredBrowserTaskRoutes(appSecurity)
 			// Deprecated compatibility path. It is intentionally backed by the
 			// encrypted platform service and the authenticated Subject, never by
 			// the former username-based legacy handlers.
@@ -274,33 +223,6 @@ func RunWebServer(options *version.Options) {
 		{
 			// 只需要WebSocket入口
 			agents.GET("/ws", agentManager.HandleAgentWebSocket())
-		}
-		// 提供给第三方的api
-		taskApi := appSecurity.Group("/taskapi")
-		{
-			// 创建任务
-			taskApi.POST("/tasks", identity.RequireRole(identity.RoleAdmin, identity.RoleUser), func(c *gin.Context) {
-				SubmitTask(c, taskManager)
-			})
-			// 获取任务状态
-			taskApi.GET("/status/:id", identity.RequireOwnerOrRole(taskOwnerByID, false), func(c *gin.Context) {
-				GetTaskStatus(c, taskManager)
-			})
-			// 获取任务结果
-			taskApi.GET("/result/:id", identity.RequireOwnerOrRole(taskOwnerByID, false), func(c *gin.Context) {
-				GetTaskResult(c, taskManager)
-			})
-			taskApi.POST("/upload", identity.RequireRole(identity.RoleAdmin, identity.RoleUser), func(c *gin.Context) {
-				HandleUploadFile(c, taskManager)
-			})
-			// 分片上传接口
-			taskApi.POST("/uploadChunk", identity.RequireRole(identity.RoleAdmin, identity.RoleUser), func(c *gin.Context) {
-				HandleUploadFileChunk(c, taskManager)
-			})
-			// 合并分片接口
-			taskApi.POST("/mergeChunks", identity.RequireRole(identity.RoleAdmin, identity.RoleUser), func(c *gin.Context) {
-				HandleMergeFileChunks(c, taskManager)
-			})
 		}
 		// version
 		v1.GET("/version", func(c *gin.Context) {
@@ -378,6 +300,7 @@ func registerPlatformGovernanceRoutes(
 	identityPolicy identity.CookiePolicy,
 	adminHandler *platformadmin.Handler,
 	modelService *platformmodels.Service,
+	taskHandlers ...*platformtasks.Handler,
 ) {
 	group.Use(
 		setupIdentityMiddleware(identityService, identityPolicy),
@@ -386,4 +309,7 @@ func registerPlatformGovernanceRoutes(
 	)
 	adminHandler.Register(group.Group("/admin"))
 	registerGovernanceModelRoutes(group.Group("/models"), modelService)
+	if len(taskHandlers) > 0 && taskHandlers[0] != nil {
+		taskHandlers[0].Register(group.Group("/tasks"))
+	}
 }

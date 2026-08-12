@@ -20,6 +20,9 @@ services:
       - aig-go-build-cache:/root/.cache/go-build
     environment:
       AIG_TEST_DB_DSN: postgres://aig_test:aig_test@postgres-test:5432/aig_test?sslmode=disable
+      AIG_AGENT_TOKEN: test-internal-agent-token
+      AIG_MAX_UPLOAD_BYTES: 1048576
+      AIG_MAX_CHUNK_BYTES: 262144
       GOPROXY: https://goproxy.cn,direct
     depends_on:
       postgres-test:

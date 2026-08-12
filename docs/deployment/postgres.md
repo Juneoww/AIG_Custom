@@ -1,5 +1,12 @@
 # PostgreSQL 部署与迁移
 
+平台与受控 Agent 必须共享一个独立生成的内部握手凭据 `AIG_AGENT_TOKEN`。例如可用
+`openssl rand -base64 48` 生成高熵值，并通过部署环境或 Secret 管理设施分别注入平台和
+Agent；不要复用数据库密码、模型密钥或会话密钥，也不要把该值写入 Compose、日志或版本库。
+Compose 允许空默认值仅用于执行 `docker compose config`，平台和 Agent 运行时会在凭据为空时
+关闭启动/连接（fail closed）。可用 `AIG_MAX_UPLOAD_BYTES` 和 `AIG_MAX_CHUNK_BYTES` 调整私有附件
+及单分片上限；默认分别为 50 MiB 和 5 MiB，单分片上限不能超过总附件上限。
+
 AI-Infra-Guard 当前交付仅支持 PostgreSQL。数据库服务固定使用
 `postgres:16.4-alpine`；平台镜像应使用明确的发布版本，例如
 `zhuquelab/aig-server:<release-version>`。本仓库的 Compose 文件默认构建并使用

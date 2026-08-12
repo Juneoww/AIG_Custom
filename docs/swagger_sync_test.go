@@ -68,8 +68,54 @@ func TestGeneratedSwaggerArtifactsStayInSync(t *testing.T) {
 			{"/api/v1/platform/models", "get"},
 			{"/api/v1/platform/models", "post"},
 			{"/api/v1/platform/models/{modelID}", "get"},
+			{"/api/v1/platform/tasks", "post"},
+			{"/api/v1/platform/tasks", "get"},
+			{"/api/v1/platform/tasks/{taskID}", "get"},
+			{"/api/v1/platform/tasks/{taskID}/result", "get"},
+			{"/api/v1/platform/tasks/{taskID}/cancel", "post"},
+			{"/api/v1/platform/tasks/attachments", "post"},
+			{"/api/v1/platform/tasks/attachments/chunked", "post"},
+			{"/api/v1/platform/tasks/attachments/{attachmentID}/chunks", "post"},
+			{"/api/v1/platform/tasks/attachments/{attachmentID}/merge", "post"},
+			{"/api/v1/platform/tasks/attachments/{attachmentID}/download", "get"},
 		} {
 			_ = swaggerValue(t, document, "paths", endpoint.path, endpoint.method)
+		}
+		createDescription := swaggerValue(t, document, "paths", "/api/v1/platform/tasks", "post", "description").(string)
+		for _, required := range []string{"Idempotency-Key", "Cookie", "raw model credentials", "opaque attachment IDs"} {
+			if !strings.Contains(createDescription, required) {
+				t.Fatalf("platform task create documentation must contain %q", required)
+			}
+		}
+		for _, legacy := range []struct{ path, method string }{
+			{"/api/v1/app/taskapi/tasks", "post"},
+			{"/api/v1/app/taskapi/status/{id}", "get"},
+			{"/api/v1/app/taskapi/result/{id}", "get"},
+			{"/api/v1/app/taskapi/upload", "post"},
+		} {
+			if swaggerValue(t, document, "paths", legacy.path, legacy.method, "deprecated") != true {
+				t.Fatalf("legacy task %s %s must be marked deprecated", legacy.method, legacy.path)
+			}
+			responses := swaggerValue(t, document, "paths", legacy.path, legacy.method, "responses").(map[string]interface{})
+			if _, ok := responses["410"]; !ok {
+				t.Fatalf("legacy task %s %s must document 410 Gone", legacy.method, legacy.path)
+			}
+			description := swaggerValue(t, document, "paths", legacy.path, legacy.method, "description").(string)
+			if !strings.Contains(description, "password-change") {
+				t.Fatalf("legacy task %s %s must document the password-change gate", legacy.method, legacy.path)
+			}
+			if legacy.method == "post" && !strings.Contains(description, "CSRF") {
+				t.Fatalf("legacy task %s %s must document the CSRF gate", legacy.method, legacy.path)
+			}
+		}
+		serialized, err := json.Marshal(document)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, forbidden := range []string{"sk-xxx", "Bearer token"} {
+			if strings.Contains(string(serialized), forbidden) {
+				t.Fatalf("Swagger must not retain executable raw credential example %q", forbidden)
+			}
 		}
 		modelDescription := swaggerValue(t, document, "paths", "/api/v1/platform/models", "get", "description")
 		if !strings.Contains(modelDescription.(string), "masked") {
@@ -150,7 +196,8 @@ func TestAPIGuidesDocumentLegacyModelAndMigrationBoundaries(t *testing.T) {
 				"/api/v1/app/models/{modelId}", "collection DELETE", "{status,message,data}",
 				"HTTP `200`", "`401`", "`403`", "masked", "/api/v1/platform/models",
 				"cannot shadow", "fails closed",
-				"Only `aig migrate` may apply database DDL", "schema reaches v4", "empty legacy table",
+				"Only `aig migrate` may apply database DDL", "schema reaches v6", "empty legacy table",
+				"/api/v1/platform/tasks", "Idempotency-Key", "opaque attachment IDs", "410 Gone", "password-change and CSRF checks",
 			},
 		},
 		{
@@ -159,7 +206,8 @@ func TestAPIGuidesDocumentLegacyModelAndMigrationBoundaries(t *testing.T) {
 				"/api/v1/app/models/{modelId}", "集合 DELETE", "{status,message,data}",
 				"HTTP `200`", "`401`", "`403`", "始终脱敏", "/api/v1/platform/models",
 				"不能遮蔽", "失败关闭",
-				"只有 `aig migrate` 可以执行数据库 DDL", "schema 到达 v4", "旧表为空",
+				"只有 `aig migrate` 可以执行数据库 DDL", "schema 到达 v6", "旧表为空",
+				"/api/v1/platform/tasks", "Idempotency-Key", "opaque 附件 ID", "410 Gone", "首次改密与 CSRF 校验",
 			},
 		},
 	} {
@@ -170,6 +218,19 @@ func TestAPIGuidesDocumentLegacyModelAndMigrationBoundaries(t *testing.T) {
 		for _, required := range guide.required {
 			if !strings.Contains(string(contents), required) {
 				t.Errorf("%s does not document %q", guide.path, required)
+			}
+		}
+		for _, executableLegacyTaskExample := range []string{
+			"/api/v1/app/taskapi/upload",
+			"/api/v1/app/taskapi/tasks",
+			"/api/v1/app/taskapi/status/",
+			"/api/v1/app/taskapi/result/",
+			"/api/v1/app/tasks/uploadChunk",
+			"/api/v1/app/tasks/mergeChunks",
+			"http://localhost:8088/api/v1/app/taskapi",
+		} {
+			if strings.Contains(string(contents), executableLegacyTaskExample) {
+				t.Errorf("%s retains executable legacy task example %q", guide.path, executableLegacyTaskExample)
 			}
 		}
 	}

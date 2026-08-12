@@ -138,13 +138,13 @@ func (m *ModelRedteamReport) Execute(ctx context.Context, request TaskRequest, c
 			return err
 		}
 		fileName := request.Attachments[0]
-		gologger.Infof("开始下载文件: %s", fileName)
+		logAgentAttachmentTransfer("download_started", request.SessionId, TaskTypeModelRedteamReport)
 		fileName2 := filepath.Join(tempDir, fmt.Sprintf("tmp-%d%s", time.Now().UnixMicro(), filepath.Ext(fileName)))
 		fileName2, _ = filepath.Abs(fileName2)
 		// Verify the resolved path is within tempDir to prevent path traversal
 		absTempDir, _ := filepath.Abs(tempDir)
 		if !strings.HasPrefix(fileName2, absTempDir+string(os.PathSeparator)) {
-			gologger.Errorf("非法文件路径: %s", fileName)
+			logAgentAttachmentFailure("download_rejected", request.SessionId, TaskTypeModelRedteamReport, nil)
 			return fmt.Errorf("非法文件路径")
 		}
 		scenarios := fmt.Sprintf("MultiDataset:dataset_file=%s,num_prompts=%d,random_seed=%d", fileName2, param.Datasets.NumPrompts, param.Datasets.RandomSeed)
@@ -153,10 +153,10 @@ func (m *ModelRedteamReport) Execute(ctx context.Context, request TaskRequest, c
 		}
 		err := utils.DownloadFile(m.Server, request.SessionId, fileName, fileName2)
 		if err != nil {
-			gologger.Errorf("下载文件失败: %v", err)
+			logAgentAttachmentFailure("download_failed", request.SessionId, TaskTypeModelRedteamReport, err)
 			return err
 		}
-		gologger.Infof("文件下载成功: %s", fileName2)
+		logAgentAttachmentTransfer("download_completed", request.SessionId, TaskTypeModelRedteamReport)
 		argv = append(argv, scenarios)
 	}
 
@@ -171,7 +171,7 @@ func (m *ModelRedteamReport) Execute(ctx context.Context, request TaskRequest, c
 		}
 		err = os.WriteFile(fileName, data, 0644)
 		if err != nil {
-			gologger.Errorf("写入文件失败: %v", err)
+			logAgentAttachmentFailure("write_failed", request.SessionId, TaskTypeModelRedteamReport, err)
 			return err
 		}
 		scenarios := fmt.Sprintf("MultiDataset:dataset_file=%s,num_prompts=%d,random_seed=%d", fileName, param.Datasets.NumPrompts, param.Datasets.RandomSeed)
@@ -217,7 +217,7 @@ func (m *ModelRedteamReport) Execute(ctx context.Context, request TaskRequest, c
 		return fmt.Errorf("resolve uv binary: %v", err)
 	}
 	err = utils.RunCmdWithContext(ctx, promptSecurityDir, uvBin, argv, func(line string) {
-		ParseStdoutLine(m.Server, promptSecurityDir, tasks, line, callbacks, &config, true)
+		ParseStdoutLine(m.Server, request.SessionId, promptSecurityDir, tasks, line, callbacks, &config, true)
 	})
 	return err
 }

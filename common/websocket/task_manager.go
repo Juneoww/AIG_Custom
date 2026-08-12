@@ -39,6 +39,7 @@ import (
 	"github.com/Juneoww/AIG_Custom/common/agent"
 	"github.com/Juneoww/AIG_Custom/internal/platform/identity"
 	platformmodels "github.com/Juneoww/AIG_Custom/internal/platform/models"
+	platformtasks "github.com/Juneoww/AIG_Custom/internal/platform/tasks"
 
 	"github.com/Juneoww/AIG_Custom/pkg/database"
 	"github.com/gin-gonic/gin"
@@ -52,11 +53,12 @@ const (
 	WSMsgTypeTaskAssign = "task_assign" // 任务分配
 
 	// 任务状态常量
-	TaskStatusTodo       = "todo"  // 待执行
-	TaskStatusDoing      = "doing" // 执行中
-	TaskStatusDone       = "done"  // 已完成
-	TaskStatusError      = "error"
-	TaskStatusTerminated = "terminated" // 已终止
+	TaskStatusTodo            = "todo"  // 待执行
+	TaskStatusDoing           = "doing" // 执行中
+	TaskStatusDone            = "done"  // 已完成
+	TaskStatusError           = "error"
+	TaskStatusDispatchUnknown = "dispatch_unknown"
+	TaskStatusTerminated      = "terminated" // 已终止
 )
 
 type TaskManager struct {
@@ -70,6 +72,11 @@ type TaskManager struct {
 	fileConfig      *FileUploadConfig // 新增：文件上传配置
 	sseManager      *SSEManager       // 新增：SSE管理器
 	dispatchCounter uint64            // round-robin 计数器（原子操作）
+	platformEvents  platformTaskEventSink
+}
+
+type platformTaskEventSink interface {
+	RecordEngineEvent(context.Context, string, platformtasks.EngineState, string) error
 }
 
 type taskModelResolver interface {
@@ -111,6 +118,10 @@ func (tm *TaskManager) SetYAMLModelSource(source taskYAMLModelSource) {
 	if tm != nil {
 		tm.yamlModels = source
 	}
+}
+
+func (tm *TaskManager) SetPlatformTaskEventSink(sink platformTaskEventSink) {
+	tm.platformEvents = sink
 }
 
 func (tm *TaskManager) resolveTaskModel(ctx context.Context, username, modelID string) (*database.ModelParams, error) {
@@ -210,7 +221,7 @@ func (tm *TaskManager) AddTask(req *TaskCreateRequest, traceID string) error {
 		Status:         TaskStatusDoing,
 		AssignedAgent:  "", // 预存时为空
 		CountryIsoCode: req.CountryIsoCode,
-		Share:          true,
+		Share:          false,
 	}
 
 	err = tm.taskStore.CreateSession(session)
@@ -276,7 +287,7 @@ func (tm *TaskManager) AddTaskApi(req *TaskCreateRequest) error {
 		Status:         TaskStatusTodo,
 		AssignedAgent:  "", // 预存时为空
 		CountryIsoCode: req.CountryIsoCode,
-		Share:          true,
+		Share:          false,
 	}
 	err = tm.taskStore.CreateSession(session)
 	if err != nil {
@@ -327,6 +338,111 @@ func (tm *TaskManager) AddTaskApi(req *TaskCreateRequest) error {
 
 	log.Infof("任务分发成功:  sessionId=%s, agentId=%s", req.SessionID, agentID)
 	return nil
+}
+
+// SubmitTask is the narrow platform-to-engine adapter boundary. The platform
+// task ID is also the stable engine session ID, so a lost acknowledgement can
+// be resolved by status readback without creating a second scan.
+func (tm *TaskManager) SubmitTask(ctx context.Context, task platformtasks.EngineTask) (string, error) {
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
+	var params map[string]interface{}
+	if len(task.Params) > 0 {
+		if err := json.Unmarshal(task.Params, &params); err != nil {
+			return "", fmt.Errorf("任务参数无效")
+		}
+	}
+	if params == nil {
+		params = map[string]interface{}{}
+	}
+	req := &TaskCreateRequest{
+		ID: task.PlatformTaskID, SessionID: task.PlatformTaskID, Username: task.OwnerUsername,
+		Task: task.TaskType, Timestamp: time.Now().UnixMilli(), Content: task.Content, Params: params,
+		Attachments: append([]string(nil), task.Attachments...), CountryIsoCode: task.CountryIsoCode,
+	}
+	existing, err := tm.taskStore.GetSession(task.PlatformTaskID)
+	if err == nil && existing != nil {
+		if existing.Username != task.OwnerUsername || existing.TaskType != task.TaskType {
+			return "", fmt.Errorf("engine session mapping conflict")
+		}
+		if existing.Status == TaskStatusTodo && existing.AssignedAgent != "" {
+			return "", platformtasks.ErrSubmitAcknowledgementUnknown
+		}
+		if existing.Status != TaskStatusTodo {
+			return task.PlatformTaskID, nil
+		}
+	} else {
+		session := &database.Session{
+			ID: task.PlatformTaskID, Username: task.OwnerUsername, Title: tm.generateTaskTitle(req),
+			TaskType: task.TaskType, Content: task.Content, Params: mustMarshalJSON(params),
+			Attachments: mustMarshalJSON(task.Attachments), Status: TaskStatusTodo,
+			CountryIsoCode: task.CountryIsoCode, Share: false,
+		}
+		if createErr := tm.taskStore.CreateSession(session); createErr != nil {
+			return "", fmt.Errorf("engine task persistence failed")
+		}
+	}
+
+	tm.mu.Lock()
+	tm.tasks[task.PlatformTaskID] = req
+	tm.mu.Unlock()
+	if err := tm.dispatchTask(task.PlatformTaskID, task.PlatformTaskID); err != nil {
+		if strings.Contains(err.Error(), "没有可用的Agent") || strings.Contains(err.Error(), "已不活跃") {
+			return "", platformtasks.NewTransientDispatchError(err)
+		}
+		if strings.Contains(err.Error(), "下发任务给") {
+			return "", fmt.Errorf("%w: engine write outcome must be confirmed", platformtasks.ErrSubmitAcknowledgementUnknown)
+		}
+		return "", err
+	}
+	return task.PlatformTaskID, nil
+}
+
+func (tm *TaskManager) GetTaskStatus(ctx context.Context, sessionID string) (platformtasks.EngineStatus, error) {
+	if err := ctx.Err(); err != nil {
+		return platformtasks.EngineStatus{}, err
+	}
+	session, err := tm.taskStore.GetSession(sessionID)
+	if err != nil {
+		return platformtasks.EngineStatus{}, platformtasks.ErrEngineTaskNotFound
+	}
+	state := platformtasks.EngineStatePending
+	switch session.Status {
+	case TaskStatusTodo:
+		state = platformtasks.EngineStatePending
+	case TaskStatusDoing:
+		state = platformtasks.EngineStateRunning
+	case TaskStatusDispatchUnknown:
+		state = platformtasks.EngineStatePending
+	case TaskStatusDone:
+		state = platformtasks.EngineStateSucceeded
+	case TaskStatusError:
+		state = platformtasks.EngineStateFailed
+	case TaskStatusTerminated:
+		state = platformtasks.EngineStateCancelled
+	default:
+		return platformtasks.EngineStatus{}, fmt.Errorf("engine task has invalid status")
+	}
+	return platformtasks.EngineStatus{State: state}, nil
+}
+
+func (tm *TaskManager) GetResult(ctx context.Context, sessionID string) (json.RawMessage, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	messages, err := tm.taskStore.GetSessionEventsByType(sessionID, WSMsgTypeResultUpdate)
+	if err != nil || len(messages) == 0 {
+		return nil, platformtasks.ErrResultNotReady
+	}
+	return append(json.RawMessage(nil), messages[0].EventData...), nil
+}
+
+func (tm *TaskManager) CancelTask(ctx context.Context, sessionID string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	return tm.TerminateTask(sessionID, identity.Subject{Role: identity.RoleAdmin}, sessionID)
 }
 
 // cleanupFailedTask 清理失败的任务（内存和数据库）
@@ -380,14 +496,7 @@ func (tm *TaskManager) dispatchTask(sessionId string, traceID string) error {
 	selectedAgent := availableAgents[idxDisp%uint64(len(availableAgents))]
 	log.Infof("选择Agent (round-robin): trace_id=%s, sessionId=%s, agentId=%s, idx=%d", traceID, sessionId, selectedAgent.agentID, idxDisp)
 
-	// 4. 更新session的assigned_agent和开始时间
-	err := tm.taskStore.UpdateSessionAssignedAgent(task.SessionID, selectedAgent.agentID)
-	if err != nil {
-		log.Errorf("无法更新session的assigned_agent: trace_id=%s, sessionId=%s, agentId=%s, error=%v", traceID, task.SessionID, selectedAgent.agentID, err)
-		return fmt.Errorf("无法更新session的assigned_agent")
-	}
-
-	// 5. 处理params中的modelid，获取模型信息
+	// 4. 处理params中的modelid，获取模型信息。构造 payload 失败时任务必须保持待执行。
 	enhancedParams := make(map[string]interface{})
 	for k, v := range task.Params {
 		enhancedParams[k] = v
@@ -480,43 +589,85 @@ func (tm *TaskManager) dispatchTask(sessionId string, traceID string) error {
 			CountryIsoCode: task.CountryIsoCode,
 		},
 	}
-	// 7. 直接发送给 Agent（简化：无重试，无额外健康检查）
+	// 5. 在写入前锁定连接，避免健康快照和网络写之间发生断开/重连。
 	selectedAgent.stateMu.RLock()
+	selectedAgent.writeMu.Lock()
+	defer selectedAgent.writeMu.Unlock()
+	defer selectedAgent.stateMu.RUnlock()
+
 	agentID := selectedAgent.agentID
 	isActive := selectedAgent.isActive
-	selectedAgent.stateMu.RUnlock()
-
 	if !isActive {
 		log.Errorf("选中的Agent已不活跃: trace_id=%s, sessionId=%s, agentId=%s", traceID, sessionId, agentID)
-		// 重置assigned_agent
-		tm.taskStore.UpdateSessionAssignedAgent(task.SessionID, "")
 		return fmt.Errorf("选中的Agent已不活跃: %s", agentID)
 	}
+
+	// 6. 先记录当前 assignment，但只在写入成功后把任务标为 running。
+	err := tm.taskStore.PrepareSessionAssignment(task.SessionID, agentID)
+	if err != nil {
+		log.Errorf("无法更新session的assigned_agent: trace_id=%s, sessionId=%s, agentId=%s, error=%v", traceID, task.SessionID, agentID, err)
+		return fmt.Errorf("无法更新session的assigned_agent")
+	}
+
+	// 7. 直接发送给 Agent（简化：无重试，无额外健康检查）
 	log.Infof("任务分配消息已构造: trace_id=%s, sessionId=%s, taskType=%s, agentId=%s", traceID, sessionId, task.Task, agentID)
 
 	// 设置写超时并直接发送
 	selectedAgent.conn.SetWriteDeadline(time.Now().Add(writeWait))
 	err = selectedAgent.conn.WriteJSON(taskMsg)
 	if err != nil {
+		_ = tm.taskStore.MarkSessionDispatchUnknown(task.SessionID, agentID)
 		log.Errorf("下发任务给Agent失败: trace_id=%s, sessionId=%s, agentId=%s, error=%v", traceID, task.SessionID, agentID, err)
 		return fmt.Errorf("下发任务给 %s 失败: %v", agentID, err)
+	}
+	if err := tm.taskStore.ConfirmSessionAssignment(task.SessionID, agentID); err != nil {
+		return fmt.Errorf("确认任务分配失败")
 	}
 
 	log.Infof("任务分发成功: trace_id=%s, sessionId=%s, agentId=%s", traceID, task.SessionID, agentID)
 	return nil
 }
 
-// HandleAgentEvent 处理来自Agent的事件
-func (tm *TaskManager) HandleAgentEvent(sessionId string, eventType string, event interface{}) {
-	log.Debugf("收到Agent事件: sessionId=%s, eventType=%s", sessionId, eventType)
+// HandleAgentEvent only accepts events from the authenticated connection that
+// owns the current non-terminal assignment.
+func (tm *TaskManager) HandleAgentEvent(agentID string, sessionId string, eventType string, event interface{}) bool {
+	log.Debugf("收到Agent事件: agentId=%s, sessionId=%s, eventType=%s", agentID, sessionId, eventType)
 
-	if tm.shouldIgnoreAgentEvent(sessionId, eventType) {
-		log.Infof("忽略无效或终态任务的Agent事件: sessionId=%s, eventType=%s", sessionId, eventType)
-		return
+	terminalStatus := ""
+	engineState := platformtasks.EngineStateRunning
+	engineReason := ""
+	if eventType == WSMsgTypeResultUpdate {
+		terminalStatus = TaskStatusDone
+		engineState = platformtasks.EngineStateSucceeded
+	} else if eventType == WSMsgTypeError {
+		terminalStatus = TaskStatusError
+		engineState = platformtasks.EngineStateFailed
+		engineReason = "agent reported task failure"
 	}
-
-	// 使用通用事件处理函数
-	tm.handleEvent(sessionId, eventType, event)
+	persistedEvent := event
+	if eventType == WSMsgTypeError {
+		persistedEvent = map[string]interface{}{"reason": engineReason, "timestamp": getEventTimestamp(event)}
+	}
+	id := generateEventID()
+	accepted, err := tm.taskStore.StoreAssignedAgentEvent(
+		id, sessionId, agentID, eventType, persistedEvent, getEventTimestamp(event), terminalStatus,
+	)
+	if err != nil {
+		log.Errorf("存储Agent事件失败: agentId=%s, sessionId=%s, eventType=%s, error=%v", agentID, sessionId, eventType, err)
+		return false
+	}
+	if !accepted {
+		log.Warnf("拒绝非当前任务Agent事件: agentId=%s, sessionId=%s, eventType=%s", agentID, sessionId, eventType)
+		return false
+	}
+	if tm.platformEvents != nil {
+		if err := tm.platformEvents.RecordEngineEvent(context.Background(), sessionId, engineState, engineReason); err != nil {
+			log.Errorf("平台任务事件收敛失败: sessionId=%s, eventType=%s, error=%v", sessionId, eventType, err)
+		}
+	}
+	if err := tm.sseManager.SendEvent(id, sessionId, eventType, event); err != nil && !strings.Contains(err.Error(), "连接不存在") {
+		log.Errorf("推送事件到SSE失败: sessionId=%s, eventType=%s, error=%v", sessionId, eventType, err)
+	}
 
 	// 根据事件类型记录特定日志
 	switch eventType {
@@ -557,11 +708,7 @@ func (tm *TaskManager) HandleAgentEvent(sessionId string, eventType string, even
 			}
 		}
 	case "error":
-		log.Errorf("错误事件: sessionId=%s %v", sessionId, event)
-		err := tm.taskStore.UpdateSessionStatus(sessionId, TaskStatusError)
-		if err != nil {
-			log.Errorf("更新任务失败: sessionId=%s, error=%v", sessionId, err)
-		}
+		log.Errorf("Agent报告任务失败: sessionId=%s", sessionId)
 	case "resultUpdate":
 		if convertedEvent, err := convertToStruct(event, &ResultUpdateEvent{}); err == nil {
 			if _, ok := convertedEvent.(*ResultUpdateEvent); ok {
@@ -569,13 +716,6 @@ func (tm *TaskManager) HandleAgentEvent(sessionId string, eventType string, even
 
 				// 监控相关代码已移除
 
-				// 更新任务状态为已完成
-				err := tm.taskStore.UpdateSessionStatus(sessionId, TaskStatusDone)
-				if err != nil {
-					log.Errorf("更新任务状态为已完成失败: sessionId=%s, error=%v", sessionId, err)
-				} else {
-					log.Infof("任务状态已更新为已完成: sessionId=%s", sessionId)
-				}
 				// 任务完成，可以清理资源
 				go tm.cleanupTask(sessionId)
 			}
@@ -583,6 +723,7 @@ func (tm *TaskManager) HandleAgentEvent(sessionId string, eventType string, even
 	default:
 		log.Debugf("未知事件类型: sessionId=%s, eventType=%s", sessionId, eventType)
 	}
+	return true
 }
 
 // convertToStruct 将 interface{} 转换为指定的结构体类型
@@ -694,24 +835,31 @@ func (tm *TaskManager) TerminateTask(sessionId string, subject identity.Subject,
 
 	if isTerminalTaskStatus(session.Status) {
 		log.Infof("任务已结束，无需终止: trace_id=%s, sessionId=%s, status=%s", traceID, sessionId, session.Status)
-		return fmt.Errorf("任务已结束，无需终止")
+		return nil
 	}
 
-	// 通知 Agent 终止任务
-	if session.AssignedAgent != "" {
-		log.Infof("通知Agent终止任务: trace_id=%s, sessionId=%s, agentId=%s", traceID, sessionId, session.AssignedAgent)
-		tm.notifyAgentToTerminate(session.AssignedAgent, sessionId, traceID)
-	}
-
-	// 发送终止事件给前端
-	tm.sendTerminationEvent(sessionId, traceID)
-
-	// 更新任务状态为已终止
-	err = tm.taskStore.UpdateSessionStatus(sessionId, TaskStatusTerminated)
+	// The database CAS chooses the only terminal winner before any external
+	// notification. A concurrent trusted Agent terminal event therefore cannot
+	// be overwritten by cancellation side effects.
+	terminated, current, err := tm.taskStore.TerminateSessionCAS(sessionId)
 	if err != nil {
 		log.Errorf("更新任务状态失败: trace_id=%s, sessionId=%s, error=%v", traceID, sessionId, err)
 		return fmt.Errorf("更新任务状态失败")
 	}
+	if !terminated {
+		if current != nil && isTerminalTaskStatus(current.Status) {
+			return nil
+		}
+		return fmt.Errorf("任务状态已变更")
+	}
+
+	// The winning cancellation is durable. Agent and SSE notifications are
+	// best-effort external effects and happen only after the CAS succeeds.
+	if current.AssignedAgent != "" {
+		log.Infof("通知Agent终止任务: trace_id=%s, sessionId=%s, agentId=%s", traceID, sessionId, current.AssignedAgent)
+		tm.notifyAgentToTerminate(current.AssignedAgent, sessionId, traceID)
+	}
+	tm.sendTerminationEvent(sessionId, traceID)
 
 	log.Infof("任务终止完成: trace_id=%s, sessionId=%s", traceID, sessionId)
 
@@ -914,10 +1062,10 @@ func (tm *TaskManager) deleteSessionAttachments(session *database.Session) error
 		// 删除文件
 		if err := os.Remove(filePath); err != nil {
 			if !os.IsNotExist(err) {
-				log.Errorf("删除附件文件失败: %s, error: %v", filePath, err)
+				log.Errorf("删除任务附件失败: sessionId=%s", session.ID)
 			}
 		} else {
-			log.Debugf("删除附件文件成功: %s", filePath)
+			log.Debugf("删除任务附件成功: sessionId=%s", session.ID)
 		}
 	}
 
@@ -961,7 +1109,7 @@ func (tm *TaskManager) UploadFile(file *multipart.FileHeader, traceID string) (*
 
 	dst, err := os.Create(filePath)
 	if err != nil {
-		log.Errorf("创建目标文件失败: trace_id=%s, filePath=%s, error=%v", traceID, filePath, err)
+		log.Errorf("创建上传目标失败: trace_id=%s", traceID)
 		return nil, fmt.Errorf("创建文件失败: %v", err)
 	}
 	defer dst.Close()
@@ -971,14 +1119,14 @@ func (tm *TaskManager) UploadFile(file *multipart.FileHeader, traceID string) (*
 	if err != nil {
 		// 清理已创建的文件
 		os.Remove(filePath)
-		log.Errorf("文件写入失败: trace_id=%s, filePath=%s, error=%v", traceID, filePath, err)
+		log.Errorf("上传文件写入失败: trace_id=%s", traceID)
 		return nil, fmt.Errorf("保存文件失败: %v", err)
 	}
 
 	// 验证写入的文件大小
 	if written != file.Size {
 		os.Remove(filePath)
-		log.Errorf("文件写入不完整: trace_id=%s, expected=%d, actual=%d, filePath=%s", traceID, file.Size, written, filePath)
+		log.Errorf("上传文件写入不完整: trace_id=%s, expected=%d, actual=%d", traceID, file.Size, written)
 		return nil, fmt.Errorf("文件写入不完整")
 	}
 
@@ -1133,12 +1281,12 @@ func (tm *TaskManager) MergeFileChunks(fileID string, filename string, totalChun
 
 	// 验证最终文件路径安全性
 	if err := tm.validatePathSafety(filePath); err != nil {
-		log.Errorf("文件路径安全校验失败: trace_id=%s, path=%s, error=%v", traceID, filePath, err)
+		log.Errorf("文件路径安全校验失败: trace_id=%s", traceID)
 		return nil, fmt.Errorf("无效的文件路径")
 	}
 
 	if err := os.WriteFile(filePath, mergedData, 0644); err != nil {
-		log.Errorf("保存合并文件失败: trace_id=%s, filePath=%s, error=%v", traceID, filePath, err)
+		log.Errorf("保存合并文件失败: trace_id=%s", traceID)
 		return nil, fmt.Errorf("保存文件失败: %v", err)
 	}
 
@@ -1557,27 +1705,45 @@ func (tm *TaskManager) extractFileNameFromURL(url string) string {
 
 // DownloadFile 下载文件
 func (tm *TaskManager) DownloadFile(sessionId string, fileUrl string, username string, c *gin.Context, traceID string) error {
-	log.Infof("开始文件下载: trace_id=%s, sessionId=%s, fileUrl=%s, username=%s", traceID, sessionId, fileUrl, username)
-
-	filename := strings.TrimLeft(fileUrl, "/")
-	filePath, _ := filepath.Abs(filepath.Join(tm.fileConfig.UploadDir, filename))
-
-	if !strings.HasPrefix(filePath, tm.fileConfig.UploadDir) {
+	log.Infof("开始内部附件下载: trace_id=%s, sessionId=%s", traceID, sessionId)
+	session, err := tm.taskStore.GetSession(sessionId)
+	if err != nil {
+		return fmt.Errorf("任务不存在")
+	}
+	var attachments []string
+	if err := json.Unmarshal(session.Attachments, &attachments); err != nil {
+		return fmt.Errorf("文件不存在于此任务中")
+	}
+	member := false
+	for _, attachment := range attachments {
+		if attachment == fileUrl {
+			member = true
+			break
+		}
+	}
+	if !member {
+		return fmt.Errorf("文件不存在于此任务中")
+	}
+	if fileUrl == "" || fileUrl != filepath.Base(fileUrl) || strings.ContainsAny(fileUrl, `/\\`) {
+		return fmt.Errorf("文件路径不合法")
+	}
+	filePath := filepath.Join(tm.fileConfig.UploadDir, fileUrl)
+	if err := tm.validatePathSafety(filePath); err != nil {
 		return fmt.Errorf("文件路径不合法")
 	}
 
 	if _, err := os.Stat(filePath); os.IsNotExist(err) {
-		log.Errorf("本地文件不存在: trace_id=%s, filePath=%s", traceID, filePath)
+		log.Errorf("内部附件不存在: trace_id=%s, sessionId=%s", traceID, sessionId)
 		return fmt.Errorf("文件不存在")
 	}
 
 	fileInfo, err := os.Stat(filePath)
 	if err != nil {
-		log.Errorf("获取文件信息失败: trace_id=%s, filePath=%s, error=%v", traceID, filePath, err)
+		log.Errorf("获取内部附件信息失败: trace_id=%s, sessionId=%s, error=%v", traceID, sessionId, err)
 		return fmt.Errorf("获取文件信息失败: %v", err)
 	}
 
-	log.Debugf("文件信息获取成功: trace_id=%s, filePath=%s, size=%d", traceID, filePath, fileInfo.Size())
+	log.Debugf("内部附件信息获取成功: trace_id=%s, sessionId=%s, size=%d", traceID, sessionId, fileInfo.Size())
 
 	// 8. 设置响应头
 	// 获取文件的MIME类型
@@ -1601,7 +1767,7 @@ func (tm *TaskManager) DownloadFile(sessionId string, fileUrl string, username s
 	// 9. 打开文件并流式传输
 	file, err := os.Open(filePath)
 	if err != nil {
-		log.Errorf("打开文件失败: trace_id=%s, filePath=%s, error=%v", traceID, filePath, err)
+		log.Errorf("打开内部附件失败: trace_id=%s, sessionId=%s", traceID, sessionId)
 		return fmt.Errorf("打开文件失败: %v", err)
 	}
 	defer file.Close()
@@ -1609,11 +1775,11 @@ func (tm *TaskManager) DownloadFile(sessionId string, fileUrl string, username s
 	// 10. 流式传输文件内容
 	written, err := io.Copy(c.Writer, file)
 	if err != nil {
-		log.Errorf("文件传输失败: trace_id=%s, filePath=%s, error=%v", traceID, filePath, err)
+		log.Errorf("内部附件传输失败: trace_id=%s, sessionId=%s", traceID, sessionId)
 		return fmt.Errorf("传输文件失败: %v", err)
 	}
-	log.Infof("文件下载成功: trace_id=%s, sessionId=%s, fileName=%s, fileSize=%d, transmittedSize=%d",
-		traceID, sessionId, filePath, fileInfo.Size(), written)
+	log.Infof("内部附件下载成功: trace_id=%s, sessionId=%s, fileSize=%d, transmittedSize=%d",
+		traceID, sessionId, fileInfo.Size(), written)
 	return nil
 }
 

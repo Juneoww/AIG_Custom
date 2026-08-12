@@ -19,18 +19,27 @@
 package websocket
 
 import (
+	"context"
+	"crypto/sha256"
+	"crypto/subtle"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"net/http"
+	"os"
 	"strings"
 	"sync"
 	"time"
 
+	platformtasks "github.com/Juneoww/AIG_Custom/internal/platform/tasks"
 	"github.com/gin-gonic/gin"
 	"github.com/go-playground/validator/v10"
 	"github.com/gorilla/websocket"
 	"trpc.group/trpc-go/trpc-go/log"
 	// "gorm.io/datatypes"
 )
+
+const InternalAgentTokenHeader = "X-Internal-Agent-Token"
 
 const (
 	// WebSocket相关常量
@@ -80,6 +89,8 @@ type AgentManager struct {
 	connections map[string]*AgentConnection
 	mu          sync.RWMutex
 	taskManager *TaskManager // 新增：引用 TaskManager
+	tokenDigest [sha256.Size]byte
+	tokenReady  bool
 	// store       *database.AgentStore // 注释掉数据库字段
 }
 
@@ -144,10 +155,45 @@ func formatValidationErrors(err error) string {
 
 // NewAgentManager 创建新的AgentManager
 // func NewAgentManager(store *database.AgentStore) *AgentManager {
-func NewAgentManager() *AgentManager {
-	return &AgentManager{
+func NewAgentManager(tokens ...string) *AgentManager {
+	manager := &AgentManager{
 		connections: make(map[string]*AgentConnection),
 		// store:       store,
+	}
+	if len(tokens) > 0 && strings.TrimSpace(tokens[0]) != "" {
+		manager.tokenDigest = sha256.Sum256([]byte(tokens[0]))
+		manager.tokenReady = true
+	}
+	return manager
+}
+
+func LoadInternalAgentTokenFromEnv() (string, error) {
+	token := strings.TrimSpace(os.Getenv("AIG_AGENT_TOKEN"))
+	if token == "" {
+		return "", errors.New("AIG_AGENT_TOKEN is required")
+	}
+	return token, nil
+}
+
+// RequireInternalToken authenticates requests made by the controlled Agent.
+// Browser identity cookies and legacy identity headers are deliberately ignored.
+func (am *AgentManager) RequireInternalToken() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		if !am.tokenReady {
+			c.AbortWithStatus(http.StatusServiceUnavailable)
+			return
+		}
+		presented := c.GetHeader(InternalAgentTokenHeader)
+		if presented == "" {
+			c.AbortWithStatus(http.StatusUnauthorized)
+			return
+		}
+		presentedDigest := sha256.Sum256([]byte(presented))
+		if subtle.ConstantTimeCompare(am.tokenDigest[:], presentedDigest[:]) != 1 {
+			c.AbortWithStatus(http.StatusForbidden)
+			return
+		}
+		c.Next()
 	}
 }
 
@@ -163,8 +209,12 @@ func NewAgentConnection(conn *websocket.Conn) *AgentConnection {
 
 // HandleAgentWebSocket 处理agent的WebSocket连接
 func (am *AgentManager) HandleAgentWebSocket() gin.HandlerFunc {
-
+	authenticate := am.RequireInternalToken()
 	return func(c *gin.Context) {
+		authenticate(c)
+		if c.IsAborted() {
+			return
+		}
 		conn, err := upgrader.Upgrade(c.Writer, c.Request, nil)
 		if err != nil {
 			log.Errorf("WebSocket升级失败: error=%v", err)
@@ -232,7 +282,9 @@ func (ac *AgentConnection) handleConnection(am *AgentManager) {
 
 		switch wsMsg.Type {
 		case WSMsgTypeRegister:
-			ac.handleRegister(am, wsMsg.Content)
+			if !ac.handleRegister(am, wsMsg.Content) {
+				return
+			}
 		case WSMsgTypeDisconnect:
 			// 只有在身份验证成功时才断开连接
 			ac.handleDisconnect(am, wsMsg.Content)
@@ -254,13 +306,13 @@ func (ac *AgentConnection) handleConnection(am *AgentManager) {
 }
 
 // handleRegister 处理注册消息
-func (ac *AgentConnection) handleRegister(am *AgentManager, content interface{}) {
+func (ac *AgentConnection) handleRegister(am *AgentManager, content interface{}) bool {
 	contentBytes, _ := json.Marshal(content)
 	var rc AgentRegisterContent
 	if err := json.Unmarshal(contentBytes, &rc); err != nil {
 		log.Errorf("Agent注册消息解析失败: error=%v", err)
 		ac.sendError("注册消息格式错误")
-		return
+		return true
 	}
 
 	// 使用validator验证结构体
@@ -268,33 +320,28 @@ func (ac *AgentConnection) handleRegister(am *AgentManager, content interface{})
 		errorMsg := formatValidationErrors(err)
 		log.Errorf("Agent注册验证失败: agentId=%s, error=%s", rc.AgentID, errorMsg)
 		ac.sendError(errorMsg)
-		return
+		return true
 	}
-
-	// 检查是否已存在相同ID的Agent
-	am.mu.Lock()
-	if existingConn, exists := am.connections[rc.AgentID]; exists {
-		am.mu.Unlock()
-		log.Warnf("Agent ID已存在，断开旧连接: agentId=%s", rc.AgentID)
-		// 断开旧连接
-		existingConn.stateMu.Lock()
-		existingConn.isActive = false
-		existingConn.stateMu.Unlock()
-		existingConn.conn.Close()
-	} else {
-		am.mu.Unlock()
-	}
-
-	// 注册新连接
-	am.mu.Lock()
-	am.connections[rc.AgentID] = ac
-	am.mu.Unlock()
 
 	// 更新连接状态
 	ac.stateMu.Lock()
 	ac.agentID = rc.AgentID
 	ac.isActive = true
 	ac.stateMu.Unlock()
+
+	// Agent ID ownership is admitted atomically. An active connection can never
+	// be replaced by a later registration using the same identifier.
+	am.mu.Lock()
+	if _, exists := am.connections[rc.AgentID]; exists {
+		am.mu.Unlock()
+		ac.sendError("Agent ID 已被活动连接占用")
+		ac.stateMu.Lock()
+		ac.isActive = false
+		ac.stateMu.Unlock()
+		return false
+	}
+	am.connections[rc.AgentID] = ac
+	am.mu.Unlock()
 
 	log.Infof("Agent注册成功: agentId=%s, hostname=%s, ip=%s, version=%s", rc.AgentID, rc.Hostname, rc.IP, rc.Version)
 	// 发送注册成功响应
@@ -305,7 +352,10 @@ func (ac *AgentConnection) handleRegister(am *AgentManager, content interface{})
 			Message: "注册成功",
 		},
 	}
-	ac.conn.WriteJSON(response)
+	ac.writeMu.Lock()
+	_ = ac.conn.WriteJSON(response)
+	ac.writeMu.Unlock()
+	return true
 }
 
 // handleDisconnect 处理主动断开连接
@@ -336,7 +386,9 @@ func (ac *AgentConnection) handleDisconnect(am *AgentManager, content interface{
 
 	// 从连接管理器中移除
 	am.mu.Lock()
-	delete(am.connections, agentID)
+	if current, exists := am.connections[agentID]; exists && current == ac {
+		delete(am.connections, agentID)
+	}
 	am.mu.Unlock()
 
 	// 发送断开确认
@@ -427,13 +479,28 @@ func (ac *AgentConnection) cleanup(am *AgentManager) {
 	if agentID != "" {
 		am.mu.Lock()
 		// 检查是否真的存在于连接管理器中
-		if _, exists := am.connections[agentID]; exists {
+		ownsRegistration := false
+		if current, exists := am.connections[agentID]; exists && current == ac {
 			delete(am.connections, agentID)
+			ownsRegistration = true
 			log.Infof("Agent已从连接管理器中移除: agentId=%s", agentID)
 		} else {
 			log.Warnf("Agent不在连接管理器中，可能已被移除: agentId=%s", agentID)
 		}
 		am.mu.Unlock()
+		if ownsRegistration && am.taskManager != nil {
+			failedSessions, err := am.taskManager.taskStore.FailAgentAssignments(agentID, "agent connection lost")
+			if err != nil {
+				log.Errorf("Agent失联任务收敛失败: agentId=%s, error=%v", agentID, err)
+			}
+			if am.taskManager.platformEvents != nil {
+				for _, sessionID := range failedSessions {
+					if err := am.taskManager.platformEvents.RecordEngineEvent(context.Background(), sessionID, platformtasks.EngineStateFailed, "agent connection lost"); err != nil {
+						log.Errorf("平台任务失联状态收敛失败: sessionId=%s, error=%v", sessionID, err)
+					}
+				}
+			}
+		}
 
 		// ac.store.UpdateOnlineStatus(ac.agentID, false)
 	} else {
@@ -464,7 +531,9 @@ func (ac *AgentConnection) sendError(message string) {
 	// 设置写超时
 	ac.conn.SetWriteDeadline(time.Now().Add(writeWait))
 
+	ac.writeMu.Lock()
 	err := ac.conn.WriteJSON(response)
+	ac.writeMu.Unlock()
 	if err != nil {
 		// 如果发送错误响应都失败，说明连接可能有问题
 		ac.stateMu.Lock()
@@ -503,10 +572,17 @@ func (ac *AgentConnection) handleAgentEvent(am *AgentManager, content interface{
 
 	log.Debugf("收到Agent事件: agentId=%s, sessionId=%s, eventType=%s", ac.agentID, sessionId, eventType)
 
-	// 转发给 TaskManager 处理
+	// 转发给 TaskManager 处理。连接注册身份是唯一可信的 Agent 身份。
+	ac.stateMu.RLock()
+	agentID := ac.agentID
+	active := ac.isActive
+	ac.stateMu.RUnlock()
 	am.mu.RLock()
-	am.taskManager.HandleAgentEvent(sessionId, eventType, event)
+	taskManager := am.taskManager
 	am.mu.RUnlock()
+	if !active || agentID == "" || taskManager == nil || !taskManager.HandleAgentEvent(agentID, sessionId, eventType, event) {
+		ac.sendError("Agent事件未被接受")
+	}
 }
 
 // 添加获取可用 Agent 的方法

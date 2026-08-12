@@ -23,7 +23,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
 	"net/url"
+	"strings"
 	"sync"
 	"time"
 
@@ -33,12 +35,15 @@ import (
 	"github.com/gorilla/websocket"
 )
 
+const InternalAgentTokenHeader = "X-Internal-Agent-Token"
+
 // Agent 客户端结构
 type Agent struct {
 	// 基本信息
-	info      AgentInfo
-	serverURL string
-	conn      *websocket.Conn
+	info       AgentInfo
+	serverURL  string
+	agentToken string
+	conn       *websocket.Conn
 
 	// 任务管理
 	Tasks    []*TaskContext
@@ -66,26 +71,37 @@ type TaskContext struct {
 
 // AgentConfig Agent配置
 type AgentConfig struct {
-	ServerURL string
-	Info      AgentInfo
+	ServerURL  string
+	AgentToken string
+	Info       AgentInfo
 }
 
 // NewAgent 创建新的Agent实例
 func NewAgent(config AgentConfig) *Agent {
 	ctx, cancel := context.WithCancel(context.Background())
 	agent := &Agent{
-		info:      config.Info,
-		serverURL: config.ServerURL,
-		conn:      nil,
-		Tasks:     make([]*TaskContext, 0),
-		sendChan:  make(chan interface{}, 100),
-		ctx:       ctx,
-		cancel:    cancel,
-		mutex:     sync.RWMutex{},
-		taskFunc:  make([]TaskInterface, 0),
+		info:       config.Info,
+		serverURL:  config.ServerURL,
+		agentToken: config.AgentToken,
+		conn:       nil,
+		Tasks:      make([]*TaskContext, 0),
+		sendChan:   make(chan interface{}, 100),
+		ctx:        ctx,
+		cancel:     cancel,
+		mutex:      sync.RWMutex{},
+		taskFunc:   make([]TaskInterface, 0),
 	}
 	return agent
 }
+
+func (a *Agent) String() string {
+	if a == nil {
+		return "<nil>"
+	}
+	return fmt.Sprintf("{AgentID:%q ServerURL:%q AgentToken:[REDACTED]}", a.info.ID, a.serverURL)
+}
+
+func (a *Agent) GoString() string { return a.String() }
 
 func (a *Agent) RegisterTaskFunc(taskFunc TaskInterface) {
 	a.mutex.Lock()
@@ -128,12 +144,17 @@ func (a *Agent) Stop() {
 
 // connect 连接到服务器
 func (a *Agent) connect() error {
+	if strings.TrimSpace(a.agentToken) == "" {
+		return errors.New("AIG_AGENT_TOKEN is required before dialing the internal Agent WebSocket")
+	}
 	u, err := url.Parse(a.serverURL)
 	if err != nil {
 		return err
 	}
 	dialer := websocket.DefaultDialer
-	conn, _, err := dialer.Dial(u.String(), nil)
+	header := http.Header{}
+	header.Set(InternalAgentTokenHeader, a.agentToken)
+	conn, _, err := dialer.Dial(u.String(), header)
 	if err != nil {
 		return err
 	}

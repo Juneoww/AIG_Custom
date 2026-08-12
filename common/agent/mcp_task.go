@@ -184,7 +184,7 @@ func (m *McpTask) Execute(ctx context.Context, request TaskRequest, callbacks Ta
 		return fmt.Errorf("resolve uv binary: %v", err)
 	}
 	err = utils.RunCmdWithContext(ctx, mcpDir, uvBin, argv, func(line string) {
-		ParseStdoutLine(m.Server, mcpDir, tasks, line, callbacks, &config, false)
+		ParseStdoutLine(m.Server, request.SessionId, mcpDir, tasks, line, callbacks, &config, false)
 	})
 	return err
 }

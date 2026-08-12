@@ -37,6 +37,11 @@ func main() {
 			server = v
 		}
 	}
+	agentToken := os.Getenv("AIG_AGENT_TOKEN")
+	if agentToken == "" {
+		gologger.Errorln("AIG_AGENT_TOKEN is required")
+		return
+	}
 	if server == "" {
 		gologger.Errorln("server is empty")
 		return
@@ -44,7 +49,8 @@ func main() {
 	gologger.Infoln("connect server:", server)
 	serverUrl := fmt.Sprintf("ws://%s/api/v1/agents/ws", server)
 	x := agent.NewAgent(agent.AgentConfig{
-		ServerURL: serverUrl,
+		ServerURL:  serverUrl,
+		AgentToken: agentToken,
 		Info: agent.AgentInfo{
 			ID:       "test_id",
 			HostName: "test_hostname",

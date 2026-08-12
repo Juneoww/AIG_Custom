@@ -44,6 +44,9 @@ func LoadFileUploadConfigFromEnv() *FileUploadConfig {
 	if uploadDir := os.Getenv("FILE_UPLOAD_DIR"); uploadDir != "" {
 		config.UploadDir = uploadDir
 	}
+	if uploadDir := os.Getenv("UPLOAD_DIR"); uploadDir != "" {
+		config.UploadDir = uploadDir
+	}
 
 	return config
 }

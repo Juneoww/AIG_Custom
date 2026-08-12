@@ -19,6 +19,7 @@
 package websocket
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"mime/multipart"
@@ -27,6 +28,7 @@ import (
 	"strconv"
 	"strings"
 
+	platformtasks "github.com/Juneoww/AIG_Custom/internal/platform/tasks"
 	"github.com/Juneoww/AIG_Custom/pkg/database"
 
 	"github.com/gin-gonic/gin"
@@ -271,7 +273,7 @@ func HandleTaskSSE(c *gin.Context, tm *TaskManager) {
 func HandleTaskCreate(c *gin.Context, tm *TaskManager) {
 	traceID := getTraceID(c)
 	var req TaskCreateRequest
-	log.Infof("开始创建任务: trace_id=%s, req=%+v", traceID, req)
+	log.Infof("开始创建任务: trace_id=%s, taskType=%s", traceID, req.Task)
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusOK, gin.H{
 			"status":  1,
@@ -1074,4 +1076,107 @@ func HandleDownloadFile(c *gin.Context, tm *TaskManager) {
 	log.Infof("文件下载成功: trace_id=%s, sessionId=%s, fileUrl=%s, username=%s", traceID, sessionId, req.FileURL, username)
 
 	// 文件下载成功，响应头已在DownloadFile方法中设置
+}
+
+// HandleInternalTaskDownload serves attachments only to the authenticated
+// controlled Agent. Browser identity is neither required nor consulted.
+func HandleInternalTaskDownload(c *gin.Context, tm *TaskManager) {
+	traceID := getTraceID(c)
+	sessionID := c.Param("sessionId")
+	if sessionID == "" || !isValidSessionID(sessionID) {
+		c.JSON(http.StatusBadRequest, gin.H{"status": 1, "message": "无效的会话ID"})
+		return
+	}
+	var request struct {
+		FileURL string `json:"fileUrl" binding:"required"`
+	}
+	if err := c.ShouldBindJSON(&request); err != nil || strings.TrimSpace(request.FileURL) == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"status": 1, "message": "参数错误"})
+		return
+	}
+	if err := tm.DownloadFile(sessionID, request.FileURL, "", c, traceID); err != nil {
+		switch err.Error() {
+		case "任务不存在", "文件不存在于此任务中", "文件不存在":
+			c.JSON(http.StatusNotFound, gin.H{"status": 1, "message": err.Error()})
+		case "文件路径不合法":
+			c.JSON(http.StatusBadRequest, gin.H{"status": 1, "message": err.Error()})
+		default:
+			c.JSON(http.StatusInternalServerError, gin.H{"status": 1, "message": "文件下载失败"})
+		}
+	}
+}
+
+// HandleInternalTaskUpload accepts scan artifacts only from an authenticated
+// controlled Agent and derives attachment ownership from the trusted engine
+// session mapping.
+func HandleInternalTaskUpload(c *gin.Context, attachments *platformtasks.AttachmentService) {
+	sessionID := c.Param("sessionId")
+	if sessionID == "" || !isValidSessionID(sessionID) {
+		c.JSON(http.StatusBadRequest, gin.H{"status": 1, "message": "无效的会话ID"})
+		return
+	}
+	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, attachments.MaxFileBytes()+(1<<20))
+	header, err := c.FormFile("file")
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"status": 1, "message": "无效的上传文件"})
+		return
+	}
+	source, err := header.Open()
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"status": 1, "message": "无效的上传文件"})
+		return
+	}
+	defer source.Close()
+	view, err := attachments.UploadForEngineSession(c.Request.Context(), sessionID, header.Filename, source)
+	if err != nil {
+		switch {
+		case errors.Is(err, platformtasks.ErrAttachmentTooLarge):
+			c.JSON(http.StatusRequestEntityTooLarge, gin.H{"status": 1, "message": "附件超过大小限制"})
+		case errors.Is(err, platformtasks.ErrNotFound):
+			c.JSON(http.StatusNotFound, gin.H{"status": 1, "message": "任务不存在"})
+		case errors.Is(err, platformtasks.ErrForbidden):
+			c.JSON(http.StatusForbidden, gin.H{"status": 1, "message": "任务状态不允许上传"})
+		case errors.Is(err, platformtasks.ErrInvalid):
+			c.JSON(http.StatusBadRequest, gin.H{"status": 1, "message": "无效的上传文件"})
+		default:
+			c.JSON(http.StatusInternalServerError, gin.H{"status": 1, "message": "附件上传失败"})
+		}
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{
+		"status": 0, "message": "上传成功",
+		"data": gin.H{
+			"filename": view.Filename,
+			"fileUrl":  "/api/v1/platform/tasks/attachments/" + view.ID + "/download",
+		},
+	})
+}
+
+func registerRetiredBrowserTaskRoutes(group *gin.RouterGroup) {
+	gone := func(c *gin.Context) {
+		c.JSON(http.StatusGone, gin.H{
+			"status":  1,
+			"message": "旧任务入口已停用，请使用 /api/v1/platform/tasks",
+		})
+	}
+	tasks := group.Group("/tasks")
+	tasks.GET("", gone)
+	tasks.GET("/:sessionId", gone)
+	tasks.GET("/sse/:sessionId", gone)
+	tasks.POST("", gone)
+	tasks.POST("/share", gone)
+	tasks.POST("/uploadFile", gone)
+	tasks.POST("/uploadChunk", gone)
+	tasks.POST("/mergeChunks", gone)
+	tasks.PUT("/:sessionId", gone)
+	tasks.DELETE("/:sessionId", gone)
+	tasks.POST("/:sessionId/terminate", gone)
+
+	taskAPI := group.Group("/taskapi")
+	taskAPI.POST("/tasks", gone)
+	taskAPI.GET("/status/:id", gone)
+	taskAPI.GET("/result/:id", gone)
+	taskAPI.POST("/upload", gone)
+	taskAPI.POST("/uploadChunk", gone)
+	taskAPI.POST("/mergeChunks", gone)
 }

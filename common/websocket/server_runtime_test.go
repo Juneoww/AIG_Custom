@@ -71,13 +71,14 @@ func TestRuntimeDatastoreInitializerWorksWithoutDDLPrivileges(t *testing.T) {
 	require.NotNil(t, stores.identityRepository)
 	require.NotNil(t, stores.auditRepository)
 	require.NotNil(t, stores.platformModelRepository)
+	require.NotNil(t, stores.platformTaskRepository)
 	require.NotNil(t, stores.taskStore)
 	require.NotNil(t, stores.modelStore)
 	require.NotNil(t, stores.agentStore)
 
 	var versions []int64
 	require.NoError(t, runtimeDB.Table("schema_migrations").Order("version ASC").Pluck("version", &versions).Error)
-	require.Equal(t, []int64{1, 2, 3, 4}, versions)
+	require.Equal(t, []int64{1, 2, 3, 4, 5, 6}, versions)
 }
 
 func TestRuntimeDatastoreInitializerRejectsLegacyPlaintextModels(t *testing.T) {

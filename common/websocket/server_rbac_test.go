@@ -22,8 +22,10 @@ func TestServerRoutesKeepKnowledgeAppAndSystemRBACGuards(t *testing.T) {
 	for _, route := range []string{
 		"fingerprints.GET(\"\", identity.RequireRole(identity.RoleAdmin, identity.RoleUser, identity.RoleAuditor)",
 		"fingerprints.POST(\"\", knowledgeHandler.Govern(platformknowledge.KindFingerprint",
-		"tasks.GET(\"/:sessionId\", identity.RequireOwnerOrRole(taskOwner, false)",
-		"tasks.PUT(\"/:sessionId\", identity.RequireOwnerOrRole(taskOwner, true)",
+		"registerRetiredBrowserTaskRoutes(appSecurity)",
+		"v1.POST(\"/app/tasks/:sessionId/downloadFile\", agentManager.RequireInternalToken()",
+		"v1.POST(\"/app/tasks/:sessionId/uploadFile\", agentManager.RequireInternalToken()",
+		"taskHandlers[0].Register(group.Group(\"/tasks\"))",
 		"registerPlatformModelRoutes(models, platformModelService, modelStore)",
 		"system.GET(\"/version\", identity.RequireRole(identity.RoleAdmin, identity.RoleAuditor)",
 		"system.POST(\"/update-data\", knowledgeHandler.GovernAsync(platformknowledge.KindSystemData",

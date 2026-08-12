@@ -42,6 +42,9 @@ services:
       MODEL_MASTER_KEY_ID: ${MODEL_MASTER_KEY_ID:-}
       MODEL_MASTER_KEY: ${MODEL_MASTER_KEY:-}
       MODEL_PREVIOUS_MASTER_KEYS: ${MODEL_PREVIOUS_MASTER_KEYS:-}
+      AIG_AGENT_TOKEN: ${AIG_AGENT_TOKEN:-}
+      AIG_MAX_UPLOAD_BYTES: ${AIG_MAX_UPLOAD_BYTES:-52428800}
+      AIG_MAX_CHUNK_BYTES: ${AIG_MAX_CHUNK_BYTES:-5242880}
       TZ: Asia/Shanghai
     volumes:
       - ./data:/app/data
@@ -64,6 +67,7 @@ services:
     environment:
       TZ: Asia/Shanghai
       AIG_SERVER: webserver:8088
+      AIG_AGENT_TOKEN: ${AIG_AGENT_TOKEN:-}
     cap_add: [SYS_ADMIN]
     security_opt: [seccomp:unconfined]
     shm_size: 2gb

@@ -2,6 +2,9 @@ x-migration-depends-on: &migration-depends-on
   migrate:
     condition: service_completed_successfully
 
+x-internal-agent-auth: &internal-agent-auth
+  AIG_AGENT_TOKEN: ${AIG_AGENT_TOKEN:-}
+
 services:
   postgres:
     image: postgres:16.4-alpine
@@ -35,7 +38,8 @@ services:
       postgres:
         condition: service_healthy
 
-  # Task 10 can add platform and agent services with:
+  # Task 10 can add platform and agent services with the same
+  # environment: *internal-agent-auth and:
   # depends_on: *migration-depends-on
 
 volumes:

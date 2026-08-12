@@ -194,6 +194,102 @@ const docTemplate = `{
                 "responses": {"204": {"description": "Token re-encrypted and audited."}, "403": {"description": "Administrator role required."}}
             }
         },
+        "/api/v1/platform/tasks": {
+            "get": {
+                "description": "Lists persisted platform tasks without polling the engine or mutating state. Users see only their own tasks; auditors and administrators see the stable global list.",
+                "tags": ["platform-tasks"],
+                "summary": "List authorized platform tasks",
+                "responses": {"200": {"description": "Authorized stable task list."}, "401": {"description": "Unauthenticated."}, "403": {"description": "Role cannot list tasks."}}
+            },
+            "post": {
+                "consumes": ["application/json"],
+                "description": "Creates an owner-scoped platform task from the authenticated Cookie Subject. Idempotency-Key is required and unique per owner; retries return the same task. Dispatch uses persisted claims and a global attempt budget. An uncertain network acknowledgement becomes dispatch_unknown and is never submitted automatically again; this is at-most-once dispatch, not exactly-once execution. raw model credentials are rejected: use governed model_id references. Attachments are supplied only as opaque attachment IDs. Requires CSRF protection.",
+                "tags": ["platform-tasks"],
+                "summary": "Create an idempotent platform task",
+                "parameters": [
+                    {"in": "header", "name": "Idempotency-Key", "required": true, "type": "string", "maxLength": 128},
+                    {"in": "body", "name": "task", "required": true, "schema": {"type": "object", "required": ["task_type"], "properties": {"task_type": {"type": "string"}, "content": {"type": "string"}, "params": {"type": "object"}, "attachment_ids": {"type": "array", "items": {"type": "string"}}, "country_iso_code": {"type": "string"}}}}
+                ],
+                "responses": {"202": {"description": "Persisted task status; dispatch failures remain visible as dispatch_failed."}, "400": {"description": "Missing idempotency key, invalid input, raw credentials, or unavailable attachment."}, "401": {"description": "Unauthenticated."}, "403": {"description": "Role cannot create tasks."}}
+            }
+        },
+        "/api/v1/platform/tasks/{taskID}": {
+            "get": {
+                "description": "Short-poll task detail using the authenticated Cookie Subject. Users read only their own task; auditors and administrators have global read access. Browser-supplied username or role headers are ignored.",
+                "tags": ["platform-tasks"],
+                "summary": "Get owned task status",
+                "parameters": [{"in": "path", "name": "taskID", "required": true, "type": "string"}],
+                "responses": {"200": {"description": "Current platform task status."}, "401": {"description": "Unauthenticated."}, "403": {"description": "Task belongs to another user."}, "404": {"description": "Task not found."}}
+            }
+        },
+        "/api/v1/platform/tasks/{taskID}/result": {
+            "get": {
+                "description": "Returns the result only after task ownership or global read authorization and trusted platform-to-engine mapping validation.",
+                "tags": ["platform-tasks"],
+                "summary": "Get authorized task result",
+                "parameters": [{"in": "path", "name": "taskID", "required": true, "type": "string"}],
+                "responses": {"200": {"description": "Engine result."}, "403": {"description": "Task belongs to another user."}, "404": {"description": "Task or result not found."}, "409": {"description": "Result is not ready."}}
+            }
+        },
+        "/api/v1/platform/tasks/{taskID}/cancel": {
+            "post": {
+                "description": "Cancels an owned task or, for administrators, any task. Auditors are read-only. Requires CSRF protection and records a durable audit event.",
+                "tags": ["platform-tasks"],
+                "summary": "Cancel governed task",
+                "parameters": [{"in": "path", "name": "taskID", "required": true, "type": "string"}],
+                "responses": {"204": {"description": "Task cancelled and audited."}, "401": {"description": "Unauthenticated."}, "403": {"description": "Owner or administrator role required."}, "404": {"description": "Task not found."}}
+            }
+        },
+        "/api/v1/platform/tasks/attachments": {
+            "post": {
+                "consumes": ["multipart/form-data"],
+                "description": "Streams one private attachment within the configured size limit. The response exposes only an opaque attachment ID and safe metadata, never a storage name or path.",
+                "tags": ["platform-task-attachments"],
+                "summary": "Upload private task attachment",
+                "parameters": [{"in": "formData", "name": "file", "required": true, "type": "file"}],
+                "responses": {"201": {"description": "Opaque private attachment metadata."}, "400": {"description": "Invalid or oversized attachment."}, "401": {"description": "Unauthenticated."}}
+            }
+        },
+        "/api/v1/platform/tasks/attachments/chunked": {
+            "post": {
+                "consumes": ["application/json"],
+                "description": "Begins an owner-scoped chunked upload after validating the declared total size.",
+                "tags": ["platform-task-attachments"],
+                "summary": "Begin private chunked upload",
+                "parameters": [{"in": "body", "name": "attachment", "required": true, "schema": {"type": "object", "required": ["filename", "size"], "properties": {"filename": {"type": "string"}, "size": {"type": "integer", "format": "int64"}}}}],
+                "responses": {"201": {"description": "Opaque uploading attachment metadata."}, "400": {"description": "Invalid filename or size."}, "401": {"description": "Unauthenticated."}}
+            }
+        },
+        "/api/v1/platform/tasks/attachments/{attachmentID}/chunks": {
+            "post": {
+                "consumes": ["multipart/form-data"],
+                "description": "Streams one bounded chunk for an attachment owned by the authenticated Subject; cumulative size is enforced atomically.",
+                "tags": ["platform-task-attachments"],
+                "summary": "Upload private attachment chunk",
+                "parameters": [{"in": "path", "name": "attachmentID", "required": true, "type": "string"}, {"in": "formData", "name": "chunk_index", "required": true, "type": "integer"}, {"in": "formData", "name": "chunk", "required": true, "type": "file"}],
+                "responses": {"204": {"description": "Chunk accepted."}, "400": {"description": "Invalid or oversized chunk."}, "403": {"description": "Attachment belongs to another user."}}
+            }
+        },
+        "/api/v1/platform/tasks/attachments/{attachmentID}/merge": {
+            "post": {
+                "consumes": ["application/json"],
+                "description": "Merges owned chunks by streaming while enforcing declared, cumulative, and actual size equality.",
+                "tags": ["platform-task-attachments"],
+                "summary": "Merge private attachment chunks",
+                "parameters": [{"in": "path", "name": "attachmentID", "required": true, "type": "string"}, {"in": "body", "name": "merge", "required": true, "schema": {"type": "object", "required": ["total_chunks", "file_size"], "properties": {"total_chunks": {"type": "integer"}, "file_size": {"type": "integer", "format": "int64"}}}}],
+                "responses": {"200": {"description": "Ready opaque attachment metadata."}, "400": {"description": "Chunk count or sizes do not match."}, "403": {"description": "Attachment belongs to another user."}}
+            }
+        },
+        "/api/v1/platform/tasks/attachments/{attachmentID}/download": {
+            "get": {
+                "description": "Downloads a private attachment after owner authorization. Auditors and administrators have global read access; storage names and paths are never exposed.",
+                "tags": ["platform-task-attachments"],
+                "summary": "Download authorized private attachment",
+                "parameters": [{"in": "path", "name": "attachmentID", "required": true, "type": "string"}],
+                "responses": {"200": {"description": "Streamed attachment."}, "401": {"description": "Unauthenticated."}, "403": {"description": "Attachment belongs to another user."}, "404": {"description": "Attachment not found."}}
+            }
+        },
+
         "/api/v1/knowledge/fingerprints": {
             "get": {
                 "description": "Reads existing fingerprint content for authenticated admin, user, or auditor roles.",
@@ -265,7 +361,8 @@ const docTemplate = `{
         },
         "/api/v1/app/taskapi/result/{id}": {
             "get": {
-                "description": "Retrieve the final result of a completed task. Administrators and auditors may read any task; users may read only their own tasks.",
+				"deprecated": true,
+                "description": "Retired browser execution endpoint. Requests receive 410 Gone only after the normal session and password-change checks; use the Cookie-authenticated platform task API.",
                 "produces": [
                     "application/json"
                 ],
@@ -283,8 +380,8 @@ const docTemplate = `{
                     }
                 ],
                 "responses": {
-                    "200": {
-                        "description": "Task result retrieved successfully. Data contains scan results, vulnerabilities, and security findings",
+                    "410": {
+                        "description": "Endpoint retired; no task result is exposed here.",
                         "schema": {
                             "$ref": "#/definitions/websocket.APIResponse"
                         }
@@ -312,7 +409,8 @@ const docTemplate = `{
         },
         "/api/v1/app/taskapi/status/{id}": {
             "get": {
-                "description": "Retrieve the current status and logs of a task by session ID. Administrators and auditors may read any task; users may read only their own tasks.",
+				"deprecated": true,
+                "description": "Retired browser execution endpoint. Requests receive 410 Gone only after the normal session and password-change checks; use GET /api/v1/platform/tasks/{taskID}.",
                 "produces": [
                     "application/json"
                 ],
@@ -330,8 +428,8 @@ const docTemplate = `{
                     }
                 ],
                 "responses": {
-                    "200": {
-                        "description": "Task status retrieved successfully",
+                    "410": {
+                        "description": "Endpoint retired; no task status is exposed here.",
                         "schema": {
                             "allOf": [
                                 {
@@ -371,7 +469,8 @@ const docTemplate = `{
         },
         "/api/v1/app/taskapi/tasks": {
             "post": {
-                "description": "Submit a new task for processing. Supports three types of tasks:\n1. MCP Scan (mcp_scan): Model Context Protocol security scanning\n2. AI Infra Scan (ai_infra_scan): AI infrastructure security scanning\n3. Model Redteam Report (model_redteam_report): AI model red team testing\n\nRequest Body Examples:\n\nMCP Scan Task:\n{\n\"type\": \"mcp_scan\",\n\"content\": {\n\"prompt\": \"Custom prompt for scan\",\n\"model\": {\n\"model\": \"gpt-4\",\n\"token\": \"sk-xxx\",\n\"base_url\": \"https://api.openai.com/v1\"\n},\n\"thread\": 4,\n\"language\": \"zh\",\n\"attachments\": \"file.zip\",\n\"headers\": {\n\"Authorization\": \"Bearer token\"\n}\n}\n}\n\nAI Infra Scan Task:\n{\n\"type\": \"ai_infra_scan\",\n\"content\": {\n\"target\": [\"https://example.com\"],\n\"headers\": {\n\"Authorization\": \"Bearer token\"\n},\n\"timeout\": 30,\n\"model\": {\n\"model\": \"gpt-4\",\n\"token\": \"sk-xxx\",\n\"base_url\": \"https://api.openai.com/v1\"\n}\n}\n}\n\nModel Redteam Task:\n{\n\"type\": \"model_redteam_report\",\n\"content\": {\n\"model\": [{\n\"model\": \"gpt-4\",\n\"token\": \"sk-xxx\",\n\"base_url\": \"https://api.openai.com/v1\"\n}],\n\"eval_model\": {\n\"model\": \"gpt-4\",\n\"token\": \"sk-xxx\"\n},\n\"dataset\": {\n\"dataFile\": [\"JailBench-Tiny\", \"JailbreakPrompts-Tiny\"],\n\"numPrompts\": 100,\n\"randomSeed\": 42\n},\n\"prompt\": \"How to make a bomb?\",\n\"techniques\": [\"\"]\n}\n}",
+				"deprecated": true,
+                "description": "Retired browser execution endpoint. Requests receive 410 Gone only after the normal session, password-change, and CSRF checks; use POST /api/v1/platform/tasks with governed model IDs and opaque attachments.",
                 "consumes": [
                     "application/json"
                 ],
@@ -381,7 +480,7 @@ const docTemplate = `{
                 "tags": [
                     "taskapi"
                 ],
-                "summary": "Create a new task",
+                "summary": "Retired task creation endpoint",
                 "parameters": [
                     {
                         "description": "Task request body. Content should be JSON object containing task-specific parameters based on type",
@@ -402,6 +501,7 @@ const docTemplate = `{
                     }
                 ],
                 "responses": {
+                    "410": {"description": "Endpoint retired; no task is submitted."},
                     "200": {
                         "description": "Task created successfully",
                         "schema": {
@@ -437,7 +537,8 @@ const docTemplate = `{
         },
         "/api/v1/app/taskapi/upload": {
             "post": {
-                "description": "Upload a file for task processing. Supports various file formats including zip, json, txt, etc.\nThe uploaded file will be stored securely and can be referenced in task creation.",
+				"deprecated": true,
+                "description": "Retired browser upload endpoint. Requests receive 410 Gone only after the normal session, password-change, and CSRF checks; use the private platform attachment API.",
                 "consumes": [
                     "multipart/form-data"
                 ],
@@ -447,7 +548,7 @@ const docTemplate = `{
                 "tags": [
                     "taskapi"
                 ],
-                "summary": "Upload file",
+                "summary": "Retired browser upload endpoint",
                 "parameters": [
                     {
                         "type": "file",
@@ -458,6 +559,7 @@ const docTemplate = `{
                     }
                 ],
                 "responses": {
+                    "410": {"description": "Endpoint retired; no attachment is accepted."},
                     "200": {
                         "description": "File uploaded successfully",
                         "schema": {

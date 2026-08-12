@@ -57,14 +57,16 @@ func TestMigrationAppliesIdentitySchemaAsVersionTwo(t *testing.T) {
 
 	var versions []SchemaMigration
 	require.NoError(t, db.Order("version ASC").Find(&versions).Error)
-	require.Len(t, versions, 4)
+	require.Len(t, versions, 6)
 	assert.Equal(t, int64(1), versions[0].Version)
 	assert.Equal(t, int64(2), versions[1].Version)
 	assert.Equal(t, int64(3), versions[2].Version)
 	assert.Equal(t, int64(4), versions[3].Version)
+	assert.Equal(t, int64(5), versions[4].Version)
+	assert.Equal(t, int64(6), versions[5].Version)
 }
 
-func TestMigrationAppliesGovernanceSchemaThroughVersionFour(t *testing.T) {
+func TestMigrationAppliesGovernanceAndPlatformTaskSchemaThroughVersionSix(t *testing.T) {
 	db := openPostgresTestDB(t)
 	resetPostgresTestDB(t, db)
 
@@ -72,12 +74,16 @@ func TestMigrationAppliesGovernanceSchemaThroughVersionFour(t *testing.T) {
 	assert.True(t, db.Migrator().HasTable("audit_events"))
 	assert.True(t, db.Migrator().HasTable("audit_completion_outbox"))
 	assert.True(t, db.Migrator().HasTable("platform_models"))
+	assert.True(t, db.Migrator().HasTable("platform_tasks"))
+	assert.True(t, db.Migrator().HasTable("platform_attachments"))
 
 	var versions []SchemaMigration
 	require.NoError(t, db.Order("version ASC").Find(&versions).Error)
-	require.Len(t, versions, 4)
+	require.Len(t, versions, 6)
 	assert.Equal(t, int64(3), versions[2].Version)
 	assert.Equal(t, int64(4), versions[3].Version)
+	assert.Equal(t, int64(5), versions[4].Version)
+	assert.Equal(t, int64(6), versions[5].Version)
 }
 
 func TestMigrationUpgradesExistingVersionThreeWithoutRewritingIt(t *testing.T) {
@@ -98,8 +104,8 @@ func TestMigrationUpgradesExistingVersionThreeWithoutRewritingIt(t *testing.T) {
 	require.True(t, db.Migrator().HasTable("audit_completion_outbox"))
 	var versions []SchemaMigration
 	require.NoError(t, db.Order("version ASC").Find(&versions).Error)
-	require.Len(t, versions, 4)
-	assert.Equal(t, []int64{1, 2, 3, 4}, []int64{versions[0].Version, versions[1].Version, versions[2].Version, versions[3].Version})
+	require.Len(t, versions, 6)
+	assert.Equal(t, []int64{1, 2, 3, 4, 5, 6}, []int64{versions[0].Version, versions[1].Version, versions[2].Version, versions[3].Version, versions[4].Version, versions[5].Version})
 }
 
 func TestMigrationVersionFourRepairsDuplicateLegacyCompletionOutboxRows(t *testing.T) {
@@ -212,11 +218,13 @@ func TestMigrationIsIdempotentAndRecordsVersion(t *testing.T) {
 
 	var versions []SchemaMigration
 	require.NoError(t, db.Order("version ASC").Find(&versions).Error)
-	require.Len(t, versions, 4)
+	require.Len(t, versions, 6)
 	assert.Equal(t, int64(1), versions[0].Version)
 	assert.Equal(t, int64(2), versions[1].Version)
 	assert.Equal(t, int64(3), versions[2].Version)
 	assert.Equal(t, int64(4), versions[3].Version)
+	assert.Equal(t, int64(5), versions[4].Version)
+	assert.Equal(t, int64(6), versions[5].Version)
 	assert.NotZero(t, versions[0].AppliedAt)
 	assert.NotZero(t, versions[1].AppliedAt)
 	assert.NotZero(t, versions[2].AppliedAt)
@@ -249,11 +257,13 @@ func TestMigrationSerializesConcurrentPostgresCalls(t *testing.T) {
 
 	var versions []SchemaMigration
 	require.NoError(t, first.Order("version ASC").Find(&versions).Error)
-	require.Len(t, versions, 4)
+	require.Len(t, versions, 6)
 	assert.Equal(t, int64(1), versions[0].Version)
 	assert.Equal(t, int64(2), versions[1].Version)
 	assert.Equal(t, int64(3), versions[2].Version)
 	assert.Equal(t, int64(4), versions[3].Version)
+	assert.Equal(t, int64(5), versions[4].Version)
+	assert.Equal(t, int64(6), versions[5].Version)
 	assert.True(t, first.Migrator().HasTable(&User{}))
 	assert.True(t, first.Migrator().HasTable(&Session{}))
 	assert.True(t, first.Migrator().HasTable(&TaskMessage{}))
@@ -265,5 +275,58 @@ func TestMigrationSerializesConcurrentPostgresCalls(t *testing.T) {
 	assert.True(t, first.Migrator().HasTable("audit_events"))
 	assert.True(t, first.Migrator().HasTable("audit_completion_outbox"))
 	assert.True(t, first.Migrator().HasTable("platform_models"))
+	assert.True(t, first.Migrator().HasTable("platform_tasks"))
+	assert.True(t, first.Migrator().HasTable("platform_attachments"))
 	assert.True(t, first.Migrator().HasIndex(&Model{}, "idx_models_username_created"))
+}
+
+func TestMigrationVersionFiveEnforcesOwnerIdempotencyAndEngineMappingUniqueness(t *testing.T) {
+	db := openPostgresTestDB(t)
+	resetPostgresTestDB(t, db)
+	require.NoError(t, Migrate(db))
+
+	row := map[string]any{
+		"id": "platform-task-1", "owner_user_id": "owner-1", "owner_username": "alice",
+		"idempotency_key": "same-key", "engine_session_id": "engine-1", "task_type": "mcp_scan",
+		"content": "scan", "params": json.RawMessage(`{}`), "attachment_refs": json.RawMessage(`[]`),
+		"status": "pending", "dispatch_error": "", "dispatch_attempts": 0,
+		"created_at": time.Now().UTC(), "updated_at": time.Now().UTC(),
+	}
+	require.NoError(t, db.Table("platform_tasks").Create(row).Error)
+
+	duplicateKey := make(map[string]any, len(row))
+	for key, value := range row {
+		duplicateKey[key] = value
+	}
+	duplicateKey["id"] = "platform-task-2"
+	duplicateKey["engine_session_id"] = "engine-2"
+	require.Error(t, db.Table("platform_tasks").Create(duplicateKey).Error)
+
+	duplicateEngine := make(map[string]any, len(row))
+	for key, value := range row {
+		duplicateEngine[key] = value
+	}
+	duplicateEngine["id"] = "platform-task-3"
+	duplicateEngine["idempotency_key"] = "another-key"
+	require.Error(t, db.Table("platform_tasks").Create(duplicateEngine).Error)
+}
+
+func TestMigrationUpgradesReleasedVersionFiveWithDispatchClaimColumn(t *testing.T) {
+	db := openPostgresTestDB(t)
+	resetPostgresTestDB(t, db)
+	require.NoError(t, db.AutoMigrate(&SchemaMigration{}))
+	require.NoError(t, migrateInitialSchema(db))
+	require.NoError(t, migrateIdentitySchema(db))
+	require.NoError(t, migrateGovernanceSchema(db))
+	require.NoError(t, migrateAuditCompletionSchema(db))
+	require.NoError(t, migratePlatformTaskSchema(db))
+	for version := int64(1); version <= 5; version++ {
+		require.NoError(t, db.Create(&SchemaMigration{Version: version}).Error)
+	}
+	assert.False(t, db.Migrator().HasColumn("platform_tasks", "dispatch_claim_token"))
+
+	require.NoError(t, Migrate(db))
+	require.NoError(t, Migrate(db), "v6 upgrade must remain idempotent")
+	assert.True(t, db.Migrator().HasColumn("platform_tasks", "dispatch_claim_token"))
+	assert.Equal(t, []int64{1, 2, 3, 4, 5, 6}, migrationVersions(t, db))
 }

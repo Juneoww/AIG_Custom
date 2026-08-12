@@ -23,7 +23,7 @@ import (
 
 // LatestSchemaVersion is the schema version required by the running server.
 // Schema changes are applied only by the explicit `aig migrate` command.
-const LatestSchemaVersion int64 = 4
+const LatestSchemaVersion int64 = 6
 
 var requiredRuntimeTables = []string{
 	"users",
@@ -37,6 +37,8 @@ var requiredRuntimeTables = []string{
 	"audit_events",
 	"audit_completion_outbox",
 	"platform_models",
+	"platform_tasks",
+	"platform_attachments",
 }
 
 type runtimeIndexRequirement struct {
@@ -56,6 +58,12 @@ var requiredRuntimeIndexes = []runtimeIndexRequirement{
 	{model: &governanceAuditCompletionMigration{}, name: "idx_audit_completion_outbox_request_id", table: "audit_completion_outbox", unique: true},
 	{model: &governanceAuditCompletionMigration{}, name: "idx_audit_completion_outbox_state"},
 	{model: &governanceAuditCompletionMigration{}, name: "idx_audit_completion_outbox_ready_at"},
+	{model: &platformTaskMigration{}, name: "idx_platform_tasks_owner_idempotency", table: "platform_tasks", unique: true},
+	{model: &platformTaskMigration{}, name: "idx_platform_tasks_engine_session", table: "platform_tasks", unique: true},
+	{model: &platformTaskMigration{}, name: "idx_platform_tasks_owner_created"},
+	{model: &platformTaskMigration{}, name: "idx_platform_tasks_status"},
+	{model: &platformAttachmentMigration{}, name: "idx_platform_attachments_owner_created"},
+	{model: &platformAttachmentMigration{}, name: "idx_platform_attachments_storage_name", table: "platform_attachments", unique: true},
 }
 
 // ValidateRuntimeSchema performs read-only validation of the complete schema
@@ -89,6 +97,9 @@ func ValidateRuntimeSchema(db *gorm.DB) error {
 	}
 	if len(missingTables) > 0 {
 		return runtimeMigrationRequiredError("缺少表: " + strings.Join(missingTables, ", "))
+	}
+	if !db.Migrator().HasColumn("platform_tasks", "dispatch_claim_token") {
+		return runtimeMigrationRequiredError("platform_tasks 缺少 dispatch_claim_token")
 	}
 
 	missingIndexes := make([]string, 0)

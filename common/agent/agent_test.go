@@ -21,13 +21,67 @@ package agent
 import (
 	"encoding/json"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"strings"
+	"sync"
 	"time"
 
 	"testing"
 
+	"github.com/gorilla/websocket"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
+
+func TestAgentConnectFailsBeforeDialWhenInternalTokenMissing(t *testing.T) {
+	agent := NewAgent(AgentConfig{ServerURL: "ws://127.0.0.1:1/api/v1/agents/ws"})
+	err := agent.connect()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "AIG_AGENT_TOKEN")
+}
+
+func TestAgentConnectSendsInternalTokenOnlyInHandshakeHeader(t *testing.T) {
+	const secret = "independent-agent-token-value"
+	var received string
+	var mu sync.Mutex
+	upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		mu.Lock()
+		received = request.Header.Get(InternalAgentTokenHeader)
+		mu.Unlock()
+		connection, err := upgrader.Upgrade(writer, request, nil)
+		if err == nil {
+			defer connection.Close()
+			<-request.Context().Done()
+		}
+	}))
+	defer server.Close()
+
+	agent := NewAgent(AgentConfig{
+		ServerURL:  strings.Replace(server.URL, "http://", "ws://", 1),
+		AgentToken: secret,
+		Info:       AgentInfo{ID: "agent-1", HostName: "host", IP: "127.0.0.1", Version: "1"},
+	})
+	require.NoError(t, agent.connect())
+	defer agent.Stop()
+	mu.Lock()
+	assert.Equal(t, secret, received)
+	mu.Unlock()
+	assert.NotContains(t, fmt.Sprintf("%+v", agent), secret)
+}
+
+func TestAgentConnectErrorNeverContainsInternalToken(t *testing.T) {
+	const secret = "must-not-appear-in-errors"
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		writer.WriteHeader(http.StatusForbidden)
+	}))
+	defer server.Close()
+	agent := NewAgent(AgentConfig{ServerURL: strings.Replace(server.URL, "http://", "ws://", 1), AgentToken: secret})
+	err := agent.connect()
+	require.Error(t, err)
+	assert.NotContains(t, err.Error(), secret)
+}
 
 // TestLargeDataSend 测试发送大字节数据
 func TestLargeDataSend(t *testing.T) {

@@ -42,6 +42,8 @@ var migrations = []migration{
 	{version: 2, apply: migrateIdentitySchema},
 	{version: 3, apply: migrateGovernanceSchema},
 	{version: 4, apply: migrateAuditCompletionSchema},
+	{version: 5, apply: migratePlatformTaskSchema},
+	{version: 6, apply: migratePlatformTaskDispatchClaimSchema},
 }
 
 const migrationAdvisoryLockKey int64 = 301237729
@@ -255,3 +257,62 @@ type governanceModelMigration struct {
 }
 
 func (governanceModelMigration) TableName() string { return "platform_models" }
+
+type platformTaskMigration struct {
+	ID                 string          `gorm:"primaryKey;column:id"`
+	OwnerUserID        string          `gorm:"not null;column:owner_user_id"`
+	OwnerUsername      string          `gorm:"not null;column:owner_username"`
+	IdempotencyKey     string          `gorm:"not null;column:idempotency_key"`
+	EngineSessionID    string          `gorm:"not null;column:engine_session_id"`
+	TaskType           string          `gorm:"not null;column:task_type"`
+	Content            string          `gorm:"not null;column:content"`
+	Params             json.RawMessage `gorm:"type:jsonb;not null;column:params"`
+	AttachmentRefs     json.RawMessage `gorm:"type:jsonb;not null;column:attachment_refs"`
+	CountryIsoCode     string          `gorm:"column:country_iso_code"`
+	Status             string          `gorm:"not null;column:status"`
+	DispatchError      string          `gorm:"not null;column:dispatch_error"`
+	DispatchAttempts   int             `gorm:"not null;column:dispatch_attempts"`
+	DispatchLeaseUntil *time.Time      `gorm:"column:dispatch_lease_until"`
+	CreatedAt          time.Time       `gorm:"not null;column:created_at"`
+	UpdatedAt          time.Time       `gorm:"not null;column:updated_at"`
+}
+
+func (platformTaskMigration) TableName() string { return "platform_tasks" }
+
+type platformAttachmentMigration struct {
+	ID           string    `gorm:"primaryKey;column:id"`
+	OwnerUserID  string    `gorm:"not null;column:owner_user_id"`
+	OriginalName string    `gorm:"not null;column:original_name"`
+	StorageName  string    `gorm:"not null;column:storage_name"`
+	Size         int64     `gorm:"not null;column:size"`
+	ChunkBytes   int64     `gorm:"not null;column:chunk_bytes"`
+	State        string    `gorm:"not null;column:state"`
+	CreatedAt    time.Time `gorm:"not null;column:created_at"`
+	UpdatedAt    time.Time `gorm:"not null;column:updated_at"`
+}
+
+func (platformAttachmentMigration) TableName() string { return "platform_attachments" }
+
+func migratePlatformTaskSchema(db *gorm.DB) error {
+	if err := db.AutoMigrate(&platformTaskMigration{}, &platformAttachmentMigration{}); err != nil {
+		return err
+	}
+	statements := []string{
+		`CREATE UNIQUE INDEX idx_platform_tasks_owner_idempotency ON platform_tasks(owner_user_id, idempotency_key)`,
+		`CREATE UNIQUE INDEX idx_platform_tasks_engine_session ON platform_tasks(engine_session_id)`,
+		`CREATE INDEX idx_platform_tasks_owner_created ON platform_tasks(owner_user_id, created_at DESC)`,
+		`CREATE INDEX idx_platform_tasks_status ON platform_tasks(status)`,
+		`CREATE INDEX idx_platform_attachments_owner_created ON platform_attachments(owner_user_id, created_at DESC)`,
+		`CREATE UNIQUE INDEX idx_platform_attachments_storage_name ON platform_attachments(storage_name)`,
+	}
+	for _, statement := range statements {
+		if err := db.Exec(statement).Error; err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func migratePlatformTaskDispatchClaimSchema(db *gorm.DB) error {
+	return db.Exec(`ALTER TABLE platform_tasks ADD COLUMN IF NOT EXISTS dispatch_claim_token text NOT NULL DEFAULT ''`).Error
+}

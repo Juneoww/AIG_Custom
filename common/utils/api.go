@@ -42,6 +42,10 @@ func DownloadFile(server, sessionId, uri, path string) error {
 	if path == "" || strings.Contains(path, "..") {
 		return fmt.Errorf("非法文件路径")
 	}
+	agentToken := strings.TrimSpace(os.Getenv("AIG_AGENT_TOKEN"))
+	if agentToken == "" {
+		return fmt.Errorf("AIG_AGENT_TOKEN is required")
+	}
 	// 创建 HTTP 客户端
 	client := &http.Client{}
 
@@ -55,7 +59,7 @@ func DownloadFile(server, sessionId, uri, path string) error {
 		return err
 	}
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("X-APIKey", "zhuque")
+	req.Header.Set("X-Internal-Agent-Token", agentToken)
 
 	// 发送 POST 请求
 	resp, err := client.Do(req)
@@ -97,63 +101,70 @@ type UploadFileResponse struct {
 }
 
 // UploadFile 上传文件到服务器
-func UploadFile(server, filePath string) (*UploadFileResponse, error) {
+func UploadFile(server, sessionID, filePath string) (*UploadFileResponse, error) {
+	agentToken := strings.TrimSpace(os.Getenv("AIG_AGENT_TOKEN"))
+	if agentToken == "" {
+		return nil, fmt.Errorf("AIG_AGENT_TOKEN is required")
+	}
+	if strings.TrimSpace(sessionID) == "" || strings.ContainsAny(sessionID, `/\\`) {
+		return nil, fmt.Errorf("无效的任务会话")
+	}
 	// 打开文件
 	file, err := os.Open(filePath)
 	if err != nil {
-		return nil, fmt.Errorf("无法打开文件: %v", err)
+		return nil, fmt.Errorf("无法打开文件")
 	}
 	defer file.Close()
 
-	// 创建 multipart writer
-	var requestBody bytes.Buffer
-	writer := multipart.NewWriter(&requestBody)
-
-	// 创建文件字段
-	part, err := writer.CreateFormFile("file", filepath.Base(filePath))
-	if err != nil {
-		return nil, fmt.Errorf("创建文件字段失败: %v", err)
-	}
-
-	// 将文件内容复制到 part
-	_, err = io.Copy(part, file)
-	if err != nil {
-		return nil, fmt.Errorf("复制文件内容失败: %v", err)
-	}
-
-	// 关闭 writer
-	err = writer.Close()
-	if err != nil {
-		return nil, fmt.Errorf("关闭 writer 失败: %v", err)
-	}
+	reader, writerPipe := io.Pipe()
+	multipartWriter := multipart.NewWriter(writerPipe)
+	copyResult := make(chan error, 1)
+	go func() {
+		part, createErr := multipartWriter.CreateFormFile("file", filepath.Base(filePath))
+		if createErr == nil {
+			_, createErr = io.Copy(part, file)
+		}
+		if closeErr := multipartWriter.Close(); createErr == nil {
+			createErr = closeErr
+		}
+		_ = writerPipe.CloseWithError(createErr)
+		copyResult <- createErr
+	}()
 
 	// 创建 HTTP 请求
-	req, err := http.NewRequest("POST", fmt.Sprintf("http://%s/api/v1/app/tasks/uploadFile", server), &requestBody)
+	req, err := http.NewRequest("POST", fmt.Sprintf("http://%s/api/v1/app/tasks/%s/uploadFile", server, sessionID), reader)
 	if err != nil {
+		_ = reader.Close()
+		<-copyResult
 		return nil, fmt.Errorf("创建请求失败: %v", err)
 	}
 
 	// 设置 Content-Type
-	req.Header.Set("Content-Type", writer.FormDataContentType())
-	req.Header.Set("X-APIKey", "zhuque")
+	req.Header.Set("Content-Type", multipartWriter.FormDataContentType())
+	req.Header.Set("X-Internal-Agent-Token", agentToken)
 
 	// 发送请求
 	client := &http.Client{}
 	resp, err := client.Do(req)
 	if err != nil {
+		_ = reader.Close()
+		<-copyResult
 		return nil, fmt.Errorf("发送请求失败: %v", err)
 	}
 	defer resp.Body.Close()
+	if err := <-copyResult; err != nil {
+		return nil, fmt.Errorf("上传流失败")
+	}
 
 	// 读取响应体
-	respBody, err := io.ReadAll(resp.Body)
+	respBody, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	if err != nil {
 		return nil, fmt.Errorf("读取响应失败: %v", err)
 	}
 
 	// 检查 HTTP 状态码
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("上传失败，HTTP 状态码：%d content:%s", resp.StatusCode, string(respBody))
+		return nil, fmt.Errorf("上传失败，HTTP 状态码：%d", resp.StatusCode)
 	}
 
 	// 解析响应 JSON

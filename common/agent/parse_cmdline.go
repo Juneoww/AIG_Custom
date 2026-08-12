@@ -83,7 +83,7 @@ type PromptResults struct {
 	Reason        string `json:"reason"`
 }
 
-func ParseStdoutLine(server, rootDir string, tasks []SubTask, line string, callbacks TaskCallbacks, config *CmdConfig, upload bool) {
+func ParseStdoutLine(server, sessionID, rootDir string, tasks []SubTask, line string, callbacks TaskCallbacks, config *CmdConfig, upload bool) {
 	var cmd CmdContent
 	if len(line) > 1 {
 		if line[0] == '{' {
@@ -174,18 +174,18 @@ func ParseStdoutLine(server, rootDir string, tasks []SubTask, line string, callb
 				gologger.WithError(err).Errorln("Failed to parse result file")
 				return
 			}
-			gologger.Infoln("开始上传文件")
+			logAgentAttachmentTransfer("upload_started", sessionID, "agent-result")
 			for i, v := range ret {
 				attachment, ok := v["attachment"]
 				if !ok || attachment == "" {
 					continue
 				}
-				info, err := utils.UploadFile(server, path.Join(rootDir, attachment.(string)))
+				info, err := utils.UploadFile(server, sessionID, path.Join(rootDir, attachment.(string)))
 				if err != nil {
-					gologger.WithError(err).Errorln("Failed to upload file")
+					logAgentAttachmentFailure("upload_failed", sessionID, "agent-result", err)
 					return
 				}
-				gologger.Infoln("上传文件成功")
+				logAgentAttachmentTransfer("upload_completed", sessionID, "agent-result")
 				v["attachment"] = info.Data.FileUrl
 				ret[i] = v
 			}

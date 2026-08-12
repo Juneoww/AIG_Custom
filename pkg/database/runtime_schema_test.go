@@ -76,6 +76,23 @@ func TestRuntimeStoreInitializationValidatesRequiredObjectsWithoutDDL(t *testing
 	assert.False(t, db.Migrator().HasIndex(&Session{}, "idx_sessions_status"), "runtime initialization must not recreate indexes")
 }
 
+func TestRuntimeSchemaRejectsMissingDispatchClaimColumnWithoutDDL(t *testing.T) {
+	db := openPostgresTestDB(t)
+	resetPostgresTestDB(t, db)
+	require.NoError(t, Migrate(db))
+	require.NoError(t, db.Exec("ALTER TABLE platform_tasks DROP COLUMN dispatch_claim_token").Error)
+	t.Cleanup(func() {
+		_ = db.Exec("ALTER TABLE platform_tasks ADD COLUMN IF NOT EXISTS dispatch_claim_token text NOT NULL DEFAULT ''").Error
+	})
+	beforeVersions := migrationVersions(t, db)
+
+	err := ValidateRuntimeSchema(db)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "dispatch_claim_token")
+	assert.Equal(t, beforeVersions, migrationVersions(t, db))
+	assert.False(t, db.Migrator().HasColumn("platform_tasks", "dispatch_claim_token"), "runtime validation must not repair schema")
+}
+
 func TestRuntimeSchemaRequiresUniqueCompletionRequestIndexWithoutDDL(t *testing.T) {
 	db := openPostgresTestDB(t)
 	for _, fixture := range []struct {
@@ -160,6 +177,7 @@ func runtimeTablePresence(db *gorm.DB) map[string]bool {
 		"users", "sessions", "task_messages", "models", "agents",
 		"identity_users", "identity_sessions", "identity_password_resets",
 		"audit_events", "audit_completion_outbox", "platform_models",
+		"platform_tasks", "platform_attachments",
 	}
 	presence := make(map[string]bool, len(tables))
 	for _, table := range tables {

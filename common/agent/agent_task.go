@@ -124,7 +124,7 @@ func (m *AgentTask) Execute(ctx context.Context, request TaskRequest, callbacks 
 		return fmt.Errorf("resolve uv binary: %v", err)
 	}
 	err = utils.RunCmdWithContext(ctx, agentScanDir, uvBin, argv, func(line string) {
-		ParseStdoutLine(m.Server, agentScanDir, tasks, line, callbacks, &config, false)
+		ParseStdoutLine(m.Server, request.SessionId, agentScanDir, tasks, line, callbacks, &config, false)
 	})
 	return err
 }

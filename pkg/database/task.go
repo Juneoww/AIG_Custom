@@ -25,6 +25,7 @@ import (
 
 	"gorm.io/datatypes"
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 )
 
 const (
@@ -195,6 +196,39 @@ func (s *TaskStore) UpdateSessionStatus(id string, status string) error {
 	return s.db.Model(&Session{}).Where("id = ?", id).Updates(updates).Error
 }
 
+// TerminateSessionCAS atomically changes only a non-terminal task to
+// terminated and returns the authoritative state when another terminal writer
+// has already won.
+func (s *TaskStore) TerminateSessionCAS(id string) (bool, *Session, error) {
+	var current Session
+	terminated := false
+	err := s.db.Transaction(func(tx *gorm.DB) error {
+		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).
+			Select("id", "status", "assigned_agent").First(&current, "id = ?", id).Error; err != nil {
+			return err
+		}
+		if current.Status != "todo" && current.Status != "doing" && current.Status != "dispatch_unknown" {
+			return nil
+		}
+		now := time.Now().UnixMilli()
+		result := tx.Model(&Session{}).
+			Where("id = ? AND status IN ?", id, []string{"todo", "doing", "dispatch_unknown"}).
+			Updates(map[string]interface{}{"status": "terminated", "completed_at": &now, "updated_at": now})
+		if result.Error != nil {
+			return result.Error
+		}
+		if result.RowsAffected != 1 {
+			return fmt.Errorf("任务状态已变更")
+		}
+		current.Status = "terminated"
+		current.CompletedAt = &now
+		current.UpdatedAt = now
+		terminated = true
+		return nil
+	})
+	return terminated, &current, err
+}
+
 // UpdateSessionAssignedAgent 更新会话的分配Agent和开始时间
 func (s *TaskStore) UpdateSessionAssignedAgent(sessionID string, agentID string) error {
 	now := time.Now().UnixMilli()
@@ -205,6 +239,75 @@ func (s *TaskStore) UpdateSessionAssignedAgent(sessionID string, agentID string)
 	}
 
 	return s.db.Model(&Session{}).Where("id = ?", sessionID).Updates(updates).Error
+}
+
+// PrepareSessionAssignment records who may receive a task without exposing it
+// as running before the WebSocket write is confirmed.
+func (s *TaskStore) PrepareSessionAssignment(sessionID, agentID string) error {
+	result := s.db.Model(&Session{}).
+		Where("id = ? AND status = ? AND assigned_agent = ''", sessionID, "todo").
+		Updates(map[string]interface{}{"assigned_agent": agentID, "updated_at": time.Now().UnixMilli()})
+	if result.Error != nil {
+		return result.Error
+	}
+	if result.RowsAffected != 1 {
+		return fmt.Errorf("任务分配状态已变更")
+	}
+	return nil
+}
+
+// ConfirmSessionAssignment marks a successfully written assignment as running.
+// A fast authenticated terminal event may already have advanced the task, which
+// is also a successful confirmation.
+func (s *TaskStore) ConfirmSessionAssignment(sessionID, agentID string) error {
+	now := time.Now().UnixMilli()
+	result := s.db.Model(&Session{}).
+		Where("id = ? AND status = ? AND assigned_agent = ?", sessionID, "todo", agentID).
+		Updates(map[string]interface{}{"status": "doing", "started_at": &now, "updated_at": now})
+	if result.Error != nil {
+		return result.Error
+	}
+	if result.RowsAffected == 1 {
+		return nil
+	}
+	var session Session
+	if err := s.db.Select("status", "assigned_agent").First(&session, "id = ?", sessionID).Error; err != nil {
+		return err
+	}
+	if session.AssignedAgent == agentID && (session.Status == "doing" || session.Status == "done" || session.Status == "error") {
+		return nil
+	}
+	return fmt.Errorf("任务分配状态已变更")
+}
+
+// MarkSessionDispatchUnknown retains assignment ownership after an uncertain
+// network write. It must never be automatically dispatched again.
+func (s *TaskStore) MarkSessionDispatchUnknown(sessionID, agentID string) error {
+	result := s.db.Model(&Session{}).
+		Where("id = ? AND status = ? AND assigned_agent = ?", sessionID, "todo", agentID).
+		Updates(map[string]interface{}{"status": "dispatch_unknown", "updated_at": time.Now().UnixMilli()})
+	if result.Error != nil {
+		return result.Error
+	}
+	if result.RowsAffected != 1 {
+		return fmt.Errorf("任务分配状态已变更")
+	}
+	return nil
+}
+
+// ResetSessionAssignment restores a task whose assignment was not confirmed.
+// It never rewrites a task already advanced by an authenticated Agent event.
+func (s *TaskStore) ResetSessionAssignment(sessionID, agentID string) error {
+	result := s.db.Model(&Session{}).
+		Where("id = ? AND status = ? AND assigned_agent = ?", sessionID, "todo", agentID).
+		Updates(map[string]interface{}{"assigned_agent": "", "status": "todo", "started_at": nil, "updated_at": time.Now().UnixMilli()})
+	if result.Error != nil {
+		return result.Error
+	}
+	if result.RowsAffected == 0 {
+		return fmt.Errorf("任务分配状态已变更")
+	}
+	return nil
 }
 
 // UpdateSession 更新会话信息
@@ -333,6 +436,96 @@ func (s *TaskStore) StoreEvent(id string, sessionID string, eventType string, ev
 	}
 
 	return s.CreateTaskMessage(message)
+}
+
+// StoreAssignedAgentEvent atomically verifies the active assignment before an
+// authenticated Agent is allowed to append an event or complete the task.
+func (s *TaskStore) StoreAssignedAgentEvent(id, sessionID, agentID, eventType string, eventData interface{}, timestamp int64, terminalStatus string) (bool, error) {
+	eventJSON, err := json.Marshal(eventData)
+	if err != nil {
+		return false, err
+	}
+	accepted := false
+	err = s.db.Transaction(func(tx *gorm.DB) error {
+		var session Session
+		err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).
+			Select("id", "status", "assigned_agent").
+			First(&session, "id = ?", sessionID).Error
+		if err != nil {
+			if err == gorm.ErrRecordNotFound {
+				return nil
+			}
+			return err
+		}
+		if session.AssignedAgent != agentID || (session.Status != "todo" && session.Status != "doing" && session.Status != "dispatch_unknown") {
+			return nil
+		}
+
+		message := &TaskMessage{
+			ID: id, SessionID: sessionID, Type: eventType,
+			EventData: datatypes.JSON(eventJSON), Timestamp: timestamp,
+			CreatedAt: time.Now().UnixMilli(),
+		}
+		if err := tx.Create(message).Error; err != nil {
+			return err
+		}
+		if terminalStatus != "" {
+			now := time.Now().UnixMilli()
+			result := tx.Model(&Session{}).
+				Where("id = ? AND assigned_agent = ? AND status IN ?", sessionID, agentID, []string{"todo", "doing", "dispatch_unknown"}).
+				Updates(map[string]interface{}{"status": terminalStatus, "completed_at": &now, "updated_at": now})
+			if result.Error != nil {
+				return result.Error
+			}
+			if result.RowsAffected != 1 {
+				return fmt.Errorf("任务分配状态已变更")
+			}
+		}
+		accepted = true
+		return nil
+	})
+	return accepted, err
+}
+
+// FailAgentAssignments terminates only tasks still owned by the disconnected
+// Agent. The stored error is deliberately a fixed, sanitized reason.
+func (s *TaskStore) FailAgentAssignments(agentID, reason string) ([]string, error) {
+	var failed []string
+	err := s.db.Transaction(func(tx *gorm.DB) error {
+		var sessions []Session
+		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).
+			Select("id", "status", "assigned_agent").
+			Where("assigned_agent = ? AND status IN ?", agentID, []string{"doing", "dispatch_unknown"}).
+			Find(&sessions).Error; err != nil {
+			return err
+		}
+		for _, session := range sessions {
+			now := time.Now().UnixMilli()
+			eventJSON, err := json.Marshal(map[string]interface{}{"reason": reason, "timestamp": now})
+			if err != nil {
+				return err
+			}
+			result := tx.Model(&Session{}).
+				Where("id = ? AND assigned_agent = ? AND status IN ?", session.ID, agentID, []string{"doing", "dispatch_unknown"}).
+				Updates(map[string]interface{}{"status": "error", "completed_at": &now, "updated_at": now})
+			if result.Error != nil {
+				return result.Error
+			}
+			if result.RowsAffected != 1 {
+				continue
+			}
+			message := &TaskMessage{
+				ID: fmt.Sprintf("disconnect_%s_%d", session.ID, now), SessionID: session.ID,
+				Type: "error", EventData: datatypes.JSON(eventJSON), Timestamp: now, CreatedAt: now,
+			}
+			if err := tx.Create(message).Error; err != nil {
+				return err
+			}
+			failed = append(failed, session.ID)
+		}
+		return nil
+	})
+	return failed, err
 }
 
 // GetSessionEvents 获取会话的所有事件

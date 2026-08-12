@@ -84,14 +84,22 @@ type ScanRequest struct {
 	Headers map[string]string `json:"headers"`
 	Timeout int               `json:"timeout,omitempty"`
 	Model   struct {
-		Model              string `json:"model"`
-		Token              string `json:"token"`
-		BaseUrl            string `json:"base_url"`
+		Model   string `json:"model"`
+		Token   string `json:"token"`
+		BaseUrl string `json:"base_url"`
 	} `json:"model,omitempty"`
 }
 
 type AIInfraScanAgent struct {
 	Server string
+}
+
+func logAgentAttachmentTransfer(action, sessionID, taskType string) {
+	gologger.Infof("agent attachment transfer: action=%s session_id=%s task_type=%s", action, sessionID, taskType)
+}
+
+func logAgentAttachmentFailure(action, sessionID, taskType string, _ error) {
+	gologger.Errorf("agent attachment transfer failed: action=%s session_id=%s task_type=%s", action, sessionID, taskType)
 }
 
 func (t *AIInfraScanAgent) GetName() string {
@@ -132,9 +140,9 @@ func (t *AIInfraScanAgent) Execute(ctx context.Context, request TaskRequest, cal
 			return fmt.Errorf("model parameters are required")
 		}
 		model = &models.OpenAI{
-			BaseUrl:            reqScan.Model.BaseUrl,
-			Model:              reqScan.Model.Model,
-			Key:                reqScan.Model.Token,
+			BaseUrl: reqScan.Model.BaseUrl,
+			Model:   reqScan.Model.Model,
+			Key:     reqScan.Model.Token,
 		}
 	}
 
@@ -191,7 +199,7 @@ func initTexts(language string) scanTexts {
 		texts.reportGenDesc = "Generating scan report"
 		texts.reportGenToolDesc = "Generating scan report"
 		texts.scanResultTemplate = "Scan results: %d items"
-		texts.downloadFileLog = "Starting to download file: %s"
+		texts.downloadFileLog = "Starting attachment download"
 		texts.execScanTool = "Execute scan"
 		texts.scanTool = "Scan"
 		texts.generateReportTool = "Generate report"
@@ -239,7 +247,7 @@ func initTexts(language string) scanTexts {
 		texts.reportGenDesc = "我需要提供更有价值的洞察..."
 		texts.reportGenToolDesc = "正在生成扫描报告"
 		texts.scanResultTemplate = "扫描结果: %d 条"
-		texts.downloadFileLog = "开始下载文件: %s"
+		texts.downloadFileLog = "开始下载附件"
 		texts.execScanTool = "执行扫描"
 		texts.scanTool = "扫描"
 		texts.generateReportTool = "生成报告"
@@ -268,22 +276,22 @@ func (t *AIInfraScanAgent) prepareTargets(request TaskRequest, reqScan ScanReque
 	}
 
 	for _, file := range request.Attachments {
-		gologger.Infof(texts.downloadFileLog, file)
+		logAgentAttachmentTransfer("download_started", request.SessionId, TaskTypeAIInfraScan)
 		fileName := filepath.Join(tempDir, fmt.Sprintf("tmp-%d%s", time.Now().UnixMicro(), filepath.Ext(file)))
 		// Verify the path is within tempDir to prevent path traversal
 		absTempDir, _ := filepath.Abs(tempDir)
 		absFileName, _ := filepath.Abs(fileName)
 		if !strings.HasPrefix(absFileName, absTempDir+string(os.PathSeparator)) {
-			gologger.WithError(fmt.Errorf("非法路径: %s", file)).Errorln(texts.downloadFile)
+			logAgentAttachmentFailure("download_rejected", request.SessionId, TaskTypeAIInfraScan, nil)
 			return nil, fmt.Errorf("非法文件路径")
 		}
 		if err := utils.DownloadFile(t.Server, request.SessionId, file, fileName); err != nil {
-			gologger.WithError(err).Errorln(texts.downloadFile)
+			logAgentAttachmentFailure("download_failed", request.SessionId, TaskTypeAIInfraScan, err)
 			return nil, err
 		}
 		lines, err := os.ReadFile(fileName)
 		if err != nil {
-			gologger.WithError(err).Errorln(texts.readFile)
+			logAgentAttachmentFailure("read_failed", request.SessionId, TaskTypeAIInfraScan, err)
 			return nil, err
 		}
 		targets = append(targets, strings.Split(string(lines), "\n")...)
@@ -546,15 +554,15 @@ target count:%s
 					if len(screenshotData) > 0 {
 						tmpPath := path.Join(os.TempDir(), fmt.Sprintf("%d.jpg", time.Now().UnixMicro()))
 						if err := os.WriteFile(tmpPath, screenshotData, 0644); err != nil {
-							gologger.WithError(err).Errorf("write file failed: %v", err)
+							logAgentAttachmentFailure("write_failed", request.SessionId, TaskTypeAIInfraScan, err)
 							return
 						}
-						info, err := utils.UploadFile(t.Server, tmpPath)
+						info, err := utils.UploadFile(t.Server, request.SessionId, tmpPath)
 						if err != nil {
-							gologger.WithError(err).Errorf("upload file failed: %v", err)
+							logAgentAttachmentFailure("upload_failed", request.SessionId, TaskTypeAIInfraScan, err)
 							return
 						}
-						result.ScreenShot = "/api/v1/images/" + info.Data.FileUrl
+						result.ScreenShot = info.Data.FileUrl
 
 						if model != nil && vulInfo != nil && (vulInfo.Severity == "high" || vulInfo.Severity == "medium") {
 							result.Vulnerabilities = append(result.Vulnerabilities, *vulInfo)
