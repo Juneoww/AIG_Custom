@@ -199,29 +199,29 @@ git commit -m "feat: add admin governance and audit logging"
 - Create: `internal/platform/tasks/entity.go`, `adapter.go`, `service.go`, `handler.go`, `service_test.go`, `handler_test.go`
 - Modify: `common/websocket/task.go`, `common/websocket/task_manager.go`, `common/websocket/agent.go`, `common/websocket/server.go`, `common/websocket/api_test.go`, `cmd/agent/main.go`, `common/agent/agent.go`, `common/agent/agent_test.go`
 
-- [ ] **Step 1: 写入失败测试：平台任务所有权、幂等分发和私有附件**
+- [x] **Step 1: 写入失败测试：平台任务所有权、幂等分发和私有附件**
 
 测试普通用户仅能读取/取消本人任务，审计员全局只读，管理员可治理；相同幂等键不会重复提交；分发临时失败保留状态而不删除任务；附件 URL 不能由未授权用户读取。另测试新的受保护任务状态查询端点只基于会话和任务所有权返回状态，拒绝匿名与旧浏览器 WebSocket 回退。
 
-- [ ] **Step 2: 写入失败测试：Agent 必须通过内网凭据认证且不能抢占重复 ID**
+- [x] **Step 2: 写入失败测试：Agent 必须通过内网凭据认证且不能抢占重复 ID**
 
 在 `common/websocket/api_test.go` 为缺失/错误 Agent token、重复 Agent ID、未经平台授权的 WebSocket 建连断言 401/403 或显式拒绝；在 `common/agent/agent_test.go` 为 Agent 客户端从 `AIG_AGENT_TOKEN` 读取 token、将其作为 WebSocket 握手 header 发送、缺失 token 时拒绝连接写失败测试。
 
-- [ ] **Step 3: 运行测试并确认失败**
+- [x] **Step 3: 运行测试并确认失败**
 
 Run: `powershell -ExecutionPolicy Bypass -File scripts/docker-go-test.ps1 -Packages './internal/platform/tasks','./common/websocket' -Run 'Test(PlatformTask|AgentAuth|TaskOwnership)'`
 
 Expected: FAIL，旧实现仍信任 header、默认共享并会清理失败任务。
 
-- [ ] **Step 4: 实现适配器与状态机**
+- [x] **Step 4: 实现适配器与状态机**
 
 平台先事务保存任务、所有者、附件引用、幂等键和 `pending` 状态，再通过 `EngineAdapter.SubmitTask/GetTaskStatus/GetResult/CancelTask` 调用现有 `TaskManager`。仅适配器可解密模型 token 并发送给内部 Agent；所有日志使用密钥掩码。回调/轮询按平台任务 ID 更新状态，网络重试有上限且不会自动重跑已进入扫描的任务。浏览器实时状态使用经 Cookie 会话和所有权授权的任务详情轮询 API（短轮询并支持断线后重试），不连接旧 Agent WebSocket 或旧公开任务接口。
 
-- [ ] **Step 5: 实现双端 Agent 认证并封闭旧入口**
+- [x] **Step 5: 实现双端 Agent 认证并封闭旧入口**
 
 在 `cmd/agent/main.go` 和 `common/agent/agent.go` 中从 `AIG_AGENT_TOKEN` 读取凭据，以 `X-Internal-Agent-Token` 在 WebSocket HTTP 握手发送；凭据缺失或错误时客户端与服务端均显式失败且不输出 token。随后将 `/api/v1/app/*` 和 `/api/v1/agents/ws` 从浏览器公开路由移至内部 token/网络策略保护组；关闭默认 `Share: true`，为上传、分片、合并和下载统一做所有权及大小限制校验。
 
-- [ ] **Step 6: 运行任务适配回归**
+- [x] **Step 6: 运行任务适配回归**
 
 Run: `powershell -ExecutionPolicy Bypass -File scripts/docker-go-test.ps1 -Packages './internal/platform/tasks','./common/websocket'`
 
@@ -316,7 +316,7 @@ Expected: FAIL，控制台工程不存在。
 
 Expected: PASS，构建产物可被 `go:embed` 编译。
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```bash
 git add web/console scripts/docker-console.ps1 common/websocket/static common/websocket/server.go .gitignore
