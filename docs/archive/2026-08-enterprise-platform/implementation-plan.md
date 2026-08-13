@@ -1,5 +1,7 @@
 # 企业安全平台二开 Implementation Plan
 
+> **归档文档：非当前实施依据。** 本文保留 2026-08 初始计划和当时勾选状态，不再更新。当前需求见 [PRD](../../product/prd.md)，当前进度见 [项目状态](../../project/status.md)，当前控制台设计见 [企业控制台设计](../../architecture/enterprise-console.md)。
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** 在保留 AI-Infra-Guard 扫描引擎及规则判定的前提下，交付具备本地账号登录、三角色治理、管理层报告、独立品牌 UI 和麒麟/PostgreSQL Docker 部署能力的单租户企业安全平台。

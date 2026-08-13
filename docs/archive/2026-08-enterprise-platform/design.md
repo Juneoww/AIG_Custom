@@ -1,5 +1,7 @@
 # 企业安全平台二开设计
 
+> **归档文档：非当前实施依据。** 本文保留 2026-08 初始设计和当时勾选状态，不再更新。当前需求见 [PRD](../../product/prd.md)，当前进度见 [项目状态](../../project/status.md)，当前控制台设计见 [企业控制台设计](../../architecture/enterprise-console.md)。
+
 ## 1. 目标与边界
 
 将 AI-Infra-Guard 的现有扫描能力包装为独立品牌的企业安全平台。第一期重点是全新用户界面、账号密码登录、权限治理、管理层报告和国产化部署适配；AI Infra Scan、MCP Scan、Agent Scan、Prompt/Jailbreak Evaluation 的扫描逻辑、规则库和结果判定保持不变。
