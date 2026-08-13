@@ -72,7 +72,11 @@ foreach ($file in $contentFiles) {
 # Markdown 只检查 ]( 后的实际链接目标。治理文档中的反引号迁移表、命令，以及归档正文中的
 # 历史命令可以保留；若这些文档把旧路径写成链接，仍会在此处被报告。
 $legacyLinkPattern = '(?i)(?:docs[\\/](?:prd\.md|architecture_evolution\.md|api_data_update\.md|superpowers[\\/]|swagger\.(?:json|ya?ml))|github\.com[\\/]Juneoww[\\/]AIG_Custom[\\/]docs|(?:^|[\\/])api(?:_zh)?\.md(?:$|[?#]))'
-$markdownFiles = Get-ChildItem -LiteralPath $repositoryRoot -Recurse -File -Filter '*.md'
+$archiveRoot = Join-Path $docsRoot 'archive'
+$markdownFiles = Get-ChildItem -LiteralPath $repositoryRoot -Recurse -File -Filter '*.md' | Where-Object {
+    # 归档历史正文保留当时的旧链接；归档 README 属于当前导航，仍必须检查。
+    -not ($_.FullName.StartsWith($archiveRoot + [System.IO.Path]::DirectorySeparatorChar) -and $_.Name -ne 'README.md')
+}
 foreach ($file in $markdownFiles) {
     $lineNumber = 0
     foreach ($line in [System.IO.File]::ReadAllLines($file.FullName)) {
