@@ -294,7 +294,7 @@ A.I.G는 AI 인프라 scan, MCP Server Scan 및 Jailbreak Evaluation 기능을 �
 
 학술 파트너들의 연구 기여와 기술 지원에 감사드립니다.
 
-#### <img src="../img/북대미래네트워크중점실험실2.png" height="30" align="middle"/>
+#### <img src="../img/北大未来网络重点实验室2.png" height="30" align="middle"/>
 <table>
   <tr>
     <td align="center" width="90">
@@ -354,7 +354,7 @@ A.I.G는 AI 인프라 scan, MCP Server Scan 및 Jailbreak Evaluation 기능을 �
   </tr>
 </table>
 
-#### <img src="../img/복단대학2.png" height="30" align="middle" style="vertical-align: middle;"/>
+#### <img src="../img/复旦大学2.png" height="30" align="middle" style="vertical-align: middle;"/>
 
 <table>
   <tr>
