@@ -1,5 +1,7 @@
 # 项目文档信息架构整理 Implementation Plan
 
+> **本计划已完成。** 当前状态与验证证据见[项目状态](../status.md)。
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** 将 `docs/` 整理为只包含人读文档的分类入口，把 Swagger 运行时代码/生成物迁入 `internal/apidocs/`，归档旧设计与计划，并建立可验证的项目状态页。

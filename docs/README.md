@@ -19,6 +19,7 @@
 
 - [API 参考（中文）](api/reference.md)
 - [API Reference (English)](api/reference.en.md)
+- [API リファレンス（日本語）](api/reference.ja.md)
 - [API 数据同步](api/data-sync.md)
 
 Swagger 运行时三件套是 `internal/apidocs/swagger.yaml`、`internal/apidocs/swagger.json` 和 `internal/apidocs/docs.go`。完整 OpenAPI 单一源建立前，必须通过现有同步测试共同维护三者，不得直接运行默认 `swag init` 覆盖；修改后运行 `go test ./internal/apidocs`。
