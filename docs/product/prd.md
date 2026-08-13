@@ -569,14 +569,14 @@ AIG Custom Platform 是基于 Tencent Zhuque Lab AI-Infra-Guard 扫描能力构�
 
 ## 18. 关联文档
 
-- [企业安全平台二开设计](superpowers/specs/2026-08-04-enterprise-platform-redesign-design.md)
-- [企业安全平台二开实施计划](superpowers/plans/2026-08-04-enterprise-platform-redesign.md)
-- [中文 API 文档](../api_zh.md)
-- [英文 API 文档](../api.md)
-- [Swagger YAML](swagger.yaml)
-- [PostgreSQL 部署与迁移](deployment/postgres.md)
-- [部署归属要求](deployment/attribution.md)
-- [架构演进](architecture_evolution.md)
+- [企业控制台设计](../architecture/enterprise-console.md)
+- [项目状态](../project/status.md)
+- [中文 API 文档](../api/reference.md)
+- [英文 API 文档](../api/reference.en.md)
+- [PostgreSQL 部署与迁移](../deployment/postgres.md)
+- [部署归属要求](../deployment/attribution.md)
+- [架构演进](../architecture/evolution.md)
+- [历史归档](../archive/2026-08-enterprise-platform/README.md)
 
 ## 19. 术语表
 
