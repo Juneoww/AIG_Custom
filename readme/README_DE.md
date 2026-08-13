@@ -82,7 +82,7 @@ Helfen Sie uns, A.I.G zu verbessern! Bitte nehmen Sie sich 3-5 Minuten Zeit, um 
 - [🖼️ Galerie](#-galerie)
 - [📖 Benutzerhandbuch](#-benutzerhandbuch)
 - [🔧 API-Dokumentation](#-api-dokumentation)
-- [🏗️ Architekturentwicklung](../docs/architecture_evolution.md)
+- [🏗️ Architekturentwicklung](../docs/architecture/evolution.md)
 - [📝 Beitragsleitfaden](#-beitragsleitfaden)
 - [🛡️ Über das Team](#️-über-das-team)
 - [🙏 Danksagungen](#-danksagungen)
@@ -239,7 +239,7 @@ A.I.G stellt einen umfassenden Satz von APIs zur Aufgabenerstellung bereit, die 
 
 Nachdem das Projekt läuft, besuchen Sie `http://localhost:8088/docs/index.html`, um die vollständige API-Dokumentation einzusehen.
 
-Detaillierte API-Nutzungsanweisungen, Parameterbeschreibungen und vollständigen Beispielcode finden Sie in der [vollständigen API-Dokumentation](../api.md).
+Detaillierte API-Nutzungsanweisungen, Parameterbeschreibungen und vollständigen Beispielcode finden Sie in der [vollständigen API-Dokumentation](../docs/api/reference.en.md).
 <br />
 <br>
 

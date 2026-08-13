@@ -82,7 +82,7 @@ A.I.G 개선에 도움을 주세요! 3~5분만 투자하여 [사용자 피드백
 - [🖼️ 스크린샷](#-스크린샷)
 - [📖 사용자 가이드](#-사용자-가이드)
 - [🔧 API 문서](#-api-문서)
-- [🏗️ 아키텍처 진화](../docs/architecture_evolution.md)
+- [🏗️ 아키텍처 진화](../docs/architecture/evolution.md)
 - [📝 기여 가이드](#-기여-가이드)
 - [🛡️ 팀 소개](#️-팀-소개)
 - [🙏 감사의 말씀](#-감사의-말씀)
@@ -239,7 +239,7 @@ A.I.G는 AI 인프라 scan, MCP Server Scan 및 Jailbreak Evaluation 기능을 �
 
 프로젝트 실행 후 `http://localhost:8088/docs/index.html`을 방문하여 전체 API 문서를 확인하세요.
 
-자세한 API 사용 지침, 파라미터 설명 및 전체 예제 코드는 [전체 API 문서](../api.md)를 참조하세요.
+자세한 API 사용 지침, 파라미터 설명 및 전체 예제 코드는 [전체 API 문서](../docs/api/reference.en.md)를 참조하세요.
 <br />
 <br>
 

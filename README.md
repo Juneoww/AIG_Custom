@@ -85,8 +85,9 @@ Help us improve A.I.G! Please take 3-5 minutes to fill out our [User Feedback Su
 - [✨ Features](#-features)
 - [🖼️ Showcase](#-showcase)
 - [📖 User Guide](#-user-guide)
+- [📚 Project Documentation](./docs/README.md)
 - [🔧 API Documentation](#-api-documentation)
-- [🏗️ Architecture Evolution](./docs/architecture_evolution.md)
+- [🏗️ Architecture Evolution](./docs/architecture/evolution.md)
 - [📝 Contribution Guide](#-contribution-guide)
 - [🛡️ About the Team](#️-about-the-team)
 - [🙏 Acknowledgements](#-acknowledgements)
@@ -243,7 +244,7 @@ A.I.G provides a comprehensive set of task creation APIs that support AI infra s
 
 After the project is running, visit `http://localhost:8088/docs/index.html` to view the complete API documentation.
 
-For detailed API usage instructions, parameter descriptions, and complete example code, please refer to the [Complete API Documentation](./api.md).
+For detailed API usage instructions, parameter descriptions, and complete example code, please refer to the [Complete API Documentation](./docs/api/reference.en.md).
 <br />
 <br>
 

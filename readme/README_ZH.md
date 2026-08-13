@@ -79,7 +79,7 @@
 - [🖼️ 功能展示](#-功能展示)
 - [📖 用户指南](#-用户指南)
 - [🔧 API文档](#-api文档)
-- [🏗️ 架构演进](../docs/architecture_evolution.md)
+- [🏗️ 架构演进](../docs/architecture/evolution.md)
 - [📝 贡献指南](#-贡献指南)
 - [🛡️ 关于团队](#️-关于团队)
 - [🙏 致谢](#-致谢)
@@ -234,7 +234,7 @@ A.I.G 提供了一套创建任务相关的API接口，支持AI基础设施扫描
 
 项目运行后访问 `http://localhost:8088/docs/index.html` 可查看完整的API文档
 
-详细的API使用说明、参数说明和完整示例代码，请查看 [完整API文档](../api_zh.md)。
+详细的API使用说明、参数说明和完整示例代码，请查看 [完整API文档](../docs/api/reference.md)。
 <br />
 <br>
 

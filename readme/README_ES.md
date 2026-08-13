@@ -82,7 +82,7 @@
 - [🖼️ Galería](#️-galería)
 - [📖 Guía de Usuario](#-guía-de-usuario)
 - [🔧 Documentación de la API](#-documentación-de-la-api)
-- [🏗️ Evolución de la Arquitectura](../docs/architecture_evolution.md)
+- [🏗️ Evolución de la Arquitectura](../docs/architecture/evolution.md)
 - [📝 Guía de Contribución](#-guía-de-contribución)
 - [🛡️ Acerca del Equipo](#️-acerca-del-equipo)
 - [🙏 Agradecimientos](#-agradecimientos)
@@ -239,7 +239,7 @@ A.I.G proporciona un conjunto completo de APIs de creación de tareas que soport
 
 Una vez que el proyecto esté en ejecución, visita `http://localhost:8088/docs/index.html` para ver la documentación completa de la API.
 
-Para instrucciones detalladas de uso de la API, descripciones de parámetros y código de ejemplo completo, consulta la [Documentación Completa de la API](../api.md).
+Para instrucciones detalladas de uso de la API, descripciones de parámetros y código de ejemplo completo, consulta la [Documentación Completa de la API](../docs/api/reference.en.md).
 <br />
 <br>
 

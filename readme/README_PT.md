@@ -82,7 +82,7 @@ Ajude-nos a melhorar o A.I.G! Por favor, reserve 3-5 minutos para preencher noss
 - [🖼️ Demonstração](#️-demonstração)
 - [📖 Guia do Usuário](#-guia-do-usuário)
 - [🔧 Documentação da API](#-documentação-da-api)
-- [🏗️ Evolução da Arquitetura](../docs/architecture_evolution.md)
+- [🏗️ Evolução da Arquitetura](../docs/architecture/evolution.md)
 - [📝 Guia de Contribuição](#-guia-de-contribuição)
 - [🛡️ Sobre a Equipe](#️-sobre-a-equipe)
 - [🙏 Agradecimentos](#-agradecimentos)
@@ -239,7 +239,7 @@ O A.I.G fornece um conjunto abrangente de APIs para criação de tarefas que sup
 
 Após o projeto estar em execução, acesse `http://localhost:8088/docs/index.html` para visualizar a documentação completa da API.
 
-Para instruções detalhadas de uso da API, descrições de parâmetros e código de exemplo completo, consulte a [Documentação Completa da API](../api.md).
+Para instruções detalhadas de uso da API, descrições de parâmetros e código de exemplo completo, consulte a [Documentação Completa da API](../docs/api/reference.en.md).
 <br />
 <br>
 
