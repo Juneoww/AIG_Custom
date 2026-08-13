@@ -138,28 +138,14 @@ Swagger 四件套与 Go 代码直接绑定，因此整体迁入 `internal/apidoc
 - `docs.go` 的包声明从 `package docs` 改为 `package apidocs`；
 - `swagger_sync_test.go` 同步改为 `package apidocs`；
 - `common/websocket/server.go` 的匿名导入从 `github.com/Juneoww/AIG_Custom/docs` 改为 `github.com/Juneoww/AIG_Custom/internal/apidocs`；
-- Swagger 生成命令固定输出 `internal/apidocs/`；
 - 测试继续在同目录读取 `swagger.json` 和 `swagger.yaml`；
 - `AGENTS.md` 中 API/任务变更校验路径更新为人工指南 `docs/api/reference*.md` 和运行时规格 `internal/apidocs/swagger.yaml`。
 
-新增唯一生成入口 `scripts/generate-swagger.ps1`，使用带中文文件头的 PowerShell 脚本封装固定 Docker 命令。脚本契约为：
+当前仓库不是完整的注解驱动生成链：Go 源码只有 6 条旧 `/app/taskapi` `@Router` 注解，而现有 Swagger 规格包含约 37 条平台路由。直接运行 `swag init` 会丢失企业平台接口。因此本次整理只做字节等价迁移、包名/import 修正和既有三件套同步测试，不新增会破坏规格的伪生成脚本，也不从不完整注解重新生成。
 
-- 固定 `golang:1.23.2-alpine` 构建容器；
-- 固定 `github.com/swaggo/swag/cmd/swag@v1.16.1`，与 `go.mod` 中 `github.com/swaggo/swag v1.16.1` 对齐；
-- 注解总入口为 `common/websocket/server.go`，扫描目录为仓库根，启用内部包和依赖解析；
-- 输出目录固定为 `internal/apidocs`；
-- 输出类型固定为 `go,json,yaml`；
-- 只在生成前删除 `internal/apidocs/docs.go`、`swagger.json`、`swagger.yaml` 三个已知生成物，不删除手写的 `swagger_sync_test.go` 或整个目录；
-- 生成后立即运行 `go test ./internal/apidocs`；
-- 主机不需要预装 Go、swag 或 pnpm。
+迁移不得改变 Swagger 路由、注册名称、API 内容或运行时页面行为。`docs/README.md` 和 `AGENTS.md` 明确记录：在完整平台路由注解或独立 OpenAPI 源尚未建立前，`internal/apidocs/swagger.yaml`、`swagger.json` 和 `docs.go` 仍按现有同步测试共同维护；不得运行默认 `swag init` 覆盖它们。
 
-脚本内唯一规范生成命令等价于：
-
-```text
-go run github.com/swaggo/swag/cmd/swag@v1.16.1 init --generalInfo common/websocket/server.go --dir . --output internal/apidocs --outputTypes go,json,yaml --parseInternal --parseDependency
-```
-
-实际 Docker 参数、命名 Go 模块缓存卷和 Windows 挂载由脚本封装。迁移不得改变 Swagger 路由、注册名称、API 内容或运行时页面行为。README 和 `AGENTS.md` 只引用该脚本，不再复制第二条生成命令，防止生成入口漂移或重新污染 `docs/`。
+“重建单一、可复现的 OpenAPI 源与生成脚本”作为 `docs/project/status.md` 的后续工程项，需另写规格和实施计划，至少覆盖全部现有平台路由后才能替换当前维护方式。该工程不属于本次目录整理范围。
 
 ## 8. 链接与引用迁移
 
@@ -181,7 +167,7 @@ go run github.com/swaggo/swag/cmd/swag@v1.16.1 init --generalInfo common/websock
 1. 建立目标目录和 `docs/README.md`、`docs/project/status.md`、归档说明；
 2. 使用 Git 可追踪移动迁移人工文档；
 3. 移动 Swagger 四件套并修正包名和 Go import；
-4. 新增唯一 Swagger 生成脚本，并从注解干净再生成三份产物；
+4. 记录当前 Swagger 非完整注解生成链的约束，禁止默认命令覆盖现有规格；
 5. 更新所有当前链接和路径引用；
 6. 运行文档、Swagger、Go 构建和静态扫描验证；
 7. 检查最终目录，不保留空目录或重复当前文档。
@@ -195,7 +181,8 @@ go run github.com/swaggo/swag/cmd/swag@v1.16.1 init --generalInfo common/websock
 - `go test ./internal/apidocs` 通过；
 - Web 服务相关 Go 包能够编译，Swagger 注册仍生效；
 - `docs.go`、`swagger.json` 和 `swagger.yaml` 同步测试通过；
-- 删除三份 Swagger 生成物后执行 `scripts/generate-swagger.ps1` 可完整恢复，生成后 `docs/` 根目录不会出现新的 `docs.go` 或 `swagger.*`；
+- 迁移前后的 `swagger.yaml`、`swagger.json` 内容一致，`docs.go` 除包名外的注册内容一致；
+- 仓库内不存在会默认向 `docs/` 输出 Swagger 的生成脚本或说明；
 - 非归档源文件对旧文档路径的扫描结果为零；
 - 根 README 和各语言 README 的架构链接有效；
 - PRD、状态页、当前控制台设计、API 和部署文档均可从 `docs/README.md` 到达；
