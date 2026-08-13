@@ -1,6 +1,6 @@
 # AI-Infra-Guard 文档
 
-本目录是 AI-Infra-Guard 人工维护文档的统一入口。以下链接按目标信息架构列出；目录迁移分阶段进行期间，部分目标文件会在后续任务中就位。
+本目录是 AI-Infra-Guard 人工维护文档的统一入口，当前有效文档按产品、项目、架构、API、部署与归档分类。
 
 ## 项目与产品
 
@@ -21,6 +21,8 @@
 - [API Reference (English)](api/reference.en.md)
 - [API 数据同步](api/data-sync.md)
 
+Swagger 运行时三件套是 `internal/apidocs/swagger.yaml`、`internal/apidocs/swagger.json` 和 `internal/apidocs/docs.go`。完整 OpenAPI 单一源建立前，必须通过现有同步测试共同维护三者，不得直接运行默认 `swag init` 覆盖；修改后运行 `go test ./internal/apidocs`。
+
 ## 部署与归属
 
 - [PostgreSQL 部署](deployment/postgres.md)
@@ -35,5 +37,5 @@
 ## 维护边界
 
 - `docs/` 只存放供人阅读和维护的文档。
-- Swagger 运行时契约、注册代码和生成物位于 `internal/apidocs/`。
+- Swagger 运行时契约、注册代码和生成物位于 `internal/apidocs/`，按上述三件套规则共同维护。
 - 新的当前有效文档应归入产品、项目、架构、API 或部署分类；已被替代的设计与计划进入归档区。

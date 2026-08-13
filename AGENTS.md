@@ -75,7 +75,7 @@ go build -o yamlcheck ./cmd/yamlcheck
 
 ### 说明
 - 修改 `data/` 下规则时，必须通过 `yamlcheck`。
-- 修改 API/任务结构时，需同步检查 `docs/api/reference.md`、`docs/api/reference.en.md` 与 `internal/apidocs/swagger.yaml`，并运行 `go test ./internal/apidocs`。
+- 修改 API/任务结构时，需同步检查 `docs/api/reference.md`、`docs/api/reference.en.md` 以及 Swagger 运行时三件套 `internal/apidocs/swagger.yaml`、`internal/apidocs/swagger.json`、`internal/apidocs/docs.go`，并运行 `go test ./internal/apidocs`；完整 OpenAPI 单一源建立前，不得直接运行默认 `swag init` 覆盖现有三件套。
 - 修改 Python 子模块时，至少完成对应入口脚本的冒烟运行。
 
 `docs/` 仅存放人读文档；Go 源码、测试和生成的 API 规格应放在对应代码目录。
