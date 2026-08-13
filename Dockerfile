@@ -57,10 +57,12 @@ RUN pip install --no-cache-dir -r /app/agent-scan/requirements.txt
 
 # 复制启动脚本到镜像中
 COPY start.sh /app/start.sh
-RUN chmod +x /app/start.sh && chown root:root /app/start.sh
+RUN sed -i 's/\r$//' /app/start.sh && \
+    chmod +x /app/start.sh && \
+    chown root:root /app/start.sh
 
 # 创建必要的目录并设置权限（仅对镜像内有效）
-RUN mkdir -p /app/uploads \
+RUN mkdir -p /app/uploads && \
     chown -R root:root /app && \
     chmod -R 755 /app && \
     mkdir -p /app/AIG-PromptSecurity/utils
