@@ -19,7 +19,6 @@
 
 - [API 参考（中文）](api/reference.md)
 - [API Reference (English)](api/reference.en.md)
-- [API リファレンス（日本語）](api/reference.ja.md)
 - [API 数据同步](api/data-sync.md)
 
 Swagger 运行时三件套是 `internal/apidocs/swagger.yaml`、`internal/apidocs/swagger.json` 和 `internal/apidocs/docs.go`。完整 OpenAPI 单一源建立前，必须通过现有同步测试共同维护三者，不得直接运行默认 `swag init` 覆盖；修改后运行 `go test ./internal/apidocs`。
@@ -32,6 +31,7 @@ Swagger 运行时三件套是 `internal/apidocs/swagger.yaml`、`internal/apidoc
 ## 历史归档
 
 - [2026-08 企业平台设计与计划归档](archive/2026-08-enterprise-platform/README.md)
+- [历史日文 API 归档](archive/legacy-api/README.md)
 
 归档文档保留历史上下文和当时的任务状态，不再更新，也不作为当前实施进度依据。当前进度只以[项目状态](project/status.md)为准。
 

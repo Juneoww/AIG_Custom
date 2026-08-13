@@ -41,9 +41,10 @@ $requiredPaths = @(
     'docs/architecture/documentation.md',
     'docs/api/reference.md',
     'docs/api/reference.en.md',
-    'docs/api/reference.ja.md',
     'docs/api/data-sync.md',
     'docs/archive/2026-08-enterprise-platform/README.md',
+    'docs/archive/legacy-api/README.md',
+    'docs/archive/legacy-api/reference.ja.md',
     'internal/apidocs/docs.go',
     'internal/apidocs/swagger.json',
     'internal/apidocs/swagger.yaml',
@@ -74,7 +75,7 @@ foreach ($relativePath in $contentFiles) {
 
 # Markdown 只检查 ]( 后的实际链接目标。治理文档中的反引号迁移表、命令，以及归档正文中的
 # 历史命令可以保留；若这些文档把旧路径写成链接，仍会在此处被报告。
-$legacyLinkPattern = '(?i)(?:docs[\\/](?:prd\.md|architecture_evolution\.md|api_data_update\.md|superpowers[\\/]|swagger\.(?:json|ya?ml))|github\.com[\\/]Juneoww[\\/]AIG_Custom[\\/]docs|(?:^|[\\/])api(?:_(?:zh|ja))?\.md(?:$|[?#]))'
+$legacyLinkPattern = '(?i)(?:docs[\\/](?:prd\.md|architecture_evolution\.md|api_data_update\.md|api[\\/]reference\.ja\.md|superpowers[\\/]|swagger\.(?:json|ya?ml))|github\.com[\\/]Juneoww[\\/]AIG_Custom[\\/]docs|(?:^|[\\/])api(?:_(?:zh|ja))?\.md(?:$|[?#]))'
 $markdownFiles = $repositoryFiles | Where-Object {
     # 归档历史正文保留当时的旧链接；归档 README 属于当前导航，仍必须检查。
     $isMarkdown = [System.IO.Path]::GetExtension($_) -eq '.md'
