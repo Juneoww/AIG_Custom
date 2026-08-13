@@ -35,6 +35,7 @@ docs/
 ├─ project/
 │  ├─ status.md
 │  └─ plans/
+│     ├─ documentation.md
 │     └─ enterprise-console.md
 ├─ architecture/
 │  ├─ evolution.md
@@ -62,6 +63,8 @@ internal/apidocs/
 
 `docs/project/plans/enterprise-console.md` 是后续经批准生成的企业控制台实施计划目标路径。本次整理不得创建空计划或把尚未生成的计划标成已存在；`docs/README.md` 和状态页在计划不存在时明确写“待编写”。
 
+本次文档整理实施计划迁入 `docs/project/plans/documentation.md`，作为当前有效且正在执行的计划；完成整理后保留并在状态页标为已完成证据。
+
 ## 4. 文件迁移映射
 
 | 当前路径 | 目标路径 | 处理方式 |
@@ -70,6 +73,7 @@ internal/apidocs/
 | `docs/architecture_evolution.md` | `docs/architecture/evolution.md` | 当前架构历史；只移动和更新引用 |
 | `docs/superpowers/specs/2026-08-13-enterprise-console-rebuild-design.md` | `docs/architecture/enterprise-console.md` | 当前有效控制台设计 |
 | `docs/superpowers/specs/2026-08-13-documentation-information-architecture-design.md` | `docs/architecture/documentation.md` | 当前有效文档治理设计；完成本次迁移后长期保留 |
+| `docs/superpowers/plans/2026-08-13-documentation-information-architecture.md` | `docs/project/plans/documentation.md` | 当前文档整理实施计划；迁移后长期保留 |
 | `docs/api_data_update.md` | `docs/api/data-sync.md` | 当前专项 API 指南 |
 | 根 `api_zh.md` | `docs/api/reference.md` | 中文 API 参考；更新仓库入口引用 |
 | 根 `api.md` | `docs/api/reference.en.md` | 英文 API 参考；为现有双语维护约束保留 |
