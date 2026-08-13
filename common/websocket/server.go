@@ -32,7 +32,7 @@ import (
 	"time"
 
 	"github.com/Juneoww/AIG_Custom/common/trpc"
-	_ "github.com/Juneoww/AIG_Custom/docs"
+	_ "github.com/Juneoww/AIG_Custom/internal/apidocs"
 	"github.com/Juneoww/AIG_Custom/internal/gologger"
 	version "github.com/Juneoww/AIG_Custom/internal/options"
 	platformadmin "github.com/Juneoww/AIG_Custom/internal/platform/admin"

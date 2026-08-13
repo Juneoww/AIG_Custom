@@ -1,4 +1,4 @@
-package docs
+package apidocs
 
 import (
 	"encoding/json"
@@ -353,7 +353,7 @@ func TestAPIGuidesDocumentLegacyModelAndMigrationBoundaries(t *testing.T) {
 		required []string
 	}{
 		{
-			path: "../api.md",
+			path: "../../docs/api/reference.en.md",
 			required: []string{
 				"/api/v1/app/models/{modelId}", "collection DELETE", "{status,message,data}",
 				"HTTP `200`", "`401`", "`403`", "masked", "/api/v1/platform/models",
@@ -367,7 +367,7 @@ func TestAPIGuidesDocumentLegacyModelAndMigrationBoundaries(t *testing.T) {
 			},
 		},
 		{
-			path: "../api_zh.md",
+			path: "../../docs/api/reference.md",
 			required: []string{
 				"/api/v1/app/models/{modelId}", "集合 DELETE", "{status,message,data}",
 				"HTTP `200`", "`401`", "`403`", "始终脱敏", "/api/v1/platform/models",
