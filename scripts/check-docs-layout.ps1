@@ -57,47 +57,59 @@ foreach ($relativePath in $requiredPaths) {
     }
 }
 
-# 移除成对的行内代码 span，防止代码示例中的 Markdown 片段被当成导航链接。
-function Remove-InlineCodeSpans {
-    param([Parameter(Mandatory = $true)][AllowEmptyString()][string]$Line)
+# 从单行中剔除跨行 HTML 注释和 backtick 代码 span，防止隐藏示例充当导航入口。
+function Get-VisibleMarkdownLine {
+    param(
+        [Parameter(Mandatory = $true)][AllowEmptyString()][string]$Line,
+        [Parameter(Mandatory = $true)][ref]$InsideHtmlComment,
+        [Parameter(Mandatory = $true)][ref]$ActiveCodeSpanLength
+    )
 
     $result = New-Object System.Text.StringBuilder
     $position = 0
     while ($position -lt $Line.Length) {
-        if ([int][char]$Line[$position] -ne 96) {
-            [void]$result.Append($Line[$position])
-            $position++
+        if ($ActiveCodeSpanLength.Value -gt 0) {
+            if ([int][char]$Line[$position] -ne 96) {
+                $position++
+                continue
+            }
+            $runStart = $position
+            while ($position -lt $Line.Length -and [int][char]$Line[$position] -eq 96) {
+                $position++
+            }
+            if ($position - $runStart -eq $ActiveCodeSpanLength.Value) {
+                $ActiveCodeSpanLength.Value = 0
+            }
             continue
         }
 
-        $openingStart = $position
-        while ($position -lt $Line.Length -and [int][char]$Line[$position] -eq 96) {
-            $position++
-        }
-        $openingLength = $position - $openingStart
-        $closingStart = -1
-        $searchPosition = $position
-        while ($searchPosition -lt $Line.Length) {
-            if ([int][char]$Line[$searchPosition] -ne 96) {
-                $searchPosition++
-                continue
+        if ($InsideHtmlComment.Value) {
+            if ($position + 2 -lt $Line.Length -and $Line.Substring($position, 3) -eq '-->') {
+                $InsideHtmlComment.Value = $false
+                $position += 3
             }
-            $candidateStart = $searchPosition
-            while ($searchPosition -lt $Line.Length -and [int][char]$Line[$searchPosition] -eq 96) {
-                $searchPosition++
+            else {
+                $position++
             }
-            if ($searchPosition - $candidateStart -eq $openingLength) {
-                $closingStart = $candidateStart
-                break
-            }
+            continue
         }
 
-        if ($closingStart -ge 0) {
-            $position = $closingStart + $openingLength
+        if ($position + 3 -lt $Line.Length -and $Line.Substring($position, 4) -eq '<!--') {
+            $InsideHtmlComment.Value = $true
+            $position += 4
+            continue
         }
-        else {
-            [void]$result.Append($Line.Substring($openingStart, $openingLength))
+        if ([int][char]$Line[$position] -eq 96) {
+            $runStart = $position
+            while ($position -lt $Line.Length -and [int][char]$Line[$position] -eq 96) {
+                $position++
+            }
+            $ActiveCodeSpanLength.Value = $position - $runStart
+            continue
         }
+
+        [void]$result.Append($Line[$position])
+        $position++
     }
     return $result.ToString()
 }
@@ -108,7 +120,9 @@ function Test-FeatureCatalogNavigationLink {
 
     $activeFenceCharacter = $null
     $activeFenceLength = 0
-    $catalogLinkPattern = '(?<!!)[\[](?<label>[^\]\r\n]*\S[^\]\r\n]*)\]\(\s*(?<target><[^>\r\n]+>|[^\s\)]+)(?:\s+(?:"[^"]*"|''[^'']*''|\([^\)]*\)))?\s*\)'
+    $insideHtmlComment = $false
+    $activeCodeSpanLength = 0
+    $catalogLinkPattern = '(?<![!\\])(?:\\\\)*\[(?<label>[^\]\r\n]*\S[^\]\r\n]*)\]\(\s*(?<target><[^>\r\n]+>|[^\s\)]+)(?:\s+(?:"[^"]*"|''[^'']*''|\([^\)]*\)))?\s*\)'
 
     foreach ($sourceLine in $Lines) {
         if ($null -ne $activeFenceCharacter) {
@@ -131,7 +145,7 @@ function Test-FeatureCatalogNavigationLink {
             continue
         }
 
-        $visibleLine = Remove-InlineCodeSpans $sourceLine
+        $visibleLine = Get-VisibleMarkdownLine $sourceLine ([ref]$insideHtmlComment) ([ref]$activeCodeSpanLength)
         $links = [regex]::Matches($visibleLine, $catalogLinkPattern)
         foreach ($link in $links) {
             $target = $link.Groups['target'].Value.Trim('<', '>')
