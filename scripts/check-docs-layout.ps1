@@ -57,10 +57,60 @@ foreach ($relativePath in $requiredPaths) {
     }
 }
 
-# 从单行中剔除跨行 HTML 注释和 backtick 代码 span，防止隐藏示例充当导航入口。
+# 判断字符前是否有奇数个反斜杠；奇数表示 Markdown 转义。
+function Test-IsEscapedMarkdownCharacter {
+    param(
+        [Parameter(Mandatory = $true)][AllowEmptyString()][string]$Line,
+        [Parameter(Mandatory = $true)][int]$Position
+    )
+
+    $backslashCount = 0
+    $positionBeforeCharacter = $Position - 1
+    while ($positionBeforeCharacter -ge 0 -and $Line[$positionBeforeCharacter] -eq '\') {
+        $backslashCount++
+        $positionBeforeCharacter--
+    }
+    return $backslashCount % 2 -eq 1
+}
+
+# 只有后续存在同长度、未转义的 closing delimiter 时，反引号才构成代码 span。
+function Test-HasClosingCodeSpanDelimiter {
+    param(
+        [Parameter(Mandatory = $true)][AllowEmptyString()][string[]]$Lines,
+        [Parameter(Mandatory = $true)][int]$StartLineIndex,
+        [Parameter(Mandatory = $true)][int]$StartCharacterIndex,
+        [Parameter(Mandatory = $true)][int]$DelimiterLength
+    )
+
+    for ($lineIndex = $StartLineIndex; $lineIndex -lt $Lines.Count; $lineIndex++) {
+        $currentLine = $Lines[$lineIndex]
+        if ($lineIndex -gt $StartLineIndex -and [string]::IsNullOrWhiteSpace($currentLine)) {
+            return $false
+        }
+        $position = if ($lineIndex -eq $StartLineIndex) { $StartCharacterIndex } else { 0 }
+        while ($position -lt $currentLine.Length) {
+            if ([int][char]$currentLine[$position] -ne 96) {
+                $position++
+                continue
+            }
+            $runStart = $position
+            while ($position -lt $currentLine.Length -and [int][char]$currentLine[$position] -eq 96) {
+                $position++
+            }
+            if ($position - $runStart -eq $DelimiterLength -and -not (Test-IsEscapedMarkdownCharacter $currentLine $runStart)) {
+                return $true
+            }
+        }
+    }
+    return $false
+}
+
+# 从单行中剔除跨行 HTML 注释和已确认的 backtick 代码 span，防止隐藏示例充当导航入口。
 function Get-VisibleMarkdownLine {
     param(
         [Parameter(Mandatory = $true)][AllowEmptyString()][string]$Line,
+        [Parameter(Mandatory = $true)][AllowEmptyString()][string[]]$AllLines,
+        [Parameter(Mandatory = $true)][int]$LineIndex,
         [Parameter(Mandatory = $true)][ref]$InsideHtmlComment,
         [Parameter(Mandatory = $true)][ref]$ActiveCodeSpanLength
     )
@@ -77,7 +127,7 @@ function Get-VisibleMarkdownLine {
             while ($position -lt $Line.Length -and [int][char]$Line[$position] -eq 96) {
                 $position++
             }
-            if ($position - $runStart -eq $ActiveCodeSpanLength.Value) {
+            if ($position - $runStart -eq $ActiveCodeSpanLength.Value -and -not (Test-IsEscapedMarkdownCharacter $Line $runStart)) {
                 $ActiveCodeSpanLength.Value = 0
             }
             continue
@@ -104,7 +154,12 @@ function Get-VisibleMarkdownLine {
             while ($position -lt $Line.Length -and [int][char]$Line[$position] -eq 96) {
                 $position++
             }
-            $ActiveCodeSpanLength.Value = $position - $runStart
+            $delimiterLength = $position - $runStart
+            if (-not (Test-IsEscapedMarkdownCharacter $Line $runStart) -and (Test-HasClosingCodeSpanDelimiter $AllLines $LineIndex $position $delimiterLength)) {
+                $ActiveCodeSpanLength.Value = $delimiterLength
+                continue
+            }
+            [void]$result.Append($Line.Substring($runStart, $delimiterLength))
             continue
         }
 
@@ -124,7 +179,8 @@ function Test-FeatureCatalogNavigationLink {
     $activeCodeSpanLength = 0
     $catalogLinkPattern = '(?<![!\\])(?:\\\\)*\[(?<label>[^\]\r\n]*\S[^\]\r\n]*)\]\(\s*(?<target><[^>\r\n]+>|[^\s\)]+)(?:\s+(?:"[^"]*"|''[^'']*''|\([^\)]*\)))?\s*\)'
 
-    foreach ($sourceLine in $Lines) {
+    for ($lineIndex = 0; $lineIndex -lt $Lines.Count; $lineIndex++) {
+        $sourceLine = $Lines[$lineIndex]
         if ($null -ne $activeFenceCharacter) {
             $closingFencePattern = '^(?: {0,3})' + [regex]::Escape($activeFenceCharacter) + '{' + $activeFenceLength + ',}[ \t]*$'
             if ($sourceLine -match $closingFencePattern) {
@@ -145,7 +201,7 @@ function Test-FeatureCatalogNavigationLink {
             continue
         }
 
-        $visibleLine = Get-VisibleMarkdownLine $sourceLine ([ref]$insideHtmlComment) ([ref]$activeCodeSpanLength)
+        $visibleLine = Get-VisibleMarkdownLine $sourceLine $Lines $lineIndex ([ref]$insideHtmlComment) ([ref]$activeCodeSpanLength)
         $links = [regex]::Matches($visibleLine, $catalogLinkPattern)
         foreach ($link in $links) {
             $target = $link.Groups['target'].Value.Trim('<', '>')
