@@ -256,6 +256,18 @@ $expectedIDs = @(
     }
 )
 $expectedModules = @($expectedPrefixModules.Values)
+$expectedEvidenceIDs = @($expectedIDs | ForEach-Object { "E-$_" })
+$expectedModuleCounts = [ordered]@{}
+foreach ($entry in $expectedRanges.GetEnumerator()) {
+    $expectedModuleCounts[$expectedPrefixModules[$entry.Key]] = @($entry.Value).Count
+}
+$expectedStatusCounts = [ordered]@{
+    '已实现' = 45
+    '部分实现' = 6
+    '待修' = 1
+    '待开发' = 5
+}
+$expectedCompatibility = @('原生能力', '兼容保留', '退役边界')
 
 function Assert-ExactSet {
     param(
@@ -280,22 +292,71 @@ function Assert-ExactSet {
     }
 }
 
+function Assert-ExactCounts {
+    param(
+        [Parameter(Mandatory)] [string] $Name,
+        [Parameter(Mandatory)] [System.Collections.IDictionary] $Expected,
+        [Parameter(Mandatory)] [string[]] $Actual
+    )
+
+    $actualGroups = @($Actual | Group-Object)
+    Assert-ExactSet -Name "$Name 枚举" -Expected @($Expected.Keys) -Actual @($actualGroups | ForEach-Object Name)
+    foreach ($entry in $Expected.GetEnumerator()) {
+        $group = @($actualGroups | Where-Object Name -EQ $entry.Key)
+        $actualCount = if ($group.Count -eq 1) { $group[0].Count } else { 0 }
+        if ($actualCount -ne $entry.Value) {
+            throw ('{0} [{1}] 数量应为 {2}，实际为 {3}' -f $Name, $entry.Key, $entry.Value, $actualCount)
+        }
+    }
+}
+
 $parts = [regex]::Split($text, '(?m)^## 证据索引\s*$')
 if ($parts.Count -ne 2) {
     throw '证据索引章节缺失或重复'
 }
 $matrixText = $parts[0]
 $evidenceText = $parts[1]
-$matrixMatches = @([regex]::Matches($matrixText, '(?m)^\| ([A-Z]+-[0-9]+) \| ([^|]+) \|'))
-$actualIDs = @($matrixMatches | ForEach-Object { $_.Groups[1].Value })
-$actualModules = @($matrixMatches | ForEach-Object { $_.Groups[2].Value.Trim() } | Sort-Object -Unique)
+$matrixLines = @([regex]::Split($matrixText, '\r?\n') | Where-Object { $_ -match '^\|\s*[A-Z]+-[0-9]+\s*\|' })
+$matrixRows = @(
+    foreach ($line in $matrixLines) {
+        $trimmedLine = $line.Trim()
+        if (-not $trimmedLine.EndsWith('|')) {
+            throw "功能矩阵行缺少结尾分隔符: $trimmedLine"
+        }
+        $cells = @($trimmedLine.Substring(1, $trimmedLine.Length - 2).Split('|') | ForEach-Object { $_.Trim() })
+        if ($cells.Count -ne 9) {
+            throw "功能矩阵行必须包含 9 列，实际为 $($cells.Count) 列: $trimmedLine"
+        }
+        [pscustomobject] [ordered]@{
+            ID            = $cells[0]
+            Module        = $cells[1]
+            Capability    = $cells[2]
+            UserValue     = $cells[3]
+            Roles         = $cells[4]
+            Entry         = $cells[5]
+            Status        = $cells[6]
+            Compatibility = $cells[7]
+            EvidenceID    = $cells[8]
+        }
+    }
+)
+$actualIDs = @($matrixRows | ForEach-Object ID)
+$actualModules = @($matrixRows | ForEach-Object Module | Sort-Object -Unique)
+$actualEvidenceColumnIDs = @($matrixRows | ForEach-Object EvidenceID)
 $evidenceMatches = @([regex]::Matches($evidenceText, '(?m)^- \*\*E-([A-Z]+-[0-9]+)\*\*：[^\r\n]*运行入口——[^\r\n]*验证来源——[^\r\n]*$'))
 $actualEvidenceIDs = @($evidenceMatches | ForEach-Object { $_.Groups[1].Value })
 
-foreach ($match in $matrixMatches) {
-    $id = $match.Groups[1].Value
+if ($matrixRows.Count -ne 57) {
+    throw "功能矩阵应包含 57 项能力，实际为 $($matrixRows.Count) 项"
+}
+if ($evidenceMatches.Count -ne 57) {
+    throw "证据索引应包含 57 项证据，实际为 $($evidenceMatches.Count) 项"
+}
+
+foreach ($row in $matrixRows) {
+    $id = $row.ID
     $prefix = $id.Split('-')[0]
-    $module = $match.Groups[2].Value.Trim()
+    $module = $row.Module
     if (-not $expectedPrefixModules.Contains($prefix)) {
         throw "$id 使用了未知编号前缀 $prefix"
     }
@@ -303,11 +364,25 @@ foreach ($match in $matrixMatches) {
     if ($module -ne $expectedModule) {
         throw ('{0} 的模块应为 [{1}]，实际为 [{2}]' -f $id, $expectedModule, $module)
     }
+    if (-not $expectedStatusCounts.Contains($row.Status)) {
+        throw ('{0} 使用了非法交付状态 [{1}]' -f $id, $row.Status)
+    }
+    if ($expectedCompatibility -notcontains $row.Compatibility) {
+        throw ('{0} 使用了非法兼容属性 [{1}]' -f $id, $row.Compatibility)
+    }
+    $expectedEvidenceID = "E-$id"
+    if ($row.EvidenceID -ne $expectedEvidenceID) {
+        throw ('{0} 的证据编号应为 [{1}]，实际为 [{2}]' -f $id, $expectedEvidenceID, $row.EvidenceID)
+    }
 }
 
 Assert-ExactSet -Name '功能编号' -Expected $expectedIDs -Actual $actualIDs
 Assert-ExactSet -Name '证据编号' -Expected $expectedIDs -Actual $actualEvidenceIDs
+Assert-ExactSet -Name '功能矩阵证据编号' -Expected $expectedEvidenceIDs -Actual $actualEvidenceColumnIDs
 Assert-ExactSet -Name '功能模块' -Expected $expectedModules -Actual $actualModules
+Assert-ExactSet -Name '功能矩阵证据与证据索引' -Expected $actualEvidenceColumnIDs -Actual @($actualEvidenceIDs | ForEach-Object { "E-$_" })
+Assert-ExactCounts -Name '功能模块' -Expected $expectedModuleCounts -Actual @($matrixRows | ForEach-Object Module)
+Assert-ExactCounts -Name '交付状态' -Expected $expectedStatusCounts -Actual @($matrixRows | ForEach-Object Status)
 
 & powershell -NoProfile -ExecutionPolicy Bypass -File scripts/check-docs-layout.ps1
 if ($LASTEXITCODE -ne 0) { throw '文档布局检查失败' }
