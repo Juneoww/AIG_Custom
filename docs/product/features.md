@@ -120,7 +120,7 @@
 | --- | --- | --- | --- |
 | `SCAN-03` | Agent 工作流注册路径的确定性冒烟 | 证明产品实际注册的 Go Agent 入口能够完整调用工作流扫描并返回安全扫描结果，而不只验证底层组件 | 使用受控夹具执行已注册 Go `AgentTask` 路径，确定性断言 Agent 安全扫描结果，并纳入自动化回归 |
 | `SCAN-06` | 反向代理透传识别回归 | 明确哪些代理透传场景能够可靠识别后端应用，避免把偶然可见信号当作普遍保证 | 使用代表性反向代理夹具覆盖受支持透传场景，以自动化回归断言通用信号能够识别后端应用；代理/应用分层和 Dify 专项置信度仍分别属于 `SCAN-07`、`SCAN-08` |
-| `OPS-04` | 企业控制台前端重构 | 让四类角色通过可维护、角色化的企业工作台使用现有平台能力 | 形成经评审实施计划，交付可维护前端源码并覆盖登录、治理、任务、报告和审计主流程，通过角色、安全与端到端验收后替换旧嵌入式产物 |
+| `OPS-04` | 企业控制台前端重构 | 让三类平台角色通过可维护、角色化的企业工作台使用现有平台能力 | 形成经评审实施计划，交付可维护前端源码并覆盖登录、治理、任务、报告和审计主流程，通过角色、安全与端到端验收后替换旧嵌入式产物 |
 | `OPS-05` | 完整 OpenAPI 单一生成源 | 让客户端、测试与人读契约从同一权威规格稳定生成 | 单一规格覆盖全部受支持平台路由，能可复现生成并校验 YAML、JSON 和 Go 内嵌产物，迁移期间不破坏现有运行时三件套 |
 | `OPS-06` | 正式发布候选 | 给目标环境提供可签收的质量、容量和发行依据 | 完成全量端到端与安全回归、目标环境部署、容量基线、离线或升级验证及发行材料签收 |
 | `FILE-05` | 旧公开图片路径 HTTP 回归 | 证明历史公开路径不会绕过附件治理重新交付服务器中的文件字节 | 在生产路由测试中准备受控存储字节，请求原旧公开图片路径并断言响应不能返回这些字节 |
@@ -196,7 +196,22 @@
 - 能力编号一经分配永不复用；能力拆分时保留原编号作为历史或退役编号，并为新能力分配新编号。证据编号始终为 `E-<能力编号>`。
 - 代码、测试、PRD、项目状态或 API 文档冲突时采用更保守状态：已实现项失去入口、行为验证或出现未关闭边界时必须降级；只有修正权威文档并取得新的运行与验证证据后才能升级。
 - 每次变更必须保持 57 个现有能力编号与证据一一对应、12 个模块仍在正式矩阵中，并检查无重复能力、重复证据或孤儿证据。
-- 目录发布验收必须执行以下命令；涉及 API、数据、Python 或部署实现的后续改动还须按仓库 `AGENTS.md` 增加对应范围测试。
+- 目录发布验收必须执行常规检查与完整目录合同；涉及 API、数据、Python 或部署实现的后续改动还须按仓库 `AGENTS.md` 增加对应范围测试。
+- 完整目录合同接受 `AIG_DOCS_BASE_REF` 作为差异基线覆盖值；该值应是现有命名 Git ref（例如 `origin/main`、`main` 或完整 `refs/...`）。未设置时依次选择现有 `origin/main`、本地 `main`，均不可用或没有共同历史时明确失败。
+
+常规检查可在仓库根目录单独运行：
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts/check-docs-layout.ps1
+docker compose -f deploy/compose/docker-compose.postgres-test.yml run --rm database-test go test ./internal/apidocs -count=1
+$mount = '{0}:/input' -f (Get-Location).Path
+docker run --rm -v $mount -w /input lycheeverse/lychee:0.24.2 --offline --no-progress 'docs/**/*.md' 'README.md' 'readme/*.md'
+```
+
+<details>
+<summary>维护者附录：完整 Windows PowerShell 5.1 目录验收程序（可直接运行）</summary>
+
+以下程序包含常规检查，以及精确结构、差异范围和敏感信息校验；请从仓库根目录整体执行。
 
 ```powershell
 $ErrorActionPreference = 'Stop'
@@ -204,7 +219,7 @@ if (Get-Variable PSNativeCommandUseErrorActionPreference -ErrorAction SilentlyCo
     $PSNativeCommandUseErrorActionPreference = $false
 }
 
-$text = Get-Content -LiteralPath docs/product/features.md -Raw
+$text = Get-Content -LiteralPath docs/product/features.md -Raw -Encoding UTF8
 $expectedRanges = [ordered]@{
     'ID'     = 1..4
     'RBAC'   = 1..4
@@ -219,6 +234,20 @@ $expectedRanges = [ordered]@{
     'AUDIT'  = 1..4
     'OPS'    = 1..6
 }
+$expectedPrefixModules = [ordered]@{
+    'ID'     = '身份、会话与密码'
+    'RBAC'   = '用户、角色与权限'
+    'MODEL'  = '模型与密钥治理'
+    'SCAN'   = '扫描类型与安全检测'
+    'TASK'   = '任务管理'
+    'AGENT'  = 'Agent 接入与运行'
+    'FILE'   = '附件管理'
+    'KB'     = '规则与知识库'
+    'REPORT' = '风险报告、趋势与 PDF'
+    'BRAND'  = '品牌配置'
+    'AUDIT'  = '审计、恢复与安全防护'
+    'OPS'    = '数据迁移、部署与运维'
+}
 $expectedIDs = @(
     foreach ($entry in $expectedRanges.GetEnumerator()) {
         foreach ($number in $entry.Value) {
@@ -226,20 +255,7 @@ $expectedIDs = @(
         }
     }
 )
-$expectedModules = @(
-    '身份、会话与密码',
-    '用户、角色与权限',
-    '模型与密钥治理',
-    '扫描类型与安全检测',
-    '任务管理',
-    'Agent 接入与运行',
-    '附件管理',
-    '规则与知识库',
-    '风险报告、趋势与 PDF',
-    '品牌配置',
-    '审计、恢复与安全防护',
-    '数据迁移、部署与运维'
-)
+$expectedModules = @($expectedPrefixModules.Values)
 
 function Assert-ExactSet {
     param(
@@ -276,13 +292,26 @@ $actualModules = @($matrixMatches | ForEach-Object { $_.Groups[2].Value.Trim() }
 $evidenceMatches = @([regex]::Matches($evidenceText, '(?m)^- \*\*E-([A-Z]+-[0-9]+)\*\*：[^\r\n]*运行入口——[^\r\n]*验证来源——[^\r\n]*$'))
 $actualEvidenceIDs = @($evidenceMatches | ForEach-Object { $_.Groups[1].Value })
 
+foreach ($match in $matrixMatches) {
+    $id = $match.Groups[1].Value
+    $prefix = $id.Split('-')[0]
+    $module = $match.Groups[2].Value.Trim()
+    if (-not $expectedPrefixModules.Contains($prefix)) {
+        throw "$id 使用了未知编号前缀 $prefix"
+    }
+    $expectedModule = $expectedPrefixModules[$prefix]
+    if ($module -ne $expectedModule) {
+        throw ('{0} 的模块应为 [{1}]，实际为 [{2}]' -f $id, $expectedModule, $module)
+    }
+}
+
 Assert-ExactSet -Name '功能编号' -Expected $expectedIDs -Actual $actualIDs
 Assert-ExactSet -Name '证据编号' -Expected $expectedIDs -Actual $actualEvidenceIDs
 Assert-ExactSet -Name '功能模块' -Expected $expectedModules -Actual $actualModules
 
 & powershell -NoProfile -ExecutionPolicy Bypass -File scripts/check-docs-layout.ps1
 if ($LASTEXITCODE -ne 0) { throw '文档布局检查失败' }
-& go test ./internal/apidocs -count=1
+& docker compose -f deploy/compose/docker-compose.postgres-test.yml run --rm database-test go test ./internal/apidocs -count=1
 if ($LASTEXITCODE -ne 0) { throw 'internal/apidocs 测试失败' }
 $mount = '{0}:/input' -f (Get-Location).Path
 & docker run --rm -v $mount -w /input lycheeverse/lychee:0.24.2 --offline --no-progress 'docs/**/*.md' 'README.md' 'readme/*.md'
@@ -290,10 +319,64 @@ if ($LASTEXITCODE -ne 0) { throw 'Markdown 链接检查失败' }
 
 & git diff --check
 if ($LASTEXITCODE -ne 0) { throw '工作区差异格式检查失败' }
-$base = (git merge-base main HEAD).Trim()
+
+function Test-GitReference {
+    param([Parameter(Mandatory)] [string] $Reference)
+
+    & git show-ref --verify --quiet $Reference
+    $showRefExit = $LASTEXITCODE
+    if ($showRefExit -eq 0) { return $true }
+    if ($showRefExit -eq 1) { return $false }
+    throw ('检查 Git ref [{0}] 失败（exit {1}）' -f $Reference, $showRefExit)
+}
+
+function Resolve-GitReference {
+    param([Parameter(Mandatory)] [string] $Reference)
+
+    if ($Reference.StartsWith('refs/')) {
+        $candidates = @($Reference)
+    }
+    else {
+        $candidates = @(
+            'refs/remotes/{0}' -f $Reference
+            'refs/heads/{0}' -f $Reference
+            'refs/tags/{0}' -f $Reference
+        )
+    }
+    foreach ($candidate in $candidates) {
+        if (Test-GitReference -Reference $candidate) { return $candidate }
+    }
+    return $null
+}
+
+$requestedBaseRef = [Environment]::GetEnvironmentVariable('AIG_DOCS_BASE_REF')
+if ([string]::IsNullOrWhiteSpace($requestedBaseRef)) {
+    if (Test-GitReference -Reference 'refs/remotes/origin/main') {
+        $baseRef = 'refs/remotes/origin/main'
+    }
+    elseif (Test-GitReference -Reference 'refs/heads/main') {
+        $baseRef = 'refs/heads/main'
+    }
+    else {
+        throw '未找到可用的差异基线；请获取 origin/main、创建本地 main，或设置 AIG_DOCS_BASE_REF'
+    }
+}
+else {
+    $requestedBaseRef = $requestedBaseRef.Trim()
+    $baseRef = Resolve-GitReference -Reference $requestedBaseRef
+    if ([string]::IsNullOrWhiteSpace($baseRef)) {
+        throw ('AIG_DOCS_BASE_REF [{0}] 不是现有命名 Git ref' -f $requestedBaseRef)
+    }
+}
+
+$mergeBaseOutput = @(& git merge-base $baseRef HEAD 2>&1)
 $mergeBaseExit = $LASTEXITCODE
-if ($mergeBaseExit -ne 0 -or [string]::IsNullOrWhiteSpace($base)) {
-    throw '无法确定 main 与 HEAD 的 merge-base'
+if ($mergeBaseExit -ne 0 -or $mergeBaseOutput.Count -eq 0) {
+    throw ('无法计算基线 [{0}] 与 HEAD 的 merge-base（exit {1}）；请确认两者具有共同历史' -f $baseRef, $mergeBaseExit)
+}
+$base = ([string] $mergeBaseOutput[-1]).Trim()
+if ([string]::IsNullOrWhiteSpace($base)) {
+    throw ('基线 [{0}] 的 merge-base 结果为空' -f $baseRef)
 }
 & git diff --check "$base..HEAD"
 if ($LASTEXITCODE -ne 0) { throw '提交范围差异格式检查失败' }
@@ -308,3 +391,5 @@ if ($scanExit -gt 1) {
     throw "功能目录敏感信息扫描执行失败（exit $scanExit）:`n$($scanOutput -join [Environment]::NewLine)"
 }
 ```
+
+</details>
