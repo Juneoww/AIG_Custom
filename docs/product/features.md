@@ -89,8 +89,8 @@
 
 ## 完成标准
 
-- 所有“已实现”条目均能从当前代码、API、测试或交付配置中找到证据。
+- 每个“已实现”条目都同时具有受支持的运行入口证据和自动化测试或环境验收证据；代码、API、Schema、配置和需求声明只能作为附加佐证。
 - 普通用户、安全审计员和系统管理员的权限边界表述与当前实现一致。
 - 扫描能力覆盖 Go 主应用、Agent 以及现有 Python 扫描组件，但不把未注册能力写成已交付。
 - 文档加入 `docs/README.md` 的“项目与产品”入口，并将 `docs/product/features.md` 加入布局脚本的必需路径。
-- 运行 `scripts/check-docs-layout.ps1`、`go test ./internal/apidocs -count=1` 和离线 Markdown 链接检查，三项均通过后才算完成。
+- 运行 `scripts/check-docs-layout.ps1`、`go test ./internal/apidocs -count=1`，以及 `docker run --rm -v "${PWD}:/input" -w /input lycheeverse/lychee:0.24.2 --offline --no-progress "docs/**/*.md" "README.md" "readme/*.md"`；三项均通过后才算完成。
