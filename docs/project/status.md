@@ -4,7 +4,7 @@
 
 | 字段 | 值 |
 | --- | --- |
-| 最后更新时间 | 2026-08-13 |
+| 最后更新时间 | 2026-08-14 |
 | 当前阶段 | 文档信息架构整理（已完成） |
 | 工作分支 | `codex/enterprise-platform` |
 | 状态枚举 | `已完成` / `正在进行` / `待开发` / `阻塞` |
@@ -38,6 +38,7 @@ PostgreSQL 迁移、身份与三角色权限、CSRF 防护、治理审计模型�
 - 不可变安全报告、PDF 与品牌阶段已完成，证据为 `3cbf64a5`。
 - 企业控制台重建设计已完成，证据为 `b9300e8f`；该证据只代表设计完成。
 - 文档信息架构整理已完成：人工文档已按产品、项目、架构、API、部署和归档分区，Swagger 运行时模块已迁出 `docs/`，仓库入口链接已更新；证据为 `cb2a387b` 至 `2fd19b00` 的上述提交。
+- [平台功能清单](../product/features.md)文档已完成，用于盘点当前平台能力、入口和实现状态；该文档不代表其中待开发功能已完成。
 - 验收已通过 `scripts/check-docs-layout.ps1`、`go test ./internal/apidocs -count=1` 和 `go test ./common/websocket -run '^$' -count=1`；本地 Markdown 相对链接检查覆盖 25 个文件并通过。
 
 ## 正在进行
@@ -73,6 +74,7 @@ PostgreSQL 迁移、身份与三角色权限、CSRF 防护、治理审计模型�
 
 - [文档总入口](../README.md)
 - [产品需求文档（PRD）](../product/prd.md)
+- [平台功能清单](../product/features.md)
 - [当前计划目录](plans/README.md)
 - [文档信息架构整理计划](plans/documentation.md)
 - 企业控制台实施计划：待编写。

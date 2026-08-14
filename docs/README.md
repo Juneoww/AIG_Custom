@@ -6,6 +6,7 @@
 
 - [项目状态](project/status.md)：当前进度、里程碑证据、下一步和风险的唯一实时来源。
 - [产品需求文档（PRD）](product/prd.md)：当前产品范围、角色边界和验收要求。
+- [平台功能清单](product/features.md)：当前平台能力、入口与实现状态的盘点。
 - [当前实施计划](project/plans/documentation.md)：文档信息架构整理实施计划。
 - 企业控制台实施计划：待编写。
 

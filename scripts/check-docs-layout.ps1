@@ -2,7 +2,7 @@
 #   校验 docs 目录只保留人读文档，并验证目标文档结构和旧路径引用已经完成迁移。
 # 实现:
 #   从脚本位置推导仓库根目录，以 Git 返回的已跟踪和未忽略文件为边界，检查 docs 文件
-#   类型、目标必需文件，以及代码、配置和 Markdown 实际链接目标中的旧路径。
+#   类型、目标必需文件、当前导航入口，以及代码、配置和 Markdown 实际链接目标中的旧路径。
 # 输入:
 #   Git 已跟踪或未忽略的未跟踪文件，以及仓库中的 docs 和 internal/apidocs 目标文件。
 # 输出:
@@ -34,6 +34,7 @@ foreach ($relativePath in ($repositoryFiles | Where-Object { $_.StartsWith('docs
 $requiredPaths = @(
     'docs/README.md',
     'docs/product/prd.md',
+    'docs/product/features.md',
     'docs/project/status.md',
     'docs/project/plans/documentation.md',
     'docs/architecture/evolution.md',
@@ -53,6 +54,36 @@ $requiredPaths = @(
 foreach ($relativePath in $requiredPaths) {
     if (-not (Test-Path -LiteralPath (Join-Path $repositoryRoot $relativePath) -PathType Leaf)) {
         $issues.Add("缺少目标文件: $relativePath")
+    }
+}
+
+# 当前文档总入口必须以实际 Markdown 链接公开平台功能清单；代码块中的示例不构成导航入口。
+$docsReadmePath = Join-Path $repositoryRoot 'docs/README.md'
+if (Test-Path -LiteralPath $docsReadmePath -PathType Leaf) {
+    $hasFeatureCatalogLink = $false
+    $insideCodeFence = $false
+    foreach ($line in [System.IO.File]::ReadAllLines($docsReadmePath, [System.Text.Encoding]::UTF8)) {
+        if ($line -match '^\s*(?:`{3,}|~{3,})') {
+            $insideCodeFence = -not $insideCodeFence
+            continue
+        }
+        if ($insideCodeFence) {
+            continue
+        }
+        $links = [regex]::Matches($line, '\]\(\s*(?<target><[^>]+>|[^\s\)]+)')
+        foreach ($link in $links) {
+            $target = $link.Groups['target'].Value.Trim('<', '>')
+            if ($target -eq 'product/features.md') {
+                $hasFeatureCatalogLink = $true
+                break
+            }
+        }
+        if ($hasFeatureCatalogLink) {
+            break
+        }
+    }
+    if (-not $hasFeatureCatalogLink) {
+        $issues.Add('docs/README.md 缺少平台功能清单入口')
     }
 }
 
