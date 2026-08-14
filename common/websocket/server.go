@@ -154,7 +154,8 @@ func RunWebServer(options *version.Options) {
 	// API 版本分组
 	v1 := r.Group("/api/v1")
 	{
-		identity.RegisterRoutesWithObserver(v1.Group("/auth"), identityService, identityPolicy, auditService)
+		auth := v1.Group("/auth")
+		identity.RegisterRoutesWithObserver(auth, identityService, identityPolicy, auditService)
 		platformGroup := v1.Group("/platform")
 		registerPlatformGovernanceRoutes(platformGroup, identityService, identityPolicy, adminHandler, platformModelService, platformTaskHandler)
 		registerPlatformReportRoutes(platformGroup, reportHandler, brandHandler)
