@@ -12,7 +12,7 @@ type PublicConfig struct {
 func publicConfig(config Config) PublicConfig {
 	logoDataURL := ""
 	if len(config.Logo) > 0 && (config.LogoMIME == "image/png" || config.LogoMIME == "image/jpeg") {
-		logoDataURL = config.LogoMIME + ";base64," + base64.StdEncoding.EncodeToString(config.Logo)
+		logoDataURL = "data:" + config.LogoMIME + ";base64," + base64.StdEncoding.EncodeToString(config.Logo)
 	}
 	return PublicConfig{
 		ProductName:  config.ProductName,

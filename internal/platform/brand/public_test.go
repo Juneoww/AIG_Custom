@@ -45,7 +45,7 @@ func TestPublicBrandEncodesValidatedPNGAndJPEG(t *testing.T) {
 
 			view, err := service.GetPublic(context.Background())
 			require.NoError(t, err)
-			assert.Equal(t, testCase.mime+";base64,"+base64.StdEncoding.EncodeToString(logo), view.LogoDataURL)
+			assert.Equal(t, "data:"+testCase.mime+";base64,"+base64.StdEncoding.EncodeToString(logo), view.LogoDataURL)
 		})
 	}
 }
