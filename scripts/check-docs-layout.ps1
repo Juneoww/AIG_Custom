@@ -57,32 +57,96 @@ foreach ($relativePath in $requiredPaths) {
     }
 }
 
-# 当前文档总入口必须以实际 Markdown 链接公开平台功能清单；代码块中的示例不构成导航入口。
-$docsReadmePath = Join-Path $repositoryRoot 'docs/README.md'
-if (Test-Path -LiteralPath $docsReadmePath -PathType Leaf) {
-    $hasFeatureCatalogLink = $false
-    $insideCodeFence = $false
-    foreach ($line in [System.IO.File]::ReadAllLines($docsReadmePath, [System.Text.Encoding]::UTF8)) {
-        if ($line -match '^\s*(?:`{3,}|~{3,})') {
-            $insideCodeFence = -not $insideCodeFence
+# 移除成对的行内代码 span，防止代码示例中的 Markdown 片段被当成导航链接。
+function Remove-InlineCodeSpans {
+    param([Parameter(Mandatory = $true)][AllowEmptyString()][string]$Line)
+
+    $result = New-Object System.Text.StringBuilder
+    $position = 0
+    while ($position -lt $Line.Length) {
+        if ([int][char]$Line[$position] -ne 96) {
+            [void]$result.Append($Line[$position])
+            $position++
             continue
         }
-        if ($insideCodeFence) {
-            continue
+
+        $openingStart = $position
+        while ($position -lt $Line.Length -and [int][char]$Line[$position] -eq 96) {
+            $position++
         }
-        $links = [regex]::Matches($line, '\]\(\s*(?<target><[^>]+>|[^\s\)]+)')
-        foreach ($link in $links) {
-            $target = $link.Groups['target'].Value.Trim('<', '>')
-            if ($target -eq 'product/features.md') {
-                $hasFeatureCatalogLink = $true
+        $openingLength = $position - $openingStart
+        $closingStart = -1
+        $searchPosition = $position
+        while ($searchPosition -lt $Line.Length) {
+            if ([int][char]$Line[$searchPosition] -ne 96) {
+                $searchPosition++
+                continue
+            }
+            $candidateStart = $searchPosition
+            while ($searchPosition -lt $Line.Length -and [int][char]$Line[$searchPosition] -eq 96) {
+                $searchPosition++
+            }
+            if ($searchPosition - $candidateStart -eq $openingLength) {
+                $closingStart = $candidateStart
                 break
             }
         }
-        if ($hasFeatureCatalogLink) {
-            break
+
+        if ($closingStart -ge 0) {
+            $position = $closingStart + $openingLength
+        }
+        else {
+            [void]$result.Append($Line.Substring($openingStart, $openingLength))
         }
     }
-    if (-not $hasFeatureCatalogLink) {
+    return $result.ToString()
+}
+
+# 当前文档总入口必须以完整、可见的 Markdown 链接公开平台功能清单；代码块和图片不构成导航入口。
+function Test-FeatureCatalogNavigationLink {
+    param([Parameter(Mandatory = $true)][AllowEmptyString()][string[]]$Lines)
+
+    $activeFenceCharacter = $null
+    $activeFenceLength = 0
+    $catalogLinkPattern = '(?<!!)[\[](?<label>[^\]\r\n]*\S[^\]\r\n]*)\]\(\s*(?<target><[^>\r\n]+>|[^\s\)]+)(?:\s+(?:"[^"]*"|''[^'']*''|\([^\)]*\)))?\s*\)'
+
+    foreach ($sourceLine in $Lines) {
+        if ($null -ne $activeFenceCharacter) {
+            $closingFencePattern = '^(?: {0,3})' + [regex]::Escape($activeFenceCharacter) + '{' + $activeFenceLength + ',}[ \t]*$'
+            if ($sourceLine -match $closingFencePattern) {
+                $activeFenceCharacter = $null
+                $activeFenceLength = 0
+            }
+            continue
+        }
+
+        $openingFence = [regex]::Match($sourceLine, '^(?: {0,3})(?<marker>`{3,}|~{3,}).*$')
+        if ($openingFence.Success) {
+            $marker = $openingFence.Groups['marker'].Value
+            $activeFenceCharacter = $marker.Substring(0, 1)
+            $activeFenceLength = $marker.Length
+            continue
+        }
+        if ($sourceLine -match '^(?: {4}|\t| {1,3}\t)') {
+            continue
+        }
+
+        $visibleLine = Remove-InlineCodeSpans $sourceLine
+        $links = [regex]::Matches($visibleLine, $catalogLinkPattern)
+        foreach ($link in $links) {
+            $target = $link.Groups['target'].Value.Trim('<', '>')
+            if ($target -eq 'product/features.md') {
+                return $true
+            }
+        }
+    }
+    return $false
+}
+
+$docsReadmePath = Join-Path $repositoryRoot 'docs/README.md'
+if (Test-Path -LiteralPath $docsReadmePath -PathType Leaf) {
+    $docsReadmeLines = [System.IO.File]::ReadAllLines($docsReadmePath, [System.Text.Encoding]::UTF8)
+    if (-not (Test-FeatureCatalogNavigationLink $docsReadmeLines)) {
         $issues.Add('docs/README.md 缺少平台功能清单入口')
     }
 }
