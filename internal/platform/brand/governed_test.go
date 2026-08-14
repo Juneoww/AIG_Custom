@@ -21,7 +21,7 @@ func TestGovernedServiceAuditsAdminUpdateAndRejectsFailedOrForbiddenWrites(t *te
 	require.Error(t, err)
 	stored, err := repository.Get(ctx)
 	require.NoError(t, err)
-	assert.Equal(t, "企业安全平台", stored.ProductName)
+	assert.Equal(t, "AI 安全治理平台", stored.ProductName)
 
 	audits := audit.NewMemoryRepository()
 	service = NewGovernedService(repository, audit.NewService(audits))

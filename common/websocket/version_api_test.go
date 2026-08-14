@@ -15,8 +15,73 @@
 package websocket
 
 import (
+	"encoding/json"
+	"errors"
+	"net/http"
+	"net/http/httptest"
+	"os"
 	"testing"
+
+	version "github.com/Juneoww/AIG_Custom/internal/options"
+	"github.com/gin-gonic/gin"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
+
+func TestSafeVersionUsesInjectedMetadataAndUnknownDefaults(t *testing.T) {
+	originalCommit, originalBuildTime := BuildCommit, BuildTime
+	t.Cleanup(func() { BuildCommit, BuildTime = originalCommit, originalBuildTime })
+
+	for _, testCase := range []struct {
+		name                 string
+		commit, buildTime    string
+		wantCommit, wantTime string
+	}{
+		{name: "unknown", wantCommit: "unknown", wantTime: "unknown"},
+		{name: "injected", commit: "abc123", buildTime: "2026-08-14T10:00:00Z", wantCommit: "abc123", wantTime: "2026-08-14T10:00:00Z"},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			BuildCommit, BuildTime = testCase.commit, testCase.buildTime
+			response := safeVersionResponse()
+			assert.Equal(t, version.GetVersion(), response.Version)
+			assert.Equal(t, testCase.wantCommit, response.Commit)
+			assert.Equal(t, testCase.wantTime, response.BuildTime)
+		})
+	}
+}
+
+func TestSafeVersionHasNoFileOrNetworkDependency(t *testing.T) {
+	originalCommit, originalBuildTime := BuildCommit, BuildTime
+	originalTransport := http.DefaultTransport
+	originalWorkingDirectory, err := os.Getwd()
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		BuildCommit, BuildTime = originalCommit, originalBuildTime
+		http.DefaultTransport = originalTransport
+		require.NoError(t, os.Chdir(originalWorkingDirectory))
+	})
+	BuildCommit, BuildTime = "", ""
+	http.DefaultTransport = failingRoundTripper{}
+	require.NoError(t, os.Chdir(t.TempDir()))
+
+	gin.SetMode(gin.TestMode)
+	response := httptest.NewRecorder()
+	context, _ := gin.CreateTestContext(response)
+	context.Request = httptest.NewRequest(http.MethodGet, "/api/v1/version", nil)
+	HandleSafeVersion(context)
+
+	require.Equal(t, http.StatusOK, response.Code)
+	var fields map[string]any
+	require.NoError(t, json.Unmarshal(response.Body.Bytes(), &fields))
+	assert.Equal(t, "unknown", fields["commit"])
+	assert.Equal(t, "unknown", fields["build_time"])
+}
+
+type failingRoundTripper struct{}
+
+func (failingRoundTripper) RoundTrip(*http.Request) (*http.Response, error) {
+	return nil, errors.New("network access is forbidden")
+}
 
 func TestParseVersion(t *testing.T) {
 	tests := []struct {

@@ -83,6 +83,14 @@ func (service *Service) Get(ctx context.Context) (Config, error) {
 	return cloneConfig(config), nil
 }
 
+func (service *Service) GetPublic(ctx context.Context) (PublicConfig, error) {
+	config, err := service.Get(ctx)
+	if err != nil {
+		return PublicConfig{}, err
+	}
+	return publicConfig(config), nil
+}
+
 func (service *Service) Update(ctx context.Context, subject identity.Subject, config Config) (Config, error) {
 	if subject.Role != identity.RoleAdmin {
 		return Config{}, ErrForbidden
@@ -116,7 +124,7 @@ func (service *Service) Update(ctx context.Context, subject identity.Subject, co
 }
 
 func defaultConfig() Config {
-	return Config{ProductName: "企业安全平台", PrimaryColor: "#1677FF", Logo: []byte{}}
+	return Config{ProductName: "AI 安全治理平台", PrimaryColor: "#1677FF", Logo: []byte{}}
 }
 
 func cloneConfig(config Config) Config {

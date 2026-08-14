@@ -27,7 +27,6 @@ import (
 	"embed"
 	"mime"
 	"net/http"
-	"os"
 	"path/filepath"
 	"time"
 
@@ -154,6 +153,7 @@ func RunWebServer(options *version.Options) {
 	// API 版本分组
 	v1 := r.Group("/api/v1")
 	{
+		registerPublicRoutes(v1, brandService)
 		auth := v1.Group("/auth")
 		identity.RegisterRoutesWithObserver(auth, identityService, identityPolicy, auditService)
 		platformGroup := v1.Group("/platform")
@@ -243,19 +243,6 @@ func RunWebServer(options *version.Options) {
 			// 只需要WebSocket入口
 			agents.GET("/ws", agentManager.HandleAgentWebSocket())
 		}
-		// version
-		v1.GET("/version", func(c *gin.Context) {
-			filename := "CHANGELOG.md"
-			data, err := os.ReadFile(filename)
-			if err != nil {
-				data = []byte("")
-			}
-			c.JSON(http.StatusOK, gin.H{
-				"version":   version.GetVersion(),
-				"changelog": string(data),
-			})
-		})
-
 		// system — data directory auto-sync & version check
 		system := v1.Group("/system")
 		system.Use(setupIdentityMiddleware(identityService, identityPolicy), identity.RequirePasswordChangeCompleted(), identity.RequireCSRF(identityPolicy))
@@ -311,6 +298,19 @@ func RunWebServer(options *version.Options) {
 // 配置身份认证中间件
 func setupIdentityMiddleware(service *identity.Service, policy identity.CookiePolicy) gin.HandlerFunc {
 	return identity.Authenticate(service, policy)
+}
+
+func registerPublicRoutes(group *gin.RouterGroup, brandService *platformbrand.Service) {
+	public := group.Group("/public")
+	public.GET("/brand", func(c *gin.Context) {
+		view, err := brandService.GetPublic(c.Request.Context())
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "brand request failed"})
+			return
+		}
+		c.JSON(http.StatusOK, view)
+	})
+	group.GET("/version", HandleSafeVersion)
 }
 
 func registerPlatformGovernanceRoutes(
