@@ -1,114 +1,32 @@
 # AI 安全治理平台功能清单
 
-> 当前文件先固化功能清单的编写范围与结构；完成代码、API 和项目状态核验后，将在同一文件中补齐正式功能内容。
+本清单面向产品、客户和管理人员，按用户可获得的结果盘点当前平台能力，并以运行入口和行为验证证据区分“已实现”“部分实现”“待修”和“待开发”。它与[产品需求文档](prd.md)、[项目状态](../project/status.md)和[API 参考](../api/reference.md)互相补充，不以路由声明、数据结构、配置项、页面占位或设计稿替代交付证据。
 
-## 文档目标
+## 产品能力总览
 
-本清单面向产品、客户和管理人员，以产品能力而非代码或接口为主要表达方式，完整说明平台当前已经实现的功能。它不替代 [产品需求文档](prd.md)、[项目状态](../project/status.md) 或 [API 参考](../api/reference.md)。
+平台把 AI 安全工作组织成一条可治理、可追溯的闭环：管理员先完成账号、角色、模型、品牌、规则和运行环境治理；用户在本人权限范围内选择扫描能力、提交目标和私有附件；受认证 Agent 获取任务并调用对应扫描组件；平台将事件与结果绑定到可信任务归属，在取消、断连、重试和恢复并发下收敛到唯一可信状态；可信成功结果随后固化为不可变报告快照，供在线详情、PDF、30 日趋势和审计追踪共同使用。
 
-## 收录原则
+本清单是后端、API、CLI、Agent、Python 扫描组件、规则数据与部署能力的库存，不表示独立、可维护的企业控制台前端已经重建。当前仓库仍保留旧嵌入式 Web 产物；企业控制台重构在 `OPS-04` 中明确列为待开发。
 
-- 只有通过当前支持的运行入口能够实际使用，并且具有自动化测试或环境验收证据的能力，才能列为“已实现”。
-- 路由声明、数据结构、配置项、页面占位和需求描述只能作为佐证，不能单独证明产品能力已经交付。
-- 交付状态与兼容属性分开记录；兼容旧接口、旧数据或历史工作流不等于对应能力已完整交付。
-- 已完成设计但尚未实现的能力不得列入已实现清单。
-- 企业控制台前端重构、完整 OpenAPI 单一生成源和正式发布候选必须保留为“待开发”。
-- 不在产品总览中展示 Token、密钥、内部路径、数据库字段等敏感或过细实现信息。
+## 角色能力总览
 
-### 交付状态
+| 角色 | 可承担的职责 | 明确边界 |
+| --- | --- | --- |
+| 普通用户 | 拥有、扫描并查看本人受治理的任务、私有附件、私有模型和报告，可使用管理员授权的全局模型与只读知识数据 | 不查看或操作其他所有者的私有资源，不进入全局治理入口 |
+| 安全审计员 | 全局只读查看任务、脱敏报告、趋势和审计记录，可在授权范围内导出不可变报告 | 一期目标禁止读取或下载任何原始附件；当前实现与目标的偏差由 `FILE-06` 标记为待修 |
+| 系统管理员 | 治理用户与角色、模型、规则、品牌、任务恢复、报告补建和系统数据，可全局查看任务、报告与审计 | 跨所有者原始附件只允许用于目标治理场景，并须形成持久、脱敏审计；当前缺口同样由 `FILE-06` 记录 |
+| 运维交付人员 | 执行迁移、部署、运行校验、镜像与发布交付，并配置内部 Agent 凭据和附件限额 | 不冒充业务所有者，不以运维身份绕过会话、角色或资源所有权边界 |
+
+## 盘点口径
 
 | 状态 | 判定标准 |
 | --- | --- |
-| 已实现 | 当前支持的入口可达，核心行为已有自动化测试或环境验收，且没有已知未关闭的产品边界阻断该能力。 |
-| 部分实现 | 能力簇已有可用主路径，但仍有明确子能力、角色边界或验收项未完成。 |
-| 待修 | 运行行为存在，但有已确认的安全、权限、一致性或交付缺口，不能按完整能力对外承诺。 |
-| 待开发 | 只有需求、设计、接口声明或页面占位，尚无受支持的可用运行行为。 |
+| 已实现 | 当前支持的入口可达，核心行为已有自动化测试或环境验收，且没有已知未关闭边界阻断该能力 |
+| 部分实现 | 主路径可用，但仍有明确子能力、角色边界或验收项未完成 |
+| 待修 | 运行行为存在，但有已确认的安全、权限、一致性或交付缺口，不能按完整能力承诺 |
+| 待开发 | 只有需求、设计、声明或占位，尚无受支持的可用运行行为 |
 
-### 兼容属性
-
-| 属性 | 含义 |
-| --- | --- |
-| 原生能力 | 当前平台直接提供并维护的能力。 |
-| 兼容保留 | 为旧接口、旧数据或旧工作流保留的受控兼容能力。 |
-| 退役边界 | 已明确停止作为当前入口，只保留迁移说明或历史上下文。 |
-
-若代码、测试、项目状态、PRD 或 API 文档对交付结论存在冲突，必须采用更保守的状态并记录冲突；先修正权威文档和验证证据，不得仅凭其中一个来源提升为“已实现”。
-
-## 计划结构
-
-正式功能清单按以下模块组织：
-
-1. 身份、会话与密码
-2. 用户、角色与权限
-3. 模型与密钥治理
-4. 扫描类型与安全检测
-5. 任务管理
-6. Agent 接入与运行
-7. 附件管理
-8. 规则与知识库
-9. 风险报告、趋势与 PDF
-10. 品牌配置
-11. 审计、恢复与安全防护
-12. 数据迁移、部署与运维
-
-文档末尾补充典型使用流程、兼容保留能力、尚未交付边界和维护规则。
-
-### 功能矩阵字段
-
-每个原子能力或边界一致的能力簇单独占一行，使用统一字段：
-
-| 字段 | 用途 |
-| --- | --- |
-| 编号 | 稳定的功能编号，用于状态更新和证据追溯。 |
-| 功能模块 | 对应上述 12 个模块之一。 |
-| 功能能力 | 用产品语言描述用户能够完成的动作或获得的结果。 |
-| 用户价值 | 说明该能力解决的问题。 |
-| 适用角色 | 普通用户、安全审计员、系统管理员或运维交付人员。 |
-| 交付入口 | Web/API、CLI、Agent、Python 扫描组件、规则数据或部署配置。 |
-| 交付状态 | `已实现`、`部分实现`、`待修` 或 `待开发`。 |
-| 兼容属性 | `原生能力`、`兼容保留` 或 `退役边界`。 |
-| 证据编号 | 指向文末证据索引，不在主表堆叠代码细节。 |
-
-### 能力与证据编号约定
-
-能力编号使用“模块前缀-两位序号”的稳定格式。编号一经分配后永不复用；能力拆分时保留原编号作为历史或退役编号，为拆分后的能力分配新编号，并在证据索引中说明关联关系。
-
-固定模块前缀见下表：
-
-| 固定模块前缀 |
-| --- |
-| `ID` 身份与会话 |
-| `RBAC` 用户与权限 |
-| `MODEL` 模型治理 |
-| `SCAN` 扫描检测 |
-| `TASK` 任务 |
-| `AGENT` Agent |
-| `FILE` 附件 |
-| `KB` 规则知识库 |
-| `REPORT` 报告 |
-| `BRAND` 品牌 |
-| `AUDIT` 审计恢复 |
-| `OPS` 迁移部署 |
-
-每个能力行的证据编号固定为 `E-<能力编号>`，例如 `SCAN-01` 对应 `E-SCAN-01`；主矩阵仅引用该编号。证据索引中的每个 `E-<能力编号>` 都必须说明当前受支持的运行入口，以及自动化测试或环境验收的验证来源；路由、Schema、配置和需求文档仅可作为附加佐证。
-
-### 全量盘点输入
-
-盘点必须覆盖以下受支持入口，避免只根据 HTTP 路由判断平台范围：
-
-- Go Web 服务的已注册平台、管理、知识库和兼容路由；
-- CLI 命令、数据库迁移和运行时校验；
-- Agent 连接、认证、任务协议和内部附件传输；
-- `cmd/agent` 实际注册的扫描任务以及三个 Python 扫描组件的生产入口；
-- 指纹、漏洞、MCP、提示词评测和 Agent 配置等规则与知识库数据；
-- Docker Compose、镜像、发布工作流和部署文档；
-- 与上述能力对应的自动化测试、故障测试和环境验收记录。
-
-“未注册”是指能力没有被当前支持的 CLI、Web 服务、Agent 任务注册或交付编排暴露，不能仅因仓库中存在常量、脚本或测试夹具而列为已交付。
-
-### 证据索引
-
-正式清单在文末维护紧凑证据索引。每个证据编号至少说明受支持的交付入口和行为验证来源；路由、Schema、配置和需求文档只能作为附加佐证。
+交付状态与兼容属性分开记录：“原生能力”由当前平台直接提供，“兼容保留”只为旧接口、旧数据或旧工作流提供受控过渡，“退役边界”不再是当前入口。主矩阵中的证据编号固定为 `E-<能力编号>`；已实现项必须同时具备受支持入口与行为验证，未注册能力不会因仓库中存在常量、脚本或夹具而被视为已交付。
 
 ## 功能矩阵
 
@@ -172,10 +90,115 @@
 | OPS-05 | 数据迁移、部署与运维 | 完整 OpenAPI 单一生成源 | 在继续同步当前 YAML、JSON 和 Go 内嵌 Swagger 三件套的同时，建立覆盖全部平台路由的唯一规格源与可复现生成流程 | 系统管理员、运维交付人员 | API 规格/生成流程 | 待开发 | 原生能力 | E-OPS-05 |
 | OPS-06 | 数据迁移、部署与运维 | 正式发布候选 | 完成全量端到端、安全回归、目标环境部署、容量基线和发行材料验收，形成可正式交付的发布候选 | 系统管理员、运维交付人员 | 发布包/部署验收 | 待开发 | 原生能力 | E-OPS-06 |
 
-## 完成标准
+## 典型使用流程
 
-- 每个“已实现”条目都同时具有受支持的运行入口证据和自动化测试或环境验收证据；代码、API、Schema、配置和需求声明只能作为附加佐证。
-- 普通用户、安全审计员和系统管理员的权限边界表述与当前实现一致。
-- 扫描能力覆盖 Go 主应用、Agent 以及现有 Python 扫描组件，但不把未注册能力写成已交付。
-- 文档加入 `docs/README.md` 的“项目与产品”入口，并将 `docs/product/features.md` 加入布局脚本的必需路径。
-- 运行 `scripts/check-docs-layout.ps1`、`go test ./internal/apidocs -count=1`，以及 `docker run --rm -v "${PWD}:/input" -w /input lycheeverse/lychee:0.24.2 --offline --no-progress "docs/**/*.md" "README.md" "readme/*.md"`；三项均通过后才算完成。
+1. **管理员初始化与模型治理**：运维交付人员先运行显式迁移、配置服务和内部 Agent 凭据，并通过本地入口建立首个管理员；管理员完成强制改密、创建用户与角色、维护全局模型或授权私有模型，密钥只以受保护形式保存和展示。
+2. **用户提交含私有附件的任务**：普通用户登录后选择本人获准模型，通过完整或分片上传取得不可推断的附件 ID，再以可重试的幂等请求提交扫描；平台从会话确定所有者，只允许绑定同一所有者且已完成上传的附件。
+3. **受认证 Agent 执行与回传**：Agent 使用独立内部凭据建立连接，领取与自身分配关系匹配的任务，按任务类型调用 Go 或 Python 扫描组件；附件传输、事件和结果回传均需匹配可信任务或旧引擎会话，不能由浏览器身份头替代认证。
+4. **可信结果固化与展示**：平台仅依据可信成功终态和持久结果生成唯一不可变快照；在线详情、PDF 和 30 日 UTC 趋势共同消费该快照，PDF 仅在已配置水印时应用水印，后续品牌变化不改写历史报告。
+5. **审计员全局只读审阅**：安全审计员可全局查看任务、脱敏报告、趋势和审计记录，并按授权导出报告；一期目标不允许其查看或下载原始附件，当前实现偏差见 `FILE-06`。
+6. **管理员恢复与补建**：任务完成、报告生成或审计投递因短暂故障未完全收敛时，后台按有界批次重试；管理员可从可信成功任务的持久结果补建缺失报告或处理需治理的恢复项，重复与并发执行仍收敛为单一终态和单一快照。
+
+## 兼容与退役边界
+
+- YAML 模型仅以只读方式兼容；平台模型不能遮蔽其 ID，也不能通过兼容写操作回落到旧明文存储。
+- 旧模型 API 是受当前会话、角色、加密存储和审计约束的治理兼容门面，不代表旧的按用户名或明文模型工作流仍受支持。
+- 旧浏览器任务创建、列表或详情、状态、结果、SSE、整文件上传、分片上传和合并入口均先经过会话、强制改密及适用的 CSRF 安全链，再按相应路由返回 `410 Gone`；客户端应迁移到平台任务与附件入口。
+- 旧公开图片交付路径未在当前服务注册，不得作为附件公开访问或兼容下载入口。
+- 历史日文 API 说明已归档在 `docs/archive/legacy-api/`，只提供历史上下文，不定义当前产品契约。
+- Agent WebSocket 以及 Agent 内部附件上传、下载属于服务间协议，不是浏览器 API；三者都要求独立内部 Token，Cookie 或浏览器自报身份不能替代该凭据。
+
+## 尚未交付
+
+`SCAN-06` 的现有边界是“部分实现”：在部分透明或透传代理场景中，已有 Dify 基础规则和通用多路径、响应体、Header、Icon 等信号可能识别后端应用，但没有代理拓扑、代理层/应用层分层、专项置信度或复杂代理回归保证。以下项目在完成条件满足前均不得升级为完整交付：
+
+| 编号 | 待交付能力 | 用户价值 | 完成条件 |
+| --- | --- | --- | --- |
+| `OPS-04` | 企业控制台前端重构 | 让四类角色通过可维护、角色化的企业工作台使用现有平台能力 | 形成经评审实施计划，交付可维护前端源码并覆盖登录、治理、任务、报告和审计主流程，通过角色、安全与端到端验收后替换旧嵌入式产物 |
+| `OPS-05` | 完整 OpenAPI 单一生成源 | 让客户端、测试与人读契约从同一权威规格稳定生成 | 单一规格覆盖全部受支持平台路由，能可复现生成并校验 YAML、JSON 和 Go 内嵌产物，迁移期间不破坏现有运行时三件套 |
+| `OPS-06` | 正式发布候选 | 给目标环境提供可签收的质量、容量和发行依据 | 完成全量端到端与安全回归、目标环境部署、容量基线、离线或升级验证及发行材料签收 |
+| `FILE-06` | 附件权限纠正 | 防止只读审计角色接触原始输入，并让管理员跨所有者治理可追责 | 服务端拒绝审计员读取全部原始附件；管理员仅在治理场景访问且成功、失败均写入持久脱敏审计；补齐角色矩阵越权回归和契约文档 |
+| `SCAN-07` | 代理层与应用层分层结果 | 区分边缘代理与真实业务组件，减少混淆和误报 | 建立代理拓扑与分层结果模型，覆盖代表性代理组合的回归夹具，并在扫描结果和报告中稳定展示两层证据 |
+| `SCAN-08` | Dify 证据聚合、置信度与版本范围增强 | 在复杂部署下给出可解释、可比较的 Dify 识别结论 | 实现 Dify 专项多信号聚合、置信度和精确版本或范围规则，覆盖透传、隐藏 Header、静态资源变化等回归场景并接入报告 |
+
+## 证据索引
+
+- **E-ID-01**：运行入口——平台认证 API 的登录、退出与当前服务端会话；验证来源——`internal/platform/identity/service_test.go` 和 `internal/platform/identity/middleware_test.go` 的认证、会话与认证路由行为测试。
+- **E-ID-02**：运行入口——平台认证 API 的改密与强制改密安全链；验证来源——`internal/platform/identity/service_test.go` 的首次或重置后改密测试及 `internal/platform/identity/middleware_test.go` 的业务入口阻断测试。
+- **E-ID-03**：运行入口——本地密码重置 CLI 与认证 API 的重置确认；验证来源——`cmd/cli/main_test.go` 的一次性令牌交付测试和 `internal/platform/identity/middleware_test.go` 的重置、会话撤销与不泄露测试。
+- **E-ID-04**：运行入口——所有受保护 Web/API 的服务端会话 Cookie；验证来源——`internal/platform/identity/service_test.go` 的哈希存储、轮换和撤销测试，以及 `internal/platform/identity/middleware_test.go` 的过期、HTTPS 与 Cookie 策略测试。
+- **E-RBAC-01**：运行入口——平台管理员用户管理 API；验证来源——`internal/platform/admin/handler_test.go` 的用户生命周期、角色守卫与审计一致性测试。
+- **E-RBAC-02**：运行入口——平台管理员用户启停和角色调整 API；验证来源——`internal/platform/admin/handler_test.go` 的管理员变更测试与 `internal/platform/identity/service_concurrency_test.go` 的并发身份更新测试。
+- **E-RBAC-03**：运行入口——平台任务、报告、模型、知识库和审计 API；验证来源——`common/websocket/resource_authorization_integration_test.go`、`internal/platform/reports/service_export_test.go` 和 `internal/platform/audit/service_test.go` 的所有者及全局只读角色测试。
+- **E-RBAC-04**：运行入口——受保护的 Cookie Web/API；验证来源——`internal/platform/identity/middleware_test.go` 的伪造身份头、角色、CSRF 和安全 Cookie 测试，以及 `common/websocket/route_security_test.go` 的生产安全链测试。
+- **E-MODEL-01**：运行入口——平台模型治理 API；验证来源——`internal/platform/models/service_test.go` 的认证加密与密钥轮换测试，以及 `common/websocket/platform_governance_integration_test.go` 的响应掩码和治理集成测试。
+- **E-MODEL-02**：运行入口——平台模型 API 与 Agent 任务模型解析器；验证来源——`internal/platform/models/resolver_test.go` 的所有者、授权、禁用和撤销测试，以及 `common/websocket/resource_authorization_integration_test.go` 的模型角色矩阵测试。
+- **E-MODEL-03**：运行入口——未显式指定模型的任务提交与 Agent 解析；验证来源——`internal/platform/models/resolver_test.go` 的最新获授权默认模型选择测试。
+- **E-MODEL-04**：运行入口——平台模型目录、只读 YAML 配置与旧模型 API 兼容门面；验证来源——`common/websocket/legacy_model_compatibility_test.go` 的加密存储、只读和 ID 冲突测试，以及 `cmd/cli/migrate_legacy_models_test.go` 的原子迁移测试。
+- **E-SCAN-01**：运行入口——Go 扫描 CLI、平台任务 API 和已注册 AI 基础设施 Agent 任务；验证来源——`common/runner/runner_test.go` 的扫描执行测试和 `common/agent/tasks_test.go` 的 AI 基础设施任务行为测试。
+- **E-SCAN-02**：运行入口——平台任务 API、已注册 MCP Agent 任务与 `mcp-scan` 生产入口；验证来源——`common/agent/tasks_test.go` 的 URL/代码两类 MCP 执行测试、`internal/mcp/plugins_test.go` 和 `mcp-scan/pytests/` 的解析与文件边界测试。
+- **E-SCAN-03**：运行入口——平台任务 API、已注册 Agent 工作流任务与 `agent-scan` 生产入口；验证来源——`agent-scan/test_websocket_provider.py` 和 `agent-scan/test_llm_error_handling.py` 的工作流连接、终止信号与失败重试测试。
+- **E-SCAN-04**：运行入口——平台任务 API、已注册模型红队 Agent 任务与 `AIG-PromptSecurity` 生产入口；验证来源——`common/agent/tasks_test.go` 的模型红队报告执行测试及 `cmd/agent/main.go` 的生产任务注册核对。
+- **E-SCAN-05**：运行入口——CLI/API/Agent 通用 Web 扫描和指纹规则引擎；验证来源——`common/fingerprints/preload/preload_test.go`、`version_detection_test.go`、`version_range_test.go` 与 `common/runner/runner_test.go` 的多路径匹配和精确或模糊版本行为测试。
+- **E-SCAN-06**：运行入口——通用 Web 扫描的多路径、响应体、Header、Icon 和现有 Dify 基础规则；验证来源——`common/fingerprints/preload/` 的通用匹配及版本测试与 `data/fingerprints/dify.yaml` 的当前规则核对；现状限制——没有代理专项回归、代理拓扑识别、分层结果或统一置信度保证。
+- **E-SCAN-07**：运行入口——无（尚未交付）；验证来源——扫描结果模型、报告映射与现有回归夹具的缺口核对，以及 `docs/product/prd.md` 的分层目标；现状限制——尚无代理层和应用层拓扑模型、代表性回归或报告展示。
+- **E-SCAN-08**：运行入口——无（尚未交付）；验证来源——当前 Dify 基础规则、通用版本测试与 `docs/product/prd.md` 的专项增强目标对照；现状限制——尚无 Dify 专项证据聚合、置信度、版本范围策略和复杂代理场景回归。
+- **E-TASK-01**：运行入口——平台任务创建 API；验证来源——`internal/platform/tasks/service_test.go` 的并发幂等、稳定所有者和唯一分发测试，以及 `handler_test.go` 的会话主体与幂等键测试。
+- **E-TASK-02**：运行入口——平台任务列表、详情、状态与结果 API；验证来源——`internal/platform/tasks/service_test.go` 和 `handler_test.go` 的普通用户所有者过滤、审计员全局只读与纯读行为测试。
+- **E-TASK-03**：运行入口——平台任务取消 API、后台交付与 Agent 事件链；验证来源——`internal/platform/tasks/service_test.go` 和 `common/websocket/platform_task_adapter_test.go` 的终态竞争、持久交付预算、未知确认与可信状态收敛测试。
+- **E-TASK-04**：运行入口——旧浏览器任务、状态、结果、SSE 与上传兼容路径；验证来源——`common/websocket/route_security_test.go` 的认证、强制改密、CSRF 和 `410 Gone` 行为测试，以及 `server_rbac_test.go` 的生产注册合同测试。
+- **E-AGENT-01**：运行入口——内部 Agent WebSocket 握手；验证来源——`common/websocket/agent_security_test.go` 和 `common/agent/agent_test.go` 的缺失凭据失败关闭、独立 Token 握手及不泄露测试。
+- **E-AGENT-02**：运行入口——Agent 注册与连接管理；验证来源——`common/websocket/agent_security_test.go` 的顺序和并发重复 Agent ID 拒绝测试，以及 `common/websocket/platform_task_adapter_test.go` 的陈旧连接安全清理测试。
+- **E-AGENT-03**：运行入口——Agent 任务分配、事件和结果回传协议；验证来源——`common/websocket/platform_task_adapter_test.go` 的认证连接、引擎会话和当前分配三重归属测试。
+- **E-AGENT-04**：运行入口——Agent 断连清理与平台任务恢复链；验证来源——`common/websocket/platform_task_adapter_test.go` 的断连失败、脱敏原因、单向终态和防重复下发测试。
+- **E-FILE-01**：运行入口——平台任务附件完整上传 API；验证来源——`internal/platform/tasks/service_test.go` 的私有、有界、所有者派生测试和 `handler_test.go` 的不可推断元数据及存储路径不外泄测试。
+- **E-FILE-02**：运行入口——平台任务附件分片开始、分片上传与合并 API；验证来源——`internal/platform/tasks/service_test.go` 的单片、累计大小、缺片、声明大小和合并清理测试。
+- **E-FILE-03**：运行入口——平台附件下载与任务创建附件绑定；验证来源——`internal/platform/tasks/handler_test.go` 的普通用户跨所有者下载拒绝测试及 `service_test.go` 的同所有者完成态附件绑定测试；现状边界——这些证据证明普通用户所有者路径，特权角色偏差见 `FILE-06`。
+- **E-FILE-04**：运行入口——Agent 内部制品上传与任务附件下载；验证来源——`common/websocket/route_security_test.go` 的独立 Token 和精确绑定测试；现状边界——上传绑定可信且运行中的平台任务及引擎会话，下载绑定所请求旧任务会话的附件清单，两者不是同一种绑定模型。
+- **E-FILE-05**：运行入口——通过安全链保留的旧浏览器上传兼容路径；验证来源——`common/websocket/route_security_test.go` 的退役上传 `410 Gone` 测试，以及 `common/websocket/server.go` 的生产路由清单对旧公开图片路径未注册的核对。
+- **E-FILE-06**：运行入口——现有平台附件读取与下载入口；验证来源——`internal/platform/tasks/service.go` 的当前特权角色判断与 `docs/product/prd.md` 的一期权限合同对照；现状限制——审计员仍可跨所有者读取，管理员跨所有者访问也未具备目标要求的专用持久脱敏审计，因此状态为待修。
+- **E-KB-01**：运行入口——受保护的指纹知识 API 与 `data/fingerprints` 规则数据；验证来源——`internal/platform/knowledge/service_test.go`、`common/websocket/knowledge_governance_test.go` 和 `server_rbac_test.go` 的只读角色、管理员治理与审计测试。
+- **E-KB-02**：运行入口——中文漏洞知识 API 及中英文漏洞数据同步清单；验证来源——`internal/platform/knowledge/service_test.go` 的受审计治理测试与 `common/websocket/update_api_test.go` 的选择性数据同步测试；现状限制——英文漏洞数据存在并可同步，但没有已注册的分语言读取或编辑 API。
+- **E-KB-03**：运行入口——评测规则与提示词集合知识 API；验证来源——`internal/platform/knowledge/handler_test.go` 的受治理写入、异步完成和恢复测试，以及 `common/websocket/server_rbac_test.go` 的角色保护合同测试。
+- **E-KB-04**：运行入口——MCP 数据、Agent 配置和越狱规则知识 API；验证来源——`internal/platform/knowledge/service_test.go` 与 `common/websocket/server_rbac_test.go` 的管理员写入和全角色受控读取测试；现状限制——越狱规则仅有读取入口，没有专用编辑入口，也不扩展未注册扫描类型。
+- **E-KB-05**：运行入口——系统数据同步、同步状态与应用版本检查 API；验证来源——`common/websocket/update_api_test.go`、`version_api_test.go` 和 `internal/platform/knowledge/handler_test.go` 的同步选择、版本比较及异步治理恢复测试；现状限制——尚无可持久追踪的规则数据版本标识，应用版本不能替代规则版本。
+- **E-REPORT-01**：运行入口——可信任务成功处理与平台报告服务；验证来源——`internal/platform/tasks/report_snapshot_test.go`、`report_snapshot_postgres_test.go` 和 `internal/platform/reports/repository_test.go` 的事务一致、唯一和不可变快照测试。
+- **E-REPORT-02**：运行入口——可信成功结果到安全报告快照的映射；验证来源——`internal/platform/reports/risk_test.go` 和 `technical_findings_test.go` 的四类生产结构白名单、凭据模式和私有路径脱敏测试；适用边界——只覆盖白名单字段、已识别模式及常见用户私有路径，不代表任意输入都能绝对脱敏。
+- **E-REPORT-03**：运行入口——平台报告列表与详情 API；验证来源——`internal/platform/reports/service_export_test.go` 和 `handler_test.go` 的所有者先过滤、全局只读角色、安全摘要及敏感字段不出线测试。
+- **E-REPORT-04**：运行入口——平台报告趋势 API；验证来源——`internal/platform/reports/snapshot_test.go` 和 `repository_test.go` 的所有者过滤、含当日 30 日 UTC 自然日窗口与服务端安全列投影测试。
+- **E-REPORT-05**：运行入口——平台报告详情与 PDF 导出 API；验证来源——`internal/platform/reports/pdf_test.go` 和 `service_export_test.go` 的嵌入中文字体、多页排版、同快照重试及导出审计测试；适用边界——水印仅在快照品牌已配置水印时应用。
+- **E-REPORT-06**：运行入口——管理员报告补建 API 与后台完成结果恢复；验证来源——`internal/platform/reports/backfill_test.go`、`internal/platform/tasks/completed_task_source_test.go` 和 `common/websocket/platform_task_recovery_test.go` 的可信来源、幂等与并发恢复测试。
+- **E-BRAND-01**：运行入口——平台品牌读取与管理员更新 API；验证来源——`internal/platform/brand/service_test.go`、`handler_test.go` 和 `governed_test.go` 的产品名、主色、Logo 实际格式、尺寸、像素、MIME、水印与角色治理测试。
+- **E-BRAND-02**：运行入口——品牌治理 API 与报告快照生成；验证来源——`internal/platform/tasks/report_snapshot_test.go` 和 `internal/platform/reports/snapshot_test.go` 的历史品牌冻结测试，以及 `internal/platform/brand/governed_test.go` 的持久审计测试。
+- **E-AUDIT-01**：运行入口——用户、模型、知识、品牌、任务、报告等治理服务的审计链；验证来源——`internal/platform/audit/service_test.go` 和 `ready_queue_test.go` 的 pending、completion、outbox、失败补偿与幂等对账测试。
+- **E-AUDIT-02**：运行入口——平台 API、Agent 任务分发与运行日志；验证来源——`internal/platform/reports/technical_findings_test.go`、`common/websocket/task_dispatch_log_test.go` 和 `common/agent/attachment_log_test.go` 的结构化凭据、自由文本、私有路径及任务载荷最小化测试。
+- **E-AUDIT-03**：运行入口——后台任务完成恢复与管理员报告补建；验证来源——`internal/platform/tasks/service_test.go`、`common/websocket/server_recovery_test.go` 和 `platform_task_recovery_test.go` 的有界批次、单项超时、后续重试及并发收敛测试。
+- **E-AUDIT-04**：运行入口——受保护平台 API 与主服务启动校验；验证来源——`internal/platform/identity/middleware_test.go`、`internal/platform/audit/service_test.go` 和 `pkg/database/runtime_schema_test.go` 的服务端授权、审计员只读及运行期无 DDL 测试；现状边界——原始附件的已知权限缺口单独记录在 `FILE-06`。
+- **E-OPS-01**：运行入口——数据库迁移 CLI 与主服务启动；验证来源——`pkg/database/migrate_cli_test.go`、`migrate_test.go` 和 `runtime_schema_test.go` 的版本化幂等迁移、并发串行及运行时只读拒绝测试。
+- **E-OPS-02**：运行入口——根目录源码构建与预构建镜像 Compose、迁移 CLI、Web 服务和 Agent；验证来源——两个根目录 Compose 的 PostgreSQL、一次性迁移、主服务和 Agent 全栈定义，以及 `common/websocket/agent_security_test.go` 和 `internal/platform/tasks/service_test.go` 的内部凭据与附件限额测试；适用边界——`deploy/compose/docker-compose.postgres.yml` 只是最小迁移基线，不作为全栈交付入口。
+- **E-OPS-03**：运行入口——主服务多架构镜像与版本发布工作流；验证来源——`.github/workflows/docker-publish.yml`、`.github/workflows/create-release.yml` 和 `internal/platform/reports/license_packaging_test.go` 的双架构、发布归档、字体许可和固定 PDF 渲染依赖 notices 随包合同测试；适用边界——许可随包范围是主服务镜像与发布包，不扩展为 Agent 镜像的 PDF 能力声明。
+- **E-OPS-04**：运行入口——无（尚未交付）；验证来源——`docs/project/status.md` 与 `docs/architecture/enterprise-console.md` 对“设计已完成、实施计划和实现待开发”的一致记录；现状限制——现有旧嵌入式产物不能证明企业控制台已重建。
+- **E-OPS-05**：运行入口——无（尚未交付）；验证来源——`docs/project/status.md` 的缺口记录与 `internal/apidocs/swagger_sync_test.go` 对现有 YAML、JSON、Go 内嵌三件套同步范围的合同检查；现状限制——当前尚无覆盖全部平台路由的单一权威生成源。
+- **E-OPS-06**：运行入口——无（尚未交付）；验证来源——`docs/project/status.md` 和 `docs/product/prd.md` 对端到端、安全回归、目标环境、容量和发行验收尚未完成的状态记录；现状限制——现有镜像与发布工作流不等同于正式发布候选签收。
+
+## 维护与验收
+
+- 能力编号一经分配永不复用；能力拆分时保留原编号作为历史或退役编号，并为新能力分配新编号。证据编号始终为 `E-<能力编号>`。
+- 代码、测试、PRD、项目状态或 API 文档冲突时采用更保守状态：已实现项失去入口、行为验证或出现未关闭边界时必须降级；只有修正权威文档并取得新的运行与验证证据后才能升级。
+- 每次变更必须保持 57 个现有能力编号与证据一一对应、12 个模块仍在正式矩阵中，并检查无重复能力、重复证据或孤儿证据。
+- 目录发布验收必须执行以下命令；涉及 API、数据、Python 或部署实现的后续改动还须按仓库 `AGENTS.md` 增加对应范围测试。
+
+```powershell
+$text = Get-Content -LiteralPath docs/product/features.md -Raw
+$ids = [regex]::Matches($text, '^\| ([A-Z]+-[0-9]+) \|', 'Multiline') | ForEach-Object { $_.Groups[1].Value }
+$evidence = [regex]::Matches($text, '(?m)^- \*\*E-([A-Z]+-[0-9]+)\*\*：.*运行入口——.*验证来源——') | ForEach-Object { $_.Groups[1].Value }
+if ($ids.Count -ne 57 -or ($ids | Sort-Object -Unique).Count -ne 57) { throw '功能编号数量或唯一性错误' }
+if ($evidence.Count -ne 57 -or ($evidence | Sort-Object -Unique).Count -ne 57) { throw '证据编号数量或唯一性错误' }
+if (Compare-Object ($ids | Sort-Object) ($evidence | Sort-Object)) { throw '功能与证据编号不一致' }
+
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts/check-docs-layout.ps1
+go test ./internal/apidocs -count=1
+docker run --rm -v "${PWD}:/input" -w /input lycheeverse/lychee:0.24.2 --offline --no-progress "docs/**/*.md" "README.md" "readme/*.md"
+git diff --check
+rg -n 'sk-[A-Za-z0-9_-]{12,}|Bearer\s+[A-Za-z0-9._-]{16,}|AKIA[0-9A-Z]{16}|BEGIN (RSA |EC |OPENSSH )?PRIVATE KEY|[A-Za-z]:\\\\|/(home|Users)/' docs/product/features.md
+```
