@@ -343,7 +343,7 @@ $matrixRows = @(
 $actualIDs = @($matrixRows | ForEach-Object ID)
 $actualModules = @($matrixRows | ForEach-Object Module | Sort-Object -Unique)
 $actualEvidenceColumnIDs = @($matrixRows | ForEach-Object EvidenceID)
-$evidenceMatches = @([regex]::Matches($evidenceText, '(?m)^- \*\*E-([A-Z]+-[0-9]+)\*\*：[^\r\n]*运行入口——[^\r\n]*验证来源——[^\r\n]*$'))
+$evidenceMatches = @([regex]::Matches($evidenceText, '(?m)^- \*\*E-([A-Z]+-[0-9]+)\*\*：[^\r\n]*运行入口——[^\r\n]*验证来源——[^\r\n]*\r?$'))
 $actualEvidenceIDs = @($evidenceMatches | ForEach-Object { $_.Groups[1].Value })
 
 if ($matrixRows.Count -ne 57) {
