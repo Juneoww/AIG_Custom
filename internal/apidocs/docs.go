@@ -31,6 +31,136 @@ const docTemplate = `{
     },
     "basePath": "/",
     "paths": {
+        "/api/v1/auth/csrf": {
+            "get": {
+                "description": "This anonymous double-submit CSRF initialization creates no session and sets an aig_csrf cookie at Path=/ with Secure in production, HttpOnly=false, and SameSite=Lax, then returns the same value as csrf_token. Send that value as X-CSRF-Token on unsafe methods.",
+                "produces": [
+                    "application/json"
+                ],
+                "responses": {
+                    "200": {
+                        "description": "Anonymous CSRF token and matching cookie.",
+                        "headers": {
+                            "Set-Cookie": {
+                                "description": "aig_csrf double-submit cookie.",
+                                "type": "string"
+                            }
+                        },
+                        "schema": {
+                            "$ref": "#/definitions/identity.CSRFResponse"
+                        }
+                    },
+                    "426": {
+                        "description": "HTTPS is required by the production Cookie policy."
+                    },
+                    "500": {
+                        "description": "Secure token generation failed; no internal detail is returned."
+                    }
+                },
+                "summary": "Initialize anonymous browser CSRF state",
+                "tags": [
+                    "identity"
+                ]
+            }
+        },
+        "/api/v1/auth/me": {
+            "get": {
+                "description": "Restores the current server-derived Cookie-session Subject. This safe method is deliberately reachable before the password-change completion gate so the browser can read must_change_password. Browser identity headers are ignored.",
+                "produces": [
+                    "application/json"
+                ],
+                "responses": {
+                    "200": {
+                        "description": "Current authenticated Subject.",
+                        "schema": {
+                            "$ref": "#/definitions/identity.CurrentSubjectResponse"
+                        }
+                    },
+                    "401": {
+                        "description": "Missing, expired, revoked, or invalid session Cookie."
+                    },
+                    "426": {
+                        "description": "HTTPS is required by the production Cookie policy."
+                    }
+                },
+                "summary": "Get the current browser Subject",
+                "tags": [
+                    "identity"
+                ]
+            }
+        },
+        "/api/v1/platform/dashboard": {
+            "get": {
+                "description": "Returns one Subject-scoped dashboard snapshot. Users aggregate only their own reports and tasks; auditors and administrators receive the global scope. The trend contains exactly 30 UTC calendar-day buckets including today, and recent tasks/attention are capped at five. Empty state is has_data=false, security_score=null, zero risk counts, 30 zero-filled buckets, and empty attention; it is never represented as score 100.",
+                "produces": [
+                    "application/json"
+                ],
+                "responses": {
+                    "200": {
+                        "description": "Governed dashboard snapshot.",
+                        "schema": {
+                            "$ref": "#/definitions/dashboard.View"
+                        }
+                    },
+                    "401": {
+                        "description": "Unauthenticated."
+                    },
+                    "403": {
+                        "description": "Password change is incomplete or the Subject role is unsupported."
+                    },
+                    "500": {
+                        "description": "Dashboard aggregation failed; internal details are not exposed."
+                    }
+                },
+                "summary": "Get governed enterprise dashboard",
+                "tags": [
+                    "platform-dashboard"
+                ]
+            }
+        },
+        "/api/v1/public/brand": {
+            "get": {
+                "description": "Anonymous exact safe brand projection. It returns only product_name, primary_color, and logo_data_url. The Logo value is empty or a verified PNG/JPEG data URL; mutable governance and storage fields are absent.",
+                "produces": [
+                    "application/json"
+                ],
+                "responses": {
+                    "200": {
+                        "description": "Login-page-safe public brand.",
+                        "schema": {
+                            "$ref": "#/definitions/brand.PublicConfig"
+                        }
+                    },
+                    "500": {
+                        "description": "Brand storage unavailable; internal details are not exposed."
+                    }
+                },
+                "summary": "Get anonymous safe brand",
+                "tags": [
+                    "public"
+                ]
+            }
+        },
+        "/api/v1/version": {
+            "get": {
+                "description": "Returns only the running version and build-injected commit/build_time allowlist. Missing build values are the literal unknown. No files or remote services are consulted by this endpoint.",
+                "produces": [
+                    "application/json"
+                ],
+                "responses": {
+                    "200": {
+                        "description": "Anonymous safe build metadata.",
+                        "schema": {
+                            "$ref": "#/definitions/websocket.SafeVersionResponse"
+                        }
+                    }
+                },
+                "summary": "Get anonymous safe build metadata",
+                "tags": [
+                    "public"
+                ]
+            }
+        },
         "/api/v1/platform/admin/reports/backfill": {
             "post": {
                 "consumes": [
@@ -170,10 +300,7 @@ const docTemplate = `{
                     "200": {
                         "description": "Authorized safe summary page.",
                         "schema": {
-                            "items": {
-                                "$ref": "#/definitions/reports.ReportSummary"
-                            },
-                            "type": "array"
+                            "$ref": "#/definitions/reports.ReportListResponse"
                         }
                     },
                     "400": {
@@ -184,6 +311,9 @@ const docTemplate = `{
                     },
                     "403": {
                         "description": "Role cannot list reports."
+                    },
+                    "500": {
+                        "description": "Report query failed; internal details are not exposed."
                     }
                 },
                 "summary": "List authorized immutable reports",
@@ -226,6 +356,9 @@ const docTemplate = `{
                     },
                     "403": {
                         "description": "Role cannot read report trends."
+                    },
+                    "500": {
+                        "description": "Trend query failed; internal details are not exposed."
                     }
                 },
                 "summary": "Get authorized server-side report trend",
@@ -263,6 +396,9 @@ const docTemplate = `{
                     },
                     "404": {
                         "description": "Report not found or not visible to the user."
+                    },
+                    "500": {
+                        "description": "Report query or immutable render decoding failed; internal details are not exposed."
                     }
                 },
                 "summary": "Get safe immutable report detail",
@@ -315,596 +451,1990 @@ const docTemplate = `{
             "get": {
                 "deprecated": true,
                 "description": "Deprecated browser compatibility path. It is protected by the authenticated Subject, delegates platform records to encrypted storage, and appends read-only YAML models with masked tokens and preserved default string arrays. Platform records return an empty default array. Use /api/v1/platform/models for new clients.",
-                "tags": ["models"],
+                "tags": [
+                    "models"
+                ],
                 "summary": "List models through deprecated compatibility facade",
-                "responses": {"200": {"description": "Visible model metadata with masked tokens.", "schema": {"$ref": "#/definitions/websocket.LegacyModelListEnvelope"}}, "401": {"description": "Unauthenticated."}}
+                "responses": {
+                    "200": {
+                        "description": "Visible model metadata with masked tokens.",
+                        "schema": {
+                            "$ref": "#/definitions/websocket.LegacyModelListEnvelope"
+                        }
+                    },
+                    "401": {
+                        "description": "Unauthenticated."
+                    }
+                }
             },
             "post": {
                 "deprecated": true,
                 "description": "Deprecated browser compatibility path. Accepts the nested legacy request, stores the token only through authenticated encryption, and returns the legacy HTTP 200 status/message/data envelope. Before any mutation it loads the read-only YAML source once; a matching trimmed ID cannot shadow a YAML model and returns status one, while a source error fails closed with status one and no database or audit mutation. Use POST /api/v1/platform/models for new clients.",
-                "tags": ["models"],
+                "tags": [
+                    "models"
+                ],
                 "summary": "Create a model through deprecated compatibility facade",
-                "parameters": [{"in": "body", "name": "body", "required": true, "schema": {"$ref": "#/definitions/websocket.LegacyModelCreateRequest"}}],
-                "responses": {"200": {"description": "Legacy mutation envelope; status is zero on success or one for validation/application errors.", "schema": {"$ref": "#/definitions/websocket.LegacyModelMutationEnvelope"}}, "401": {"description": "Unauthenticated."}, "403": {"description": "Auditor role cannot create models."}}
+                "parameters": [
+                    {
+                        "in": "body",
+                        "name": "body",
+                        "required": true,
+                        "schema": {
+                            "$ref": "#/definitions/websocket.LegacyModelCreateRequest"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "Legacy mutation envelope; status is zero on success or one for validation/application errors.",
+                        "schema": {
+                            "$ref": "#/definitions/websocket.LegacyModelMutationEnvelope"
+                        }
+                    },
+                    "401": {
+                        "description": "Unauthenticated."
+                    },
+                    "403": {
+                        "description": "Auditor role cannot create models."
+                    }
+                }
             },
             "delete": {
                 "deprecated": true,
                 "description": "Deprecated collection-delete compatibility path. Accepts model_ids and returns the legacy HTTP 200 status/message/data envelope. Authorization is checked for every model before deletion.",
-                "tags": ["models"],
+                "tags": [
+                    "models"
+                ],
                 "summary": "Delete models through deprecated compatibility facade",
-                "parameters": [{"in": "body", "name": "body", "required": true, "schema": {"$ref": "#/definitions/websocket.LegacyModelDeleteRequest"}}],
-                "responses": {"200": {"description": "Legacy mutation envelope; status is zero on success or one for validation/application errors.", "schema": {"$ref": "#/definitions/websocket.LegacyModelMutationEnvelope"}}, "401": {"description": "Unauthenticated."}, "403": {"description": "Subject cannot delete one or more requested models."}}
+                "parameters": [
+                    {
+                        "in": "body",
+                        "name": "body",
+                        "required": true,
+                        "schema": {
+                            "$ref": "#/definitions/websocket.LegacyModelDeleteRequest"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "Legacy mutation envelope; status is zero on success or one for validation/application errors.",
+                        "schema": {
+                            "$ref": "#/definitions/websocket.LegacyModelMutationEnvelope"
+                        }
+                    },
+                    "401": {
+                        "description": "Unauthenticated."
+                    },
+                    "403": {
+                        "description": "Subject cannot delete one or more requested models."
+                    }
+                }
             }
         },
         "/api/v1/app/models/{modelId}": {
             "get": {
                 "deprecated": true,
                 "description": "Deprecated browser compatibility path. Returns an authorized encrypted platform model or falls back to a read-only YAML model when the ID is absent from platform storage. The token is always masked and default is always a string array. Use GET /api/v1/platform/models/{modelID} for new clients.",
-                "tags": ["models"],
+                "tags": [
+                    "models"
+                ],
                 "summary": "Get a model through deprecated compatibility facade",
-                "parameters": [{"in": "path", "maxLength": 128, "name": "modelId", "required": true, "type": "string"}],
-                "responses": {"200": {"description": "Legacy detail envelope; application errors also use HTTP 200 with status one.", "schema": {"$ref": "#/definitions/websocket.LegacyModelDetailEnvelope"}}, "401": {"description": "Unauthenticated."}, "403": {"description": "Subject cannot read this private model."}}
+                "parameters": [
+                    {
+                        "in": "path",
+                        "maxLength": 128,
+                        "name": "modelId",
+                        "required": true,
+                        "type": "string"
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "Legacy detail envelope; application errors also use HTTP 200 with status one.",
+                        "schema": {
+                            "$ref": "#/definitions/websocket.LegacyModelDetailEnvelope"
+                        }
+                    },
+                    "401": {
+                        "description": "Unauthenticated."
+                    },
+                    "403": {
+                        "description": "Subject cannot read this private model."
+                    }
+                }
             },
             "put": {
                 "deprecated": true,
                 "description": "Deprecated browser compatibility path. Accepts the nested legacy update request; an omitted or masked token preserves the encrypted token. Returns the legacy HTTP 200 status/message/data envelope.",
-                "tags": ["models"],
+                "tags": [
+                    "models"
+                ],
                 "summary": "Update a model through deprecated compatibility facade",
-                "parameters": [{"in": "path", "maxLength": 128, "name": "modelId", "required": true, "type": "string"}, {"in": "body", "name": "body", "required": true, "schema": {"$ref": "#/definitions/websocket.LegacyModelUpdateRequest"}}],
-                "responses": {"200": {"description": "Legacy mutation envelope; status is zero on success or one for validation/application errors.", "schema": {"$ref": "#/definitions/websocket.LegacyModelMutationEnvelope"}}, "401": {"description": "Unauthenticated."}, "403": {"description": "Subject cannot update this model."}}
+                "parameters": [
+                    {
+                        "in": "path",
+                        "maxLength": 128,
+                        "name": "modelId",
+                        "required": true,
+                        "type": "string"
+                    },
+                    {
+                        "in": "body",
+                        "name": "body",
+                        "required": true,
+                        "schema": {
+                            "$ref": "#/definitions/websocket.LegacyModelUpdateRequest"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "Legacy mutation envelope; status is zero on success or one for validation/application errors.",
+                        "schema": {
+                            "$ref": "#/definitions/websocket.LegacyModelMutationEnvelope"
+                        }
+                    },
+                    "401": {
+                        "description": "Unauthenticated."
+                    },
+                    "403": {
+                        "description": "Subject cannot update this model."
+                    }
+                }
             }
         },
         "/api/v1/platform/admin/users": {
             "get": {
-                "description": "Lists local accounts. Administrator only.",
-                "tags": ["platform-admin"],
+                "description": "Lists local accounts in a paginated safe envelope. Administrator only; credential material is never returned. page defaults to 1, page_size defaults to 20, values over 100 are capped at 100, and page cannot exceed 1000.",
+                "parameters": [
+                    {
+                        "default": 1,
+                        "in": "query",
+                        "maximum": 1000,
+                        "minimum": 1,
+                        "name": "page",
+                        "type": "integer"
+                    },
+                    {
+                        "default": 20,
+                        "in": "query",
+                        "maximum": 100,
+                        "minimum": 1,
+                        "name": "page_size",
+                        "type": "integer"
+                    }
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "platform-admin"
+                ],
                 "summary": "List managed users",
-                "responses": {"200": {"description": "User metadata without password hashes."}, "403": {"description": "Administrator role required."}}
+                "responses": {
+                    "200": {
+                        "description": "User metadata without password hashes.",
+                        "schema": {
+                            "$ref": "#/definitions/admin.UserListResponse"
+                        }
+                    },
+                    "400": {
+                        "description": "Invalid page or page_size."
+                    },
+                    "401": {
+                        "description": "Unauthenticated."
+                    },
+                    "403": {
+                        "description": "Administrator role and completed password change required."
+                    },
+                    "500": {
+                        "description": "Account query failed; internal details are not exposed."
+                    }
+                }
             },
             "post": {
-                "consumes": ["application/json"],
                 "description": "Creates a local account with an administrator-assigned role and records an audit event. Passwords and hashes are never returned.",
-                "tags": ["platform-admin"],
+                "tags": [
+                    "platform-admin"
+                ],
                 "summary": "Create managed user",
-                "parameters": [{"in": "body", "name": "user", "required": true, "schema": {"type": "object", "required": ["username", "password", "role"], "properties": {"username": {"type": "string"}, "password": {"type": "string"}, "role": {"type": "string", "enum": ["admin", "user", "auditor"]}}}}],
-                "responses": {"201": {"description": "User created and audited."}, "403": {"description": "Administrator role required."}}
+                "responses": {
+                    "201": {
+                        "description": "User created and audited."
+                    },
+                    "403": {
+                        "description": "Administrator role required."
+                    }
+                }
             }
         },
         "/api/v1/platform/admin/users/{userID}/role": {
             "put": {
                 "description": "Assigns admin, user, or auditor and records an audit event. Administrator only.",
-                "tags": ["platform-admin"],
+                "tags": [
+                    "platform-admin"
+                ],
                 "summary": "Assign user role",
-                "parameters": [{"in": "path", "name": "userID", "required": true, "type": "string"}],
-                "responses": {"204": {"description": "Role assigned and audited."}, "403": {"description": "Administrator role required."}}
+                "parameters": [
+                    {
+                        "in": "path",
+                        "name": "userID",
+                        "required": true,
+                        "type": "string"
+                    }
+                ],
+                "responses": {
+                    "204": {
+                        "description": "Role assigned and audited."
+                    },
+                    "403": {
+                        "description": "Administrator role required."
+                    }
+                }
             }
         },
         "/api/v1/platform/admin/users/{userID}/active": {
             "put": {
                 "description": "Enables or disables an account, revokes sessions on disable, and records an audit event. Administrator only.",
-                "tags": ["platform-admin"],
+                "tags": [
+                    "platform-admin"
+                ],
                 "summary": "Set account active state",
-                "parameters": [{"in": "path", "name": "userID", "required": true, "type": "string"}],
-                "responses": {"204": {"description": "Account state changed and audited."}, "403": {"description": "Administrator role required."}}
+                "parameters": [
+                    {
+                        "in": "path",
+                        "name": "userID",
+                        "required": true,
+                        "type": "string"
+                    }
+                ],
+                "responses": {
+                    "204": {
+                        "description": "Account state changed and audited."
+                    },
+                    "403": {
+                        "description": "Administrator role required."
+                    }
+                }
             }
         },
         "/api/v1/platform/admin/users/{userID}/password-reset": {
             "post": {
                 "description": "Requests a password reset through the configured out-of-band channel and records an audit event. The HTTP response never contains a reset token.",
-                "tags": ["platform-admin"],
+                "tags": [
+                    "platform-admin"
+                ],
                 "summary": "Request managed password reset",
-                "parameters": [{"in": "path", "name": "userID", "required": true, "type": "string"}],
-                "responses": {"204": {"description": "Reset requested and audited; no token is returned."}, "403": {"description": "Administrator role required."}}
+                "parameters": [
+                    {
+                        "in": "path",
+                        "name": "userID",
+                        "required": true,
+                        "type": "string"
+                    }
+                ],
+                "responses": {
+                    "204": {
+                        "description": "Reset requested and audited; no token is returned."
+                    },
+                    "403": {
+                        "description": "Administrator role required."
+                    }
+                }
             }
         },
         "/api/v1/platform/admin/audit-events": {
             "get": {
-                "description": "Queries append-only sanitized audit events. Governed mutations write a durable pending event before state changes and correlate later success or failure with the same request_id. Administrators and auditors may read; ordinary users are denied.",
-                "tags": ["audit"],
+                "description": "Queries append-only recursively sanitized audit events in a paginated envelope. Governed mutations correlate durable pending and completion evidence by request_id. Administrators and auditors may read; ordinary users are denied. page defaults to 1, page_size defaults to 20, values over 100 are capped at 100, and page cannot exceed 1000.",
+                "parameters": [
+                    {
+                        "in": "query",
+                        "name": "action",
+                        "type": "string"
+                    },
+                    {
+                        "in": "query",
+                        "name": "actor_user_id",
+                        "type": "string"
+                    },
+                    {
+                        "in": "query",
+                        "name": "resource_type",
+                        "type": "string"
+                    },
+                    {
+                        "in": "query",
+                        "name": "resource_id",
+                        "type": "string"
+                    },
+                    {
+                        "default": 1,
+                        "in": "query",
+                        "maximum": 1000,
+                        "minimum": 1,
+                        "name": "page",
+                        "type": "integer"
+                    },
+                    {
+                        "default": 20,
+                        "in": "query",
+                        "maximum": 100,
+                        "minimum": 1,
+                        "name": "page_size",
+                        "type": "integer"
+                    }
+                ],
+                "tags": [
+                    "audit"
+                ],
                 "summary": "Query audit events",
-                "responses": {"200": {"description": "Sanitized audit event list."}, "403": {"description": "Admin or auditor role required."}}
+                "responses": {
+                    "200": {
+                        "description": "Sanitized audit event page.",
+                        "schema": {
+                            "$ref": "#/definitions/admin.AuditListResponse"
+                        }
+                    },
+                    "400": {
+                        "description": "Invalid page or page_size."
+                    },
+                    "401": {
+                        "description": "Unauthenticated."
+                    },
+                    "403": {
+                        "description": "Administrator or auditor role and completed password change required."
+                    },
+                    "500": {
+                        "description": "Audit query failed; internal details are not exposed."
+                    }
+                }
             }
         },
         "/api/v1/platform/admin/audit-events/prepared/{requestID}/finalize": {
             "post": {
                 "description": "Administrator-only recovery for a prepared file-backed mutation after an operator verifies its real outcome. It promotes the existing request to the same stable outbox and event identity without repeating the file mutation. Retrying the same outcome is idempotent; a conflicting outcome returns 409. The request_id is obtained from the audit-event query or the safe X-Audit-Request-ID header returned when a successful legacy mutation needs recovery.",
-                "tags": ["audit"],
+                "tags": [
+                    "audit"
+                ],
                 "summary": "Finalize a prepared audit completion",
                 "parameters": [
-                    {"in": "path", "name": "requestID", "required": true, "type": "string"},
-                    {"in": "body", "name": "body", "required": true, "schema": {"type": "object", "required": ["outcome"], "properties": {"outcome": {"type": "string", "enum": ["success", "failure"]}, "metadata": {"type": "object", "additionalProperties": true}}}}
+                    {
+                        "in": "path",
+                        "name": "requestID",
+                        "required": true,
+                        "type": "string"
+                    },
+                    {
+                        "in": "body",
+                        "name": "body",
+                        "required": true,
+                        "schema": {
+                            "type": "object",
+                            "required": [
+                                "outcome"
+                            ],
+                            "properties": {
+                                "outcome": {
+                                    "type": "string",
+                                    "enum": [
+                                        "success",
+                                        "failure"
+                                    ]
+                                },
+                                "metadata": {
+                                    "type": "object",
+                                    "additionalProperties": true
+                                }
+                            }
+                        }
+                    }
                 ],
-                "responses": {"204": {"description": "The prepared completion is durably ready for reconciliation."}, "400": {"description": "Invalid outcome or request body."}, "403": {"description": "Administrator role required."}, "404": {"description": "Prepared request not found."}, "409": {"description": "The request was already finalized with a different outcome."}}
+                "responses": {
+                    "204": {
+                        "description": "The prepared completion is durably ready for reconciliation."
+                    },
+                    "400": {
+                        "description": "Invalid outcome or request body."
+                    },
+                    "403": {
+                        "description": "Administrator role required."
+                    },
+                    "404": {
+                        "description": "Prepared request not found."
+                    },
+                    "409": {
+                        "description": "The request was already finalized with a different outcome."
+                    }
+                }
             }
         },
         "/api/v1/platform/admin/audit-events/reconcile": {
             "post": {
                 "description": "Retries durable audit completion outbox entries whose final append previously failed. Delivery uses a stable event identifier, so repeated reconciliation does not duplicate audit events. Administrator only.",
-                "tags": ["audit"],
+                "tags": [
+                    "audit"
+                ],
                 "summary": "Reconcile pending audit completions",
-                "parameters": [{"in": "query", "name": "limit", "type": "integer"}],
-                "responses": {"200": {"description": "Number of completion events reconciled."}, "403": {"description": "Administrator role required."}}
+                "parameters": [
+                    {
+                        "in": "query",
+                        "name": "limit",
+                        "type": "integer"
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "Number of completion events reconciled."
+                    },
+                    "403": {
+                        "description": "Administrator role required."
+                    }
+                }
             }
         },
         "/api/v1/platform/models": {
             "get": {
-                "description": "Lists visible model metadata. Every token is masked; ciphertext, nonce, and key identifiers are never returned. Users see global and their own private models, auditors see global models, and administrators see governance metadata.",
-                "tags": ["models"],
+                "description": "Lists visible model metadata in CatalogPage. Every token is masked as ******** and every row declares source=platform|yaml plus read_only. Users see global and their own private platform models; auditors see global rows read-only; administrators see all platform rows. Immutable YAML rows are appended after platform rows, remain read_only=true, and a same-ID YAML row remains distinct instead of shadowing the platform row. YAML loading is cached and fails closed. page defaults to 1, page_size defaults to 20, values over 100 are capped at 100, and page cannot exceed 1000.",
+                "parameters": [
+                    {
+                        "default": 1,
+                        "in": "query",
+                        "maximum": 1000,
+                        "minimum": 1,
+                        "name": "page",
+                        "type": "integer"
+                    },
+                    {
+                        "default": 20,
+                        "in": "query",
+                        "maximum": 100,
+                        "minimum": 1,
+                        "name": "page_size",
+                        "type": "integer"
+                    }
+                ],
+                "tags": [
+                    "models"
+                ],
                 "summary": "List governed models",
-                "responses": {"200": {"description": "Visible model metadata with masked tokens."}, "401": {"description": "Unauthenticated."}}
+                "responses": {
+                    "200": {
+                        "description": "Visible safe model catalog with masked tokens.",
+                        "schema": {
+                            "$ref": "#/definitions/models.CatalogPage"
+                        }
+                    },
+                    "400": {
+                        "description": "Invalid page or page_size."
+                    },
+                    "401": {
+                        "description": "Unauthenticated."
+                    },
+                    "403": {
+                        "description": "Password change is incomplete or the Subject role is unsupported."
+                    },
+                    "500": {
+                        "description": "Platform or YAML catalog unavailable; internal source paths and details are not exposed."
+                    }
+                }
             },
             "post": {
                 "description": "Creates an AES-GCM encrypted model configuration. Users may create only private models they own; administrators may create global models; auditors cannot write.",
-                "tags": ["models"],
+                "parameters": [
+                    {
+                        "in": "body",
+                        "name": "model",
+                        "required": true,
+                        "schema": {
+                            "$ref": "#/definitions/models.CreateInput"
+                        }
+                    }
+                ],
+                "tags": [
+                    "models"
+                ],
                 "summary": "Create governed model",
-                "responses": {"201": {"description": "Model metadata with a masked token."}, "403": {"description": "Scope or role is not permitted."}}
+                "responses": {
+                    "201": {
+                        "description": "Model metadata with a masked token.",
+                        "schema": {
+                            "$ref": "#/definitions/models.View"
+                        }
+                    },
+                    "400": {
+                        "description": "Invalid model input."
+                    },
+                    "401": {
+                        "description": "Unauthenticated."
+                    },
+                    "403": {
+                        "description": "Scope/role is not permitted, password change is incomplete, or CSRF is invalid."
+                    },
+                    "500": {
+                        "description": "Encryption, persistence, or durable audit failed; internal details are not exposed."
+                    }
+                }
             }
         },
         "/api/v1/platform/models/{modelID}": {
             "get": {
                 "description": "Returns authorized model metadata with a masked token. Another user's private model is never disclosed.",
-                "tags": ["models"],
+                "tags": [
+                    "models"
+                ],
                 "summary": "Get governed model",
-                "parameters": [{"in": "path", "name": "modelID", "required": true, "type": "string"}],
-                "responses": {"200": {"description": "Model metadata with masked token."}, "403": {"description": "Private model belongs to another user."}, "404": {"description": "Model not found."}}
+                "parameters": [
+                    {
+                        "in": "path",
+                        "name": "modelID",
+                        "required": true,
+                        "type": "string"
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "Model metadata with masked token.",
+                        "schema": {
+                            "$ref": "#/definitions/models.View"
+                        }
+                    },
+                    "401": {
+                        "description": "Unauthenticated."
+                    },
+                    "403": {
+                        "description": "Private model belongs to another user."
+                    },
+                    "404": {
+                        "description": "Model not found."
+                    },
+                    "500": {
+                        "description": "Model query failed; internal details are not exposed."
+                    }
+                }
             },
             "put": {
                 "description": "Updates an authorized private or global model and audits the change. A masked token value preserves the existing encrypted token.",
-                "tags": ["models"],
+                "parameters": [
+                    {
+                        "in": "path",
+                        "name": "modelID",
+                        "required": true,
+                        "type": "string"
+                    },
+                    {
+                        "in": "body",
+                        "name": "model",
+                        "required": true,
+                        "schema": {
+                            "$ref": "#/definitions/models.UpdateInput"
+                        }
+                    }
+                ],
+                "tags": [
+                    "models"
+                ],
                 "summary": "Update governed model",
-                "parameters": [{"in": "path", "name": "modelID", "required": true, "type": "string"}],
-                "responses": {"200": {"description": "Updated metadata with masked token."}, "403": {"description": "Write is not permitted."}}
+                "responses": {
+                    "200": {
+                        "description": "Updated metadata with masked token.",
+                        "schema": {
+                            "$ref": "#/definitions/models.View"
+                        }
+                    },
+                    "400": {
+                        "description": "Invalid model input."
+                    },
+                    "401": {
+                        "description": "Unauthenticated."
+                    },
+                    "403": {
+                        "description": "Write is not permitted, password change is incomplete, or CSRF is invalid."
+                    },
+                    "404": {
+                        "description": "Model not found."
+                    },
+                    "500": {
+                        "description": "Encryption, persistence, or durable audit failed; internal details are not exposed."
+                    }
+                }
             },
             "delete": {
                 "description": "Deletes an authorized model and records an audit event.",
-                "tags": ["models"],
+                "parameters": [
+                    {
+                        "in": "path",
+                        "name": "modelID",
+                        "required": true,
+                        "type": "string"
+                    }
+                ],
+                "tags": [
+                    "models"
+                ],
                 "summary": "Delete governed model",
-                "parameters": [{"in": "path", "name": "modelID", "required": true, "type": "string"}],
-                "responses": {"204": {"description": "Model deleted and audited."}, "403": {"description": "Write is not permitted."}}
+                "responses": {
+                    "204": {
+                        "description": "Model deleted and audited."
+                    },
+                    "401": {
+                        "description": "Unauthenticated."
+                    },
+                    "403": {
+                        "description": "Write is not permitted, password change is incomplete, or CSRF is invalid."
+                    },
+                    "404": {
+                        "description": "Model not found."
+                    },
+                    "500": {
+                        "description": "Persistence or durable audit failed; internal details are not exposed."
+                    }
+                }
             }
         },
         "/api/v1/platform/models/{modelID}/rotate-encryption": {
             "post": {
                 "description": "Re-encrypts a stored token with the active environment-injected master key. Administrator only; plaintext is never returned or logged.",
-                "tags": ["models"],
+                "parameters": [
+                    {
+                        "in": "path",
+                        "name": "modelID",
+                        "required": true,
+                        "type": "string"
+                    }
+                ],
+                "tags": [
+                    "models"
+                ],
                 "summary": "Rotate model token encryption",
-                "parameters": [{"in": "path", "name": "modelID", "required": true, "type": "string"}],
-                "responses": {"204": {"description": "Token re-encrypted and audited."}, "403": {"description": "Administrator role required."}}
+                "responses": {
+                    "204": {
+                        "description": "Token re-encrypted and audited."
+                    },
+                    "401": {
+                        "description": "Unauthenticated."
+                    },
+                    "403": {
+                        "description": "Administrator role, completed password change, and valid CSRF required."
+                    },
+                    "404": {
+                        "description": "Model not found."
+                    },
+                    "500": {
+                        "description": "Decryption, encryption, persistence, or durable audit failed; internal details are not exposed."
+                    }
+                }
             }
         },
         "/api/v1/platform/tasks": {
             "get": {
-                "description": "Lists persisted platform tasks without polling the engine or mutating state. Users see only their own tasks; auditors and administrators see the stable global list.",
-                "tags": ["platform-tasks"],
+                "description": "Lists persisted platform tasks as TaskListResponse without polling the engine or mutating state. Users see only their own tasks; auditors and administrators see the stable global list. Items use the narrow TaskSummary only. page defaults to 1, page_size defaults to 20, values over 100 are capped at 100, and page cannot exceed 1000.",
+                "parameters": [
+                    {
+                        "default": 1,
+                        "in": "query",
+                        "maximum": 1000,
+                        "minimum": 1,
+                        "name": "page",
+                        "type": "integer"
+                    },
+                    {
+                        "default": 20,
+                        "in": "query",
+                        "maximum": 100,
+                        "minimum": 1,
+                        "name": "page_size",
+                        "type": "integer"
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "Authorized stable task list.",
+                        "schema": {
+                            "$ref": "#/definitions/tasks.TaskListResponse"
+                        }
+                    },
+                    "400": {
+                        "description": "Invalid page or page_size."
+                    },
+                    "401": {
+                        "description": "Unauthenticated."
+                    },
+                    "403": {
+                        "description": "Password change is incomplete or the Subject role is unsupported."
+                    },
+                    "500": {
+                        "description": "Task query failed; internal details are not exposed."
+                    }
+                },
                 "summary": "List authorized platform tasks",
-                "responses": {"200": {"description": "Authorized stable task list."}, "401": {"description": "Unauthenticated."}, "403": {"description": "Role cannot list tasks."}}
+                "tags": [
+                    "platform-tasks"
+                ]
             },
             "post": {
-                "consumes": ["application/json"],
-                "description": "Creates an owner-scoped platform task from the authenticated Cookie Subject. Idempotency-Key is required and unique per owner; retries return the same task. Dispatch uses persisted claims and a global attempt budget. An uncertain network acknowledgement becomes dispatch_unknown and is never submitted automatically again; this is at-most-once dispatch, not exactly-once execution. raw model credentials are rejected: use governed model_id references. Attachments are supplied only as opaque attachment IDs. Requires CSRF protection.",
-                "tags": ["platform-tasks"],
-                "summary": "Create an idempotent platform task",
-                "parameters": [
-                    {"in": "header", "name": "Idempotency-Key", "required": true, "type": "string", "maxLength": 128},
-                    {"in": "body", "name": "task", "required": true, "schema": {"type": "object", "required": ["task_type"], "properties": {"task_type": {"type": "string"}, "content": {"type": "string"}, "params": {"type": "object"}, "attachment_ids": {"type": "array", "items": {"type": "string"}}, "country_iso_code": {"type": "string"}}}}
+                "consumes": [
+                    "application/json"
                 ],
-                "responses": {"202": {"description": "Persisted task status; dispatch failures remain visible as dispatch_failed."}, "400": {"description": "Missing idempotency key, invalid input, raw credentials, or unavailable attachment."}, "401": {"description": "Unauthenticated."}, "403": {"description": "Role cannot create tasks."}}
+                "description": "Creates an owner-scoped platform task from the authenticated Cookie Subject. Idempotency-Key is required and unique per owner; retries return the same task. Dispatch uses persisted claims and a global attempt budget. An uncertain network acknowledgement becomes dispatch_unknown and is never submitted automatically again; this is at-most-once dispatch, not exactly-once execution. raw model credentials are rejected: use governed model_id references. Attachments are supplied only as opaque attachment IDs. Requires CSRF protection.",
+                "parameters": [
+                    {
+                        "in": "header",
+                        "maxLength": 128,
+                        "name": "Idempotency-Key",
+                        "required": true,
+                        "type": "string"
+                    },
+                    {
+                        "in": "body",
+                        "name": "task",
+                        "required": true,
+                        "schema": {
+                            "properties": {
+                                "attachment_ids": {
+                                    "items": {
+                                        "type": "string"
+                                    },
+                                    "type": "array"
+                                },
+                                "content": {
+                                    "type": "string"
+                                },
+                                "country_iso_code": {
+                                    "type": "string"
+                                },
+                                "params": {
+                                    "type": "object"
+                                },
+                                "task_type": {
+                                    "type": "string"
+                                }
+                            },
+                            "required": [
+                                "task_type"
+                            ],
+                            "type": "object"
+                        }
+                    }
+                ],
+                "responses": {
+                    "202": {
+                        "description": "Persisted task status; dispatch failures remain visible as dispatch_failed."
+                    },
+                    "400": {
+                        "description": "Missing idempotency key, invalid input, raw credentials, or unavailable attachment."
+                    },
+                    "401": {
+                        "description": "Unauthenticated."
+                    },
+                    "403": {
+                        "description": "Role cannot create tasks, password change is incomplete, or CSRF is invalid."
+                    },
+                    "500": {
+                        "description": "Persistence or durable audit failed; internal details are not exposed."
+                    },
+                    "503": {
+                        "description": "Task is persisted with dispatch_failed because trusted dispatch failed."
+                    }
+                },
+                "summary": "Create an idempotent platform task",
+                "tags": [
+                    "platform-tasks"
+                ]
             }
         },
         "/api/v1/platform/tasks/{taskID}": {
             "get": {
-                "description": "Short-poll task detail using the authenticated Cookie Subject. Users read only their own task; auditors and administrators have global read access. Browser-supplied username or role headers are ignored.",
-                "tags": ["platform-tasks"],
+                "description": "Short-poll browser-safe TaskDetail using the authenticated Cookie Subject. Users read only their own task; auditors and administrators have global read access. The input_summary is a narrow display projection; browser-supplied identity headers are ignored.",
+                "parameters": [
+                    {
+                        "in": "path",
+                        "name": "taskID",
+                        "required": true,
+                        "type": "string"
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "Current platform task status.",
+                        "schema": {
+                            "$ref": "#/definitions/tasks.TaskDetail"
+                        }
+                    },
+                    "401": {
+                        "description": "Unauthenticated."
+                    },
+                    "403": {
+                        "description": "Password change is incomplete or the Subject role is unsupported."
+                    },
+                    "404": {
+                        "description": "Task not found or not visible to this user."
+                    },
+                    "500": {
+                        "description": "Task query failed; internal details are not exposed."
+                    }
+                },
                 "summary": "Get owned task status",
-                "parameters": [{"in": "path", "name": "taskID", "required": true, "type": "string"}],
-                "responses": {"200": {"description": "Current platform task status."}, "401": {"description": "Unauthenticated."}, "403": {"description": "Task belongs to another user."}, "404": {"description": "Task not found."}}
+                "tags": [
+                    "platform-tasks"
+                ]
             }
         },
         "/api/v1/platform/tasks/{taskID}/result": {
             "get": {
-                "description": "Returns the result only after task ownership or global read authorization and trusted platform-to-engine mapping validation.",
-                "tags": ["platform-tasks"],
-                "summary": "Get authorized task result",
-                "parameters": [{"in": "path", "name": "taskID", "required": true, "type": "string"}],
-                "responses": {"200": {"description": "Engine result."}, "403": {"description": "Task belongs to another user."}, "404": {"description": "Task or result not found."}, "409": {"description": "Result is not ready."}}
+                "deprecated": true,
+                "description": "Retired browser result route. After Cookie authentication and the password-change gate it always returns 410 Gone, regardless of task identity or state. It never reads or returns engine results. Authentication failure remains 401 and an incomplete password change remains 403.",
+                "parameters": [
+                    {
+                        "in": "path",
+                        "name": "taskID",
+                        "required": true,
+                        "type": "string"
+                    }
+                ],
+                "responses": {
+                    "401": {
+                        "description": "Unauthenticated."
+                    },
+                    "403": {
+                        "description": "Password change is incomplete."
+                    },
+                    "410": {
+                        "description": "Browser task result retrieval is permanently retired; use immutable reports."
+                    }
+                },
+                "summary": "Retired browser task result route",
+                "tags": [
+                    "platform-tasks"
+                ]
             }
         },
         "/api/v1/platform/tasks/{taskID}/cancel": {
             "post": {
                 "description": "Cancels an owned task or, for administrators, any task. Auditors are read-only. Requires CSRF protection and records a durable audit event.",
-                "tags": ["platform-tasks"],
+                "parameters": [
+                    {
+                        "in": "path",
+                        "name": "taskID",
+                        "required": true,
+                        "type": "string"
+                    }
+                ],
+                "responses": {
+                    "204": {
+                        "description": "Task cancelled and audited."
+                    },
+                    "401": {
+                        "description": "Unauthenticated."
+                    },
+                    "403": {
+                        "description": "Owner or administrator role required."
+                    },
+                    "404": {
+                        "description": "Task not found."
+                    },
+                    "500": {
+                        "description": "Cancellation or durable audit failed; internal details are not exposed."
+                    }
+                },
                 "summary": "Cancel governed task",
-                "parameters": [{"in": "path", "name": "taskID", "required": true, "type": "string"}],
-                "responses": {"204": {"description": "Task cancelled and audited."}, "401": {"description": "Unauthenticated."}, "403": {"description": "Owner or administrator role required."}, "404": {"description": "Task not found."}}
+                "tags": [
+                    "platform-tasks"
+                ]
             }
         },
         "/api/v1/platform/tasks/attachments": {
             "post": {
-                "consumes": ["multipart/form-data"],
-                "description": "Streams one private attachment within the configured size limit. The response exposes only an opaque attachment ID and safe metadata, never a storage name or path.",
-                "tags": ["platform-task-attachments"],
+                "consumes": [
+                    "multipart/form-data"
+                ],
+                "description": "Streams one private attachment owned by the authenticated user or administrator within the configured size limit. Auditors cannot create attachments. Requires CSRF. The response exposes only an opaque attachment ID and safe metadata, never a storage name or path.",
+                "parameters": [
+                    {
+                        "in": "formData",
+                        "name": "file",
+                        "required": true,
+                        "type": "file"
+                    }
+                ],
+                "responses": {
+                    "201": {
+                        "description": "Opaque private attachment metadata.",
+                        "schema": {
+                            "$ref": "#/definitions/tasks.AttachmentView"
+                        }
+                    },
+                    "400": {
+                        "description": "Invalid or oversized attachment."
+                    },
+                    "401": {
+                        "description": "Unauthenticated."
+                    },
+                    "403": {
+                        "description": "Password change is incomplete or CSRF is invalid."
+                    },
+                    "413": {
+                        "description": "Attachment exceeds the configured file-size limit."
+                    },
+                    "500": {
+                        "description": "Storage, persistence, or durable audit failed; internal details are not exposed."
+                    }
+                },
                 "summary": "Upload private task attachment",
-                "parameters": [{"in": "formData", "name": "file", "required": true, "type": "file"}],
-                "responses": {"201": {"description": "Opaque private attachment metadata."}, "400": {"description": "Invalid or oversized attachment."}, "401": {"description": "Unauthenticated."}}
+                "tags": [
+                    "platform-task-attachments"
+                ]
             }
         },
         "/api/v1/platform/tasks/attachments/chunked": {
             "post": {
-                "consumes": ["application/json"],
-                "description": "Begins an owner-scoped chunked upload after validating the declared total size.",
-                "tags": ["platform-task-attachments"],
+                "consumes": [
+                    "application/json"
+                ],
+                "description": "Begins an owner-scoped chunked upload for an authenticated user or administrator after validating the declared total size. Auditors cannot create attachments. Requires CSRF.",
+                "parameters": [
+                    {
+                        "in": "body",
+                        "name": "attachment",
+                        "required": true,
+                        "schema": {
+                            "properties": {
+                                "filename": {
+                                    "type": "string"
+                                },
+                                "size": {
+                                    "format": "int64",
+                                    "type": "integer"
+                                }
+                            },
+                            "required": [
+                                "filename",
+                                "size"
+                            ],
+                            "type": "object"
+                        }
+                    }
+                ],
+                "responses": {
+                    "201": {
+                        "description": "Opaque uploading attachment metadata.",
+                        "schema": {
+                            "$ref": "#/definitions/tasks.AttachmentView"
+                        }
+                    },
+                    "400": {
+                        "description": "Invalid filename or size."
+                    },
+                    "401": {
+                        "description": "Unauthenticated."
+                    },
+                    "403": {
+                        "description": "Password change is incomplete or CSRF is invalid."
+                    },
+                    "413": {
+                        "description": "Declared size exceeds the configured file-size limit."
+                    },
+                    "500": {
+                        "description": "Persistence or durable audit failed; internal details are not exposed."
+                    }
+                },
                 "summary": "Begin private chunked upload",
-                "parameters": [{"in": "body", "name": "attachment", "required": true, "schema": {"type": "object", "required": ["filename", "size"], "properties": {"filename": {"type": "string"}, "size": {"type": "integer", "format": "int64"}}}}],
-                "responses": {"201": {"description": "Opaque uploading attachment metadata."}, "400": {"description": "Invalid filename or size."}, "401": {"description": "Unauthenticated."}}
+                "tags": [
+                    "platform-task-attachments"
+                ]
             }
         },
         "/api/v1/platform/tasks/attachments/{attachmentID}/chunks": {
             "post": {
-                "consumes": ["multipart/form-data"],
-                "description": "Streams one bounded chunk for an attachment owned by the authenticated Subject; cumulative size is enforced atomically.",
-                "tags": ["platform-task-attachments"],
+                "consumes": [
+                    "multipart/form-data"
+                ],
+                "description": "Streams one bounded chunk. Owner users may write their own attachment; administrators may write any attachment; auditors are read-only. Cumulative size is enforced atomically. Requires CSRF.",
+                "parameters": [
+                    {
+                        "in": "path",
+                        "name": "attachmentID",
+                        "required": true,
+                        "type": "string"
+                    },
+                    {
+                        "in": "formData",
+                        "name": "chunk_index",
+                        "required": true,
+                        "type": "integer"
+                    },
+                    {
+                        "in": "formData",
+                        "name": "chunk",
+                        "required": true,
+                        "type": "file"
+                    }
+                ],
+                "responses": {
+                    "204": {
+                        "description": "Chunk accepted."
+                    },
+                    "400": {
+                        "description": "Invalid chunk index or attachment state."
+                    },
+                    "401": {
+                        "description": "Unauthenticated."
+                    },
+                    "403": {
+                        "description": "Subject cannot write this attachment, password change is incomplete, or CSRF is invalid."
+                    },
+                    "404": {
+                        "description": "Attachment not found."
+                    },
+                    "413": {
+                        "description": "Chunk exceeds the configured chunk-size limit."
+                    },
+                    "500": {
+                        "description": "Storage, persistence, or durable audit failed; internal details are not exposed."
+                    }
+                },
                 "summary": "Upload private attachment chunk",
-                "parameters": [{"in": "path", "name": "attachmentID", "required": true, "type": "string"}, {"in": "formData", "name": "chunk_index", "required": true, "type": "integer"}, {"in": "formData", "name": "chunk", "required": true, "type": "file"}],
-                "responses": {"204": {"description": "Chunk accepted."}, "400": {"description": "Invalid or oversized chunk."}, "403": {"description": "Attachment belongs to another user."}}
+                "tags": [
+                    "platform-task-attachments"
+                ]
             }
         },
         "/api/v1/platform/tasks/attachments/{attachmentID}/merge": {
             "post": {
-                "consumes": ["application/json"],
-                "description": "Merges owned chunks by streaming while enforcing declared, cumulative, and actual size equality.",
-                "tags": ["platform-task-attachments"],
+                "consumes": [
+                    "application/json"
+                ],
+                "description": "Merges chunks by streaming while enforcing declared, cumulative, and actual size equality. Owner users may merge their own attachment; administrators may merge any attachment; auditors are read-only. Requires CSRF.",
+                "parameters": [
+                    {
+                        "in": "path",
+                        "name": "attachmentID",
+                        "required": true,
+                        "type": "string"
+                    },
+                    {
+                        "in": "body",
+                        "name": "merge",
+                        "required": true,
+                        "schema": {
+                            "properties": {
+                                "file_size": {
+                                    "format": "int64",
+                                    "type": "integer"
+                                },
+                                "total_chunks": {
+                                    "type": "integer"
+                                }
+                            },
+                            "required": [
+                                "total_chunks",
+                                "file_size"
+                            ],
+                            "type": "object"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "Ready opaque attachment metadata.",
+                        "schema": {
+                            "$ref": "#/definitions/tasks.AttachmentView"
+                        }
+                    },
+                    "400": {
+                        "description": "Chunk count or sizes do not match."
+                    },
+                    "403": {
+                        "description": "Subject cannot write this attachment, password change is incomplete, or CSRF is invalid."
+                    },
+                    "404": {
+                        "description": "Attachment not found."
+                    },
+                    "500": {
+                        "description": "Storage, persistence, or durable audit failed; internal details are not exposed."
+                    }
+                },
                 "summary": "Merge private attachment chunks",
-                "parameters": [{"in": "path", "name": "attachmentID", "required": true, "type": "string"}, {"in": "body", "name": "merge", "required": true, "schema": {"type": "object", "required": ["total_chunks", "file_size"], "properties": {"total_chunks": {"type": "integer"}, "file_size": {"type": "integer", "format": "int64"}}}}],
-                "responses": {"200": {"description": "Ready opaque attachment metadata."}, "400": {"description": "Chunk count or sizes do not match."}, "403": {"description": "Attachment belongs to another user."}}
+                "tags": [
+                    "platform-task-attachments"
+                ]
             }
         },
         "/api/v1/platform/tasks/attachments/{attachmentID}/download": {
             "get": {
-                "description": "Downloads a private attachment after owner authorization. Auditors and administrators have global read access; storage names and paths are never exposed.",
-                "tags": ["platform-task-attachments"],
+                "description": "Downloads a ready private attachment after authorization. An owner user may read their own attachment; other users receive 404 to avoid existence disclosure; auditors receive 403; administrators may read any attachment. Before an administrator cross-owner storage open, the server durably records a successful attachment.download_authorized event with sanitized authorization metadata; this records authorization, not stream delivery. Storage names and paths are never exposed.",
+                "parameters": [
+                    {
+                        "in": "path",
+                        "name": "attachmentID",
+                        "required": true,
+                        "type": "string"
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "Streamed attachment.",
+                        "schema": {
+                            "type": "file"
+                        }
+                    },
+                    "400": {
+                        "description": "Attachment is not ready."
+                    },
+                    "401": {
+                        "description": "Unauthenticated."
+                    },
+                    "403": {
+                        "description": "Auditor or unsupported role cannot download attachments; password change may also be incomplete."
+                    },
+                    "404": {
+                        "description": "Attachment is absent, storage is absent, or it belongs to another ordinary user."
+                    },
+                    "500": {
+                        "description": "Storage open or required authorization audit failed; no bytes or internal details are returned."
+                    }
+                },
                 "summary": "Download authorized private attachment",
-                "parameters": [{"in": "path", "name": "attachmentID", "required": true, "type": "string"}],
-                "responses": {"200": {"description": "Streamed attachment."}, "401": {"description": "Unauthenticated."}, "403": {"description": "Attachment belongs to another user."}, "404": {"description": "Attachment not found."}}
+                "tags": [
+                    "platform-task-attachments"
+                ]
             }
         },
-
         "/api/v1/knowledge/fingerprints": {
             "get": {
                 "description": "Reads existing fingerprint content for authenticated admin, user, or auditor roles.",
-                "tags": ["knowledge"],
+                "tags": [
+                    "knowledge"
+                ],
                 "summary": "List fingerprints",
-                "responses": {"200": {"description": "Existing fingerprint data in the legacy-compatible format."}}
+                "responses": {
+                    "200": {
+                        "description": "Existing fingerprint data in the legacy-compatible format."
+                    }
+                }
             },
             "post": {
                 "description": "Creates fingerprint content through the admin-only governed facade. The original on-disk format is preserved and the change is audited.",
-                "tags": ["knowledge"],
+                "tags": [
+                    "knowledge"
+                ],
                 "summary": "Create fingerprint",
-                "responses": {"200": {"description": "Future scans use the new content; historical report snapshots are unchanged.", "headers": {"X-Audit-Request-ID": {"type": "string", "description": "Present only when the file mutation succeeded but its prepared audit completion needs explicit administrator finalization; no internal error or metadata is exposed."}}}, "403": {"description": "Administrator role required."}}
+                "responses": {
+                    "200": {
+                        "description": "Future scans use the new content; historical report snapshots are unchanged.",
+                        "headers": {
+                            "X-Audit-Request-ID": {
+                                "type": "string",
+                                "description": "Present only when the file mutation succeeded but its prepared audit completion needs explicit administrator finalization; no internal error or metadata is exposed."
+                            }
+                        }
+                    },
+                    "403": {
+                        "description": "Administrator role required."
+                    }
+                }
             }
         },
         "/api/v1/auth/login": {
             "post": {
-                "consumes": ["application/json"],
-                "description": "Creates a local password session and sets HttpOnly session and CSRF cookies. HTTPS is required unless APP_ENV=test explicitly enables insecure test cookies.",
-                "tags": ["auth"],
+                "consumes": [
+                    "application/json"
+                ],
+                "description": "Requires the anonymous aig_csrf cookie from GET /api/v1/auth/csrf and the matching X-CSRF-Token header before credentials are processed. On success it creates a local password session, sets the HttpOnly aig_session Cookie, rotates the readable aig_csrf Cookie, and returns only must_change_password. HTTPS is required unless APP_ENV=test explicitly enables insecure test cookies.",
+                "parameters": [
+                    {
+                        "in": "body",
+                        "name": "credentials",
+                        "required": true,
+                        "schema": {
+                            "$ref": "#/definitions/identity.LoginRequest"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "Session established; response includes must_change_password.",
+                        "schema": {
+                            "$ref": "#/definitions/identity.LoginResponse"
+                        }
+                    },
+                    "400": {
+                        "description": "Invalid request body."
+                    },
+                    "401": {
+                        "description": "Invalid credentials or disabled account."
+                    },
+                    "403": {
+                        "description": "Missing or mismatched pre-authentication CSRF cookie/header."
+                    },
+                    "426": {
+                        "description": "HTTPS is required."
+                    },
+                    "500": {
+                        "description": "Authentication audit or secure token generation failed; internal details are not exposed."
+                    }
+                },
                 "summary": "Log in with a local account",
-                "parameters": [{"in": "body", "name": "credentials", "required": true, "schema": {"type": "object", "required": ["username", "password"], "properties": {"username": {"type": "string"}, "password": {"type": "string"}}}}],
-                "responses": {"200": {"description": "Session established; response includes must_change_password."}, "400": {"description": "Invalid request body."}, "401": {"description": "Invalid credentials or disabled account."}, "426": {"description": "HTTPS is required."}}
+                "tags": [
+                    "auth"
+                ]
             }
         },
         "/api/v1/auth/change-password": {
             "post": {
-                "consumes": ["application/json"],
+                "consumes": [
+                    "application/json"
+                ],
                 "description": "Changes the authenticated user's password. Requires HTTPS, aig_session, and a matching X-CSRF-Token header.",
-                "tags": ["auth"],
+                "parameters": [
+                    {
+                        "in": "body",
+                        "name": "password",
+                        "required": true,
+                        "schema": {
+                            "type": "object",
+                            "required": [
+                                "old_password",
+                                "new_password"
+                            ],
+                            "properties": {
+                                "old_password": {
+                                    "type": "string"
+                                },
+                                "new_password": {
+                                    "type": "string"
+                                }
+                            }
+                        }
+                    }
+                ],
+                "responses": {
+                    "204": {
+                        "description": "Password changed and session revoked."
+                    },
+                    "401": {
+                        "description": "Unauthenticated or invalid current password."
+                    },
+                    "403": {
+                        "description": "Missing or invalid CSRF token."
+                    },
+                    "426": {
+                        "description": "HTTPS is required."
+                    }
+                },
                 "summary": "Change local password",
-                "parameters": [{"in": "body", "name": "password", "required": true, "schema": {"type": "object", "required": ["old_password", "new_password"], "properties": {"old_password": {"type": "string"}, "new_password": {"type": "string"}}}}],
-                "responses": {"204": {"description": "Password changed and session revoked."}, "401": {"description": "Unauthenticated or invalid current password."}, "403": {"description": "Missing or invalid CSRF token."}, "426": {"description": "HTTPS is required."}}
+                "tags": [
+                    "auth"
+                ]
             }
         },
         "/api/v1/auth/logout": {
             "post": {
                 "description": "Revokes the authenticated session. Requires HTTPS, aig_session, and a matching X-CSRF-Token header.",
-                "tags": ["auth"],
+                "responses": {
+                    "204": {
+                        "description": "Session revoked."
+                    },
+                    "401": {
+                        "description": "Unauthenticated."
+                    },
+                    "403": {
+                        "description": "Missing or invalid CSRF token."
+                    },
+                    "426": {
+                        "description": "HTTPS is required."
+                    }
+                },
                 "summary": "Log out of local session",
-                "responses": {"204": {"description": "Session revoked."}, "401": {"description": "Unauthenticated."}, "403": {"description": "Missing or invalid CSRF token."}, "426": {"description": "HTTPS is required."}}
+                "tags": [
+                    "auth"
+                ]
             }
         },
         "/api/v1/auth/rotate-session": {
             "post": {
-                "description": "Rotates authenticated session and CSRF cookies. Requires HTTPS, aig_session, and a matching X-CSRF-Token header.",
-                "tags": ["auth"],
+                "description": "Rotates the authenticated session and CSRF cookies. Requires HTTPS, the aig_session cookie, and a matching X-CSRF-Token header.",
+                "responses": {
+                    "204": {
+                        "description": "Session and CSRF cookies rotated."
+                    },
+                    "401": {
+                        "description": "Unauthenticated or expired session."
+                    },
+                    "403": {
+                        "description": "Missing or invalid CSRF token."
+                    },
+                    "426": {
+                        "description": "HTTPS is required unless APP_ENV=test explicitly enables insecure test cookies."
+                    }
+                },
                 "summary": "Rotate local session",
-                "responses": {"204": {"description": "Session and CSRF cookies rotated."}, "401": {"description": "Unauthenticated or expired session."}, "403": {"description": "Missing or invalid CSRF token."}, "426": {"description": "HTTPS is required."}}
+                "tags": [
+                    "auth"
+                ]
             }
         },
         "/api/v1/auth/password-resets/{userID}": {
             "post": {
-                "description": "Requires HTTPS, administrator session, and matching X-CSRF-Token. This HTTP endpoint never returns a reset token. A trusted local administrator must run ai-infra-guard create-password-reset --username <username> to obtain the sensitive one-time token for secure delivery; it must never be logged or persisted.",
-                "tags": ["auth"],
+                "description": "Requires HTTPS, an administrator session, and a matching X-CSRF-Token header. This HTTP endpoint never returns a reset token. A trusted local administrator must run ai-infra-guard create-password-reset --username <username> to obtain the sensitive one-time token for secure delivery; it must never be logged or persisted.",
+                "parameters": [
+                    {
+                        "description": "Identity user ID",
+                        "in": "path",
+                        "name": "userID",
+                        "required": true,
+                        "type": "string"
+                    }
+                ],
+                "responses": {
+                    "204": {
+                        "description": "Reset request accepted; no token is returned."
+                    },
+                    "401": {
+                        "description": "Unauthenticated."
+                    },
+                    "403": {
+                        "description": "Administrator role or valid CSRF token required."
+                    },
+                    "404": {
+                        "description": "User not found."
+                    },
+                    "426": {
+                        "description": "HTTPS is required unless APP_ENV=test explicitly enables insecure test cookies."
+                    }
+                },
                 "summary": "Request password reset as administrator",
-                "parameters": [{"type": "string", "name": "userID", "in": "path", "required": true}],
-                "responses": {"204": {"description": "Reset request accepted; no token is returned."}, "401": {"description": "Unauthenticated."}, "403": {"description": "Administrator role or valid CSRF token required."}, "404": {"description": "User not found."}, "426": {"description": "HTTPS is required."}}
+                "tags": [
+                    "auth"
+                ]
             }
         },
         "/api/v1/auth/password-resets/confirm": {
             "post": {
-                "consumes": ["application/json"],
-                "description": "Confirms a password reset using a one-time token. Requires HTTPS. The token is accepted only in the request body and is never echoed.",
-                "tags": ["auth"],
+                "consumes": [
+                    "application/json"
+                ],
+                "description": "Confirms a password reset using a one-time token. Before the reset token is processed, the request requires the anonymous aig_csrf cookie from GET /api/v1/auth/csrf and the matching X-CSRF-Token header. Requires HTTPS. The reset token is accepted only in the request body and is never echoed.",
+                "parameters": [
+                    {
+                        "in": "body",
+                        "name": "reset",
+                        "required": true,
+                        "schema": {
+                            "$ref": "#/definitions/identity.PasswordResetConfirmRequest"
+                        }
+                    }
+                ],
+                "responses": {
+                    "204": {
+                        "description": "Password reset completed."
+                    },
+                    "400": {
+                        "description": "Invalid request body."
+                    },
+                    "401": {
+                        "description": "Invalid, expired, or already-used token."
+                    },
+                    "403": {
+                        "description": "Missing or mismatched pre-authentication CSRF cookie/header."
+                    },
+                    "426": {
+                        "description": "HTTPS is required unless APP_ENV=test explicitly enables insecure test cookies."
+                    }
+                },
                 "summary": "Confirm password reset",
-                "parameters": [{"in": "body", "name": "reset", "required": true, "schema": {"type": "object", "required": ["token", "temporary_password"], "properties": {"token": {"type": "string"}, "temporary_password": {"type": "string"}}}}],
-                "responses": {"204": {"description": "Password reset completed."}, "400": {"description": "Invalid request body."}, "401": {"description": "Invalid, expired, or already-used token."}, "426": {"description": "HTTPS is required."}}
+                "tags": [
+                    "auth"
+                ]
+            }
+        },
+        "/api/v1/app/tasks": {
+            "get": {
+                "deprecated": true,
+                "description": "Retired browser task collection. After authentication and the password-change gate it returns 410 Gone.",
+                "responses": {
+                    "401": {
+                        "description": "Unauthenticated."
+                    },
+                    "403": {
+                        "description": "Password change is incomplete."
+                    },
+                    "410": {
+                        "description": "Endpoint retired; no task list is exposed."
+                    }
+                },
+                "summary": "Retired browser task list",
+                "tags": [
+                    "retired-browser-tasks"
+                ]
+            },
+            "post": {
+                "deprecated": true,
+                "description": "Retired browser task creation. After authentication, the password-change gate, and CSRF it returns 410 Gone.",
+                "responses": {
+                    "401": {
+                        "description": "Unauthenticated."
+                    },
+                    "403": {
+                        "description": "Password change is incomplete or CSRF is invalid."
+                    },
+                    "410": {
+                        "description": "Endpoint retired; no task is submitted."
+                    }
+                },
+                "summary": "Retired browser task creation",
+                "tags": [
+                    "retired-browser-tasks"
+                ]
+            }
+        },
+        "/api/v1/app/tasks/{sessionId}": {
+            "get": {
+                "deprecated": true,
+                "description": "Retired browser task detail. After authentication and the password-change gate it returns 410 Gone.",
+                "parameters": [
+                    {
+                        "in": "path",
+                        "name": "sessionId",
+                        "required": true,
+                        "type": "string"
+                    }
+                ],
+                "responses": {
+                    "401": {
+                        "description": "Unauthenticated."
+                    },
+                    "403": {
+                        "description": "Password change is incomplete."
+                    },
+                    "410": {
+                        "description": "Endpoint retired; no task detail is exposed."
+                    }
+                },
+                "summary": "Retired browser task detail",
+                "tags": [
+                    "retired-browser-tasks"
+                ]
+            },
+            "put": {
+                "deprecated": true,
+                "description": "Retired browser task update. After authentication, the password-change gate, and CSRF it returns 410 Gone.",
+                "parameters": [
+                    {
+                        "in": "path",
+                        "name": "sessionId",
+                        "required": true,
+                        "type": "string"
+                    }
+                ],
+                "responses": {
+                    "401": {
+                        "description": "Unauthenticated."
+                    },
+                    "403": {
+                        "description": "Password change is incomplete or CSRF is invalid."
+                    },
+                    "410": {
+                        "description": "Endpoint retired; no task is changed."
+                    }
+                },
+                "summary": "Retired browser task update",
+                "tags": [
+                    "retired-browser-tasks"
+                ]
+            },
+            "delete": {
+                "deprecated": true,
+                "description": "Retired browser task deletion. After authentication, the password-change gate, and CSRF it returns 410 Gone.",
+                "parameters": [
+                    {
+                        "in": "path",
+                        "name": "sessionId",
+                        "required": true,
+                        "type": "string"
+                    }
+                ],
+                "responses": {
+                    "401": {
+                        "description": "Unauthenticated."
+                    },
+                    "403": {
+                        "description": "Password change is incomplete or CSRF is invalid."
+                    },
+                    "410": {
+                        "description": "Endpoint retired; no task is deleted."
+                    }
+                },
+                "summary": "Retired browser task deletion",
+                "tags": [
+                    "retired-browser-tasks"
+                ]
+            }
+        },
+        "/api/v1/app/tasks/sse/{sessionId}": {
+            "get": {
+                "deprecated": true,
+                "description": "Retired browser task stream. After authentication and the password-change gate it returns 410 Gone and opens no stream.",
+                "parameters": [
+                    {
+                        "in": "path",
+                        "name": "sessionId",
+                        "required": true,
+                        "type": "string"
+                    }
+                ],
+                "responses": {
+                    "401": {
+                        "description": "Unauthenticated."
+                    },
+                    "403": {
+                        "description": "Password change is incomplete."
+                    },
+                    "410": {
+                        "description": "Endpoint retired; no stream is opened."
+                    }
+                },
+                "summary": "Retired browser task stream",
+                "tags": [
+                    "retired-browser-tasks"
+                ]
+            }
+        },
+        "/api/v1/app/tasks/share": {
+            "post": {
+                "deprecated": true,
+                "description": "Retired browser task share. After authentication, the password-change gate, and CSRF it returns 410 Gone.",
+                "responses": {
+                    "401": {
+                        "description": "Unauthenticated."
+                    },
+                    "403": {
+                        "description": "Password change is incomplete or CSRF is invalid."
+                    },
+                    "410": {
+                        "description": "Endpoint retired; no task is shared."
+                    }
+                },
+                "summary": "Retired browser task share",
+                "tags": [
+                    "retired-browser-tasks"
+                ]
+            }
+        },
+        "/api/v1/app/tasks/uploadFile": {
+            "post": {
+                "deprecated": true,
+                "description": "Retired browser upload. After authentication, the password-change gate, and CSRF it returns 410 Gone.",
+                "responses": {
+                    "401": {
+                        "description": "Unauthenticated."
+                    },
+                    "403": {
+                        "description": "Password change is incomplete or CSRF is invalid."
+                    },
+                    "410": {
+                        "description": "Endpoint retired; no file is accepted."
+                    }
+                },
+                "summary": "Retired browser upload",
+                "tags": [
+                    "retired-browser-tasks"
+                ]
+            }
+        },
+        "/api/v1/app/tasks/uploadChunk": {
+            "post": {
+                "deprecated": true,
+                "description": "Retired browser chunk upload. After authentication, the password-change gate, and CSRF it returns 410 Gone.",
+                "responses": {
+                    "401": {
+                        "description": "Unauthenticated."
+                    },
+                    "403": {
+                        "description": "Password change is incomplete or CSRF is invalid."
+                    },
+                    "410": {
+                        "description": "Endpoint retired; no chunk is accepted."
+                    }
+                },
+                "summary": "Retired browser chunk upload",
+                "tags": [
+                    "retired-browser-tasks"
+                ]
+            }
+        },
+        "/api/v1/app/tasks/mergeChunks": {
+            "post": {
+                "deprecated": true,
+                "description": "Retired browser chunk merge. After authentication, the password-change gate, and CSRF it returns 410 Gone.",
+                "responses": {
+                    "401": {
+                        "description": "Unauthenticated."
+                    },
+                    "403": {
+                        "description": "Password change is incomplete or CSRF is invalid."
+                    },
+                    "410": {
+                        "description": "Endpoint retired; no chunks are merged."
+                    }
+                },
+                "summary": "Retired browser chunk merge",
+                "tags": [
+                    "retired-browser-tasks"
+                ]
+            }
+        },
+        "/api/v1/app/tasks/{sessionId}/terminate": {
+            "post": {
+                "deprecated": true,
+                "description": "Retired browser termination. After authentication, the password-change gate, and CSRF it returns 410 Gone.",
+                "parameters": [
+                    {
+                        "in": "path",
+                        "name": "sessionId",
+                        "required": true,
+                        "type": "string"
+                    }
+                ],
+                "responses": {
+                    "401": {
+                        "description": "Unauthenticated."
+                    },
+                    "403": {
+                        "description": "Password change is incomplete or CSRF is invalid."
+                    },
+                    "410": {
+                        "description": "Endpoint retired; no task is terminated."
+                    }
+                },
+                "summary": "Retired browser task termination",
+                "tags": [
+                    "retired-browser-tasks"
+                ]
+            }
+        },
+        "/api/v1/app/taskapi/uploadChunk": {
+            "post": {
+                "deprecated": true,
+                "description": "Retired browser chunk upload. After authentication, the password-change gate, and CSRF it returns 410 Gone.",
+                "responses": {
+                    "401": {
+                        "description": "Unauthenticated."
+                    },
+                    "403": {
+                        "description": "Password change is incomplete or CSRF is invalid."
+                    },
+                    "410": {
+                        "description": "Endpoint retired; no chunk is accepted."
+                    }
+                },
+                "summary": "Retired taskapi chunk upload",
+                "tags": [
+                    "taskapi"
+                ]
+            }
+        },
+        "/api/v1/app/taskapi/mergeChunks": {
+            "post": {
+                "deprecated": true,
+                "description": "Retired browser chunk merge. After authentication, the password-change gate, and CSRF it returns 410 Gone.",
+                "responses": {
+                    "401": {
+                        "description": "Unauthenticated."
+                    },
+                    "403": {
+                        "description": "Password change is incomplete or CSRF is invalid."
+                    },
+                    "410": {
+                        "description": "Endpoint retired; no chunks are merged."
+                    }
+                },
+                "summary": "Retired taskapi chunk merge",
+                "tags": [
+                    "taskapi"
+                ]
             }
         },
         "/api/v1/app/taskapi/result/{id}": {
             "get": {
-				"deprecated": true,
+                "deprecated": true,
                 "description": "Retired browser execution endpoint. Requests receive 410 Gone only after the normal session and password-change checks; use the Cookie-authenticated platform task API.",
+                "parameters": [
+                    {
+                        "description": "Task Session ID",
+                        "in": "path",
+                        "name": "id",
+                        "required": true,
+                        "type": "string"
+                    }
+                ],
                 "produces": [
                     "application/json"
                 ],
+                "responses": {
+                    "401": {
+                        "description": "Unauthenticated."
+                    },
+                    "403": {
+                        "description": "Password change is incomplete."
+                    },
+                    "410": {
+                        "description": "Endpoint retired; no task result is exposed here."
+                    }
+                },
+                "summary": "Get task result",
                 "tags": [
                     "taskapi"
-                ],
-                "summary": "Get task result",
-                "parameters": [
-                    {
-                        "type": "string",
-                        "description": "Task Session ID",
-                        "name": "id",
-                        "in": "path",
-                        "required": true
-                    }
-                ],
-                "responses": {
-                    "410": {
-                        "description": "Endpoint retired; no task result is exposed here.",
-                        "schema": {
-                            "$ref": "#/definitions/websocket.APIResponse"
-                        }
-                    },
-                    "400": {
-                        "description": "Invalid session ID format",
-                        "schema": {
-                            "$ref": "#/definitions/websocket.APIResponse"
-                        }
-                    },
-                    "404": {
-                        "description": "Task not found or not completed",
-                        "schema": {
-                            "$ref": "#/definitions/websocket.APIResponse"
-                        }
-                    },
-                    "500": {
-                        "description": "Internal server error",
-                        "schema": {
-                            "$ref": "#/definitions/websocket.APIResponse"
-                        }
-                    }
-                }
+                ]
             }
         },
         "/api/v1/app/taskapi/status/{id}": {
             "get": {
-				"deprecated": true,
+                "deprecated": true,
                 "description": "Retired browser execution endpoint. Requests receive 410 Gone only after the normal session and password-change checks; use GET /api/v1/platform/tasks/{taskID}.",
+                "parameters": [
+                    {
+                        "description": "Task Session ID",
+                        "in": "path",
+                        "name": "id",
+                        "required": true,
+                        "type": "string"
+                    }
+                ],
                 "produces": [
                     "application/json"
                 ],
+                "responses": {
+                    "401": {
+                        "description": "Unauthenticated."
+                    },
+                    "403": {
+                        "description": "Password change is incomplete."
+                    },
+                    "410": {
+                        "description": "Endpoint retired; no task status is exposed here."
+                    }
+                },
+                "summary": "Get task status",
                 "tags": [
                     "taskapi"
-                ],
-                "summary": "Get task status",
-                "parameters": [
-                    {
-                        "type": "string",
-                        "description": "Task Session ID",
-                        "name": "id",
-                        "in": "path",
-                        "required": true
-                    }
-                ],
-                "responses": {
-                    "410": {
-                        "description": "Endpoint retired; no task status is exposed here.",
-                        "schema": {
-                            "allOf": [
-                                {
-                                    "$ref": "#/definitions/websocket.APIResponse"
-                                },
-                                {
-                                    "type": "object",
-                                    "properties": {
-                                        "data": {
-                                            "$ref": "#/definitions/websocket.TaskStatusResponse"
-                                        }
-                                    }
-                                }
-                            ]
-                        }
-                    },
-                    "400": {
-                        "description": "Invalid session ID format",
-                        "schema": {
-                            "$ref": "#/definitions/websocket.APIResponse"
-                        }
-                    },
-                    "404": {
-                        "description": "Task not found",
-                        "schema": {
-                            "$ref": "#/definitions/websocket.APIResponse"
-                        }
-                    },
-                    "500": {
-                        "description": "Internal server error",
-                        "schema": {
-                            "$ref": "#/definitions/websocket.APIResponse"
-                        }
-                    }
-                }
+                ]
             }
         },
         "/api/v1/app/taskapi/tasks": {
             "post": {
-				"deprecated": true,
+                "deprecated": true,
                 "description": "Retired browser execution endpoint. Requests receive 410 Gone only after the normal session, password-change, and CSRF checks; use POST /api/v1/platform/tasks with governed model IDs and opaque attachments.",
-                "consumes": [
-                    "application/json"
-                ],
-                "produces": [
-                    "application/json"
-                ],
+                "responses": {
+                    "401": {
+                        "description": "Unauthenticated."
+                    },
+                    "403": {
+                        "description": "Password change is incomplete or CSRF is invalid."
+                    },
+                    "410": {
+                        "description": "Endpoint retired; no task is submitted."
+                    }
+                },
+                "summary": "Retired task creation endpoint",
                 "tags": [
                     "taskapi"
-                ],
-                "summary": "Retired task creation endpoint",
-                "parameters": [
-                    {
-                        "description": "Task request body. Content should be JSON object containing task-specific parameters based on type",
-                        "name": "request",
-                        "in": "body",
-                        "required": true,
-                        "schema": {
-                            "type": "object",
-                            "properties": {
-                                "content": {
-                                    "type": "object"
-                                },
-                                "type": {
-                                    "type": "string"
-                                }
-                            }
-                        }
-                    }
-                ],
-                "responses": {
-                    "410": {"description": "Endpoint retired; no task is submitted."},
-                    "200": {
-                        "description": "Task created successfully",
-                        "schema": {
-                            "allOf": [
-                                {
-                                    "$ref": "#/definitions/websocket.APIResponse"
-                                },
-                                {
-                                    "type": "object",
-                                    "properties": {
-                                        "data": {
-                                            "$ref": "#/definitions/websocket.TaskCreateResponse"
-                                        }
-                                    }
-                                }
-                            ]
-                        }
-                    },
-                    "400": {
-                        "description": "Invalid request parameters",
-                        "schema": {
-                            "$ref": "#/definitions/websocket.APIResponse"
-                        }
-                    },
-                    "500": {
-                        "description": "Internal server error",
-                        "schema": {
-                            "$ref": "#/definitions/websocket.APIResponse"
-                        }
-                    }
-                }
+                ]
             }
         },
         "/api/v1/app/taskapi/upload": {
             "post": {
-				"deprecated": true,
+                "deprecated": true,
                 "description": "Retired browser upload endpoint. Requests receive 410 Gone only after the normal session, password-change, and CSRF checks; use the private platform attachment API.",
-                "consumes": [
-                    "multipart/form-data"
-                ],
-                "produces": [
-                    "application/json"
-                ],
+                "responses": {
+                    "401": {
+                        "description": "Unauthenticated."
+                    },
+                    "403": {
+                        "description": "Password change is incomplete or CSRF is invalid."
+                    },
+                    "410": {
+                        "description": "Endpoint retired; no attachment is accepted."
+                    }
+                },
+                "summary": "Upload file",
                 "tags": [
                     "taskapi"
-                ],
-                "summary": "Retired browser upload endpoint",
-                "parameters": [
-                    {
-                        "type": "file",
-                        "description": "File to upload",
-                        "name": "file",
-                        "in": "formData",
-                        "required": true
-                    }
-                ],
-                "responses": {
-                    "410": {"description": "Endpoint retired; no attachment is accepted."},
-                    "200": {
-                        "description": "File uploaded successfully",
-                        "schema": {
-                            "type": "object",
-                            "properties": {
-                                "data": {
-                                    "type": "object",
-                                    "properties": {
-                                        "fileUrl": {
-                                            "type": "string"
-                                        },
-                                        "filename": {
-                                            "type": "string"
-                                        },
-                                        "size": {
-                                            "type": "integer"
-                                        }
-                                    }
-                                },
-                                "message": {
-                                    "type": "string"
-                                },
-                                "status": {
-                                    "type": "integer"
-                                }
-                            }
-                        }
-                    },
-                    "400": {
-                        "description": "Invalid file or upload parameters",
-                        "schema": {
-                            "type": "object",
-                            "properties": {
-                                "data": {
-                                    "type": "object"
-                                },
-                                "message": {
-                                    "type": "string"
-                                },
-                                "status": {
-                                    "type": "integer"
-                                }
-                            }
-                        }
-                    },
-                    "500": {
-                        "description": "Internal server error",
-                        "schema": {
-                            "type": "object",
-                            "properties": {
-                                "data": {
-                                    "type": "object"
-                                },
-                                "message": {
-                                    "type": "string"
-                                },
-                                "status": {
-                                    "type": "integer"
-                                }
-                            }
-                        }
-                    }
-                }
+                ]
             }
         }
     },
     "definitions": {
+        "admin.AuditListResponse": {
+            "description": "Paginated sanitized audit-event envelope.",
+            "properties": {
+                "items": {
+                    "items": {
+                        "$ref": "#/definitions/audit.Event"
+                    },
+                    "type": "array"
+                },
+                "page": {
+                    "minimum": 1,
+                    "type": "integer"
+                },
+                "page_size": {
+                    "maximum": 100,
+                    "minimum": 1,
+                    "type": "integer"
+                },
+                "total": {
+                    "format": "int64",
+                    "minimum": 0,
+                    "type": "integer"
+                }
+            },
+            "required": [
+                "items",
+                "total",
+                "page",
+                "page_size"
+            ],
+            "type": "object"
+        },
+        "admin.UserListResponse": {
+            "description": "Administrator-only paginated local-account envelope.",
+            "properties": {
+                "items": {
+                    "items": {
+                        "$ref": "#/definitions/admin.UserResponse"
+                    },
+                    "type": "array"
+                },
+                "page": {
+                    "minimum": 1,
+                    "type": "integer"
+                },
+                "page_size": {
+                    "maximum": 100,
+                    "minimum": 1,
+                    "type": "integer"
+                },
+                "total": {
+                    "format": "int64",
+                    "minimum": 0,
+                    "type": "integer"
+                }
+            },
+            "required": [
+                "items",
+                "total",
+                "page",
+                "page_size"
+            ],
+            "type": "object"
+        },
+        "admin.UserResponse": {
+            "description": "Safe local-account metadata; credentials and credential hashes are not representable.",
+            "properties": {
+                "active": {
+                    "type": "boolean"
+                },
+                "created_at": {
+                    "format": "date-time",
+                    "type": "string"
+                },
+                "id": {
+                    "type": "string"
+                },
+                "must_change_password": {
+                    "type": "boolean"
+                },
+                "role": {
+                    "enum": [
+                        "admin",
+                        "user",
+                        "auditor"
+                    ],
+                    "type": "string"
+                },
+                "updated_at": {
+                    "format": "date-time",
+                    "type": "string"
+                },
+                "username": {
+                    "type": "string"
+                }
+            },
+            "required": [
+                "id",
+                "username",
+                "role",
+                "active",
+                "must_change_password",
+                "created_at",
+                "updated_at"
+            ],
+            "type": "object"
+        },
+        "audit.Event": {
+            "description": "Append-only event with recursively sanitized metadata. Secret-like metadata keys are replaced by a redaction marker before persistence and response.",
+            "properties": {
+                "action": {
+                    "description": "Governance action, including attachment.download_authorized for an approved administrator cross-owner download.",
+                    "type": "string"
+                },
+                "actor_role": {
+                    "enum": [
+                        "admin",
+                        "user",
+                        "auditor"
+                    ],
+                    "type": "string"
+                },
+                "actor_user_id": {
+                    "type": "string"
+                },
+                "actor_username": {
+                    "type": "string"
+                },
+                "client_ip": {
+                    "type": "string"
+                },
+                "id": {
+                    "type": "string"
+                },
+                "metadata": {
+                    "additionalProperties": true,
+                    "description": "Sanitized JSON metadata only.",
+                    "type": "object"
+                },
+                "occurred_at": {
+                    "format": "date-time",
+                    "type": "string"
+                },
+                "outcome": {
+                    "enum": [
+                        "pending",
+                        "success",
+                        "failure"
+                    ],
+                    "type": "string"
+                },
+                "request_id": {
+                    "type": "string"
+                },
+                "resource_id": {
+                    "type": "string"
+                },
+                "resource_type": {
+                    "type": "string"
+                }
+            },
+            "required": [
+                "id",
+                "occurred_at",
+                "action",
+                "outcome",
+                "metadata"
+            ],
+            "type": "object"
+        },
         "brand.Config": {
             "description": "Current mutable brand configuration. Logo bytes are returned only by the brand API and are never copied into report list or detail payloads.",
             "properties": {
@@ -956,6 +2486,31 @@ const docTemplate = `{
             ],
             "type": "object"
         },
+        "brand.PublicConfig": {
+            "description": "Exact anonymous login-page-safe brand projection.",
+            "properties": {
+                "logo_data_url": {
+                    "description": "A validated data:image/png;base64 or data:image/jpeg;base64 value; empty string when no valid Logo is configured.",
+                    "pattern": "^(?:|data:image/(?:png|jpeg);base64,[A-Za-z0-9+/]+={0,2})$",
+                    "type": "string"
+                },
+                "primary_color": {
+                    "example": "#1677FF",
+                    "pattern": "^#[0-9A-Fa-f]{6}$",
+                    "type": "string"
+                },
+                "product_name": {
+                    "maxLength": 128,
+                    "type": "string"
+                }
+            },
+            "required": [
+                "product_name",
+                "primary_color",
+                "logo_data_url"
+            ],
+            "type": "object"
+        },
         "brand.UpdateRequest": {
             "properties": {
                 "logo": {
@@ -995,6 +2550,475 @@ const docTemplate = `{
             ],
             "type": "object"
         },
+        "dashboard.AttentionItem": {
+            "description": "Narrow report snapshot requiring attention; no engine, owner, attachment, or render source data is included.",
+            "properties": {
+                "completed_at": {
+                    "format": "date-time",
+                    "type": "string"
+                },
+                "high": {
+                    "minimum": 0,
+                    "type": "integer"
+                },
+                "low": {
+                    "minimum": 0,
+                    "type": "integer"
+                },
+                "medium": {
+                    "minimum": 0,
+                    "type": "integer"
+                },
+                "report_id": {
+                    "type": "string"
+                },
+                "score": {
+                    "maximum": 100,
+                    "minimum": 0,
+                    "type": "integer"
+                },
+                "task_id": {
+                    "type": "string"
+                },
+                "task_type": {
+                    "enum": [
+                        "mcp_scan",
+                        "ai_infra_scan",
+                        "model_redteam_report",
+                        "agent_scan"
+                    ],
+                    "type": "string"
+                }
+            },
+            "required": [
+                "report_id",
+                "task_id",
+                "task_type",
+                "completed_at",
+                "score",
+                "high",
+                "medium",
+                "low"
+            ],
+            "type": "object"
+        },
+        "dashboard.TrendPoint": {
+            "properties": {
+                "completed": {
+                    "minimum": 0,
+                    "type": "integer"
+                },
+                "date": {
+                    "description": "UTC calendar day at 00:00:00Z.",
+                    "format": "date-time",
+                    "type": "string"
+                },
+                "high": {
+                    "minimum": 0,
+                    "type": "integer"
+                },
+                "low": {
+                    "minimum": 0,
+                    "type": "integer"
+                },
+                "medium": {
+                    "minimum": 0,
+                    "type": "integer"
+                },
+                "security_score": {
+                    "maximum": 100,
+                    "minimum": 0,
+                    "type": "integer",
+                    "x-nullable": true
+                }
+            },
+            "required": [
+                "date",
+                "completed",
+                "security_score",
+                "high",
+                "medium",
+                "low"
+            ],
+            "type": "object"
+        },
+        "dashboard.View": {
+            "description": "Subject-scoped governed dashboard. The trend is always exactly 30 ascending UTC day buckets.",
+            "properties": {
+                "attention": {
+                    "items": {
+                        "$ref": "#/definitions/dashboard.AttentionItem"
+                    },
+                    "maxItems": 5,
+                    "type": "array"
+                },
+                "has_data": {
+                    "type": "boolean"
+                },
+                "mapping_versions": {
+                    "items": {
+                        "type": "string"
+                    },
+                    "type": "array"
+                },
+                "recent_tasks": {
+                    "items": {
+                        "$ref": "#/definitions/tasks.TaskSummary"
+                    },
+                    "maxItems": 5,
+                    "type": "array"
+                },
+                "risk": {
+                    "$ref": "#/definitions/reports.RiskSummary"
+                },
+                "security_score": {
+                    "maximum": 100,
+                    "minimum": 0,
+                    "type": "integer",
+                    "x-nullable": true
+                },
+                "trend": {
+                    "description": "Exactly 30 zero-filled, ascending UTC calendar-day buckets ending today.",
+                    "items": {
+                        "$ref": "#/definitions/dashboard.TrendPoint"
+                    },
+                    "maxItems": 30,
+                    "minItems": 30,
+                    "type": "array"
+                }
+            },
+            "required": [
+                "has_data",
+                "security_score",
+                "mapping_versions",
+                "risk",
+                "trend",
+                "recent_tasks",
+                "attention"
+            ],
+            "type": "object"
+        },
+        "identity.CSRFResponse": {
+            "properties": {
+                "csrf_token": {
+                    "description": "Double-submit token matching the aig_csrf cookie; use it only in X-CSRF-Token.",
+                    "type": "string"
+                }
+            },
+            "required": [
+                "csrf_token"
+            ],
+            "type": "object"
+        },
+        "identity.CurrentSubjectResponse": {
+            "description": "Current Cookie-session Subject, intentionally available before the password-change completion gate.",
+            "properties": {
+                "id": {
+                    "type": "string"
+                },
+                "must_change_password": {
+                    "type": "boolean"
+                },
+                "role": {
+                    "enum": [
+                        "admin",
+                        "user",
+                        "auditor"
+                    ],
+                    "type": "string"
+                },
+                "username": {
+                    "type": "string"
+                }
+            },
+            "required": [
+                "id",
+                "username",
+                "role",
+                "must_change_password"
+            ],
+            "type": "object"
+        },
+        "identity.LoginRequest": {
+            "properties": {
+                "password": {
+                    "format": "password",
+                    "type": "string",
+                    "x-write-only": true
+                },
+                "username": {
+                    "type": "string"
+                }
+            },
+            "required": [
+                "username",
+                "password"
+            ],
+            "type": "object"
+        },
+        "identity.LoginResponse": {
+            "properties": {
+                "must_change_password": {
+                    "type": "boolean"
+                }
+            },
+            "required": [
+                "must_change_password"
+            ],
+            "type": "object"
+        },
+        "identity.PasswordResetConfirmRequest": {
+            "properties": {
+                "temporary_password": {
+                    "format": "password",
+                    "type": "string",
+                    "x-write-only": true
+                },
+                "token": {
+                    "format": "password",
+                    "type": "string",
+                    "x-write-only": true
+                }
+            },
+            "required": [
+                "token",
+                "temporary_password"
+            ],
+            "type": "object"
+        },
+        "models.CatalogPage": {
+            "description": "Paginated governed model catalog containing encrypted platform rows followed by immutable YAML rows.",
+            "properties": {
+                "items": {
+                    "items": {
+                        "$ref": "#/definitions/models.CatalogView"
+                    },
+                    "type": "array"
+                },
+                "page": {
+                    "minimum": 1,
+                    "type": "integer"
+                },
+                "page_size": {
+                    "maximum": 100,
+                    "minimum": 1,
+                    "type": "integer"
+                },
+                "total": {
+                    "format": "int64",
+                    "minimum": 0,
+                    "type": "integer"
+                }
+            },
+            "required": [
+                "items",
+                "total",
+                "page",
+                "page_size"
+            ],
+            "type": "object"
+        },
+        "models.CatalogView": {
+            "properties": {
+                "base_url": {
+                    "type": "string"
+                },
+                "created_at": {
+                    "format": "date-time",
+                    "type": "string"
+                },
+                "disabled": {
+                    "type": "boolean"
+                },
+                "id": {
+                    "type": "string"
+                },
+                "limit": {
+                    "type": "integer"
+                },
+                "name": {
+                    "type": "string"
+                },
+                "note": {
+                    "type": "string"
+                },
+                "owner_user_id": {
+                    "description": "Present only for an authorized encrypted private model; empty for YAML rows.",
+                    "type": "string"
+                },
+                "provider_model": {
+                    "type": "string"
+                },
+                "read_only": {
+                    "description": "True for YAML rows and for encrypted rows the current Subject cannot mutate.",
+                    "type": "boolean"
+                },
+                "scope": {
+                    "enum": [
+                        "private",
+                        "global"
+                    ],
+                    "type": "string"
+                },
+                "source": {
+                    "enum": [
+                        "platform",
+                        "yaml"
+                    ],
+                    "type": "string"
+                },
+                "token": {
+                    "description": "Always masked as ********; plaintext and encrypted storage material are never returned.",
+                    "example": "********",
+                    "type": "string"
+                },
+                "updated_at": {
+                    "format": "date-time",
+                    "type": "string"
+                }
+            },
+            "required": [
+                "id",
+                "scope",
+                "name",
+                "provider_model",
+                "base_url",
+                "disabled",
+                "token",
+                "source",
+                "read_only"
+            ],
+            "type": "object"
+        },
+        "models.CreateInput": {
+            "properties": {
+                "base_url": {
+                    "type": "string"
+                },
+                "limit": {
+                    "type": "integer"
+                },
+                "name": {
+                    "type": "string"
+                },
+                "note": {
+                    "type": "string"
+                },
+                "provider_model": {
+                    "type": "string"
+                },
+                "scope": {
+                    "enum": [
+                        "private",
+                        "global"
+                    ],
+                    "type": "string"
+                },
+                "token": {
+                    "description": "Write-only plaintext token encrypted before persistence and never returned.",
+                    "format": "password",
+                    "type": "string",
+                    "x-write-only": true
+                }
+            },
+            "required": [
+                "name",
+                "provider_model",
+                "base_url",
+                "token",
+                "scope"
+            ],
+            "type": "object"
+        },
+        "models.UpdateInput": {
+            "properties": {
+                "base_url": {
+                    "type": "string"
+                },
+                "disabled": {
+                    "type": "boolean"
+                },
+                "limit": {
+                    "type": "integer"
+                },
+                "name": {
+                    "type": "string"
+                },
+                "note": {
+                    "type": "string"
+                },
+                "provider_model": {
+                    "type": "string"
+                },
+                "token": {
+                    "description": "Optional write-only replacement. Omit, empty, or ******** preserves the stored encrypted token.",
+                    "format": "password",
+                    "type": "string",
+                    "x-write-only": true
+                }
+            },
+            "type": "object"
+        },
+        "models.View": {
+            "properties": {
+                "base_url": {
+                    "type": "string"
+                },
+                "created_at": {
+                    "format": "date-time",
+                    "type": "string"
+                },
+                "disabled": {
+                    "type": "boolean"
+                },
+                "id": {
+                    "type": "string"
+                },
+                "limit": {
+                    "type": "integer"
+                },
+                "name": {
+                    "type": "string"
+                },
+                "note": {
+                    "type": "string"
+                },
+                "owner_user_id": {
+                    "type": "string"
+                },
+                "provider_model": {
+                    "type": "string"
+                },
+                "scope": {
+                    "enum": [
+                        "private",
+                        "global"
+                    ],
+                    "type": "string"
+                },
+                "token": {
+                    "description": "Always masked as ********; plaintext and encrypted storage material are never returned.",
+                    "example": "********",
+                    "type": "string"
+                },
+                "updated_at": {
+                    "format": "date-time",
+                    "type": "string"
+                }
+            },
+            "required": [
+                "id",
+                "scope",
+                "name",
+                "provider_model",
+                "base_url",
+                "disabled",
+                "token",
+                "created_at",
+                "updated_at"
+            ],
+            "type": "object"
+        },
         "reports.BackfillRequest": {
             "properties": {
                 "task_id": {
@@ -1006,6 +3030,114 @@ const docTemplate = `{
             },
             "required": [
                 "task_id"
+            ],
+            "type": "object"
+        },
+        "reports.ReportDetail": {
+            "description": "Safe immutable online report. It contains only the frozen RenderModel and public report metadata; stored source results, render payloads, private ownership metadata, Logo bytes, paths, and mutable brand records are absent.",
+            "properties": {
+                "completed_at": {
+                    "format": "date-time",
+                    "type": "string"
+                },
+                "created_at": {
+                    "description": "Immutable report generation time.",
+                    "format": "date-time",
+                    "type": "string"
+                },
+                "id": {
+                    "type": "string"
+                },
+                "render": {
+                    "$ref": "#/definitions/reports.RenderModel"
+                },
+                "risk": {
+                    "$ref": "#/definitions/reports.RiskSummary"
+                },
+                "task_id": {
+                    "type": "string"
+                },
+                "task_type": {
+                    "type": "string"
+                }
+            },
+            "required": [
+                "id",
+                "task_id",
+                "task_type",
+                "completed_at",
+                "created_at",
+                "risk",
+                "render"
+            ],
+            "type": "object"
+        },
+        "reports.ReportSummary": {
+            "description": "Bounded safe report-list item. Stored raw results, render JSON, owner IDs, Logo bytes, and mutable brand metadata are omitted.",
+            "properties": {
+                "brand_product_name": {
+                    "type": "string"
+                },
+                "completed_at": {
+                    "format": "date-time",
+                    "type": "string"
+                },
+                "created_at": {
+                    "format": "date-time",
+                    "type": "string"
+                },
+                "id": {
+                    "type": "string"
+                },
+                "risk": {
+                    "$ref": "#/definitions/reports.RiskSummary"
+                },
+                "task_id": {
+                    "type": "string"
+                },
+                "task_type": {
+                    "type": "string"
+                }
+            },
+            "required": [
+                "id",
+                "task_id",
+                "task_type",
+                "completed_at",
+                "created_at",
+                "risk",
+                "brand_product_name"
+            ],
+            "type": "object"
+        },
+        "reports.ReportListResponse": {
+            "properties": {
+                "items": {
+                    "items": {
+                        "$ref": "#/definitions/reports.ReportSummary"
+                    },
+                    "type": "array"
+                },
+                "page": {
+                    "minimum": 1,
+                    "type": "integer"
+                },
+                "page_size": {
+                    "maximum": 100,
+                    "minimum": 1,
+                    "type": "integer"
+                },
+                "total": {
+                    "format": "int64",
+                    "minimum": 0,
+                    "type": "integer"
+                }
+            },
+            "required": [
+                "items",
+                "total",
+                "page",
+                "page_size"
             ],
             "type": "object"
         },
@@ -1105,83 +3237,6 @@ const docTemplate = `{
                 "recommendations",
                 "coverage",
                 "conclusion"
-            ],
-            "type": "object"
-        },
-        "reports.ReportDetail": {
-            "description": "Safe immutable online report. It contains only the frozen RenderModel and public report metadata, never raw_result, render_data, owner_user_id, Logo bytes, paths, or mutable brand records.",
-            "properties": {
-                "completed_at": {
-                    "format": "date-time",
-                    "type": "string"
-                },
-                "created_at": {
-                    "description": "Immutable report generation time.",
-                    "format": "date-time",
-                    "type": "string"
-                },
-                "id": {
-                    "type": "string"
-                },
-                "render": {
-                    "$ref": "#/definitions/reports.RenderModel"
-                },
-                "risk": {
-                    "$ref": "#/definitions/reports.RiskSummary"
-                },
-                "task_id": {
-                    "type": "string"
-                },
-                "task_type": {
-                    "type": "string"
-                }
-            },
-            "required": [
-                "id",
-                "task_id",
-                "task_type",
-                "completed_at",
-                "created_at",
-                "risk",
-                "render"
-            ],
-            "type": "object"
-        },
-        "reports.ReportSummary": {
-            "description": "Bounded safe report-list item. Stored raw results, render JSON, owner IDs, Logo bytes, and mutable brand metadata are omitted.",
-            "properties": {
-                "brand_product_name": {
-                    "type": "string"
-                },
-                "completed_at": {
-                    "format": "date-time",
-                    "type": "string"
-                },
-                "created_at": {
-                    "format": "date-time",
-                    "type": "string"
-                },
-                "id": {
-                    "type": "string"
-                },
-                "risk": {
-                    "$ref": "#/definitions/reports.RiskSummary"
-                },
-                "task_id": {
-                    "type": "string"
-                },
-                "task_type": {
-                    "type": "string"
-                }
-            },
-            "required": [
-                "id",
-                "task_id",
-                "task_type",
-                "completed_at",
-                "created_at",
-                "risk",
-                "brand_product_name"
             ],
             "type": "object"
         },
@@ -1325,113 +3380,477 @@ const docTemplate = `{
             ],
             "type": "object"
         },
+        "tasks.AttachmentView": {
+            "description": "Opaque attachment metadata; storage location and owner identifiers are not returned.",
+            "properties": {
+                "created_at": {
+                    "format": "date-time",
+                    "type": "string"
+                },
+                "filename": {
+                    "type": "string"
+                },
+                "id": {
+                    "type": "string"
+                },
+                "size": {
+                    "format": "int64",
+                    "minimum": 0,
+                    "type": "integer"
+                },
+                "state": {
+                    "enum": [
+                        "uploading",
+                        "ready"
+                    ],
+                    "type": "string"
+                }
+            },
+            "required": [
+                "id",
+                "filename",
+                "size",
+                "state",
+                "created_at"
+            ],
+            "type": "object"
+        },
+        "tasks.TaskDetail": {
+            "description": "Browser-safe task detail with only display-safe input metadata.",
+            "properties": {
+                "created_at": {
+                    "format": "date-time",
+                    "type": "string"
+                },
+                "id": {
+                    "type": "string"
+                },
+                "input_summary": {
+                    "$ref": "#/definitions/tasks.TaskInputSummary"
+                },
+                "owner": {
+                    "type": "string"
+                },
+                "status": {
+                    "enum": [
+                        "pending",
+                        "dispatching",
+                        "running",
+                        "succeeded",
+                        "failed",
+                        "dispatch_failed",
+                        "dispatch_unknown",
+                        "cancelled"
+                    ],
+                    "type": "string"
+                },
+                "task_type": {
+                    "enum": [
+                        "mcp_scan",
+                        "ai_infra_scan",
+                        "model_redteam_report",
+                        "agent_scan",
+                        "unknown"
+                    ],
+                    "type": "string"
+                },
+                "updated_at": {
+                    "format": "date-time",
+                    "type": "string"
+                }
+            },
+            "required": [
+                "id",
+                "owner",
+                "task_type",
+                "status",
+                "created_at",
+                "updated_at",
+                "input_summary"
+            ],
+            "type": "object"
+        },
+        "tasks.TaskInputSummary": {
+            "description": "Task-type-specific display metadata; source content, arbitrary parameters, credentials, URLs, attachment references, and engine data are absent.",
+            "properties": {
+                "language": {
+                    "enum": [
+                        "zh",
+                        "en"
+                    ],
+                    "type": "string"
+                },
+                "num_prompts": {
+                    "maximum": 1000000,
+                    "minimum": 1,
+                    "type": "integer"
+                },
+                "target_count": {
+                    "minimum": 1,
+                    "type": "integer"
+                },
+                "thread": {
+                    "maximum": 1024,
+                    "minimum": 1,
+                    "type": "integer"
+                },
+                "timeout": {
+                    "maximum": 86400,
+                    "minimum": 1,
+                    "type": "integer"
+                }
+            },
+            "type": "object"
+        },
+        "tasks.TaskListResponse": {
+            "properties": {
+                "items": {
+                    "items": {
+                        "$ref": "#/definitions/tasks.TaskSummary"
+                    },
+                    "type": "array"
+                },
+                "page": {
+                    "minimum": 1,
+                    "type": "integer"
+                },
+                "page_size": {
+                    "maximum": 100,
+                    "minimum": 1,
+                    "type": "integer"
+                },
+                "total": {
+                    "format": "int64",
+                    "minimum": 0,
+                    "type": "integer"
+                }
+            },
+            "required": [
+                "items",
+                "total",
+                "page",
+                "page_size"
+            ],
+            "type": "object"
+        },
+        "tasks.TaskSummary": {
+            "description": "Narrow browser list item.",
+            "properties": {
+                "created_at": {
+                    "format": "date-time",
+                    "type": "string"
+                },
+                "id": {
+                    "type": "string"
+                },
+                "owner": {
+                    "type": "string"
+                },
+                "status": {
+                    "enum": [
+                        "pending",
+                        "dispatching",
+                        "running",
+                        "succeeded",
+                        "failed",
+                        "dispatch_failed",
+                        "dispatch_unknown",
+                        "cancelled"
+                    ],
+                    "type": "string"
+                },
+                "task_type": {
+                    "enum": [
+                        "mcp_scan",
+                        "ai_infra_scan",
+                        "model_redteam_report",
+                        "agent_scan",
+                        "unknown"
+                    ],
+                    "type": "string"
+                },
+                "updated_at": {
+                    "format": "date-time",
+                    "type": "string"
+                }
+            },
+            "required": [
+                "id",
+                "owner",
+                "task_type",
+                "status",
+                "created_at",
+                "updated_at"
+            ],
+            "type": "object"
+        },
         "websocket.APIResponse": {
-            "type": "object",
             "properties": {
                 "data": {
                     "description": "响应数据"
                 },
                 "message": {
                     "description": "响应消息",
-                    "type": "string",
-                    "example": "操作成功"
+                    "example": "操作成功",
+                    "type": "string"
                 },
                 "status": {
                     "description": "状态码: 0=成功, 1=失败",
-                    "type": "integer",
-                    "example": 0
+                    "example": 0,
+                    "type": "integer"
                 }
-            }
+            },
+            "type": "object"
         },
         "websocket.LegacyModelCreateRequest": {
             "description": "Deprecated browser request shape retained for compatibility. The model object is required and its token is accepted only as write-only secret input.",
-            "type": "object",
-            "required": ["model_id", "model"],
-            "properties": {"model": {"$ref": "#/definitions/websocket.LegacyModelInfo"}, "model_id": {"description": "Compatibility model ID. Path separators and identifiers longer than 128 characters are rejected.", "type": "string", "maxLength": 128}}
+            "properties": {
+                "model": {
+                    "$ref": "#/definitions/websocket.LegacyModelInfo"
+                },
+                "model_id": {
+                    "description": "Compatibility model ID. Path separators and identifiers longer than 128 characters are rejected.",
+                    "maxLength": 128,
+                    "type": "string"
+                }
+            },
+            "required": [
+                "model_id",
+                "model"
+            ],
+            "type": "object"
         },
         "websocket.LegacyModelDeleteRequest": {
-            "type": "object",
-            "required": ["model_ids"],
-            "properties": {"model_ids": {"description": "Compatibility model IDs to delete as one legacy collection request.", "type": "array", "minItems": 1, "items": {"type": "string", "maxLength": 128}}}
+            "properties": {
+                "model_ids": {
+                    "description": "Compatibility model IDs to delete as one legacy collection request.",
+                    "items": {
+                        "maxLength": 128,
+                        "type": "string"
+                    },
+                    "minItems": 1,
+                    "type": "array"
+                }
+            },
+            "required": [
+                "model_ids"
+            ],
+            "type": "object"
         },
         "websocket.LegacyModelDetailEnvelope": {
-            "type": "object",
-            "properties": {"data": {"$ref": "#/definitions/websocket.LegacyModelView"}, "message": {"type": "string"}, "status": {"description": "Legacy application status. Zero means success; validation and not-found errors use one while retaining HTTP 200.", "type": "integer"}}
+            "properties": {
+                "data": {
+                    "$ref": "#/definitions/websocket.LegacyModelView"
+                },
+                "message": {
+                    "type": "string"
+                },
+                "status": {
+                    "description": "Legacy application status. Zero means success; validation and not-found errors use one while retaining HTTP 200.",
+                    "type": "integer"
+                }
+            },
+            "type": "object"
         },
         "websocket.LegacyModelInfo": {
-            "type": "object",
-            "required": ["model", "token", "base_url"],
-            "properties": {"base_url": {"type": "string"}, "limit": {"type": "integer"}, "model": {"type": "string"}, "note": {"type": "string"}, "token": {"description": "Write-only plaintext token. It is authenticated-encrypted before storage and is never returned.", "type": "string", "format": "password"}}
+            "properties": {
+                "base_url": {
+                    "type": "string"
+                },
+                "limit": {
+                    "type": "integer"
+                },
+                "model": {
+                    "type": "string"
+                },
+                "note": {
+                    "type": "string"
+                },
+                "token": {
+                    "description": "Write-only plaintext token. It is authenticated-encrypted before storage and is never returned.",
+                    "format": "password",
+                    "type": "string"
+                }
+            },
+            "required": [
+                "model",
+                "token",
+                "base_url"
+            ],
+            "type": "object"
         },
         "websocket.LegacyModelListEnvelope": {
-            "type": "object",
-            "properties": {"data": {"type": "array", "items": {"$ref": "#/definitions/websocket.LegacyModelView"}}, "message": {"type": "string"}, "status": {"description": "Legacy application status. Zero means success.", "type": "integer"}}
+            "properties": {
+                "data": {
+                    "items": {
+                        "$ref": "#/definitions/websocket.LegacyModelView"
+                    },
+                    "type": "array"
+                },
+                "message": {
+                    "type": "string"
+                },
+                "status": {
+                    "description": "Legacy application status. Zero means success.",
+                    "type": "integer"
+                }
+            },
+            "type": "object"
         },
         "websocket.LegacyModelMutationEnvelope": {
-            "type": "object",
-            "properties": {"data": {"description": "Null for legacy create, update, and collection-delete responses.", "type": "object", "x-nullable": true}, "message": {"type": "string"}, "status": {"description": "Legacy application status. Zero means success; validation and not-found errors use one while retaining HTTP 200.", "type": "integer"}}
+            "properties": {
+                "data": {
+                    "description": "Null for legacy create, update, and collection-delete responses.",
+                    "type": "object",
+                    "x-nullable": true
+                },
+                "message": {
+                    "type": "string"
+                },
+                "status": {
+                    "description": "Legacy application status. Zero means success; validation and not-found errors use one while retaining HTTP 200.",
+                    "type": "integer"
+                }
+            },
+            "type": "object"
         },
         "websocket.LegacyModelUpdateInfo": {
-            "type": "object",
-            "properties": {"base_url": {"type": "string"}, "limit": {"type": "integer"}, "model": {"type": "string"}, "note": {"type": "string"}, "token": {"description": "Optional write-only replacement token. Omit it or send the mask sentinel to preserve the stored token.", "type": "string", "format": "password"}}
+            "properties": {
+                "base_url": {
+                    "type": "string"
+                },
+                "limit": {
+                    "type": "integer"
+                },
+                "model": {
+                    "type": "string"
+                },
+                "note": {
+                    "type": "string"
+                },
+                "token": {
+                    "description": "Optional write-only replacement token. Omit it or send the mask sentinel to preserve the stored token.",
+                    "format": "password",
+                    "type": "string"
+                }
+            },
+            "type": "object"
         },
         "websocket.LegacyModelUpdateRequest": {
-            "type": "object",
-            "required": ["model"],
-            "properties": {"model": {"$ref": "#/definitions/websocket.LegacyModelUpdateInfo"}}
+            "properties": {
+                "model": {
+                    "$ref": "#/definitions/websocket.LegacyModelUpdateInfo"
+                }
+            },
+            "required": [
+                "model"
+            ],
+            "type": "object"
         },
         "websocket.LegacyModelView": {
-            "type": "object",
-            "properties": {"default": {"description": "Task-type identifiers copied from a read-only YAML model. Encrypted platform models return an explicit empty array.", "type": "array", "items": {"type": "string"}}, "model": {"$ref": "#/definitions/websocket.LegacyModelViewInfo"}, "model_id": {"type": "string"}}
+            "properties": {
+                "default": {
+                    "description": "Task-type identifiers copied from a read-only YAML model. Encrypted platform models return an explicit empty array.",
+                    "items": {
+                        "type": "string"
+                    },
+                    "type": "array"
+                },
+                "model": {
+                    "$ref": "#/definitions/websocket.LegacyModelViewInfo"
+                },
+                "model_id": {
+                    "type": "string"
+                }
+            },
+            "type": "object"
         },
         "websocket.LegacyModelViewInfo": {
-            "type": "object",
-            "properties": {"base_url": {"type": "string"}, "limit": {"type": "integer"}, "model": {"type": "string"}, "note": {"type": "string"}, "token": {"description": "Always masked as ********; plaintext, ciphertext, nonce, and key identifiers are never exposed.", "type": "string", "example": "********"}}
+            "properties": {
+                "base_url": {
+                    "type": "string"
+                },
+                "limit": {
+                    "type": "integer"
+                },
+                "model": {
+                    "type": "string"
+                },
+                "note": {
+                    "type": "string"
+                },
+                "token": {
+                    "description": "Always masked as ********; plaintext, ciphertext, nonce, and key identifiers are never exposed.",
+                    "example": "********",
+                    "type": "string"
+                }
+            },
+            "type": "object"
+        },
+        "websocket.SafeVersionResponse": {
+            "description": "Anonymous build metadata allowlist.",
+            "properties": {
+                "build_time": {
+                    "type": "string"
+                },
+                "commit": {
+                    "type": "string"
+                },
+                "version": {
+                    "type": "string"
+                }
+            },
+            "required": [
+                "version",
+                "commit",
+                "build_time"
+            ],
+            "type": "object"
         },
         "websocket.TaskCreateResponse": {
-            "type": "object",
             "properties": {
                 "session_id": {
                     "description": "任务会话ID",
-                    "type": "string",
-                    "example": "550e8400-e29b-41d4-a716-446655440000"
+                    "example": "550e8400-e29b-41d4-a716-446655440000",
+                    "type": "string"
                 }
-            }
+            },
+            "type": "object"
         },
         "websocket.TaskStatusResponse": {
-            "type": "object",
             "properties": {
                 "created_at": {
                     "description": "创建时间戳(毫秒)",
-                    "type": "integer",
-                    "example": 1640995200000
+                    "example": 1640995200000,
+                    "type": "integer"
                 },
                 "log": {
                     "description": "任务执行日志",
-                    "type": "string",
-                    "example": "任务执行日志..."
+                    "example": "任务执行日志...",
+                    "type": "string"
                 },
                 "session_id": {
                     "description": "任务会话ID",
-                    "type": "string",
-                    "example": "550e8400-e29b-41d4-a716-446655440000"
+                    "example": "550e8400-e29b-41d4-a716-446655440000",
+                    "type": "string"
                 },
                 "status": {
                     "description": "任务状态: pending, running, completed, failed",
-                    "type": "string",
-                    "example": "running"
+                    "example": "running",
+                    "type": "string"
                 },
                 "title": {
                     "description": "任务标题",
-                    "type": "string",
-                    "example": "MCP安全扫描任务"
+                    "example": "MCP安全扫描任务",
+                    "type": "string"
                 },
                 "updated_at": {
                     "description": "更新时间戳(毫秒)",
-                    "type": "integer",
-                    "example": 1640995200000
+                    "example": 1640995200000,
+                    "type": "integer"
                 }
-            }
+            },
+            "type": "object"
         }
     }
 }`

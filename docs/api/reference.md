@@ -35,7 +35,7 @@ AIG Custom Platform 是基于 Tencent Zhuque Lab AI-Infra-Guard（https://github
 
 ## 通用响应格式
 
-所有API接口都遵循统一的响应格式：
+下列 `{status,message,data}` 形状仅属于保留的旧兼容接口。企业控制台端点使用后续章节明确记录的 DTO 与分页 envelope。
 
 ```json
 {
@@ -44,6 +44,34 @@ AIG Custom Platform 是基于 Tencent Zhuque Lab AI-Infra-Guard（https://github
   "data": {}             // 响应数据
 }
 ```
+
+## 浏览器身份、CSRF 与公开初始化
+
+安全方法是 `GET`、`HEAD` 和 `OPTIONS`，CSRF 中间件不要求它们携带 token。其他所有浏览器方法都必须发送与 `aig_csrf` Cookie 完全一致的 `X-CSRF-Token` 请求头。缺少会话返回 `401`；已认证 Subject 被首次改密门禁、角色策略或 CSRF 策略拒绝时返回 `403`。生产环境的凭据端点要求 HTTPS，并可能返回 `426`；下文列出的基础设施失败统一使用脱敏 `500`。浏览器自报的身份、角色、路径或授权请求头不能替代 Cookie 会话。
+
+- `GET /api/v1/auth/csrf` 是匿名初始化：不创建 session，设置可读的 `aig_csrf` 双提交 Cookie（`Path=/`、`SameSite=Lax`，生产环境启用 `Secure`），响应仅为 `{ "csrf_token": "<csrf-token>" }`。登录与重置确认客户端必须先调用它。
+- `POST /api/v1/auth/login` 与 `POST /api/v1/auth/password-resets/confirm` 在处理凭据或一次性重置 token 前，都要求上述 Cookie/请求头配对。登录设置 HttpOnly `aig_session`、轮换 `aig_csrf`，仅返回 `must_change_password`；重置确认返回 `204`，绝不回显 token。
+- `GET /api/v1/auth/me` 精确返回 `id`、`username`、`role`、`must_change_password`。匿名调用返回 `401`。它特意位于首次改密门禁之前，使强制改密会话可以恢复 Subject；改密完成前，受保护业务端点仍返回 `403`。
+- `GET /api/v1/public/brand` 匿名可用，精确返回 `product_name`、`primary_color`、`logo_data_url`。Logo 值只能为空，或是已验证的 `data:image/png;base64,...` / `data:image/jpeg;base64,...` 表示。
+- `GET /api/v1/version` 匿名可用，精确返回 `version`、`commit`、`build_time`。值来自构建注入或固定的 `unknown`；该端点不读取文件，也不发起公网请求。
+
+## 企业控制台集合契约
+
+`GET /api/v1/platform/dashboard` 返回服务端计算且按 Subject 限定的快照。普通用户只聚合本人任务/报告；审计员与管理员读取全局范围。`trend` 恰好 30 个 UTC 自然日桶并以当天结束，`recent_tasks` 与 `attention` 最多各 5 项；每个 attention 项仅有 `report_id`、`task_id`、`task_type`、`completed_at`、`score`、`high`、`medium`、`low`。空态是 `has_data=false`、`security_score=null`、风险计数全零、恰好 30 个补零 UTC 桶和空 attention，绝不表示为 100 分。接口返回 `200`，或 `401`/`403`/脱敏 `500`。
+
+列表端点统一使用包含 `items`、int64 `total`、`page`、`page_size` 的明确 envelope。它们接受 `page=1..1000`（默认 1）与 `page_size=1..100`（默认 20）；大于 100 的正 `page_size` 会截断为 100，格式错误、非正数或大于 1000 的 page 返回 `400`。
+
+| 端点 | Envelope | Scope 与安全 item 契约 |
+|---|---|---|
+| `GET /api/v1/platform/tasks` | `TaskListResponse` | 普通用户仅本人；审计员/管理员全局。`TaskSummary` 仅含 ID、owner 展示名、规范化类型/状态与时间戳。 |
+| `GET /api/v1/platform/reports` | `ReportListResponse` | 普通用户仅本人；审计员/管理员全局。item 是不可变安全摘要。 |
+| `GET /api/v1/platform/admin/users` | `UserListResponse` | 仅管理员；不含任何凭据材料。 |
+| `GET /api/v1/platform/admin/audit-events` | `AuditListResponse` | 仅审计员/管理员；metadata 递归脱敏。 |
+| `GET /api/v1/platform/models` | `CatalogPage` | 普通用户看全局和本人私有 platform 行；审计员只读全局行；管理员看全部 platform 行。token 始终为 `********`，`source` 为 `platform` 或 `yaml`，并显式返回 `read_only`。只读 YAML 行与同 ID platform 行发生碰撞时仍分别保留；目录加载失败时失败关闭。 |
+
+`GET /api/v1/platform/tasks/{taskID}` 返回 `TaskDetail`，其 `input_summary` 仅含有界展示元数据。普通用户只看本人任务，审计员/管理员全局只读；任务不存在或对普通用户不可见时返回 `404`。`GET /api/v1/platform/tasks/{taskID}/result` 已退役：通过认证与首次改密门禁后恒定返回 `410 Gone`，且绝不读取引擎输出。
+
+附件变更请求要求 CSRF。普通用户只能创建/写入本人 opaque 附件，管理员可治理任意附件，审计员只读。下载时，owner 成功，其他普通用户得到 `404`，审计员得到 `403`，管理员可跨 owner 下载。管理员跨 owner 打开存储前，服务端必须先持久化脱敏的 `attachment.download_authorized` 授权事件；该事件证明授权而非后续流传输成功，响应也不返回存储位置。
 
 ## 任务 API 迁移边界
 
@@ -59,7 +87,7 @@ AIG Custom Platform 是基于 Tencent Zhuque Lab AI-Infra-Guard（https://github
 
 独立受治理模型 API 是 `/api/v1/platform/models`。已弃用的 `/api/v1/app/models/{modelId}` facade 仅保留模型兼容：集合 DELETE 与嵌套请求体继续使用 `{status,message,data}` envelope 和 HTTP `200` 应用错误约定。响应凭据始终脱敏。YAML 模型 ID 不能遮蔽加密平台行；YAML 加载失败时，在数据库或审计变更前失败关闭。
 
-只有 `aig migrate` 可以执行数据库 DDL。全新或升级后的 PostgreSQL schema 到达 v7；runtime 启动只做校验。迁移可安全处理旧表为空的情况，且不依赖 runtime AutoMigrate。
+只有 `aig migrate` 可以执行数据库 DDL。全新或升级后的 PostgreSQL schema 到达 v8；runtime 启动只做校验。迁移可安全处理旧表为空的情况，且不依赖 runtime AutoMigrate。版本 8 新增 `idx_platform_tasks_updated_at` 与 `idx_platform_tasks_owner_updated_at`，分别支持全局和 owner 范围按 `updated_at DESC, id DESC` 稳定读取最近任务。
 
 ## 不可变报告与品牌 API
 
@@ -67,11 +95,11 @@ AIG Custom Platform 是基于 Tencent Zhuque Lab AI-Infra-Guard（https://github
 
 ### 报告列表、趋势与详情
 
-- `GET /api/v1/platform/reports?page=1&page_size=20` 返回分页安全摘要。`page` 从 1 开始；`page_size` 默认 20、最大 100。摘要仅包含报告/任务 ID、时间、风险摘要与快照中的产品名。
+- `GET /api/v1/platform/reports?page=1&page_size=20` 返回 `ReportListResponse` 分页安全摘要 envelope。`page` 从 1 开始；`page_size` 默认 20、最大 100。摘要仅包含报告/任务 ID、时间、风险摘要与快照中的产品名。
 - `GET /api/v1/platform/reports/trends?days=30` 返回服务端计算、补零且包含当天的 UTC 自然日桶；`days` 范围为 1 到 30。浏览器不得从不完整列表自行推导趋势。
 - `GET /api/v1/platform/reports/{reportID}` 返回安全详情，其中 `render` 是任务完成时保存的不可变 RenderModel。
 
-不可变 `report-render-v2` RenderModel 固化风险映射版本、生成/完成时间、任务元数据、产品名/主色/水印、风险评分及评分说明、风险分布、`risk_trend` 中 30 个固定 UTC 日桶、Top 风险、含证据/影响/修复的技术发现、建议、覆盖范围和结论。技术发现仅按四类可信引擎的显式 schema 白名单映射，完成脱敏和严重度排序后最多保留 50 条；提示词、会话、附件、截图、凭据、URL 查询参数和用户绝对路径都不会进入 RenderModel。在线详情与自动分页 PDF 重试只消费同一个模型。列表与详情契约明确分离：绝不暴露原始引擎结果与 Logo 字节，也不暴露存储的 `render_data`、owner ID、文件路径或当前可变品牌记录。列表仅接受 `page=1..1000`、`page_size=1..100`（默认 20）。
+不可变 `report-render-v2` RenderModel 固化风险映射版本、生成/完成时间、任务元数据、产品名/主色/水印、风险评分及评分说明、风险分布、`risk_trend` 中 30 个固定 UTC 日桶、Top 风险、含证据/影响/修复的技术发现、建议、覆盖范围和结论。技术发现仅按四类可信引擎的显式 schema 白名单映射，完成脱敏和严重度排序后最多保留 50 条；提示词、会话、附件、截图、凭据、URL 查询参数和用户绝对路径都不会进入 RenderModel。在线详情与自动分页 PDF 重试只消费同一个模型。列表与详情契约明确分离：绝不暴露原始引擎结果与 Logo 字节，也不暴露存储的渲染载荷、owner ID、文件路径或当前可变品牌记录。列表仅接受 `page=1..1000`、`page_size=1..100`（默认 20）。
 
 读取成功返回 `200`；分页或趋势参数无效返回 `400`；未认证返回 `401`；角色不支持返回 `403`；报告不存在或对普通用户不可见返回 `404`。
 
@@ -410,7 +438,7 @@ curl -X PUT http://localhost:8088/api/v1/app/models/my-gpt4-model \
   -d '{
     "model": {
       "model": "gpt-4",
-      "token": "sk-new-api-key-here",
+      "token": "<new-api-key>",
       "base_url": "https://api.openai.com/v1",
       "note": "更新了API密钥",
       "limit": 2000
@@ -540,7 +568,7 @@ curl -X DELETE http://localhost:8088/api/v1/app/models \
 
 ## 已退役任务工作流迁移
 
-不要复制或改造历史浏览器任务示例。客户端应迁移到受保护平台章节记录的平台任务集合，以及按 owner 授权的详情、取消、结果和附件操作。历史浏览器任务路由返回 `410 Gone`；不存在 WebSocket、SSE、状态、结果、上传或携带凭据请求的回退。
+不要复制或改造历史浏览器任务示例。客户端应迁移到受保护平台章节记录的平台任务集合、按 owner 授权的详情/取消、不可变报告与附件操作。历史浏览器任务路由返回 `410 Gone`；不存在 WebSocket、SSE、状态、结果、上传或携带凭据请求的回退。
 
 ## 错误处理
 

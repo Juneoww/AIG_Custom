@@ -92,19 +92,37 @@ func TestGeneratedSwaggerArtifactsStayInSync(t *testing.T) {
 			{"/api/v1/app/taskapi/status/{id}", "get"},
 			{"/api/v1/app/taskapi/result/{id}", "get"},
 			{"/api/v1/app/taskapi/upload", "post"},
+			{"/api/v1/app/taskapi/uploadChunk", "post"},
+			{"/api/v1/app/taskapi/mergeChunks", "post"},
+			{"/api/v1/app/tasks", "get"},
+			{"/api/v1/app/tasks", "post"},
+			{"/api/v1/app/tasks/{sessionId}", "get"},
+			{"/api/v1/app/tasks/{sessionId}", "put"},
+			{"/api/v1/app/tasks/{sessionId}", "delete"},
+			{"/api/v1/app/tasks/sse/{sessionId}", "get"},
+			{"/api/v1/app/tasks/share", "post"},
+			{"/api/v1/app/tasks/uploadFile", "post"},
+			{"/api/v1/app/tasks/uploadChunk", "post"},
+			{"/api/v1/app/tasks/mergeChunks", "post"},
+			{"/api/v1/app/tasks/{sessionId}/terminate", "post"},
 		} {
 			if swaggerValue(t, document, "paths", legacy.path, legacy.method, "deprecated") != true {
 				t.Fatalf("legacy task %s %s must be marked deprecated", legacy.method, legacy.path)
 			}
 			responses := swaggerValue(t, document, "paths", legacy.path, legacy.method, "responses").(map[string]interface{})
-			if _, ok := responses["410"]; !ok {
-				t.Fatalf("legacy task %s %s must document 410 Gone", legacy.method, legacy.path)
+			if len(responses) != 3 {
+				t.Fatalf("legacy task %s %s responses = %v, want only 401/403/410", legacy.method, legacy.path, responses)
+			}
+			for _, status := range []string{"401", "403", "410"} {
+				if _, ok := responses[status]; !ok {
+					t.Fatalf("legacy task %s %s must document %s", legacy.method, legacy.path, status)
+				}
 			}
 			description := swaggerValue(t, document, "paths", legacy.path, legacy.method, "description").(string)
 			if !strings.Contains(description, "password-change") {
 				t.Fatalf("legacy task %s %s must document the password-change gate", legacy.method, legacy.path)
 			}
-			if legacy.method == "post" && !strings.Contains(description, "CSRF") {
+			if legacy.method != "get" && !strings.Contains(description, "CSRF") {
 				t.Fatalf("legacy task %s %s must document the CSRF gate", legacy.method, legacy.path)
 			}
 		}
@@ -219,8 +237,8 @@ func TestSwaggerDocumentsImmutableReportAndBrandContracts(t *testing.T) {
 				descriptionTerms                          []string
 			}{
 				{
-					path: "/api/v1/platform/reports", method: "get", responseStatus: "200", responseRef: "#/definitions/reports.ReportSummary", arrayResponse: true,
-					requiredStatuses: []string{"200", "400", "401", "403"},
+					path: "/api/v1/platform/reports", method: "get", responseStatus: "200", responseRef: "#/definitions/reports.ReportListResponse",
+					requiredStatuses: []string{"200", "400", "401", "403", "500"},
 					descriptionTerms: []string{"page", "page_size", "Users", "auditors", "administrators", "safe summary", "raw engine results", "Logo bytes"},
 				},
 				{
@@ -347,6 +365,200 @@ func TestSwaggerDocumentsImmutableReportAndBrandContracts(t *testing.T) {
 	}
 }
 
+func TestSwaggerDocumentsEnterpriseConsoleContracts(t *testing.T) {
+	documents := loadSwaggerDocuments(t)
+	for name, document := range documents {
+		t.Run(name, func(t *testing.T) {
+			operations := []struct {
+				path, method, successStatus, responseRef string
+				statuses                                 []string
+			}{
+				{"/api/v1/auth/csrf", "get", "200", "#/definitions/identity.CSRFResponse", []string{"200", "426", "500"}},
+				{"/api/v1/auth/login", "post", "200", "#/definitions/identity.LoginResponse", []string{"200", "400", "401", "403", "426", "500"}},
+				{"/api/v1/auth/me", "get", "200", "#/definitions/identity.CurrentSubjectResponse", []string{"200", "401", "426"}},
+				{"/api/v1/auth/password-resets/confirm", "post", "", "", []string{"204", "400", "401", "403", "426"}},
+				{"/api/v1/public/brand", "get", "200", "#/definitions/brand.PublicConfig", []string{"200", "500"}},
+				{"/api/v1/version", "get", "200", "#/definitions/websocket.SafeVersionResponse", []string{"200"}},
+				{"/api/v1/platform/dashboard", "get", "200", "#/definitions/dashboard.View", []string{"200", "401", "403", "500"}},
+				{"/api/v1/platform/tasks", "get", "200", "#/definitions/tasks.TaskListResponse", []string{"200", "400", "401", "403", "500"}},
+				{"/api/v1/platform/tasks/{taskID}", "get", "200", "#/definitions/tasks.TaskDetail", []string{"200", "401", "403", "404", "500"}},
+				{"/api/v1/platform/tasks/{taskID}/result", "get", "", "", []string{"401", "403", "410"}},
+				{"/api/v1/platform/reports", "get", "200", "#/definitions/reports.ReportListResponse", []string{"200", "400", "401", "403", "500"}},
+				{"/api/v1/platform/admin/users", "get", "200", "#/definitions/admin.UserListResponse", []string{"200", "400", "401", "403", "500"}},
+				{"/api/v1/platform/admin/audit-events", "get", "200", "#/definitions/admin.AuditListResponse", []string{"200", "400", "401", "403", "500"}},
+				{"/api/v1/platform/models", "get", "200", "#/definitions/models.CatalogPage", []string{"200", "400", "401", "403", "500"}},
+				{"/api/v1/platform/tasks/attachments/{attachmentID}/download", "get", "200", "", []string{"200", "400", "401", "403", "404", "500"}},
+			}
+			for _, operation := range operations {
+				for _, status := range operation.statuses {
+					_ = swaggerValue(t, document, "paths", operation.path, operation.method, "responses", status)
+				}
+				if operation.responseRef != "" {
+					got := swaggerNestedRef(t, swaggerValue(t, document, "paths", operation.path, operation.method, "responses", operation.successStatus, "schema"))
+					if got != operation.responseRef {
+						t.Errorf("%s %s response schema = %q, want %q", operation.method, operation.path, got, operation.responseRef)
+					}
+				}
+			}
+
+			for _, request := range []struct{ path, method, ref string }{
+				{"/api/v1/auth/login", "post", "#/definitions/identity.LoginRequest"},
+				{"/api/v1/auth/password-resets/confirm", "post", "#/definitions/identity.PasswordResetConfirmRequest"},
+			} {
+				if got := swaggerBodyParameterRef(t, document, request.path, request.method); got != request.ref {
+					t.Errorf("%s %s body schema = %q, want %q", request.method, request.path, got, request.ref)
+				}
+			}
+
+			for _, path := range []string{
+				"/api/v1/platform/tasks", "/api/v1/platform/reports",
+				"/api/v1/platform/admin/users", "/api/v1/platform/admin/audit-events", "/api/v1/platform/models",
+			} {
+				assertPaginationContract(t, document, path)
+			}
+			for _, definition := range []string{
+				"tasks.TaskListResponse", "reports.ReportListResponse", "admin.UserListResponse", "admin.AuditListResponse", "models.CatalogPage",
+			} {
+				if got := swaggerValue(t, document, "definitions", definition, "properties", "total", "format"); got != "int64" {
+					t.Errorf("%s.total format = %v, want int64", definition, got)
+				}
+			}
+
+			assertExactProperties(t, document, "identity.CSRFResponse", "csrf_token")
+			assertExactProperties(t, document, "identity.CurrentSubjectResponse", "id", "username", "role", "must_change_password")
+			assertExactProperties(t, document, "brand.PublicConfig", "product_name", "primary_color", "logo_data_url")
+			assertExactProperties(t, document, "websocket.SafeVersionResponse", "version", "commit", "build_time")
+			assertExactProperties(t, document, "dashboard.View", "has_data", "security_score", "mapping_versions", "risk", "trend", "recent_tasks", "attention")
+			assertExactProperties(t, document, "dashboard.AttentionItem", "report_id", "task_id", "task_type", "completed_at", "score", "high", "medium", "low")
+			assertExactProperties(t, document, "tasks.TaskSummary", "id", "owner", "task_type", "status", "created_at", "updated_at")
+			assertExactProperties(t, document, "tasks.TaskDetail", "id", "owner", "task_type", "status", "created_at", "updated_at", "input_summary")
+
+			if got := swaggerValue(t, document, "definitions", "dashboard.View", "properties", "security_score", "x-nullable"); got != true {
+				t.Errorf("dashboard security_score x-nullable = %v, want true", got)
+			}
+			trend := swaggerValue(t, document, "definitions", "dashboard.View", "properties", "trend")
+			for _, field := range []string{"minItems", "maxItems"} {
+				if got := swaggerValue(t, trend, field); got != float64(30) && got != 30 {
+					t.Errorf("dashboard trend %s = %v, want 30", field, got)
+				}
+			}
+			for _, definition := range []string{"tasks.TaskSummary", "tasks.TaskDetail"} {
+				status := swaggerValue(t, document, "definitions", definition, "properties", "status")
+				if got := swaggerValue(t, status, "enum").([]interface{}); len(got) != 8 {
+					t.Errorf("%s.status enum has %d values, want 8", definition, len(got))
+				}
+			}
+			for _, definition := range []string{"models.CatalogView", "models.View"} {
+				tokenDescription := strings.ToLower(swaggerValue(t, document, "definitions", definition, "properties", "token", "description").(string))
+				if !strings.Contains(tokenDescription, "masked") || !strings.Contains(tokenDescription, "********") {
+					t.Errorf("%s token description must state the fixed mask", definition)
+				}
+			}
+			for _, field := range []string{"source", "read_only"} {
+				_ = swaggerValue(t, document, "definitions", "models.CatalogView", "properties", field)
+			}
+			if got := swaggerValue(t, document, "definitions", "models.CatalogView", "properties", "source", "enum").([]interface{}); !reflect.DeepEqual(got, []interface{}{"platform", "yaml"}) {
+				t.Errorf("models.CatalogView.source enum = %v", got)
+			}
+
+			resultDescription := swaggerValue(t, document, "paths", "/api/v1/platform/tasks/{taskID}/result", "get", "description").(string)
+			for _, term := range []string{"always returns 410", "authentication", "password-change"} {
+				if !strings.Contains(resultDescription, term) {
+					t.Errorf("retired platform result description does not contain %q", term)
+				}
+			}
+			for _, path := range []string{"/api/v1/auth/login", "/api/v1/auth/password-resets/confirm"} {
+				if !strings.Contains(swaggerValue(t, document, "paths", path, "post", "description").(string), "CSRF") {
+					t.Errorf("%s must document its pre-authentication CSRF prerequisite", path)
+				}
+			}
+			csrfDescription := swaggerValue(t, document, "paths", "/api/v1/auth/csrf", "get", "description").(string)
+			for _, term := range []string{"anonymous", "aig_csrf", "SameSite=Lax", "no session"} {
+				if !strings.Contains(csrfDescription, term) {
+					t.Errorf("CSRF bootstrap description does not contain %q", term)
+				}
+			}
+			brandLogoDescription := swaggerValue(t, document, "definitions", "brand.PublicConfig", "properties", "logo_data_url", "description").(string)
+			for _, term := range []string{"data:image/png;base64", "data:image/jpeg;base64", "empty string"} {
+				if !strings.Contains(brandLogoDescription, term) {
+					t.Errorf("public Logo description does not contain %q", term)
+				}
+			}
+			brandLogoPattern := swaggerValue(t, document, "definitions", "brand.PublicConfig", "properties", "logo_data_url", "pattern").(string)
+			for _, term := range []string{"^", "png", "jpeg", "$"} {
+				if !strings.Contains(brandLogoPattern, term) {
+					t.Errorf("public Logo pattern does not contain %q", term)
+				}
+			}
+			versionDescription := swaggerValue(t, document, "paths", "/api/v1/version", "get", "description").(string)
+			if strings.Contains(strings.ToLower(versionDescription), "github") || strings.Contains(strings.ToLower(versionDescription), "update check") {
+				t.Error("public version endpoint must not be described as a network update check")
+			}
+			dashboardDescription := swaggerValue(t, document, "paths", "/api/v1/platform/dashboard", "get", "description").(string)
+			for _, term := range []string{"30 UTC", "Users", "auditors", "administrators", "has_data=false", "security_score=null"} {
+				if !strings.Contains(dashboardDescription, term) {
+					t.Errorf("dashboard description does not contain %q", term)
+				}
+			}
+			attachmentDescription := swaggerValue(t, document, "paths", "/api/v1/platform/tasks/attachments/{attachmentID}/download", "get", "description").(string)
+			for _, term := range []string{"owner", "404", "auditors", "403", "administrators", "attachment.download_authorized", "sanitized"} {
+				if !strings.Contains(attachmentDescription, term) {
+					t.Errorf("attachment download description does not contain %q", term)
+				}
+			}
+
+			for _, definition := range []string{
+				"identity.CSRFResponse", "identity.CurrentSubjectResponse", "brand.PublicConfig", "websocket.SafeVersionResponse",
+				"dashboard.View", "dashboard.TrendPoint", "dashboard.AttentionItem", "tasks.TaskSummary", "tasks.TaskDetail",
+				"tasks.TaskListResponse", "reports.ReportListResponse", "admin.UserResponse", "admin.UserListResponse",
+				"admin.AuditListResponse", "models.CatalogView", "models.CatalogPage",
+			} {
+				properties := swaggerValue(t, document, "definitions", definition, "properties").(map[string]interface{})
+				for _, forbidden := range []string{"raw_result", "render_data", "logo", "password_hash", "token_hash", "storage_name", "engine_session_id", "dispatch_error", "attachment_ids"} {
+					if _, exists := properties[forbidden]; exists {
+						t.Errorf("safe wire definition %s exposes %s", definition, forbidden)
+					}
+				}
+			}
+		})
+	}
+}
+
+func TestAPIGuidesDocumentEnterpriseConsoleContracts(t *testing.T) {
+	for _, guide := range []struct {
+		path     string
+		required []string
+	}{
+		{"../../docs/api/reference.en.md", []string{
+			"## Browser identity, CSRF, and public bootstrap", "/api/v1/auth/csrf", "/api/v1/auth/me", "/api/v1/public/brand", "/api/v1/version",
+			"## Enterprise console collections", "/api/v1/platform/dashboard", "exactly 30 UTC", "security_score=null",
+			"TaskListResponse", "ReportListResponse", "UserListResponse", "AuditListResponse", "CatalogPage", "page=1..1000", "page_size=1..100",
+			"attachment.download_authorized", "other users receive `404`", "auditors receive `403`", "schema reaches v8",
+			"idx_platform_tasks_updated_at", "idx_platform_tasks_owner_updated_at",
+		}},
+		{"../../docs/api/reference.md", []string{
+			"## 浏览器身份、CSRF 与公开初始化", "/api/v1/auth/csrf", "/api/v1/auth/me", "/api/v1/public/brand", "/api/v1/version",
+			"## 企业控制台集合契约", "/api/v1/platform/dashboard", "恰好 30 个 UTC", "security_score=null",
+			"TaskListResponse", "ReportListResponse", "UserListResponse", "AuditListResponse", "CatalogPage", "page=1..1000", "page_size=1..100",
+			"attachment.download_authorized", "其他普通用户得到 `404`", "审计员得到 `403`", "schema 到达 v8",
+			"idx_platform_tasks_updated_at", "idx_platform_tasks_owner_updated_at",
+		}},
+	} {
+		contents, err := os.ReadFile(guide.path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, required := range guide.required {
+			if !strings.Contains(string(contents), required) {
+				t.Errorf("%s does not document %q", guide.path, required)
+			}
+		}
+		if strings.Contains(string(contents), "schema reaches v7") || strings.Contains(string(contents), "schema 到达 v7") {
+			t.Errorf("%s retains the obsolete schema v7 statement", guide.path)
+		}
+	}
+}
+
 func TestAPIGuidesDocumentLegacyModelAndMigrationBoundaries(t *testing.T) {
 	for _, guide := range []struct {
 		path     string
@@ -358,7 +570,7 @@ func TestAPIGuidesDocumentLegacyModelAndMigrationBoundaries(t *testing.T) {
 				"/api/v1/app/models/{modelId}", "collection DELETE", "{status,message,data}",
 				"HTTP `200`", "`401`", "`403`", "masked", "/api/v1/platform/models",
 				"cannot shadow", "fails closed",
-				"Only `aig migrate` may apply database DDL", "schema reaches v7", "empty legacy table",
+				"Only `aig migrate` may apply database DDL", "schema reaches v8", "empty legacy table",
 				"/api/v1/platform/tasks", "Idempotency-Key", "opaque attachment IDs", "410 Gone", "password-change and CSRF checks",
 				"/api/v1/platform/reports", "page_size", "safe summary", "immutable RenderModel", "30 fixed UTC day buckets",
 				"/api/v1/platform/reports/{reportID}/exports/pdf", "durable pending/completion audit outbox",
@@ -372,7 +584,7 @@ func TestAPIGuidesDocumentLegacyModelAndMigrationBoundaries(t *testing.T) {
 				"/api/v1/app/models/{modelId}", "集合 DELETE", "{status,message,data}",
 				"HTTP `200`", "`401`", "`403`", "始终脱敏", "/api/v1/platform/models",
 				"不能遮蔽", "失败关闭",
-				"只有 `aig migrate` 可以执行数据库 DDL", "schema 到达 v7", "旧表为空",
+				"只有 `aig migrate` 可以执行数据库 DDL", "schema 到达 v8", "旧表为空",
 				"/api/v1/platform/tasks", "Idempotency-Key", "opaque 附件 ID", "410 Gone", "首次改密与 CSRF 校验",
 				"/api/v1/platform/reports", "page_size", "安全摘要", "不可变 RenderModel", "30 个固定 UTC 日桶",
 				"/api/v1/platform/reports/{reportID}/exports/pdf", "持久化 pending/completion 审计 outbox",
@@ -403,6 +615,64 @@ func TestAPIGuidesDocumentLegacyModelAndMigrationBoundaries(t *testing.T) {
 				t.Errorf("%s retains executable legacy task example %q", guide.path, executableLegacyTaskExample)
 			}
 		}
+	}
+}
+
+func loadSwaggerDocuments(t *testing.T) map[string]interface{} {
+	t.Helper()
+	embedded := decodeSwaggerJSON(t, []byte(SwaggerInfo.ReadDoc()))
+	jsonData, err := os.ReadFile("swagger.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	yamlData, err := os.ReadFile("swagger.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var yamlDocument interface{}
+	if err := yaml.Unmarshal(yamlData, &yamlDocument); err != nil {
+		t.Fatal(err)
+	}
+	normalizedYAML, err := json.Marshal(yamlDocument)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return map[string]interface{}{
+		"embedded": embedded,
+		"json":     decodeSwaggerJSON(t, jsonData),
+		"yaml":     decodeSwaggerJSON(t, normalizedYAML),
+	}
+}
+
+func assertPaginationContract(t *testing.T, document interface{}, path string) {
+	t.Helper()
+	for _, parameter := range []struct {
+		name                  string
+		minimum, maximum, def float64
+	}{
+		{"page", 1, 1000, 1},
+		{"page_size", 1, 100, 20},
+	} {
+		for field, want := range map[string]float64{"minimum": parameter.minimum, "maximum": parameter.maximum, "default": parameter.def} {
+			got := swaggerParameterValue(t, document, path, "get", parameter.name, field)
+			if got != want && got != int(want) {
+				t.Errorf("%s %s %s = %v, want %v", path, parameter.name, field, got, want)
+			}
+		}
+	}
+}
+
+func assertExactProperties(t *testing.T, document interface{}, definition string, expected ...string) {
+	t.Helper()
+	properties := swaggerValue(t, document, "definitions", definition, "properties").(map[string]interface{})
+	actual := make([]string, 0, len(properties))
+	for property := range properties {
+		actual = append(actual, property)
+	}
+	sort.Strings(actual)
+	sort.Strings(expected)
+	if !reflect.DeepEqual(actual, expected) {
+		t.Errorf("%s properties = %v, want %v", definition, actual, expected)
 	}
 }
 

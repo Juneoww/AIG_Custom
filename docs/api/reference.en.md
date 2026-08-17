@@ -35,7 +35,7 @@ After the project is running, you can access `http://localhost:8088/docs/index.h
 
 ## Common Response Format
 
-All API interfaces follow a unified response format:
+The `{status,message,data}` shape below belongs to retained legacy-compatible interfaces. Enterprise console endpoints use the explicit DTOs and paginated envelopes documented in the next sections.
 
 ```json
 {
@@ -44,6 +44,34 @@ All API interfaces follow a unified response format:
   "data": {}             // Response data
 }
 ```
+
+## Browser identity, CSRF, and public bootstrap
+
+Safe methods are `GET`, `HEAD`, and `OPTIONS`; the CSRF middleware does not require a token for them. Every other browser method requires an `X-CSRF-Token` header equal to the `aig_csrf` Cookie. A missing session is `401`; an authenticated Subject blocked by the first-password-change gate, role policy, or CSRF policy receives `403`. Production credential endpoints require HTTPS and may return `426`; sanitized infrastructure failures use `500` where listed. Browser-provided identity, role, path, or authorization headers never replace the Cookie session.
+
+- `GET /api/v1/auth/csrf` is anonymous initialization. It creates no session, sets the readable `aig_csrf` double-submit Cookie (`Path=/`, `SameSite=Lax`, and `Secure` in production), and returns only `{ "csrf_token": "<csrf-token>" }`. Login and reset-confirm clients must call it first.
+- `POST /api/v1/auth/login` and `POST /api/v1/auth/password-resets/confirm` require that Cookie/header pair before credentials or a one-time reset token are processed. Login sets an HttpOnly `aig_session`, rotates `aig_csrf`, and returns only `must_change_password`; reset confirmation returns `204` and never echoes its token.
+- `GET /api/v1/auth/me` returns exactly `id`, `username`, `role`, and `must_change_password`. Anonymous callers receive `401`. It intentionally runs before the first-password-change gate so a forced-change session can restore its Subject; protected business endpoints remain `403` until the password is changed.
+- `GET /api/v1/public/brand` is anonymous and returns exactly `product_name`, `primary_color`, and `logo_data_url`. The Logo value is either empty or a verified `data:image/png;base64,...` / `data:image/jpeg;base64,...` representation.
+- `GET /api/v1/version` is anonymous and returns exactly `version`, `commit`, and `build_time`. Values are build-injected or the fixed `unknown`; the endpoint performs no file read or public-network request.
+
+## Enterprise console collections
+
+`GET /api/v1/platform/dashboard` returns a server-computed, Subject-scoped snapshot. Users aggregate only their own tasks/reports; auditors and administrators receive the global scope. `trend` has exactly 30 UTC calendar-day buckets ending today, `recent_tasks` and `attention` contain at most five items, and every attention item has only `report_id`, `task_id`, `task_type`, `completed_at`, `score`, `high`, `medium`, and `low`. The empty state is `has_data=false`, `security_score=null`, zero risk counts, exactly 30 zero-filled UTC buckets, and empty attention—not a score of 100. It returns `200`, or `401`/`403`/sanitized `500`.
+
+The list endpoints use explicit envelopes with `items`, int64 `total`, `page`, and `page_size`. They accept `page=1..1000` (default 1) and `page_size=1..100` (default 20); a larger positive `page_size` is capped at 100, while malformed/non-positive values and pages over 1000 return `400`.
+
+| Endpoint | Envelope | Scope and safe item contract |
+|---|---|---|
+| `GET /api/v1/platform/tasks` | `TaskListResponse` | Users: own tasks; auditors/admins: global. `TaskSummary` has only ID, owner display name, canonical type/status, and timestamps. |
+| `GET /api/v1/platform/reports` | `ReportListResponse` | Users: own reports; auditors/admins: global. Each item is an immutable safe summary. |
+| `GET /api/v1/platform/admin/users` | `UserListResponse` | Administrator only. No credential material. |
+| `GET /api/v1/platform/admin/audit-events` | `AuditListResponse` | Auditors/admins only. Metadata is recursively sanitized. |
+| `GET /api/v1/platform/models` | `CatalogPage` | Users see global plus own private platform rows; auditors see global rows read-only; admins see all platform rows. Tokens are always `********`; `source` is `platform` or `yaml`, and `read_only` is explicit. Read-only YAML rows remain distinct when an ID collides with a platform row and catalog loading fails closed. |
+
+`GET /api/v1/platform/tasks/{taskID}` returns `TaskDetail`, whose `input_summary` contains only bounded display metadata. A user sees only their own task; auditors/admins have global read access; absent or user-invisible tasks return `404`. `GET /api/v1/platform/tasks/{taskID}/result` is retired: after authentication and the password-change gate it always returns `410 Gone` and never reads engine output.
+
+Attachment mutations require CSRF. Users create/write only their own opaque attachments; administrators may govern any attachment; auditors are read-only. For download, the owner succeeds, other users receive `404`, auditors receive `403`, and administrators may download across owners. Before a cross-owner administrator storage open, the server durably writes the sanitized `attachment.download_authorized` authorization event. That event proves authorization, not downstream stream delivery, and no storage location is returned.
 
 ## Task API migration boundary
 
@@ -59,7 +87,7 @@ Platform tasks use `GET /api/v1/platform/tasks`, `POST /api/v1/platform/tasks`, 
 
 The independently governed model API is `/api/v1/platform/models`. The deprecated `/api/v1/app/models/{modelId}` facade remains only for model compatibility: collection DELETE and its nested request bodies retain the `{status,message,data}` envelope and HTTP `200` application-error convention. Response credentials are masked. YAML model IDs cannot shadow encrypted platform rows, and YAML loading fails closed before any database or audit mutation.
 
-Only `aig migrate` may apply database DDL. A fresh or upgraded PostgreSQL database schema reaches v7; runtime startup only validates it. Migration safely handles an empty legacy table and never relies on runtime AutoMigrate.
+Only `aig migrate` may apply database DDL. A fresh or upgraded PostgreSQL database schema reaches v8; runtime startup only validates it. Migration safely handles an empty legacy table and never relies on runtime AutoMigrate. Version 8 adds `idx_platform_tasks_updated_at` and `idx_platform_tasks_owner_updated_at` for stable recent-task ordering (`updated_at DESC, id DESC`) in global and owner scopes.
 
 ## Immutable Reports and Brand API
 
@@ -67,11 +95,11 @@ All endpoints below use the authenticated Cookie Subject and the completed-passw
 
 ### Report list, trend, and detail
 
-- `GET /api/v1/platform/reports?page=1&page_size=20` returns a paginated safe summary. `page` starts at 1; `page_size` defaults to 20 and is capped at 100. A summary contains only report/task identifiers, timestamps, risk summary, and the frozen product name.
+- `GET /api/v1/platform/reports?page=1&page_size=20` returns `ReportListResponse`, a paginated safe-summary envelope. `page` starts at 1; `page_size` defaults to 20 and is capped at 100. A summary contains only report/task identifiers, timestamps, risk summary, and the frozen product name.
 - `GET /api/v1/platform/reports/trends?days=30` returns server-computed, zero-filled UTC calendar-day buckets including the current UTC day. `days` accepts 1 through 30. The browser must not derive this aggregate from a partial list.
 - `GET /api/v1/platform/reports/{reportID}` returns a safe detail whose `render` value is the immutable RenderModel stored with the completed task.
 
-The immutable `report-render-v2` RenderModel freezes the risk mapping version, generated/completed times, task metadata, product/color/watermark, risk score and score explanation, risk distribution, exactly 30 fixed UTC day buckets in `risk_trend`, Top risks, technical findings with evidence/impact/remediation, recommendations, coverage, and conclusion. Technical findings are explicitly mapped from the four trusted engine schemas, redacted, severity-ordered, and capped at 50; prompts, conversations, attachments, screenshots, credentials, URL queries, and user paths are never copied into the render model. Online detail and paginated PDF retries consume that same model. The list and detail contracts are deliberately separate: raw engine results and Logo bytes are never exposed, nor are stored `render_data`, owner IDs, file paths, or mutable brand records. List pagination accepts `page=1..1000` and `page_size=1..100` (default 20).
+The immutable `report-render-v2` RenderModel freezes the risk mapping version, generated/completed times, task metadata, product/color/watermark, risk score and score explanation, risk distribution, exactly 30 fixed UTC day buckets in `risk_trend`, Top risks, technical findings with evidence/impact/remediation, recommendations, coverage, and conclusion. Technical findings are explicitly mapped from the four trusted engine schemas, redacted, severity-ordered, and capped at 50; prompts, conversations, attachments, screenshots, credentials, URL queries, and user paths are never copied into the render model. Online detail and paginated PDF retries consume that same model. The list and detail contracts are deliberately separate: raw engine results and Logo bytes are never exposed, nor are stored render payloads, owner IDs, file paths, or mutable brand records. List pagination accepts `page=1..1000` and `page_size=1..100` (default 20).
 
 Successful reads return `200`. Invalid pagination or trend ranges return `400`; missing authentication returns `401`; an unsupported role returns `403`; a missing or user-invisible report returns `404`.
 
@@ -410,7 +438,7 @@ curl -X PUT http://localhost:8088/api/v1/app/models/my-gpt4-model \
   -d '{
     "model": {
       "model": "gpt-4",
-      "token": "sk-new-api-key-here",
+      "token": "<new-api-key>",
       "base_url": "https://api.openai.com/v1",
       "note": "Updated API key",
       "limit": 2000
@@ -540,7 +568,7 @@ In addition to database models created through the API, the system also supports
 
 ## Retired task workflow migration
 
-Do not copy or adapt historical browser task examples. Migrate clients to the platform task collection and owner-authorized detail, cancel, result, and attachment operations documented in the protected platform section. Historical task browser routes return `410 Gone`; there is no WebSocket, SSE, status, result, upload, or credential-bearing request fallback.
+Do not copy or adapt historical browser task examples. Migrate clients to the platform task collection, owner-authorized detail/cancel, immutable reports, and attachment operations documented in the protected platform section. Historical task browser routes return `410 Gone`; there is no WebSocket, SSE, status, result, upload, or credential-bearing request fallback.
 
 ## Error Handling
 

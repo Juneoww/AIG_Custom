@@ -1,5 +1,131 @@
 basePath: /
 definitions:
+  admin.AuditListResponse:
+    description: Paginated sanitized audit-event envelope.
+    properties:
+      items:
+        items:
+          $ref: '#/definitions/audit.Event'
+        type: array
+      page:
+        minimum: 1
+        type: integer
+      page_size:
+        maximum: 100
+        minimum: 1
+        type: integer
+      total:
+        format: int64
+        minimum: 0
+        type: integer
+    required:
+    - items
+    - total
+    - page
+    - page_size
+    type: object
+  admin.UserListResponse:
+    description: Administrator-only paginated local-account envelope.
+    properties:
+      items:
+        items:
+          $ref: '#/definitions/admin.UserResponse'
+        type: array
+      page:
+        minimum: 1
+        type: integer
+      page_size:
+        maximum: 100
+        minimum: 1
+        type: integer
+      total:
+        format: int64
+        minimum: 0
+        type: integer
+    required:
+    - items
+    - total
+    - page
+    - page_size
+    type: object
+  admin.UserResponse:
+    description: Safe local-account metadata; credentials and credential hashes are not representable.
+    properties:
+      active:
+        type: boolean
+      created_at:
+        format: date-time
+        type: string
+      id:
+        type: string
+      must_change_password:
+        type: boolean
+      role:
+        enum:
+        - admin
+        - user
+        - auditor
+        type: string
+      updated_at:
+        format: date-time
+        type: string
+      username:
+        type: string
+    required:
+    - id
+    - username
+    - role
+    - active
+    - must_change_password
+    - created_at
+    - updated_at
+    type: object
+  audit.Event:
+    description: Append-only event with recursively sanitized metadata. Secret-like metadata keys are replaced by a redaction marker before persistence and response.
+    properties:
+      action:
+        description: Governance action, including attachment.download_authorized for an approved administrator cross-owner download.
+        type: string
+      actor_role:
+        enum:
+        - admin
+        - user
+        - auditor
+        type: string
+      actor_user_id:
+        type: string
+      actor_username:
+        type: string
+      client_ip:
+        type: string
+      id:
+        type: string
+      metadata:
+        additionalProperties: true
+        description: Sanitized JSON metadata only.
+        type: object
+      occurred_at:
+        format: date-time
+        type: string
+      outcome:
+        enum:
+        - pending
+        - success
+        - failure
+        type: string
+      request_id:
+        type: string
+      resource_id:
+        type: string
+      resource_type:
+        type: string
+    required:
+    - id
+    - occurred_at
+    - action
+    - outcome
+    - metadata
+    type: object
   brand.Config:
     description: Current mutable brand configuration. Logo bytes are returned only by the brand API and are never copied into report list or detail payloads.
     properties:
@@ -40,6 +166,25 @@ definitions:
     - logo_mime
     - watermark
     type: object
+  brand.PublicConfig:
+    description: Exact anonymous login-page-safe brand projection.
+    properties:
+      logo_data_url:
+        description: A validated data:image/png;base64 or data:image/jpeg;base64 value; empty string when no valid Logo is configured.
+        pattern: '^(?:|data:image/(?:png|jpeg);base64,[A-Za-z0-9+/]+={0,2})$'
+        type: string
+      primary_color:
+        example: '#1677FF'
+        pattern: ^#[0-9A-Fa-f]{6}$
+        type: string
+      product_name:
+        maxLength: 128
+        type: string
+    required:
+    - product_name
+    - primary_color
+    - logo_data_url
+    type: object
   brand.UpdateRequest:
     properties:
       logo:
@@ -70,6 +215,351 @@ definitions:
     - logo_mime
     - watermark
     type: object
+  dashboard.AttentionItem:
+    description: Narrow report snapshot requiring attention; no engine, owner, attachment, or render source data is included.
+    properties:
+      completed_at:
+        format: date-time
+        type: string
+      high:
+        minimum: 0
+        type: integer
+      low:
+        minimum: 0
+        type: integer
+      medium:
+        minimum: 0
+        type: integer
+      report_id:
+        type: string
+      score:
+        maximum: 100
+        minimum: 0
+        type: integer
+      task_id:
+        type: string
+      task_type:
+        enum:
+        - mcp_scan
+        - ai_infra_scan
+        - model_redteam_report
+        - agent_scan
+        type: string
+    required:
+    - report_id
+    - task_id
+    - task_type
+    - completed_at
+    - score
+    - high
+    - medium
+    - low
+    type: object
+  dashboard.TrendPoint:
+    properties:
+      completed:
+        minimum: 0
+        type: integer
+      date:
+        description: UTC calendar day at 00:00:00Z.
+        format: date-time
+        type: string
+      high:
+        minimum: 0
+        type: integer
+      low:
+        minimum: 0
+        type: integer
+      medium:
+        minimum: 0
+        type: integer
+      security_score:
+        maximum: 100
+        minimum: 0
+        type: integer
+        x-nullable: true
+    required:
+    - date
+    - completed
+    - security_score
+    - high
+    - medium
+    - low
+    type: object
+  dashboard.View:
+    description: Subject-scoped governed dashboard. The trend is always exactly 30 ascending UTC day buckets.
+    properties:
+      attention:
+        items:
+          $ref: '#/definitions/dashboard.AttentionItem'
+        maxItems: 5
+        type: array
+      has_data:
+        type: boolean
+      mapping_versions:
+        items:
+          type: string
+        type: array
+      recent_tasks:
+        items:
+          $ref: '#/definitions/tasks.TaskSummary'
+        maxItems: 5
+        type: array
+      risk:
+        $ref: '#/definitions/reports.RiskSummary'
+      security_score:
+        maximum: 100
+        minimum: 0
+        type: integer
+        x-nullable: true
+      trend:
+        description: Exactly 30 zero-filled, ascending UTC calendar-day buckets ending today.
+        items:
+          $ref: '#/definitions/dashboard.TrendPoint'
+        maxItems: 30
+        minItems: 30
+        type: array
+    required:
+    - has_data
+    - security_score
+    - mapping_versions
+    - risk
+    - trend
+    - recent_tasks
+    - attention
+    type: object
+  identity.CSRFResponse:
+    properties:
+      csrf_token:
+        description: Double-submit token matching the aig_csrf cookie; use it only in X-CSRF-Token.
+        type: string
+    required:
+    - csrf_token
+    type: object
+  identity.CurrentSubjectResponse:
+    description: Current Cookie-session Subject, intentionally available before the password-change completion gate.
+    properties:
+      id:
+        type: string
+      must_change_password:
+        type: boolean
+      role:
+        enum:
+        - admin
+        - user
+        - auditor
+        type: string
+      username:
+        type: string
+    required:
+    - id
+    - username
+    - role
+    - must_change_password
+    type: object
+  identity.LoginRequest:
+    properties:
+      password:
+        format: password
+        type: string
+        x-write-only: true
+      username:
+        type: string
+    required:
+    - username
+    - password
+    type: object
+  identity.LoginResponse:
+    properties:
+      must_change_password:
+        type: boolean
+    required:
+    - must_change_password
+    type: object
+  identity.PasswordResetConfirmRequest:
+    properties:
+      temporary_password:
+        format: password
+        type: string
+        x-write-only: true
+      token:
+        format: password
+        type: string
+        x-write-only: true
+    required:
+    - token
+    - temporary_password
+    type: object
+  models.CatalogPage:
+    description: Paginated governed model catalog containing encrypted platform rows followed by immutable YAML rows.
+    properties:
+      items:
+        items:
+          $ref: '#/definitions/models.CatalogView'
+        type: array
+      page:
+        minimum: 1
+        type: integer
+      page_size:
+        maximum: 100
+        minimum: 1
+        type: integer
+      total:
+        format: int64
+        minimum: 0
+        type: integer
+    required:
+    - items
+    - total
+    - page
+    - page_size
+    type: object
+  models.CatalogView:
+    properties:
+      base_url:
+        type: string
+      created_at:
+        format: date-time
+        type: string
+      disabled:
+        type: boolean
+      id:
+        type: string
+      limit:
+        type: integer
+      name:
+        type: string
+      note:
+        type: string
+      owner_user_id:
+        description: Present only for an authorized encrypted private model; empty for YAML rows.
+        type: string
+      provider_model:
+        type: string
+      read_only:
+        description: True for YAML rows and for encrypted rows the current Subject cannot mutate.
+        type: boolean
+      scope:
+        enum:
+        - private
+        - global
+        type: string
+      source:
+        enum:
+        - platform
+        - yaml
+        type: string
+      token:
+        description: Always masked as ********; plaintext and encrypted storage material are never returned.
+        example: '********'
+        type: string
+      updated_at:
+        format: date-time
+        type: string
+    required:
+    - id
+    - scope
+    - name
+    - provider_model
+    - base_url
+    - disabled
+    - token
+    - source
+    - read_only
+    type: object
+  models.CreateInput:
+    properties:
+      base_url:
+        type: string
+      limit:
+        type: integer
+      name:
+        type: string
+      note:
+        type: string
+      provider_model:
+        type: string
+      scope:
+        enum:
+        - private
+        - global
+        type: string
+      token:
+        description: Write-only plaintext token encrypted before persistence and never returned.
+        format: password
+        type: string
+        x-write-only: true
+    required:
+    - name
+    - provider_model
+    - base_url
+    - token
+    - scope
+    type: object
+  models.UpdateInput:
+    properties:
+      base_url:
+        type: string
+      disabled:
+        type: boolean
+      limit:
+        type: integer
+      name:
+        type: string
+      note:
+        type: string
+      provider_model:
+        type: string
+      token:
+        description: Optional write-only replacement. Omit, empty, or ******** preserves the stored encrypted token.
+        format: password
+        type: string
+        x-write-only: true
+    type: object
+  models.View:
+    properties:
+      base_url:
+        type: string
+      created_at:
+        format: date-time
+        type: string
+      disabled:
+        type: boolean
+      id:
+        type: string
+      limit:
+        type: integer
+      name:
+        type: string
+      note:
+        type: string
+      owner_user_id:
+        type: string
+      provider_model:
+        type: string
+      scope:
+        enum:
+        - private
+        - global
+        type: string
+      token:
+        description: Always masked as ********; plaintext and encrypted storage material are never returned.
+        example: '********'
+        type: string
+      updated_at:
+        format: date-time
+        type: string
+    required:
+    - id
+    - scope
+    - name
+    - provider_model
+    - base_url
+    - disabled
+    - token
+    - created_at
+    - updated_at
+    type: object
   reports.BackfillRequest:
     properties:
       task_id:
@@ -81,7 +571,7 @@ definitions:
     - task_id
     type: object
   reports.ReportDetail:
-    description: Safe immutable online report. It contains only the frozen RenderModel and public report metadata, never raw_result, render_data, owner_user_id, Logo bytes, paths, or mutable brand records.
+    description: Safe immutable online report. It contains only the frozen RenderModel and public report metadata; stored source results, render payloads, private ownership metadata, Logo bytes, paths, and mutable brand records are absent.
     properties:
       completed_at:
         format: date-time
@@ -136,6 +626,29 @@ definitions:
     - created_at
     - risk
     - brand_product_name
+    type: object
+  reports.ReportListResponse:
+    properties:
+      items:
+        items:
+          $ref: '#/definitions/reports.ReportSummary'
+        type: array
+      page:
+        minimum: 1
+        type: integer
+      page_size:
+        maximum: 100
+        minimum: 1
+        type: integer
+      total:
+        format: int64
+        minimum: 0
+        type: integer
+    required:
+    - items
+    - total
+    - page
+    - page_size
     type: object
   reports.RenderModel:
     description: Versioned presentation model frozen when the snapshot is created. Online detail and every PDF retry consume this same immutable value.
@@ -314,6 +827,162 @@ definitions:
     - medium
     - low
     type: object
+  tasks.AttachmentView:
+    description: Opaque attachment metadata; storage location and owner identifiers are not returned.
+    properties:
+      created_at:
+        format: date-time
+        type: string
+      filename:
+        type: string
+      id:
+        type: string
+      size:
+        format: int64
+        minimum: 0
+        type: integer
+      state:
+        enum:
+        - uploading
+        - ready
+        type: string
+    required:
+    - id
+    - filename
+    - size
+    - state
+    - created_at
+    type: object
+  tasks.TaskDetail:
+    description: Browser-safe task detail with only display-safe input metadata.
+    properties:
+      created_at:
+        format: date-time
+        type: string
+      id:
+        type: string
+      input_summary:
+        $ref: '#/definitions/tasks.TaskInputSummary'
+      owner:
+        type: string
+      status:
+        enum:
+        - pending
+        - dispatching
+        - running
+        - succeeded
+        - failed
+        - dispatch_failed
+        - dispatch_unknown
+        - cancelled
+        type: string
+      task_type:
+        enum:
+        - mcp_scan
+        - ai_infra_scan
+        - model_redteam_report
+        - agent_scan
+        - unknown
+        type: string
+      updated_at:
+        format: date-time
+        type: string
+    required:
+    - id
+    - owner
+    - task_type
+    - status
+    - created_at
+    - updated_at
+    - input_summary
+    type: object
+  tasks.TaskInputSummary:
+    description: Task-type-specific display metadata; source content, arbitrary parameters, credentials, URLs, attachment references, and engine data are absent.
+    properties:
+      language:
+        enum:
+        - zh
+        - en
+        type: string
+      num_prompts:
+        maximum: 1000000
+        minimum: 1
+        type: integer
+      target_count:
+        minimum: 1
+        type: integer
+      thread:
+        maximum: 1024
+        minimum: 1
+        type: integer
+      timeout:
+        maximum: 86400
+        minimum: 1
+        type: integer
+    type: object
+  tasks.TaskListResponse:
+    properties:
+      items:
+        items:
+          $ref: '#/definitions/tasks.TaskSummary'
+        type: array
+      page:
+        minimum: 1
+        type: integer
+      page_size:
+        maximum: 100
+        minimum: 1
+        type: integer
+      total:
+        format: int64
+        minimum: 0
+        type: integer
+    required:
+    - items
+    - total
+    - page
+    - page_size
+    type: object
+  tasks.TaskSummary:
+    description: Narrow browser list item.
+    properties:
+      created_at:
+        format: date-time
+        type: string
+      id:
+        type: string
+      owner:
+        type: string
+      status:
+        enum:
+        - pending
+        - dispatching
+        - running
+        - succeeded
+        - failed
+        - dispatch_failed
+        - dispatch_unknown
+        - cancelled
+        type: string
+      task_type:
+        enum:
+        - mcp_scan
+        - ai_infra_scan
+        - model_redteam_report
+        - agent_scan
+        - unknown
+        type: string
+      updated_at:
+        format: date-time
+        type: string
+    required:
+    - id
+    - owner
+    - task_type
+    - status
+    - created_at
+    - updated_at
+    type: object
   websocket.APIResponse:
     properties:
       data:
@@ -454,6 +1123,20 @@ definitions:
         example: '********'
         type: string
     type: object
+  websocket.SafeVersionResponse:
+    description: Anonymous build metadata allowlist.
+    properties:
+      build_time:
+        type: string
+      commit:
+        type: string
+      version:
+        type: string
+    required:
+    - version
+    - commit
+    - build_time
+    type: object
   websocket.TaskCreateResponse:
     properties:
       session_id:
@@ -494,6 +1177,91 @@ info:
   title: AIG Custom Platform 任务API
   version: "1.0"
 paths:
+  /api/v1/auth/csrf:
+    get:
+      description: This anonymous double-submit CSRF initialization creates no session and sets an aig_csrf cookie at Path=/ with Secure in production, HttpOnly=false, and SameSite=Lax, then returns the same value as csrf_token. Send that value as X-CSRF-Token on unsafe methods.
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: Anonymous CSRF token and matching cookie.
+          headers:
+            Set-Cookie:
+              description: aig_csrf double-submit cookie.
+              type: string
+          schema:
+            $ref: '#/definitions/identity.CSRFResponse'
+        "426":
+          description: HTTPS is required by the production Cookie policy.
+        "500":
+          description: Secure token generation failed; no internal detail is returned.
+      summary: Initialize anonymous browser CSRF state
+      tags:
+      - identity
+  /api/v1/auth/me:
+    get:
+      description: Restores the current server-derived Cookie-session Subject. This safe method is deliberately reachable before the password-change completion gate so the browser can read must_change_password. Browser identity headers are ignored.
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: Current authenticated Subject.
+          schema:
+            $ref: '#/definitions/identity.CurrentSubjectResponse'
+        "401":
+          description: Missing, expired, revoked, or invalid session Cookie.
+        "426":
+          description: HTTPS is required by the production Cookie policy.
+      summary: Get the current browser Subject
+      tags:
+      - identity
+  /api/v1/platform/dashboard:
+    get:
+      description: Returns one Subject-scoped dashboard snapshot. Users aggregate only their own reports and tasks; auditors and administrators receive the global scope. The trend contains exactly 30 UTC calendar-day buckets including today, and recent tasks/attention are capped at five. Empty state is has_data=false, security_score=null, zero risk counts, 30 zero-filled buckets, and empty attention; it is never represented as score 100.
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: Governed dashboard snapshot.
+          schema:
+            $ref: '#/definitions/dashboard.View'
+        "401":
+          description: Unauthenticated.
+        "403":
+          description: Password change is incomplete or the Subject role is unsupported.
+        "500":
+          description: Dashboard aggregation failed; internal details are not exposed.
+      summary: Get governed enterprise dashboard
+      tags:
+      - platform-dashboard
+  /api/v1/public/brand:
+    get:
+      description: Anonymous exact safe brand projection. It returns only product_name, primary_color, and logo_data_url. The Logo value is empty or a verified PNG/JPEG data URL; mutable governance and storage fields are absent.
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: Login-page-safe public brand.
+          schema:
+            $ref: '#/definitions/brand.PublicConfig'
+        "500":
+          description: Brand storage unavailable; internal details are not exposed.
+      summary: Get anonymous safe brand
+      tags:
+      - public
+  /api/v1/version:
+    get:
+      description: Returns only the running version and build-injected commit/build_time allowlist. Missing build values are the literal unknown. No files or remote services are consulted by this endpoint.
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: Anonymous safe build metadata.
+          schema:
+            $ref: '#/definitions/websocket.SafeVersionResponse'
+      summary: Get anonymous safe build metadata
+      tags:
+      - public
   /api/v1/platform/admin/reports/backfill:
     post:
       consumes:
@@ -588,15 +1356,15 @@ paths:
         "200":
           description: Authorized safe summary page.
           schema:
-            items:
-              $ref: '#/definitions/reports.ReportSummary'
-            type: array
+            $ref: '#/definitions/reports.ReportListResponse'
         "400":
           description: Invalid page or page_size.
         "401":
           description: Unauthenticated.
         "403":
           description: Role cannot list reports.
+        "500":
+          description: Report query failed; internal details are not exposed.
       summary: List authorized immutable reports
       tags:
       - platform-reports
@@ -625,6 +1393,8 @@ paths:
           description: Unauthenticated.
         "403":
           description: Role cannot read report trends.
+        "500":
+          description: Trend query failed; internal details are not exposed.
       summary: Get authorized server-side report trend
       tags:
       - platform-reports
@@ -649,6 +1419,8 @@ paths:
           description: Role cannot read reports.
         "404":
           description: Report not found or not visible to the user.
+        "500":
+          description: Report query or immutable render decoding failed; internal details are not exposed.
       summary: Get safe immutable report detail
       tags:
       - platform-reports
@@ -784,15 +1556,38 @@ paths:
           description: Subject cannot update this model.
   /api/v1/platform/admin/users:
     get:
-      description: Lists local accounts. Administrator only.
+      description: Lists local accounts in a paginated safe envelope. Administrator only; credential material is never returned. page defaults to 1, page_size defaults to 20, values over 100 are capped at 100, and page cannot exceed 1000.
+      parameters:
+      - default: 1
+        in: query
+        maximum: 1000
+        minimum: 1
+        name: page
+        type: integer
+      - default: 20
+        in: query
+        maximum: 100
+        minimum: 1
+        name: page_size
+        type: integer
+      produces:
+      - application/json
       tags:
       - platform-admin
       summary: List managed users
       responses:
         "200":
           description: User metadata without password hashes.
+          schema:
+            $ref: '#/definitions/admin.UserListResponse'
+        "400":
+          description: Invalid page or page_size.
+        "401":
+          description: Unauthenticated.
         "403":
-          description: Administrator role required.
+          description: Administrator role and completed password change required.
+        "500":
+          description: Account query failed; internal details are not exposed.
     post:
       description: Creates a local account with an administrator-assigned role and records an audit event. Passwords and hashes are never returned.
       tags:
@@ -853,15 +1648,48 @@ paths:
           description: Administrator role required.
   /api/v1/platform/admin/audit-events:
     get:
-      description: Queries append-only sanitized audit events. Governed mutations write a durable pending event before state changes and correlate later success or failure with the same request_id. Administrators and auditors may read; ordinary users are denied.
+      description: Queries append-only recursively sanitized audit events in a paginated envelope. Governed mutations correlate durable pending and completion evidence by request_id. Administrators and auditors may read; ordinary users are denied. page defaults to 1, page_size defaults to 20, values over 100 are capped at 100, and page cannot exceed 1000.
+      parameters:
+      - in: query
+        name: action
+        type: string
+      - in: query
+        name: actor_user_id
+        type: string
+      - in: query
+        name: resource_type
+        type: string
+      - in: query
+        name: resource_id
+        type: string
+      - default: 1
+        in: query
+        maximum: 1000
+        minimum: 1
+        name: page
+        type: integer
+      - default: 20
+        in: query
+        maximum: 100
+        minimum: 1
+        name: page_size
+        type: integer
       tags:
       - audit
       summary: Query audit events
       responses:
         "200":
-          description: Sanitized audit event list.
+          description: Sanitized audit event page.
+          schema:
+            $ref: '#/definitions/admin.AuditListResponse'
+        "400":
+          description: Invalid page or page_size.
+        "401":
+          description: Unauthenticated.
         "403":
-          description: Admin or auditor role required.
+          description: Administrator or auditor role and completed password change required.
+        "500":
+          description: Audit query failed; internal details are not exposed.
   /api/v1/platform/admin/audit-events/prepared/{requestID}/finalize:
     post:
       description: Administrator-only recovery for a prepared file-backed mutation after an operator verifies its real outcome. It promotes the existing request to the same stable outbox and event identity without repeating the file mutation. Retrying the same outcome is idempotent; a conflicting outcome returns 409. The request_id is obtained from the audit-event query or the safe X-Audit-Request-ID header returned when a successful legacy mutation needs recovery.
@@ -917,25 +1745,60 @@ paths:
           description: Administrator role required.
   /api/v1/platform/models:
     get:
-      description: Lists visible model metadata. Every token is masked; ciphertext, nonce, and key identifiers are never returned. Users see global and their own private models, auditors see global models, and administrators see governance metadata.
+      description: Lists visible model metadata in CatalogPage. Every token is masked as ******** and every row declares source=platform|yaml plus read_only. Users see global and their own private platform models; auditors see global rows read-only; administrators see all platform rows. Immutable YAML rows are appended after platform rows, remain read_only=true, and a same-ID YAML row remains distinct instead of shadowing the platform row. YAML loading is cached and fails closed. page defaults to 1, page_size defaults to 20, values over 100 are capped at 100, and page cannot exceed 1000.
+      parameters:
+      - default: 1
+        in: query
+        maximum: 1000
+        minimum: 1
+        name: page
+        type: integer
+      - default: 20
+        in: query
+        maximum: 100
+        minimum: 1
+        name: page_size
+        type: integer
       tags:
       - models
       summary: List governed models
       responses:
         "200":
-          description: Visible model metadata with masked tokens.
+          description: Visible safe model catalog with masked tokens.
+          schema:
+            $ref: '#/definitions/models.CatalogPage'
+        "400":
+          description: Invalid page or page_size.
         "401":
           description: Unauthenticated.
+        "403":
+          description: Password change is incomplete or the Subject role is unsupported.
+        "500":
+          description: Platform or YAML catalog unavailable; internal source paths and details are not exposed.
     post:
       description: Creates an AES-GCM encrypted model configuration. Users may create only private models they own; administrators may create global models; auditors cannot write.
+      parameters:
+      - in: body
+        name: model
+        required: true
+        schema:
+          $ref: '#/definitions/models.CreateInput'
       tags:
       - models
       summary: Create governed model
       responses:
         "201":
           description: Model metadata with a masked token.
+          schema:
+            $ref: '#/definitions/models.View'
+        "400":
+          description: Invalid model input.
+        "401":
+          description: Unauthenticated.
         "403":
-          description: Scope or role is not permitted.
+          description: Scope/role is not permitted, password change is incomplete, or CSRF is invalid.
+        "500":
+          description: Encryption, persistence, or durable audit failed; internal details are not exposed.
   /api/v1/platform/models/{modelID}:
     get:
       description: Returns authorized model metadata with a masked token. Another user's private model is never disclosed.
@@ -950,51 +1813,118 @@ paths:
       responses:
         "200":
           description: Model metadata with masked token.
+          schema:
+            $ref: '#/definitions/models.View'
+        "401":
+          description: Unauthenticated.
         "403":
           description: Private model belongs to another user.
         "404":
           description: Model not found.
+        "500":
+          description: Model query failed; internal details are not exposed.
     put:
       description: Updates an authorized private or global model and audits the change. A masked token value preserves the existing encrypted token.
+      parameters:
+      - in: path
+        name: modelID
+        required: true
+        type: string
+      - in: body
+        name: model
+        required: true
+        schema:
+          $ref: '#/definitions/models.UpdateInput'
       tags:
       - models
       summary: Update governed model
       responses:
         "200":
           description: Updated metadata with masked token.
+          schema:
+            $ref: '#/definitions/models.View'
+        "400":
+          description: Invalid model input.
+        "401":
+          description: Unauthenticated.
         "403":
-          description: Write is not permitted.
+          description: Write is not permitted, password change is incomplete, or CSRF is invalid.
+        "404":
+          description: Model not found.
+        "500":
+          description: Encryption, persistence, or durable audit failed; internal details are not exposed.
     delete:
       description: Deletes an authorized model and records an audit event.
+      parameters:
+      - in: path
+        name: modelID
+        required: true
+        type: string
       tags:
       - models
       summary: Delete governed model
       responses:
         "204":
           description: Model deleted and audited.
+        "401":
+          description: Unauthenticated.
         "403":
-          description: Write is not permitted.
+          description: Write is not permitted, password change is incomplete, or CSRF is invalid.
+        "404":
+          description: Model not found.
+        "500":
+          description: Persistence or durable audit failed; internal details are not exposed.
   /api/v1/platform/models/{modelID}/rotate-encryption:
     post:
       description: Re-encrypts a stored token with the active environment-injected master key. Administrator only; plaintext is never returned or logged.
+      parameters:
+      - in: path
+        name: modelID
+        required: true
+        type: string
       tags:
       - models
       summary: Rotate model token encryption
       responses:
         "204":
           description: Token re-encrypted and audited.
-        "403":
-          description: Administrator role required.
-  /api/v1/platform/tasks:
-    get:
-      description: Lists persisted platform tasks without polling the engine or mutating state. Users see only their own tasks; auditors and administrators see the stable global list.
-      responses:
-        "200":
-          description: Authorized stable task list.
         "401":
           description: Unauthenticated.
         "403":
-          description: Role cannot list tasks.
+          description: Administrator role, completed password change, and valid CSRF required.
+        "404":
+          description: Model not found.
+        "500":
+          description: Decryption, encryption, persistence, or durable audit failed; internal details are not exposed.
+  /api/v1/platform/tasks:
+    get:
+      description: Lists persisted platform tasks as TaskListResponse without polling the engine or mutating state. Users see only their own tasks; auditors and administrators see the stable global list. Items use the narrow TaskSummary only. page defaults to 1, page_size defaults to 20, values over 100 are capped at 100, and page cannot exceed 1000.
+      parameters:
+      - default: 1
+        in: query
+        maximum: 1000
+        minimum: 1
+        name: page
+        type: integer
+      - default: 20
+        in: query
+        maximum: 100
+        minimum: 1
+        name: page_size
+        type: integer
+      responses:
+        "200":
+          description: Authorized stable task list.
+          schema:
+            $ref: '#/definitions/tasks.TaskListResponse'
+        "400":
+          description: Invalid page or page_size.
+        "401":
+          description: Unauthenticated.
+        "403":
+          description: Password change is incomplete or the Subject role is unsupported.
+        "500":
+          description: Task query failed; internal details are not exposed.
       summary: List authorized platform tasks
       tags:
       - platform-tasks
@@ -1036,13 +1966,17 @@ paths:
         "401":
           description: Unauthenticated.
         "403":
-          description: Role cannot create tasks.
+          description: Role cannot create tasks, password change is incomplete, or CSRF is invalid.
+        "500":
+          description: Persistence or durable audit failed; internal details are not exposed.
+        "503":
+          description: Task is persisted with dispatch_failed because trusted dispatch failed.
       summary: Create an idempotent platform task
       tags:
       - platform-tasks
   /api/v1/platform/tasks/{taskID}:
     get:
-      description: Short-poll task detail using the authenticated Cookie Subject. Users read only their own task; auditors and administrators have global read access. Browser-supplied username or role headers are ignored.
+      description: Short-poll browser-safe TaskDetail using the authenticated Cookie Subject. Users read only their own task; auditors and administrators have global read access. The input_summary is a narrow display projection; browser-supplied identity headers are ignored.
       parameters:
       - in: path
         name: taskID
@@ -1051,33 +1985,36 @@ paths:
       responses:
         "200":
           description: Current platform task status.
+          schema:
+            $ref: '#/definitions/tasks.TaskDetail'
         "401":
           description: Unauthenticated.
         "403":
-          description: Task belongs to another user.
+          description: Password change is incomplete or the Subject role is unsupported.
         "404":
-          description: Task not found.
+          description: Task not found or not visible to this user.
+        "500":
+          description: Task query failed; internal details are not exposed.
       summary: Get owned task status
       tags:
       - platform-tasks
   /api/v1/platform/tasks/{taskID}/result:
     get:
-      description: Returns the result only after task ownership or global read authorization and trusted platform-to-engine mapping validation.
+      deprecated: true
+      description: Retired browser result route. After Cookie authentication and the password-change gate it always returns 410 Gone, regardless of task identity or state. It never reads or returns engine results. Authentication failure remains 401 and an incomplete password change remains 403.
       parameters:
       - in: path
         name: taskID
         required: true
         type: string
       responses:
-        "200":
-          description: Engine result.
+        "401":
+          description: Unauthenticated.
         "403":
-          description: Task belongs to another user.
-        "404":
-          description: Task or result not found.
-        "409":
-          description: Result is not ready.
-      summary: Get authorized task result
+          description: Password change is incomplete.
+        "410":
+          description: Browser task result retrieval is permanently retired; use immutable reports.
+      summary: Retired browser task result route
       tags:
       - platform-tasks
   /api/v1/platform/tasks/{taskID}/cancel:
@@ -1097,6 +2034,8 @@ paths:
           description: Owner or administrator role required.
         "404":
           description: Task not found.
+        "500":
+          description: Cancellation or durable audit failed; internal details are not exposed.
       summary: Cancel governed task
       tags:
       - platform-tasks
@@ -1104,7 +2043,7 @@ paths:
     post:
       consumes:
       - multipart/form-data
-      description: Streams one private attachment within the configured size limit. The response exposes only an opaque attachment ID and safe metadata, never a storage name or path.
+      description: Streams one private attachment owned by the authenticated user or administrator within the configured size limit. Auditors cannot create attachments. Requires CSRF. The response exposes only an opaque attachment ID and safe metadata, never a storage name or path.
       parameters:
       - in: formData
         name: file
@@ -1113,10 +2052,18 @@ paths:
       responses:
         "201":
           description: Opaque private attachment metadata.
+          schema:
+            $ref: '#/definitions/tasks.AttachmentView'
         "400":
           description: Invalid or oversized attachment.
         "401":
           description: Unauthenticated.
+        "403":
+          description: Password change is incomplete or CSRF is invalid.
+        "413":
+          description: Attachment exceeds the configured file-size limit.
+        "500":
+          description: Storage, persistence, or durable audit failed; internal details are not exposed.
       summary: Upload private task attachment
       tags:
       - platform-task-attachments
@@ -1124,7 +2071,7 @@ paths:
     post:
       consumes:
       - application/json
-      description: Begins an owner-scoped chunked upload after validating the declared total size.
+      description: Begins an owner-scoped chunked upload for an authenticated user or administrator after validating the declared total size. Auditors cannot create attachments. Requires CSRF.
       parameters:
       - in: body
         name: attachment
@@ -1143,10 +2090,18 @@ paths:
       responses:
         "201":
           description: Opaque uploading attachment metadata.
+          schema:
+            $ref: '#/definitions/tasks.AttachmentView'
         "400":
           description: Invalid filename or size.
         "401":
           description: Unauthenticated.
+        "403":
+          description: Password change is incomplete or CSRF is invalid.
+        "413":
+          description: Declared size exceeds the configured file-size limit.
+        "500":
+          description: Persistence or durable audit failed; internal details are not exposed.
       summary: Begin private chunked upload
       tags:
       - platform-task-attachments
@@ -1154,7 +2109,7 @@ paths:
     post:
       consumes:
       - multipart/form-data
-      description: Streams one bounded chunk for an attachment owned by the authenticated Subject; cumulative size is enforced atomically.
+      description: Streams one bounded chunk. Owner users may write their own attachment; administrators may write any attachment; auditors are read-only. Cumulative size is enforced atomically. Requires CSRF.
       parameters:
       - in: path
         name: attachmentID
@@ -1172,9 +2127,17 @@ paths:
         "204":
           description: Chunk accepted.
         "400":
-          description: Invalid or oversized chunk.
+          description: Invalid chunk index or attachment state.
+        "401":
+          description: Unauthenticated.
         "403":
-          description: Attachment belongs to another user.
+          description: Subject cannot write this attachment, password change is incomplete, or CSRF is invalid.
+        "404":
+          description: Attachment not found.
+        "413":
+          description: Chunk exceeds the configured chunk-size limit.
+        "500":
+          description: Storage, persistence, or durable audit failed; internal details are not exposed.
       summary: Upload private attachment chunk
       tags:
       - platform-task-attachments
@@ -1182,7 +2145,7 @@ paths:
     post:
       consumes:
       - application/json
-      description: Merges owned chunks by streaming while enforcing declared, cumulative, and actual size equality.
+      description: Merges chunks by streaming while enforcing declared, cumulative, and actual size equality. Owner users may merge their own attachment; administrators may merge any attachment; auditors are read-only. Requires CSRF.
       parameters:
       - in: path
         name: attachmentID
@@ -1205,16 +2168,22 @@ paths:
       responses:
         "200":
           description: Ready opaque attachment metadata.
+          schema:
+            $ref: '#/definitions/tasks.AttachmentView'
         "400":
           description: Chunk count or sizes do not match.
         "403":
-          description: Attachment belongs to another user.
+          description: Subject cannot write this attachment, password change is incomplete, or CSRF is invalid.
+        "404":
+          description: Attachment not found.
+        "500":
+          description: Storage, persistence, or durable audit failed; internal details are not exposed.
       summary: Merge private attachment chunks
       tags:
       - platform-task-attachments
   /api/v1/platform/tasks/attachments/{attachmentID}/download:
     get:
-      description: Downloads a private attachment after owner authorization. Auditors and administrators have global read access; storage names and paths are never exposed.
+      description: Downloads a ready private attachment after authorization. An owner user may read their own attachment; other users receive 404 to avoid existence disclosure; auditors receive 403; administrators may read any attachment. Before an administrator cross-owner storage open, the server durably records a successful attachment.download_authorized event with sanitized authorization metadata; this records authorization, not stream delivery. Storage names and paths are never exposed.
       parameters:
       - in: path
         name: attachmentID
@@ -1223,12 +2192,18 @@ paths:
       responses:
         "200":
           description: Streamed attachment.
+          schema:
+            type: file
+        "400":
+          description: Attachment is not ready.
         "401":
           description: Unauthenticated.
         "403":
-          description: Attachment belongs to another user.
+          description: Auditor or unsupported role cannot download attachments; password change may also be incomplete.
         "404":
-          description: Attachment not found.
+          description: Attachment is absent, storage is absent, or it belongs to another ordinary user.
+        "500":
+          description: Storage open or required authorization audit failed; no bytes or internal details are returned.
       summary: Download authorized private attachment
       tags:
       - platform-task-attachments
@@ -1259,30 +2234,28 @@ paths:
     post:
       consumes:
       - application/json
-      description: Creates a local password session and sets HttpOnly session and CSRF cookies. HTTPS is required unless APP_ENV=test explicitly enables insecure test cookies.
+      description: Requires the anonymous aig_csrf cookie from GET /api/v1/auth/csrf and the matching X-CSRF-Token header before credentials are processed. On success it creates a local password session, sets the HttpOnly aig_session Cookie, rotates the readable aig_csrf Cookie, and returns only must_change_password. HTTPS is required unless APP_ENV=test explicitly enables insecure test cookies.
       parameters:
       - in: body
         name: credentials
         required: true
         schema:
-          type: object
-          required:
-          - username
-          - password
-          properties:
-            username:
-              type: string
-            password:
-              type: string
+          $ref: '#/definitions/identity.LoginRequest'
       responses:
         "200":
           description: Session established; response includes must_change_password.
+          schema:
+            $ref: '#/definitions/identity.LoginResponse'
         "400":
           description: Invalid request body.
         "401":
           description: Invalid credentials or disabled account.
+        "403":
+          description: Missing or mismatched pre-authentication CSRF cookie/header.
         "426":
           description: HTTPS is required.
+        "500":
+          description: Authentication audit or secure token generation failed; internal details are not exposed.
       summary: Log in with a local account
       tags:
       - auth
@@ -1374,21 +2347,13 @@ paths:
     post:
       consumes:
       - application/json
-      description: Confirms a password reset using a one-time token. Requires HTTPS. The token is accepted only in the request body and is never echoed.
+      description: Confirms a password reset using a one-time token. Before the reset token is processed, the request requires the anonymous aig_csrf cookie from GET /api/v1/auth/csrf and the matching X-CSRF-Token header. Requires HTTPS. The reset token is accepted only in the request body and is never echoed.
       parameters:
       - in: body
         name: reset
         required: true
         schema:
-          type: object
-          required:
-          - token
-          - temporary_password
-          properties:
-            token:
-              type: string
-            temporary_password:
-              type: string
+          $ref: '#/definitions/identity.PasswordResetConfirmRequest'
       responses:
         "204":
           description: Password reset completed.
@@ -1396,11 +2361,217 @@ paths:
           description: Invalid request body.
         "401":
           description: Invalid, expired, or already-used token.
+        "403":
+          description: Missing or mismatched pre-authentication CSRF cookie/header.
         "426":
           description: HTTPS is required unless APP_ENV=test explicitly enables insecure test cookies.
       summary: Confirm password reset
       tags:
       - auth
+  /api/v1/app/tasks:
+    get:
+      deprecated: true
+      description: Retired browser task collection. After authentication and the password-change gate it returns 410 Gone.
+      responses:
+        "401":
+          description: Unauthenticated.
+        "403":
+          description: Password change is incomplete.
+        "410":
+          description: Endpoint retired; no task list is exposed.
+      summary: Retired browser task list
+      tags:
+      - retired-browser-tasks
+    post:
+      deprecated: true
+      description: Retired browser task creation. After authentication, the password-change gate, and CSRF it returns 410 Gone.
+      responses:
+        "401":
+          description: Unauthenticated.
+        "403":
+          description: Password change is incomplete or CSRF is invalid.
+        "410":
+          description: Endpoint retired; no task is submitted.
+      summary: Retired browser task creation
+      tags:
+      - retired-browser-tasks
+  /api/v1/app/tasks/{sessionId}:
+    get:
+      deprecated: true
+      description: Retired browser task detail. After authentication and the password-change gate it returns 410 Gone.
+      parameters:
+      - in: path
+        name: sessionId
+        required: true
+        type: string
+      responses:
+        "401":
+          description: Unauthenticated.
+        "403":
+          description: Password change is incomplete.
+        "410":
+          description: Endpoint retired; no task detail is exposed.
+      summary: Retired browser task detail
+      tags:
+      - retired-browser-tasks
+    put:
+      deprecated: true
+      description: Retired browser task update. After authentication, the password-change gate, and CSRF it returns 410 Gone.
+      parameters:
+      - in: path
+        name: sessionId
+        required: true
+        type: string
+      responses:
+        "401":
+          description: Unauthenticated.
+        "403":
+          description: Password change is incomplete or CSRF is invalid.
+        "410":
+          description: Endpoint retired; no task is changed.
+      summary: Retired browser task update
+      tags:
+      - retired-browser-tasks
+    delete:
+      deprecated: true
+      description: Retired browser task deletion. After authentication, the password-change gate, and CSRF it returns 410 Gone.
+      parameters:
+      - in: path
+        name: sessionId
+        required: true
+        type: string
+      responses:
+        "401":
+          description: Unauthenticated.
+        "403":
+          description: Password change is incomplete or CSRF is invalid.
+        "410":
+          description: Endpoint retired; no task is deleted.
+      summary: Retired browser task deletion
+      tags:
+      - retired-browser-tasks
+  /api/v1/app/tasks/sse/{sessionId}:
+    get:
+      deprecated: true
+      description: Retired browser task stream. After authentication and the password-change gate it returns 410 Gone and opens no stream.
+      parameters:
+      - in: path
+        name: sessionId
+        required: true
+        type: string
+      responses:
+        "401":
+          description: Unauthenticated.
+        "403":
+          description: Password change is incomplete.
+        "410":
+          description: Endpoint retired; no stream is opened.
+      summary: Retired browser task stream
+      tags:
+      - retired-browser-tasks
+  /api/v1/app/tasks/share:
+    post:
+      deprecated: true
+      description: Retired browser task share. After authentication, the password-change gate, and CSRF it returns 410 Gone.
+      responses:
+        "401":
+          description: Unauthenticated.
+        "403":
+          description: Password change is incomplete or CSRF is invalid.
+        "410":
+          description: Endpoint retired; no task is shared.
+      summary: Retired browser task share
+      tags:
+      - retired-browser-tasks
+  /api/v1/app/tasks/uploadFile:
+    post:
+      deprecated: true
+      description: Retired browser upload. After authentication, the password-change gate, and CSRF it returns 410 Gone.
+      responses:
+        "401":
+          description: Unauthenticated.
+        "403":
+          description: Password change is incomplete or CSRF is invalid.
+        "410":
+          description: Endpoint retired; no file is accepted.
+      summary: Retired browser upload
+      tags:
+      - retired-browser-tasks
+  /api/v1/app/tasks/uploadChunk:
+    post:
+      deprecated: true
+      description: Retired browser chunk upload. After authentication, the password-change gate, and CSRF it returns 410 Gone.
+      responses:
+        "401":
+          description: Unauthenticated.
+        "403":
+          description: Password change is incomplete or CSRF is invalid.
+        "410":
+          description: Endpoint retired; no chunk is accepted.
+      summary: Retired browser chunk upload
+      tags:
+      - retired-browser-tasks
+  /api/v1/app/tasks/mergeChunks:
+    post:
+      deprecated: true
+      description: Retired browser chunk merge. After authentication, the password-change gate, and CSRF it returns 410 Gone.
+      responses:
+        "401":
+          description: Unauthenticated.
+        "403":
+          description: Password change is incomplete or CSRF is invalid.
+        "410":
+          description: Endpoint retired; no chunks are merged.
+      summary: Retired browser chunk merge
+      tags:
+      - retired-browser-tasks
+  /api/v1/app/tasks/{sessionId}/terminate:
+    post:
+      deprecated: true
+      description: Retired browser termination. After authentication, the password-change gate, and CSRF it returns 410 Gone.
+      parameters:
+      - in: path
+        name: sessionId
+        required: true
+        type: string
+      responses:
+        "401":
+          description: Unauthenticated.
+        "403":
+          description: Password change is incomplete or CSRF is invalid.
+        "410":
+          description: Endpoint retired; no task is terminated.
+      summary: Retired browser task termination
+      tags:
+      - retired-browser-tasks
+  /api/v1/app/taskapi/uploadChunk:
+    post:
+      deprecated: true
+      description: Retired browser chunk upload. After authentication, the password-change gate, and CSRF it returns 410 Gone.
+      responses:
+        "401":
+          description: Unauthenticated.
+        "403":
+          description: Password change is incomplete or CSRF is invalid.
+        "410":
+          description: Endpoint retired; no chunk is accepted.
+      summary: Retired taskapi chunk upload
+      tags:
+      - taskapi
+  /api/v1/app/taskapi/mergeChunks:
+    post:
+      deprecated: true
+      description: Retired browser chunk merge. After authentication, the password-change gate, and CSRF it returns 410 Gone.
+      responses:
+        "401":
+          description: Unauthenticated.
+        "403":
+          description: Password change is incomplete or CSRF is invalid.
+        "410":
+          description: Endpoint retired; no chunks are merged.
+      summary: Retired taskapi chunk merge
+      tags:
+      - taskapi
   /api/v1/app/taskapi/result/{id}:
     get:
       deprecated: true
@@ -1414,20 +2585,12 @@ paths:
       produces:
       - application/json
       responses:
+        "401":
+          description: Unauthenticated.
+        "403":
+          description: Password change is incomplete.
         "410":
           description: Endpoint retired; no task result is exposed here.
-        "400":
-          description: Invalid session ID format
-          schema:
-            $ref: '#/definitions/websocket.APIResponse'
-        "404":
-          description: Task not found or not completed
-          schema:
-            $ref: '#/definitions/websocket.APIResponse'
-        "500":
-          description: Internal server error
-          schema:
-            $ref: '#/definitions/websocket.APIResponse'
       summary: Get task result
       tags:
       - taskapi
@@ -1444,20 +2607,12 @@ paths:
       produces:
       - application/json
       responses:
+        "401":
+          description: Unauthenticated.
+        "403":
+          description: Password change is incomplete.
         "410":
           description: Endpoint retired; no task status is exposed here.
-        "400":
-          description: Invalid session ID format
-          schema:
-            $ref: '#/definitions/websocket.APIResponse'
-        "404":
-          description: Task not found
-          schema:
-            $ref: '#/definitions/websocket.APIResponse'
-        "500":
-          description: Internal server error
-          schema:
-            $ref: '#/definitions/websocket.APIResponse'
       summary: Get task status
       tags:
       - taskapi
@@ -1466,6 +2621,10 @@ paths:
       deprecated: true
       description: Retired browser execution endpoint. Requests receive 410 Gone only after the normal session, password-change, and CSRF checks; use POST /api/v1/platform/tasks with governed model IDs and opaque attachments.
       responses:
+        "401":
+          description: Unauthenticated.
+        "403":
+          description: Password change is incomplete or CSRF is invalid.
         "410":
           description: Endpoint retired; no task is submitted.
       summary: Retired task creation endpoint
@@ -1476,30 +2635,12 @@ paths:
       deprecated: true
       description: Retired browser upload endpoint. Requests receive 410 Gone only after the normal session, password-change, and CSRF checks; use the private platform attachment API.
       responses:
+        "401":
+          description: Unauthenticated.
+        "403":
+          description: Password change is incomplete or CSRF is invalid.
         "410":
           description: Endpoint retired; no attachment is accepted.
-        "400":
-          description: Invalid file or upload parameters
-          schema:
-            properties:
-              data:
-                type: object
-              message:
-                type: string
-              status:
-                type: integer
-            type: object
-        "500":
-          description: Internal server error
-          schema:
-            properties:
-              data:
-                type: object
-              message:
-                type: string
-              status:
-                type: integer
-            type: object
       summary: Upload file
       tags:
       - taskapi
