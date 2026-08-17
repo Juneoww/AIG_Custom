@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"net/url"
 	"os"
 	"strings"
@@ -201,6 +202,82 @@ func TestGormDashboardProjectionFiltersOwnerUTCWindowSucceededStatusAndUsesSafeB
 	global, err := repository.Dashboard(context.Background(), DashboardQuery{From: lower, To: upper, AttentionLimit: 5})
 	require.NoError(t, err)
 	assert.Equal(t, 3, global.SnapshotCount)
+}
+
+func TestDashboardRiskValidationMatchesMemoryAndPostgres(t *testing.T) {
+	type riskCase struct {
+		name, mapping     string
+		high, medium, low int
+		valid             bool
+		expectedMapping   string
+	}
+	cases := []riskCase{
+		{name: "space mapping", mapping: " ", valid: false},
+		{name: "tab mapping", mapping: "\t", valid: false},
+		{name: "newline mapping", mapping: "\n", valid: false},
+		{name: "carriage return mapping", mapping: "\r", valid: false},
+		{name: "vertical tab mapping", mapping: "\v", valid: false},
+		{name: "form feed mapping", mapping: "\f", valid: false},
+		{name: "high overflow", mapping: "risk-v2", high: int(math.MaxInt32) + 1, valid: false},
+		{name: "medium overflow", mapping: "risk-v2", medium: int(math.MaxInt32) + 1, valid: false},
+		{name: "low overflow", mapping: "risk-v2", low: int(math.MaxInt32) + 1, valid: false},
+		{name: "max int32 and normalized mapping", mapping: " \trisk-v2\n", high: int(math.MaxInt32), valid: true, expectedMapping: "risk-v2"},
+	}
+	lower := time.Date(2026, 8, 1, 0, 0, 0, 0, time.UTC)
+	upper := lower.AddDate(0, 0, 1)
+	assertProjection := func(t *testing.T, fixture riskCase, projection DashboardProjection) {
+		t.Helper()
+		if !fixture.valid {
+			assert.Zero(t, projection.SnapshotCount)
+			assert.Empty(t, projection.MappingVersions)
+			assert.Empty(t, projection.Attention)
+			return
+		}
+		assert.Equal(t, 1, projection.SnapshotCount)
+		assert.Equal(t, []string{fixture.expectedMapping}, projection.MappingVersions)
+		require.Len(t, projection.Attention, 1)
+		assert.Equal(t, fixture.high, projection.Attention[0].High)
+	}
+
+	t.Run("memory", func(t *testing.T) {
+		repository := NewMemoryRepository()
+		repository.SetDashboardTaskVerifier(func(context.Context, string, string) (bool, error) { return true, nil })
+		for index, fixture := range cases {
+			t.Run(fixture.name, func(t *testing.T) {
+				id := fmt.Sprintf("memory-boundary-%d", index)
+				snapshot := reportSnapshotFixture("report-"+id, "task-"+id)
+				snapshot.OwnerUserID = id
+				snapshot.CompletedAt = lower.Add(time.Hour)
+				snapshot.CreatedAt = snapshot.CompletedAt
+				snapshot.Risk = RiskSummary{MappingVersion: fixture.mapping, Score: 50, High: fixture.high, Medium: fixture.medium, Low: fixture.low}
+				require.NoError(t, repository.Create(context.Background(), snapshot))
+				projection, err := repository.Dashboard(context.Background(), DashboardQuery{OwnerUserID: id, From: lower, To: upper, AttentionLimit: 5})
+				require.NoError(t, err)
+				assertProjection(t, fixture, projection)
+			})
+		}
+	})
+
+	t.Run("postgres", func(t *testing.T) {
+		db := openReportsTestDB(t)
+		require.NoError(t, database.Migrate(db))
+		repository := NewGormRepository(db)
+		for index, fixture := range cases {
+			t.Run(fixture.name, func(t *testing.T) {
+				id := fmt.Sprintf("postgres-boundary-%d", index)
+				seedDashboardTask(t, db, "task-"+id, id, "succeeded", lower.Add(time.Hour))
+				snapshot := reportSnapshotFixture("report-"+id, "task-"+id)
+				snapshot.OwnerUserID = id
+				snapshot.CompletedAt = lower.Add(time.Hour)
+				snapshot.CreatedAt = snapshot.CompletedAt
+				snapshot.Risk = RiskSummary{MappingVersion: fixture.mapping, Score: 50, High: fixture.high, Medium: fixture.medium, Low: fixture.low}
+				require.NoError(t, repository.Create(context.Background(), snapshot))
+				projection, err := repository.Dashboard(context.Background(), DashboardQuery{OwnerUserID: id, From: lower, To: upper, AttentionLimit: 5})
+				require.NoError(t, err)
+				assertProjection(t, fixture, projection)
+			})
+		}
+	})
 }
 
 func seedDashboardTask(t *testing.T, db *gorm.DB, id, owner, status string, timestamp time.Time) {

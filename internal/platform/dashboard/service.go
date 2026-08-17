@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/Juneoww/AIG_Custom/internal/platform/identity"
@@ -127,6 +128,7 @@ func attentionItems(records []reports.DashboardAttention) []AttentionItem {
 func stableVersions(input []string) []string {
 	unique := make(map[string]struct{}, len(input))
 	for _, version := range input {
+		version = strings.TrimSpace(version)
 		if version != "" {
 			unique[version] = struct{}{}
 		}
@@ -147,7 +149,15 @@ func nonNilTasks(input []tasks.TaskSummary) []tasks.TaskSummary {
 }
 
 func roundedAverage(sum, count int) int {
-	return (sum + count/2) / count
+	if count <= 0 || sum <= 0 {
+		return 0
+	}
+	quotient, remainder := sum/count, sum%count
+	threshold := count/2 + count%2
+	if remainder >= threshold {
+		quotient++
+	}
+	return quotient
 }
 
 func utcDay(value time.Time) time.Time {

@@ -82,6 +82,13 @@ type DashboardRepository interface {
 
 type DashboardTaskVerifier func(context.Context, string, string) (bool, error)
 
+const (
+	dashboardMaxRiskCount = 1<<31 - 1
+	// This is Unicode White_Space, the same character set used by strings.TrimSpace.
+	dashboardTrimCharacters    = " \t\n\v\f\r\u0085\u00a0\u1680\u2000\u2001\u2002\u2003\u2004\u2005\u2006\u2007\u2008\u2009\u200a\u2028\u2029\u202f\u205f\u3000"
+	dashboardMappingVersionSQL = "btrim(reports.risk_summary ->> 'mapping_version', ?)"
+)
+
 type MemoryRepository struct {
 	mu                     sync.RWMutex
 	byID                   map[string]*Snapshot
@@ -268,8 +275,7 @@ func (repository *GormRepository) Dashboard(ctx context.Context, query Dashboard
 		COALESCE(SUM((reports.risk_summary ->> 'high')::integer), 0) AS high,
 		COALESCE(SUM((reports.risk_summary ->> 'medium')::integer), 0) AS medium,
 		COALESCE(SUM((reports.risk_summary ->> 'low')::integer), 0) AS low,
-		COALESCE(jsonb_agg(DISTINCT (reports.risk_summary ->> 'mapping_version') ORDER BY (reports.risk_summary ->> 'mapping_version'))
-			FILTER (WHERE (reports.risk_summary ->> 'mapping_version') <> ''), '[]'::jsonb) AS mapping_versions`).
+		COALESCE(jsonb_agg(DISTINCT `+dashboardMappingVersionSQL+`), '[]'::jsonb) AS mapping_versions`, dashboardTrimCharacters).
 		Scan(&aggregate).Error; err != nil {
 		return DashboardProjection{}, err
 	}
@@ -281,6 +287,7 @@ func (repository *GormRepository) Dashboard(ctx context.Context, query Dashboard
 	if len(aggregate.MappingVersions) > 0 && json.Unmarshal(aggregate.MappingVersions, &projection.MappingVersions) != nil {
 		return DashboardProjection{}, ErrInvalidSnapshot
 	}
+	sort.Strings(projection.MappingVersions)
 
 	if err := base.Session(&gorm.Session{}).Select(`
 		date_trunc('day', reports.completed_at AT TIME ZONE 'UTC') AS date,
@@ -315,8 +322,9 @@ func (repository *GormRepository) dashboardBase(ctx context.Context, query Dashb
 		Joins("JOIN platform_tasks AS tasks ON tasks.id = reports.task_id AND tasks.owner_user_id = reports.owner_user_id").
 		Where("tasks.status = ?", "succeeded").
 		Where("reports.completed_at >= ? AND reports.completed_at < ?", query.From.UTC(), query.To.UTC())
-	db = db.Where("jsonb_typeof(reports.risk_summary -> 'mapping_version') = 'string' AND btrim(reports.risk_summary ->> 'mapping_version') <> ''")
-	for field, maximum := range map[string]int{"score": 100, "high": 2147483647, "medium": 2147483647, "low": 2147483647} {
+	db = db.Where("jsonb_typeof(reports.risk_summary -> 'mapping_version') = 'string'").
+		Where(dashboardMappingVersionSQL+" <> ''", dashboardTrimCharacters)
+	for field, maximum := range map[string]int{"score": 100, "high": dashboardMaxRiskCount, "medium": dashboardMaxRiskCount, "low": dashboardMaxRiskCount} {
 		db = db.Where(dashboardIntegerIsValid(field, maximum))
 	}
 	if query.OwnerUserID != "" {
@@ -513,8 +521,9 @@ func (repository *MemoryRepository) Dashboard(ctx context.Context, query Dashboa
 		projection.Risk.High += snapshot.Risk.High
 		projection.Risk.Medium += snapshot.Risk.Medium
 		projection.Risk.Low += snapshot.Risk.Low
-		if snapshot.Risk.MappingVersion != "" {
-			versions[snapshot.Risk.MappingVersion] = struct{}{}
+		mappingVersion := strings.TrimSpace(snapshot.Risk.MappingVersion)
+		if mappingVersion != "" {
+			versions[mappingVersion] = struct{}{}
 		}
 		day := utcDay(snapshot.CompletedAt)
 		point := trend[day]
@@ -563,7 +572,9 @@ func (repository *MemoryRepository) Dashboard(ctx context.Context, query Dashboa
 
 func validDashboardRisk(risk RiskSummary) bool {
 	return strings.TrimSpace(risk.MappingVersion) != "" && risk.Score >= 0 && risk.Score <= 100 &&
-		risk.High >= 0 && risk.Medium >= 0 && risk.Low >= 0
+		risk.High >= 0 && risk.High <= dashboardMaxRiskCount &&
+		risk.Medium >= 0 && risk.Medium <= dashboardMaxRiskCount &&
+		risk.Low >= 0 && risk.Low <= dashboardMaxRiskCount
 }
 
 func validateDashboardQuery(query DashboardQuery) error {

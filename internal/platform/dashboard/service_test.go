@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"math"
 	"net/url"
 	"os"
 	"strings"
@@ -92,7 +93,7 @@ func TestServiceAggregatesOnlyFrozenProjectionAndRoundsScores(t *testing.T) {
 		SnapshotCount: 2,
 		ScoreSum:      139,
 		MappingVersions: []string{
-			"risk-v2", "risk-v1", "risk-v2",
+			" risk-v2\n", "risk-v1", "risk-v2", "\t",
 		},
 		Risk: reports.RiskSummary{High: 2, Medium: 3, Low: 4},
 		Trend: []reports.DashboardTrendPoint{
@@ -124,6 +125,44 @@ func TestServiceAggregatesOnlyFrozenProjectionAndRoundsScores(t *testing.T) {
 	assert.Equal(t, "report-high", view.Attention[0].ReportID)
 	assert.Equal(t, reports.RiskSummary{High: 2, Medium: 1, Score: 80}, view.Attention[0].Risk)
 	assert.Equal(t, "AIG", view.Attention[0].ProductName)
+}
+
+func TestServiceRoundsExtremeProjectionWithoutOverflow(t *testing.T) {
+	now := time.Date(2026, 8, 17, 12, 0, 0, 0, time.UTC)
+	reportsReader := &recordingReportReader{projection: reports.DashboardProjection{
+		SnapshotCount: math.MaxInt,
+		ScoreSum:      math.MaxInt - 1,
+		Trend: []reports.DashboardTrendPoint{{
+			Date: now, Completed: math.MaxInt, ScoreSum: math.MaxInt - 1,
+		}},
+	}}
+	service := NewService(reportsReader, &recordingTaskReader{})
+	service.now = func() time.Time { return now }
+
+	view, err := service.Get(context.Background(), identity.Subject{Role: identity.RoleAdmin})
+	require.NoError(t, err)
+	require.NotNil(t, view.SecurityScore)
+	assert.Equal(t, 1, *view.SecurityScore)
+	require.NotNil(t, view.Trend[29].SecurityScore)
+	assert.Equal(t, 1, *view.Trend[29].SecurityScore)
+}
+
+func TestRoundedAverageHandlesRoundingBoundaries(t *testing.T) {
+	for _, test := range []struct {
+		name       string
+		sum, count int
+		expected   int
+	}{
+		{name: "nonpositive count", sum: 10, count: 0, expected: 0},
+		{name: "even below half", sum: 1, count: 4, expected: 0},
+		{name: "even exact half", sum: 2, count: 4, expected: 1},
+		{name: "odd below half", sum: 1, count: 3, expected: 0},
+		{name: "odd above half", sum: 2, count: 3, expected: 1},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			assert.Equal(t, test.expected, roundedAverage(test.sum, test.count))
+		})
+	}
 }
 
 func TestServiceKeepsRoleScopeInsideReportsAndTasksServices(t *testing.T) {
