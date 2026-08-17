@@ -437,6 +437,34 @@ func TestGovernanceModelSafeCatalogListEnvelopePaginationPreservesYAMLCollision(
 	assert.NotContains(t, response.Body.String(), "yaml-loader-token-sentinel")
 }
 
+func TestGovernanceModelSafeCatalogCachesFixedInitialYAMLFailure(t *testing.T) {
+	ctx := context.Background()
+	identityService := identity.NewService(identity.NewMemoryRepository())
+	admin, err := identityService.CreateUser(ctx, identity.CreateUserInput{
+		Username: "catalog-failure-admin", Password: "catalog-password", Role: identity.RoleAdmin,
+	})
+	require.NoError(t, err)
+	login, err := identityService.Authenticate(ctx, admin.Username, "catalog-password")
+	require.NoError(t, err)
+	modelService := platformmodels.NewService(platformmodels.NewMemoryRepository(), nil, nil)
+	yamlSource := &stubYAMLModelSource{loadErr: errors.New("C:/private/models.yaml: token-sentinel")}
+	configureSafeModelCatalog(modelService, yamlSource)
+
+	gin.SetMode(gin.TestMode)
+	router := gin.New()
+	policy := identity.CookiePolicy{}
+	group := router.Group("/api/v1/platform", setupIdentityMiddleware(identityService, policy), identity.RequirePasswordChangeCompleted(), identity.RequireCSRF(policy))
+	registerGovernanceModelRoutes(group.Group("/models"), modelService)
+	for attempt := 0; attempt < 2; attempt++ {
+		response := governanceRequest(t, router, login.Token, http.MethodGet, "/api/v1/platform/models", nil)
+		assert.Equal(t, http.StatusInternalServerError, response.Code)
+		assert.JSONEq(t, `{"error":"model catalog request failed"}`, response.Body.String())
+		assert.NotContains(t, response.Body.String(), "models.yaml")
+		assert.NotContains(t, response.Body.String(), "token-sentinel")
+	}
+	assert.Equal(t, 1, yamlSource.loadCalls)
+}
+
 type legacyModelMutationRows struct {
 	PlatformModels int64
 	LegacyModels   int64

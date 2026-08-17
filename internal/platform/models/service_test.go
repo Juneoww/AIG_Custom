@@ -213,6 +213,24 @@ func TestModelSafeCatalogCachesAndCopiesYAMLLoaderResult(t *testing.T) {
 	assert.Equal(t, int32(1), loads.Load())
 }
 
+func TestModelSafeCatalogCachesFixedYAMLLoaderError(t *testing.T) {
+	service := NewService(NewMemoryRepository(), nil, nil)
+	loads := 0
+	service.SetCatalogLoader(func() ([]CatalogView, error) {
+		loads++
+		return nil, errors.New("C:/private/models.yaml: token-sentinel")
+	})
+	for attempt := 0; attempt < 2; attempt++ {
+		_, err := service.SafeCatalog(context.Background(), identity.Subject{Role: identity.RoleAdmin}, 1, 20)
+		if assert.Error(t, err) {
+			assert.EqualError(t, err, "模型目录暂不可用")
+			assert.NotContains(t, err.Error(), "models.yaml")
+			assert.NotContains(t, err.Error(), "token-sentinel")
+		}
+	}
+	assert.Equal(t, 1, loads)
+}
+
 func TestTokenUsesAuthenticatedEncryptionAndSupportsKeyRotationBoundary(t *testing.T) {
 	ctx := context.Background()
 	repository := NewMemoryRepository()

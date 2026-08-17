@@ -9,6 +9,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"unicode"
 
 	"github.com/Juneoww/AIG_Custom/internal/platform/identity"
 	"github.com/Juneoww/AIG_Custom/internal/platform/txcontext"
@@ -427,8 +428,7 @@ func sanitizeBrowserValue(value any) any {
 	case map[string]any:
 		out := make(map[string]any, len(typed))
 		for key, nested := range typed {
-			normalized := strings.NewReplacer("-", "", "_", "", " ", "").Replace(strings.ToLower(key))
-			if sensitiveBrowserKey(normalized) {
+			if sensitiveBrowserKey(key) {
 				out[key] = RedactedValue
 				continue
 			}
@@ -446,19 +446,59 @@ func sanitizeBrowserValue(value any) any {
 	}
 }
 
-func sensitiveBrowserKey(normalized string) bool {
-	switch normalized {
-	case "raw", "rawresult", "rawdata", "rawpayload", "rawresponse",
-		"error", "internalerror", "errormessage", "errorstack",
-		"path", "configpath", "filepath", "stack", "stacktrace",
-		"token", "apitoken", "accesstoken", "refreshtoken", "secret", "clientsecret",
-		"password", "passwordhash", "credential", "credentials",
-		"header", "headers", "authorizationheader",
-		"content", "requestcontent", "responsecontent":
-		return true
-	default:
+func sensitiveBrowserKey(key string) bool {
+	tokens := browserKeyTokens(key)
+	if strings.Join(tokens, "") == "errorcount" {
 		return false
 	}
+	hasAPI, hasPrivate, hasKey := false, false, false
+	for _, token := range tokens {
+		switch token {
+		case "raw", "rawresult", "rawdata", "rawpayload", "rawresponse",
+			"error", "internalerror", "errormessage", "errorstack",
+			"path", "configpath", "filepath", "stack", "stacktrace",
+			"token", "apitoken", "accesstoken", "refreshtoken", "secret", "clientsecret",
+			"password", "passwordhash", "credential", "credentials",
+			"header", "headers", "authorization", "authorizationheader", "cookie",
+			"content", "requestcontent", "responsecontent", "apikey", "privatekey":
+			return true
+		case "api":
+			hasAPI = true
+		case "private":
+			hasPrivate = true
+		case "key":
+			hasKey = true
+		}
+	}
+	return hasKey && (hasAPI || hasPrivate)
+}
+
+func browserKeyTokens(key string) []string {
+	runes := []rune(key)
+	tokens := make([]string, 0, 4)
+	current := make([]rune, 0, len(runes))
+	flush := func() {
+		if len(current) != 0 {
+			tokens = append(tokens, string(current))
+			current = current[:0]
+		}
+	}
+	for index, char := range runes {
+		if !unicode.IsLetter(char) && !unicode.IsDigit(char) {
+			flush()
+			continue
+		}
+		if unicode.IsUpper(char) && len(current) != 0 {
+			previous := runes[index-1]
+			nextIsLower := index+1 < len(runes) && unicode.IsLower(runes[index+1])
+			if unicode.IsLower(previous) || unicode.IsDigit(previous) || unicode.IsUpper(previous) && nextIsLower {
+				flush()
+			}
+		}
+		current = append(current, unicode.ToLower(char))
+	}
+	flush()
+	return tokens
 }
 
 func normalizedLimit(limit int) int {

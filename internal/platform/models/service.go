@@ -22,6 +22,7 @@ var (
 	ErrNotFound              = errors.New("模型配置不存在")
 	ErrInvalid               = errors.New("模型配置无效")
 	ErrPaginationUnavailable = errors.New("模型分页仓库未配置")
+	ErrCatalogUnavailable    = errors.New("模型目录暂不可用")
 )
 
 const maxCompatibilityModelIDLength = 128
@@ -420,6 +421,10 @@ func (service *Service) loadCatalog() ([]CatalogView, error) {
 		service.catalogLoaded = true
 		if service.catalog != nil {
 			service.catalogViews, service.catalogErr = service.catalog()
+			if service.catalogErr != nil {
+				service.catalogViews = nil
+				service.catalogErr = ErrCatalogUnavailable
+			}
 		}
 		service.catalogViews = cloneCatalogViews(service.catalogViews)
 	}

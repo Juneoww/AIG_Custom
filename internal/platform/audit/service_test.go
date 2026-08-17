@@ -190,11 +190,22 @@ func TestAuditPaginationUsesFilteredCountAndSanitizesStoredMetadata(t *testing.T
 func TestAuditPaginationSanitizesBrowserMetadataAtArbitraryArrayDepth(t *testing.T) {
 	repository := NewMemoryRepository()
 	metadata := map[string]any{
-		"safe":             "kept",
-		"withdrawal_count": "withdrawal-kept",
-		"draw_calls":       "draw-kept",
-		"error_count":      "error-count-kept",
-		"contention_count": "contention-kept",
+		"safe":               "kept",
+		"withdrawal_count":   "withdrawal-kept",
+		"draw_calls":         "draw-kept",
+		"error_count":        "error-count-kept",
+		"contention_count":   "contention-kept",
+		"dispatch_error":     "dispatch-error-sentinel",
+		"raw_output":         "raw-output-sentinel",
+		"artifact_path":      "artifact-path-sentinel",
+		"request_headers":    "request-headers-sentinel",
+		"dispatchError":      "camel-error-sentinel",
+		"rawOutput":          "camel-raw-sentinel",
+		"artifactPath":       "camel-path-sentinel",
+		"requestHeaders":     "camel-headers-sentinel",
+		"api_key":            "api-key-sentinel",
+		"private-key":        "private-key-sentinel",
+		"prefix_error_count": "disguised-error-count-sentinel",
 		"nested": []any{[]any{map[string]any{
 			"raw_result":  "raw-sentinel",
 			"config_path": "path-sentinel",
@@ -226,6 +237,9 @@ func TestAuditPaginationSanitizesBrowserMetadataAtArbitraryArrayDepth(t *testing
 	for _, sentinel := range []string{
 		"raw-sentinel", "path-sentinel", "error-sentinel", "token-sentinel", "password-sentinel",
 		"credential-sentinel", "header-sentinel", "content-sentinel",
+		"dispatch-error-sentinel", "raw-output-sentinel", "artifact-path-sentinel", "request-headers-sentinel",
+		"camel-error-sentinel", "camel-raw-sentinel", "camel-path-sentinel", "camel-headers-sentinel",
+		"api-key-sentinel", "private-key-sentinel", "disguised-error-count-sentinel",
 	} {
 		assert.NotContains(t, string(wire), sentinel)
 	}
