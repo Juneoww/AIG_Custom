@@ -250,6 +250,26 @@ func TestAuditPaginationSanitizesBrowserMetadataAtArbitraryArrayDepth(t *testing
 	}
 }
 
+func TestAuditBrowserSensitiveKeyTokensCoverPluralAndCompactForms(t *testing.T) {
+	for _, key := range []string{
+		"private_keys", "privateKeys", "PRIVATE_KEYS", "privatekeys",
+		"api_keys", "apiKeys", "API_KEYS", "apikeys",
+		"cookies", "tokens", "secrets", "passwords", "credentials", "headers", "paths", "errors", "contents",
+		"request_header", "request_headers", "requestHeader", "requestHeaders", "requestheader", "requestheaders",
+		"authorization_header", "authorization_headers", "authorizationHeader", "authorizationHeaders",
+		"authorizationheader", "authorizationheaders",
+	} {
+		t.Run(key, func(t *testing.T) {
+			assert.True(t, sensitiveBrowserKey(key))
+		})
+	}
+	for _, key := range []string{"withdrawal_count", "draw_calls", "error_count", "contention_count"} {
+		t.Run("safe_"+key, func(t *testing.T) {
+			assert.False(t, sensitiveBrowserKey(key))
+		})
+	}
+}
+
 func TestAuthenticationAttemptsHaveStableAuditBoundary(t *testing.T) {
 	service := NewService(NewMemoryRepository())
 	ctx := context.Background()

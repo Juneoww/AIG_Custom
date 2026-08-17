@@ -455,18 +455,19 @@ func sensitiveBrowserKey(key string) bool {
 	for _, token := range tokens {
 		switch token {
 		case "raw", "rawresult", "rawdata", "rawpayload", "rawresponse",
-			"error", "internalerror", "errormessage", "errorstack",
-			"path", "configpath", "filepath", "stack", "stacktrace",
-			"token", "apitoken", "accesstoken", "refreshtoken", "secret", "clientsecret",
-			"password", "passwordhash", "credential", "credentials",
-			"header", "headers", "authorization", "authorizationheader", "cookie",
-			"content", "requestcontent", "responsecontent", "apikey", "privatekey":
+			"error", "errors", "internalerror", "errormessage", "errorstack",
+			"path", "paths", "configpath", "filepath", "stack", "stacktrace",
+			"token", "tokens", "apitoken", "accesstoken", "refreshtoken", "secret", "secrets", "clientsecret",
+			"password", "passwords", "passwordhash", "credential", "credentials",
+			"header", "headers", "authorization", "authorizationheader", "authorizationheaders", "cookie", "cookies",
+			"content", "contents", "requestcontent", "responsecontent",
+			"apikey", "apikeys", "privatekey", "privatekeys", "requestheader", "requestheaders":
 			return true
 		case "api":
 			hasAPI = true
 		case "private":
 			hasPrivate = true
-		case "key":
+		case "key", "keys":
 			hasKey = true
 		}
 	}
