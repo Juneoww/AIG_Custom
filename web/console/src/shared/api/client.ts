@@ -10,7 +10,12 @@ import { ApiError, NetworkError, apiErrorFromStatus } from './errors'
 const CSRF_COOKIE_NAME = 'aig_csrf'
 const CSRF_HEADER_NAME = 'X-CSRF-Token'
 const SAFE_METHODS = new Set(['GET', 'HEAD', 'OPTIONS'])
+const MAX_JSON_BYTES = 2 * 1024 * 1024
 const unauthorizedListeners = new Set<() => void>()
+
+export interface ApiRequestPolicy {
+  unauthorized?: 'notify' | 'suppress'
+}
 
 function readCookie(name: string): string | undefined {
   const prefix = `${name}=`
@@ -28,21 +33,60 @@ function readCookie(name: string): string | undefined {
   }
 }
 
-function isAllowlistedErrorEnvelope(value: unknown): value is { error: string } {
-  if (!value || typeof value !== 'object' || Array.isArray(value)) return false
-  const keys = Object.keys(value)
-  return keys.length === 1 && keys[0] === 'error' && typeof (value as { error?: unknown }).error === 'string'
+function isJSONContentType(value: string | null): boolean {
+  const mime = value?.split(';', 1)[0]?.trim().toLowerCase() ?? ''
+  return mime === 'application/json' || /^application\/[a-z0-9!#$&^_.+-]+\+json$/.test(mime)
 }
 
-async function consumeSafeErrorEnvelope(response: Response): Promise<void> {
-  if (!response.headers.get('Content-Type')?.toLowerCase().includes('application/json')) return
+function declaredResponseTooLarge(value: string | null): boolean {
+  const length = value?.trim() ?? ''
+  if (!/^\d+$/.test(length)) return false
   try {
-    const value: unknown = await response.json()
-    if (isAllowlistedErrorEnvelope(value)) {
-      return
-    }
+    return BigInt(length) > BigInt(MAX_JSON_BYTES)
   } catch {
-    return
+    return false
+  }
+}
+
+async function readBoundedJSON(response: Response): Promise<unknown> {
+  if (!isJSONContentType(response.headers.get('Content-Type'))) {
+    throw new ApiError('unexpected-response', response.status)
+  }
+  if (declaredResponseTooLarge(response.headers.get('Content-Length')) || !response.body) {
+    throw new ApiError('unexpected-response', response.status)
+  }
+
+  const reader = response.body.getReader()
+  const chunks: Uint8Array[] = []
+  let total = 0
+
+  for (;;) {
+    const { done, value } = await reader.read()
+    if (done) break
+    total += value.byteLength
+    if (total > MAX_JSON_BYTES) {
+      try {
+        await reader.cancel()
+      } catch {
+        // 取消失败不改变固定的响应错误，也不暴露底层流信息。
+      }
+      throw new ApiError('unexpected-response', response.status)
+    }
+    chunks.push(value)
+  }
+
+  const bytes = new Uint8Array(total)
+  let offset = 0
+  for (const chunk of chunks) {
+    bytes.set(chunk, offset)
+    offset += chunk.byteLength
+  }
+
+  try {
+    const text = new TextDecoder('utf-8', { fatal: true }).decode(bytes)
+    return JSON.parse(text) as unknown
+  } catch {
+    throw new ApiError('unexpected-response', response.status)
   }
 }
 
@@ -57,7 +101,11 @@ export function subscribeToUnauthorized(listener: () => void): () => void {
   }
 }
 
-export async function apiRequest<T>(path: string, init: RequestInit = {}): Promise<T> {
+export async function apiRequest<T>(
+  path: string,
+  init: RequestInit = {},
+  policy: ApiRequestPolicy = {},
+): Promise<T> {
   let requestURL: URL
   try {
     requestURL = new URL(path, window.location.origin)
@@ -71,14 +119,14 @@ export async function apiRequest<T>(path: string, init: RequestInit = {}): Promi
   const method = (init.method ?? 'GET').toUpperCase()
   const headers = new Headers(init.headers)
 
-  if (!SAFE_METHODS.has(method) && init.body !== undefined && init.body !== null) {
+  if (!SAFE_METHODS.has(method)) {
     const csrfToken = readCookie(CSRF_COOKIE_NAME)
     if (csrfToken) headers.set(CSRF_HEADER_NAME, csrfToken)
   }
 
   let response: Response
   try {
-    response = await fetch(path, {
+    response = await fetch(requestURL.href, {
       ...init,
       method,
       headers,
@@ -89,16 +137,11 @@ export async function apiRequest<T>(path: string, init: RequestInit = {}): Promi
   }
 
   if (!response.ok) {
-    await consumeSafeErrorEnvelope(response)
-    if (response.status === 401) notifyUnauthorized()
+    if (response.status === 401 && policy.unauthorized !== 'suppress') notifyUnauthorized()
     throw apiErrorFromStatus(response.status)
   }
 
   if (response.status === 204) return undefined as T
 
-  try {
-    return (await response.json()) as T
-  } catch {
-    throw new ApiError('unexpected-response', response.status)
-  }
+  return (await readBoundedJSON(response)) as T
 }

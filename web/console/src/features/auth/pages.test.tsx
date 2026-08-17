@@ -29,6 +29,14 @@ function jsonResponse(body: unknown, status = 200) {
   })
 }
 
+function deferred<T>() {
+  let resolve!: (value: T | PromiseLike<T>) => void
+  const promise = new Promise<T>((resolvePromise) => {
+    resolve = resolvePromise
+  })
+  return { promise, resolve }
+}
+
 beforeEach(() => {
   vi.stubGlobal(
     'ResizeObserver',
@@ -57,7 +65,7 @@ describe('LoginPage', () => {
     expect(screen.queryByText(/^A\.I\.G$/)).not.toBeInTheDocument()
   })
 
-  it('认证失败展示固定中文错误且保留当前输入', async () => {
+  it('认证失败展示固定中文错误、保留用户名并清除密码', async () => {
     const fetchMock = vi
       .fn()
       .mockImplementationOnce(() => {
@@ -74,7 +82,27 @@ describe('LoginPage', () => {
 
     expect(await screen.findByText('用户名或密码不正确。')).toBeInTheDocument()
     expect(screen.getByLabelText(/^用户名/)).toHaveValue('operator')
-    expect(screen.getByLabelText(/^密码/)).toHaveValue('incorrect-password')
+    expect(screen.getByLabelText(/^密码/)).toHaveValue('')
+  })
+
+  it('同步双击提交时只启动一次登录流程', async () => {
+    const pendingCSRF = deferred<Response>()
+    const fetchMock = vi
+      .fn()
+      .mockReturnValueOnce(pendingCSRF.promise)
+      .mockResolvedValueOnce(new Response(null, { status: 401 }))
+    vi.stubGlobal('fetch', fetchMock)
+    renderPage(<LoginPage />)
+    fireEvent.change(screen.getByLabelText(/^用户名/), { target: { value: 'operator' } })
+    fireEvent.change(screen.getByLabelText(/^密码/), { target: { value: 'temporary-password' } })
+    const form = screen.getByRole('button', { name: '登录' }).closest('form')
+
+    fireEvent.submit(form!)
+    fireEvent.submit(form!)
+
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+    pendingCSRF.resolve(jsonResponse({ csrf_token: 'bootstrap-token' }))
+    expect(await screen.findByText('用户名或密码不正确。')).toBeInTheDocument()
   })
 })
 
@@ -94,6 +122,28 @@ describe('ChangePasswordPage', () => {
 
     expect(await screen.findByText('两次输入的新密码不一致。')).toBeInTheDocument()
     expect(fetchMock).not.toHaveBeenCalled()
+    expect(screen.getByLabelText(/^当前密码/)).toHaveValue('')
+    expect(screen.getByLabelText(/^新密码/)).toHaveValue('')
+    expect(screen.getByLabelText(/^确认新密码/)).toHaveValue('')
+  })
+
+  it('当前密码错误时保留 must-change 页面错误并清除全部密码字段', async () => {
+    document.cookie = 'aig_csrf=current-token; Path=/'
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(null, { status: 401 })))
+    renderPage(<ChangePasswordPage />, {
+      status: 'must-change',
+      subject: { id: 'user-2', username: 'new-operator', role: 'user', must_change_password: true },
+    })
+
+    fireEvent.change(screen.getByLabelText(/^当前密码/), { target: { value: 'invalid-password' } })
+    fireEvent.change(screen.getByLabelText(/^新密码/), { target: { value: 'replacement-password' } })
+    fireEvent.change(screen.getByLabelText(/^确认新密码/), { target: { value: 'replacement-password' } })
+    fireEvent.click(screen.getByRole('button', { name: '更新密码' }))
+
+    expect(await screen.findByText('当前密码不正确或登录已失效，请重新登录。')).toBeInTheDocument()
+    expect(screen.getByLabelText(/^当前密码/)).toHaveValue('')
+    expect(screen.getByLabelText(/^新密码/)).toHaveValue('')
+    expect(screen.getByLabelText(/^确认新密码/)).toHaveValue('')
   })
 })
 
@@ -138,5 +188,46 @@ describe('ResetPasswordPage', () => {
     })
     expect(localSet).not.toHaveBeenCalled()
     localSet.mockRestore()
+  })
+
+  it('403 失败时保留手工凭据上下文但清除临时密码', async () => {
+    const fetchMock = vi
+      .fn()
+      .mockImplementationOnce(() => {
+        document.cookie = 'aig_csrf=reset-csrf; Path=/'
+        return Promise.resolve(jsonResponse({ csrf_token: 'reset-csrf' }))
+      })
+      .mockResolvedValueOnce(new Response(null, { status: 403 }))
+    vi.stubGlobal('fetch', fetchMock)
+    renderPage(<ResetPasswordPage />)
+
+    fireEvent.change(screen.getByLabelText(/^重置凭据/), { target: { value: 'manually-pasted-token' } })
+    fireEvent.change(screen.getByLabelText(/^临时密码/), { target: { value: 'temporary-password' } })
+    fireEvent.change(screen.getByLabelText(/^确认临时密码/), { target: { value: 'temporary-password' } })
+    fireEvent.click(screen.getByRole('button', { name: '重置密码' }))
+
+    expect(await screen.findByText('安全校验失败，请刷新页面后重试。')).toBeInTheDocument()
+    expect(screen.getByLabelText(/^重置凭据/)).toHaveValue('manually-pasted-token')
+    expect(screen.getByLabelText(/^临时密码/)).toHaveValue('')
+    expect(screen.getByLabelText(/^确认临时密码/)).toHaveValue('')
+  })
+
+  it('无效重置凭据失败时清除凭据和临时密码', async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(jsonResponse({ csrf_token: 'reset-csrf' }))
+      .mockResolvedValueOnce(new Response(null, { status: 401 }))
+    vi.stubGlobal('fetch', fetchMock)
+    renderPage(<ResetPasswordPage />)
+
+    fireEvent.change(screen.getByLabelText(/^重置凭据/), { target: { value: 'invalid-token' } })
+    fireEvent.change(screen.getByLabelText(/^临时密码/), { target: { value: 'temporary-password' } })
+    fireEvent.change(screen.getByLabelText(/^确认临时密码/), { target: { value: 'temporary-password' } })
+    fireEvent.click(screen.getByRole('button', { name: '重置密码' }))
+
+    expect(await screen.findByText('重置凭据无效或已失效。')).toBeInTheDocument()
+    expect(screen.getByLabelText(/^重置凭据/)).toHaveValue('')
+    expect(screen.getByLabelText(/^临时密码/)).toHaveValue('')
+    expect(screen.getByLabelText(/^确认临时密码/)).toHaveValue('')
   })
 })

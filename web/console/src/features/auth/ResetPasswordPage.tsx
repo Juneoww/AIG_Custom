@@ -5,7 +5,7 @@
  * 输出：重置确认请求与固定中文状态提示。
  * 依赖：React、Fluent UI、共享错误类型与身份重置函数。
  */
-import { useState, type FormEvent } from 'react'
+import { useRef, useState, type FormEvent } from 'react'
 import {
   Button,
   Field,
@@ -89,16 +89,21 @@ export function ResetPasswordPage() {
   const [errorMessage, setErrorMessage] = useState('')
   const [successMessage, setSuccessMessage] = useState('')
   const [submitting, setSubmitting] = useState(false)
+  const submittingRef = useRef(false)
 
   async function handleSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault()
+    if (submittingRef.current) return
     setErrorMessage('')
     setSuccessMessage('')
     if (temporaryPassword !== confirmation) {
+      setTemporaryPassword('')
+      setConfirmation('')
       setErrorMessage('两次输入的临时密码不一致。')
       return
     }
 
+    submittingRef.current = true
     setSubmitting(true)
     try {
       await confirmPasswordReset({ token, temporary_password: temporaryPassword })
@@ -107,8 +112,12 @@ export function ResetPasswordPage() {
       setConfirmation('')
       setSuccessMessage('密码已重置，请使用临时密码重新登录。')
     } catch (error) {
+      if (error instanceof ApiError && error.kind === 'unauthenticated') setToken('')
+      setTemporaryPassword('')
+      setConfirmation('')
       setErrorMessage(resetErrorMessage(error))
     } finally {
+      submittingRef.current = false
       setSubmitting(false)
     }
   }

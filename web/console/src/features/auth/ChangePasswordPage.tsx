@@ -5,7 +5,7 @@
  * 输出：改密请求、固定错误提示与重新登录要求。
  * 依赖：React、Fluent UI 与身份会话上下文。
  */
-import { useState, type FormEvent } from 'react'
+import { useRef, useState, type FormEvent } from 'react'
 import {
   Button,
   Field,
@@ -84,21 +84,31 @@ export function ChangePasswordPage() {
   const [confirmation, setConfirmation] = useState('')
   const [errorMessage, setErrorMessage] = useState('')
   const [submitting, setSubmitting] = useState(false)
+  const submittingRef = useRef(false)
 
   async function handleSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault()
+    if (submittingRef.current) return
     setErrorMessage('')
     if (newPassword !== confirmation) {
+      setOldPassword('')
+      setNewPassword('')
+      setConfirmation('')
       setErrorMessage('两次输入的新密码不一致。')
       return
     }
 
+    submittingRef.current = true
     setSubmitting(true)
     try {
       await changePassword(oldPassword, newPassword)
     } catch (error) {
+      setOldPassword('')
+      setNewPassword('')
+      setConfirmation('')
       setErrorMessage(changePasswordErrorMessage(error))
     } finally {
+      submittingRef.current = false
       setSubmitting(false)
     }
   }

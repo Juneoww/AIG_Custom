@@ -5,7 +5,7 @@
  * 输出：登录请求、提交状态与脱敏错误提示。
  * 依赖：React、Fluent UI 与身份会话上下文。
  */
-import { useState, type FormEvent } from 'react'
+import { useRef, useState, type FormEvent } from 'react'
 import {
   Button,
   Field,
@@ -96,16 +96,21 @@ export function LoginPage() {
   const [password, setPassword] = useState('')
   const [errorMessage, setErrorMessage] = useState('')
   const [submitting, setSubmitting] = useState(false)
+  const submittingRef = useRef(false)
 
   async function handleSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault()
+    if (submittingRef.current) return
+    submittingRef.current = true
     setErrorMessage('')
     setSubmitting(true)
     try {
       await login(username, password)
     } catch (error) {
+      setPassword('')
       setErrorMessage(loginErrorMessage(error))
     } finally {
+      submittingRef.current = false
       setSubmitting(false)
     }
   }
