@@ -36,6 +36,8 @@ const (
 	ActionKnowledgeChanged           Action = "knowledge.changed"
 )
 
+const ActionAttachmentDownloadAuthorized Action = "attachment.download_authorized"
+
 type Outcome string
 
 const (

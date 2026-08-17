@@ -984,6 +984,7 @@ var (
 	ErrAttachmentTooLarge      = errors.New("附件超过大小限制")
 	ErrAttachmentSizeMismatch  = errors.New("附件大小不匹配")
 	ErrAttachmentNotReady      = errors.New("附件尚未就绪")
+	ErrAttachmentStorage       = errors.New("附件存储暂时不可用")
 	errAttachmentDownloadAudit = errors.New("无法持久化附件下载授权审计")
 )
 
@@ -1328,11 +1329,16 @@ func (service *AttachmentService) Open(ctx context.Context, subject identity.Sub
 	if err != nil {
 		return nil, "", 0, err
 	}
+	var preOpenInfo os.FileInfo
 	if subject.Role == identity.RoleAdmin && subject.UserID != attachment.OwnerUserID {
 		info, statErr := os.Stat(path)
-		if statErr != nil || !info.Mode().IsRegular() {
-			return nil, "", 0, ErrNotFound
+		if statErr != nil {
+			return nil, "", 0, classifyAttachmentStorageError(statErr)
 		}
+		if !info.Mode().IsRegular() {
+			return nil, "", 0, ErrAttachmentStorage
+		}
+		preOpenInfo = info
 		metadata := map[string]any{
 			"attachment_id":     attachment.ID,
 			"owner_user_id":     attachment.OwnerUserID,
@@ -1342,7 +1348,7 @@ func (service *AttachmentService) Open(ctx context.Context, subject identity.Sub
 		// not downstream file-stream delivery. The authorization must precede
 		// Storage Open; later I/O failures return no bytes and do not change it.
 		if auditErr := service.audits.Record(ctx, subject, audit.EventInput{
-			Action: audit.ActionAttachmentDownloaded, ResourceType: "attachment", ResourceID: attachment.ID,
+			Action: audit.ActionAttachmentDownloadAuthorized, ResourceType: "attachment", ResourceID: attachment.ID,
 			Outcome: audit.OutcomeSuccess, Metadata: metadata,
 		}); auditErr != nil {
 			return nil, "", 0, errAttachmentDownloadAudit
@@ -1350,9 +1356,27 @@ func (service *AttachmentService) Open(ctx context.Context, subject identity.Sub
 	}
 	file, err := service.openFile(path)
 	if err != nil {
-		return nil, "", 0, ErrNotFound
+		return nil, "", 0, classifyAttachmentStorageError(err)
+	}
+	if preOpenInfo != nil {
+		postOpenInfo, statErr := file.Stat()
+		if statErr != nil {
+			_ = file.Close()
+			return nil, "", 0, classifyAttachmentStorageError(statErr)
+		}
+		if !postOpenInfo.Mode().IsRegular() || !os.SameFile(preOpenInfo, postOpenInfo) {
+			_ = file.Close()
+			return nil, "", 0, ErrAttachmentStorage
+		}
 	}
 	return file, attachment.OriginalName, attachment.Size, nil
+}
+
+func classifyAttachmentStorageError(err error) error {
+	if errors.Is(err, os.ErrNotExist) {
+		return ErrNotFound
+	}
+	return ErrAttachmentStorage
 }
 
 func (service *AttachmentService) ResolveReady(ctx context.Context, ownerUserID string, ids []string) ([]string, error) {

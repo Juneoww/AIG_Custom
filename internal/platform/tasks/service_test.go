@@ -719,7 +719,7 @@ func (recorder *failingAttachmentAuditRecorder) Record(context.Context, identity
 
 func TestAttachmentDownloadOwnerAuditorAndAdminAuthorization(t *testing.T) {
 	ctx := context.Background()
-	downloadAction := audit.ActionAttachmentDownloaded
+	downloadAction := audit.ActionAttachmentDownloadAuthorized
 	repository := NewMemoryRepository()
 	auditRepository := audit.NewMemoryRepository()
 	auditService := audit.NewService(auditRepository)
@@ -796,7 +796,7 @@ func TestAttachmentDownloadOwnerAuditorAndAdminAuthorization(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, events, 1)
 	event := events[0]
-	assert.Equal(t, audit.ActionAttachmentDownloaded, event.Action)
+	assert.Equal(t, downloadAction, event.Action)
 	assert.Equal(t, audit.OutcomeSuccess, event.Outcome)
 	assert.Equal(t, admin.UserID, event.ActorUserID)
 	var metadata map[string]any
@@ -809,11 +809,14 @@ func TestAttachmentDownloadOwnerAuditorAndAdminAuthorization(t *testing.T) {
 	for _, secret := range []string{"private-name.txt", storedOwnerAttachment.StorageName, "private-content", attachments.config.UploadDir, "token", "phase"} {
 		assert.NotContains(t, serialized, secret)
 	}
+	legacyEvents, err := auditRepository.List(ctx, audit.Filter{Action: audit.ActionAttachmentDownloaded, ResourceID: ownerAttachment.ID})
+	require.NoError(t, err)
+	assert.Empty(t, legacyEvents, "authorization must not claim that file delivery completed")
 }
 
 func TestAttachmentDownloadAdminAuditFailureFailsClosed(t *testing.T) {
 	ctx := context.Background()
-	downloadAction := audit.ActionAttachmentDownloaded
+	downloadAction := audit.ActionAttachmentDownloadAuthorized
 	repository := NewMemoryRepository()
 	auditRepository := audit.NewMemoryRepository()
 	auditService := audit.NewService(auditRepository)
@@ -867,12 +870,73 @@ func TestAttachmentDownloadAdminMissingStorageDoesNotRecordFalseSuccess(t *testi
 	file, _, _, err := attachments.Open(ctx, admin, attachment.ID)
 	assert.Nil(t, file)
 	require.ErrorIs(t, err, ErrNotFound)
-	events, err := auditRepository.List(ctx, audit.Filter{Action: audit.ActionAttachmentDownloaded, ResourceID: attachment.ID})
+	events, err := auditRepository.List(ctx, audit.Filter{Action: audit.ActionAttachmentDownloadAuthorized, ResourceID: attachment.ID})
 	require.NoError(t, err)
 	assert.Empty(t, events, "a missing storage object must not produce a successful download audit")
 }
 
 func TestAttachmentDownloadAdminOpenFailureRecordsAuthorizationNotDelivery(t *testing.T) {
+	tests := []struct {
+		name       string
+		open       func(string) (*os.File, error)
+		notFound   bool
+		storageErr bool
+	}{
+		{name: "not found", open: func(string) (*os.File, error) { return nil, os.ErrNotExist }, notFound: true},
+		{name: "permission", open: func(string) (*os.File, error) { return nil, os.ErrPermission }, storageErr: true},
+		{name: "file stat", open: func(path string) (*os.File, error) {
+			file, err := os.Open(path)
+			if err != nil {
+				return nil, err
+			}
+			if err := file.Close(); err != nil {
+				return nil, err
+			}
+			return file, nil
+		}, storageErr: true},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			ctx := context.Background()
+			repository := NewMemoryRepository()
+			auditRepository := audit.NewMemoryRepository()
+			auditService := audit.NewService(auditRepository)
+			attachments, err := NewAttachmentService(repository, AttachmentConfig{
+				UploadDir: t.TempDir(), MaxFileBytes: 32, MaxChunkBytes: 8,
+			}, auditService)
+			require.NoError(t, err)
+			owner := identity.Subject{UserID: "user-owner", Username: "owner", Role: identity.RoleUser}
+			admin := identity.Subject{UserID: "user-admin", Username: "admin", Role: identity.RoleAdmin}
+			view, err := attachments.Upload(ctx, owner, "private-name.txt", strings.NewReader("private-content"))
+			require.NoError(t, err)
+			attachments.openFile = test.open
+
+			file, _, _, err := attachments.Open(ctx, admin, view.ID)
+			if file != nil {
+				_ = file.Close()
+			}
+			assert.Nil(t, file)
+			if test.notFound {
+				require.ErrorIs(t, err, ErrNotFound)
+			}
+			if test.storageErr {
+				require.ErrorIs(t, err, ErrAttachmentStorage)
+				assert.EqualError(t, err, "附件存储暂时不可用")
+				assert.NotContains(t, err.Error(), attachments.config.UploadDir)
+			}
+			events, err := auditRepository.List(ctx, audit.Filter{Action: audit.ActionAttachmentDownloadAuthorized, ResourceID: view.ID})
+			require.NoError(t, err)
+			require.Len(t, events, 1)
+			assert.Equal(t, audit.OutcomeSuccess, events[0].Outcome)
+			var metadata map[string]any
+			require.NoError(t, json.Unmarshal(events[0].Metadata, &metadata))
+			assert.ElementsMatch(t, []string{"attachment_id", "owner_user_id", "governance_action"}, mapKeys(metadata))
+			assert.Equal(t, "cross_owner_download_authorized", metadata["governance_action"])
+		})
+	}
+}
+
+func TestAttachmentDownloadAdminRejectsReplacedStorageObject(t *testing.T) {
 	ctx := context.Background()
 	repository := NewMemoryRepository()
 	auditRepository := audit.NewMemoryRepository()
@@ -885,22 +949,23 @@ func TestAttachmentDownloadAdminOpenFailureRecordsAuthorizationNotDelivery(t *te
 	admin := identity.Subject{UserID: "user-admin", Username: "admin", Role: identity.RoleAdmin}
 	view, err := attachments.Upload(ctx, owner, "private-name.txt", strings.NewReader("private-content"))
 	require.NoError(t, err)
-	attachments.openFile = func(string) (*os.File, error) {
-		return nil, errors.New("injected storage open failure")
-	}
+	replacementPath := filepath.Join(t.TempDir(), "replacement.txt")
+	require.NoError(t, os.WriteFile(replacementPath, []byte("wrong-content"), 0o600))
+	replacement, err := os.Open(replacementPath)
+	require.NoError(t, err)
+	attachments.openFile = func(string) (*os.File, error) { return replacement, nil }
 
 	file, _, _, err := attachments.Open(ctx, admin, view.ID)
 	assert.Nil(t, file)
-	require.ErrorIs(t, err, ErrNotFound)
-	events, err := auditRepository.List(ctx, audit.Filter{Action: audit.ActionAttachmentDownloaded, ResourceID: view.ID})
+	require.ErrorIs(t, err, ErrAttachmentStorage)
+	assert.EqualError(t, err, "附件存储暂时不可用")
+	buffer := make([]byte, 1)
+	_, readErr := replacement.Read(buffer)
+	assert.Error(t, readErr, "rejected replacement handle must be closed")
+	events, err := auditRepository.List(ctx, audit.Filter{Action: audit.ActionAttachmentDownloadAuthorized, ResourceID: view.ID})
 	require.NoError(t, err)
 	require.Len(t, events, 1)
 	assert.Equal(t, audit.OutcomeSuccess, events[0].Outcome)
-	var metadata map[string]any
-	require.NoError(t, json.Unmarshal(events[0].Metadata, &metadata))
-	assert.ElementsMatch(t, []string{"attachment_id", "owner_user_id", "governance_action"}, mapKeys(metadata))
-	assert.Equal(t, "cross_owner_download_authorized", metadata["governance_action"])
-	assert.NotEqual(t, "download_delivered", metadata["governance_action"])
 }
 
 func TestInternalArtifactUploadDerivesOwnerFromTrustedPlatformTask(t *testing.T) {

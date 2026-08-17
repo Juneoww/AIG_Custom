@@ -178,7 +178,7 @@ func TestAttachmentRouteOwnerAuditorAndAdminAuditAuthorization(t *testing.T) {
 	assert.Equal(t, http.StatusNotFound, download("admin", "missing-attachment").Code)
 
 	events, err := auditRepository.List(ctx, platformaudit.Filter{
-		Action: platformaudit.ActionAttachmentDownloaded, ResourceID: attachment.ID,
+		Action: platformaudit.ActionAttachmentDownloadAuthorized, ResourceID: attachment.ID,
 	})
 	require.NoError(t, err)
 	require.Len(t, events, 1)

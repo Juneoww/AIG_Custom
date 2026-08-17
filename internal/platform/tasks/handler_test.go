@@ -9,6 +9,7 @@ import (
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"testing"
 
 	"github.com/Juneoww/AIG_Custom/internal/platform/audit"
@@ -175,7 +176,7 @@ func TestAttachmentHandlerReturnsOnlyOpaqueMetadataAndEnforcesOwnerDownload(t *t
 	router.ServeHTTP(response, request)
 	require.Equal(t, http.StatusOK, response.Code)
 	assert.Equal(t, "private", response.Body.String())
-	events, err := auditRepository.List(ctx, audit.Filter{Action: audit.ActionAttachmentDownloaded, ResourceID: attachment.ID})
+	events, err := auditRepository.List(ctx, audit.Filter{Action: audit.ActionAttachmentDownloadAuthorized, ResourceID: attachment.ID})
 	require.NoError(t, err)
 	require.Len(t, events, 1)
 	assert.Equal(t, audit.OutcomeSuccess, events[0].Outcome)
@@ -187,6 +188,16 @@ func TestAttachmentHandlerReturnsOnlyOpaqueMetadataAndEnforcesOwnerDownload(t *t
 	router.ServeHTTP(response, request)
 	assert.Equal(t, http.StatusInternalServerError, response.Code)
 	assert.Empty(t, response.Body.String())
+
+	auditRepository.failErr = nil
+	attachmentService.openFile = func(string) (*os.File, error) { return nil, os.ErrPermission }
+	request = httptest.NewRequest(http.MethodGet, "/tasks/attachments/"+attachment.ID+"/download", nil)
+	request.AddCookie(&http.Cookie{Name: "aig_session", Value: admin.Token})
+	response = httptest.NewRecorder()
+	router.ServeHTTP(response, request)
+	assert.Equal(t, http.StatusInternalServerError, response.Code)
+	assert.Empty(t, response.Body.String())
+	assert.NotContains(t, response.Body.String(), attachmentService.config.UploadDir)
 }
 
 func newTaskHandlerFixture(t *testing.T) (http.Handler, map[string]string, *recordingEngine) {
