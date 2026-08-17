@@ -159,7 +159,7 @@ const useStyles = makeStyles({
   },
   statusPanel: {
     maxWidth: '600px',
-    marginTop: '40px',
+    margin: '40px 0 0',
     paddingTop: tokens.spacingVerticalL,
     ...shorthands.borderTop('1px', 'solid', tokens.colorNeutralStroke1),
     display: 'grid',
@@ -177,6 +177,9 @@ const useStyles = makeStyles({
   },
   statusTerm: {
     color: tokens.colorNeutralForeground3,
+  },
+  statusValue: {
+    margin: 0,
   },
 })
 
@@ -236,20 +239,28 @@ export function App() {
                 当前已建立可复现的前端开发与测试环境。业务页面将在后续阶段连接平台真实接口。
               </Text>
 
-              <div className={styles.statusPanel} aria-label="建设状态">
+              <dl className={styles.statusPanel} aria-label="建设状态">
                 <div className={styles.statusItem}>
-                  <Text className={styles.statusTerm} size={200}>
-                    当前阶段
-                  </Text>
-                  <Text weight="semibold">工程骨架</Text>
+                  <dt>
+                    <Text className={styles.statusTerm} size={200}>
+                      当前阶段
+                    </Text>
+                  </dt>
+                  <dd className={styles.statusValue}>
+                    <Text weight="semibold">工程骨架</Text>
+                  </dd>
                 </div>
                 <div className={styles.statusItem}>
-                  <Text className={styles.statusTerm} size={200}>
-                    数据来源
-                  </Text>
-                  <Text weight="semibold">尚未接入</Text>
+                  <dt>
+                    <Text className={styles.statusTerm} size={200}>
+                      数据来源
+                    </Text>
+                  </dt>
+                  <dd className={styles.statusValue}>
+                    <Text weight="semibold">尚未接入</Text>
+                  </dd>
                 </div>
-              </div>
+              </dl>
             </section>
           </main>
         </div>

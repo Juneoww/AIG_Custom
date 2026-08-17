@@ -17,4 +17,17 @@ describe('App', () => {
     expect(screen.getByText('AI 安全治理平台')).toBeInTheDocument()
     expect(screen.queryByText(/^A\.I\.G$/)).not.toBeInTheDocument()
   })
+
+  it('starts each product shell render with a single brand name', () => {
+    render(<App />)
+
+    expect(screen.getByText('AI 安全治理平台')).toBeInTheDocument()
+  })
+
+  it('exposes build status terms and definitions', () => {
+    render(<App />)
+
+    expect(screen.getAllByRole('term')).toHaveLength(2)
+    expect(screen.getAllByRole('definition')).toHaveLength(2)
+  })
 })

@@ -2,7 +2,7 @@
  * 功能：挂载企业控制台 React 根组件。
  * 实现：在严格模式下把 App 渲染到 index.html 的 root 节点。
  * 输入：浏览器 DOM 与 App 根组件。
- * 输出：可交互的控制台页面。
+ * 输出：控制台根视图。
  * 依赖：React DOM。
  */
 import { StrictMode } from 'react'
