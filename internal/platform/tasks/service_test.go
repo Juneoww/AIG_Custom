@@ -709,21 +709,11 @@ func TestAttachmentUploadIsPrivateBoundedAndResolvesOnlyForOwningTask(t *testing
 	require.ErrorIs(t, err, ErrForbidden)
 }
 
-type failingAttachmentCompletionRecorder struct {
-	*audit.Service
+type failingAttachmentAuditRecorder struct {
 	err error
 }
 
-func (recorder *failingAttachmentCompletionRecorder) PersistCompletion(context.Context, identity.Subject, audit.EventInput) (string, error) {
-	return "", recorder.err
-}
-
-type failingAttachmentBeginRecorder struct {
-	*audit.Service
-	err error
-}
-
-func (recorder *failingAttachmentBeginRecorder) Record(context.Context, identity.Subject, audit.EventInput) error {
+func (recorder *failingAttachmentAuditRecorder) Record(context.Context, identity.Subject, audit.EventInput) error {
 	return recorder.err
 }
 
@@ -789,7 +779,7 @@ func TestAttachmentDownloadOwnerAuditorAndAdminAuthorization(t *testing.T) {
 	attachments.openFile = func(path string) (*os.File, error) {
 		storageOpenCalls.Add(1)
 		visible, listErr := auditRepository.List(ctx, audit.Filter{Action: downloadAction, ResourceID: ownerAttachment.ID})
-		if listErr == nil && len(visible) == 2 && visible[1].Outcome == audit.OutcomeSuccess {
+		if listErr == nil && len(visible) == 1 && visible[0].Outcome == audit.OutcomeSuccess {
 			successDurableAtOpen.Store(true)
 		}
 		return os.Open(path)
@@ -804,21 +794,20 @@ func TestAttachmentDownloadOwnerAuditorAndAdminAuthorization(t *testing.T) {
 
 	events, err := auditRepository.List(ctx, audit.Filter{Action: downloadAction, ResourceID: ownerAttachment.ID})
 	require.NoError(t, err)
-	require.Len(t, events, 2)
-	assert.Equal(t, audit.OutcomePending, events[0].Outcome)
-	assert.Equal(t, audit.OutcomeSuccess, events[1].Outcome)
-	for _, event := range events {
-		assert.Equal(t, admin.UserID, event.ActorUserID)
-		var metadata map[string]any
-		require.NoError(t, json.Unmarshal(event.Metadata, &metadata))
-		assert.Subset(t, []string{"attachment_id", "owner_user_id", "governance_action", "phase"}, mapKeys(metadata))
-		assert.Equal(t, ownerAttachment.ID, metadata["attachment_id"])
-		assert.Equal(t, owner.UserID, metadata["owner_user_id"])
-		assert.Equal(t, "cross_owner_download_authorized", metadata["governance_action"])
-		serialized := string(event.Metadata)
-		for _, secret := range []string{"private-name.txt", storedOwnerAttachment.StorageName, "private-content", attachments.config.UploadDir, "token"} {
-			assert.NotContains(t, serialized, secret)
-		}
+	require.Len(t, events, 1)
+	event := events[0]
+	assert.Equal(t, audit.ActionAttachmentDownloaded, event.Action)
+	assert.Equal(t, audit.OutcomeSuccess, event.Outcome)
+	assert.Equal(t, admin.UserID, event.ActorUserID)
+	var metadata map[string]any
+	require.NoError(t, json.Unmarshal(event.Metadata, &metadata))
+	assert.ElementsMatch(t, []string{"attachment_id", "owner_user_id", "governance_action"}, mapKeys(metadata))
+	assert.Equal(t, ownerAttachment.ID, metadata["attachment_id"])
+	assert.Equal(t, owner.UserID, metadata["owner_user_id"])
+	assert.Equal(t, "cross_owner_download_authorized", metadata["governance_action"])
+	serialized := string(event.Metadata)
+	for _, secret := range []string{"private-name.txt", storedOwnerAttachment.StorageName, "private-content", attachments.config.UploadDir, "token", "phase"} {
+		assert.NotContains(t, serialized, secret)
 	}
 }
 
@@ -842,32 +831,20 @@ func TestAttachmentDownloadAdminAuditFailureFailsClosed(t *testing.T) {
 		storageOpenCalls.Add(1)
 		return os.Open(path)
 	}
-	injected := errors.New("injected attachment audit completion failure")
-	attachments.audits = &failingAttachmentCompletionRecorder{Service: auditService, err: injected}
+	injected := errors.New("injected attachment audit append failure")
+	attachments.audits = &failingAttachmentAuditRecorder{err: injected}
 	file, _, _, err := attachments.Open(ctx, admin, view.ID)
 	if file != nil {
 		_ = file.Close()
 	}
-	require.ErrorIs(t, err, injected)
+	assert.EqualError(t, err, "无法持久化附件下载授权审计")
+	assert.NotErrorIs(t, err, injected)
 	assert.Nil(t, file)
-	assert.Zero(t, storageOpenCalls.Load(), "audit completion failure must occur before Storage Open")
+	assert.Zero(t, storageOpenCalls.Load(), "audit append failure must occur before Storage Open")
 
 	events, err := auditRepository.List(ctx, audit.Filter{Action: downloadAction, ResourceID: view.ID})
 	require.NoError(t, err)
-	require.Len(t, events, 1)
-	assert.Equal(t, audit.OutcomePending, events[0].Outcome)
-	assert.NotEqual(t, audit.OutcomeSuccess, events[0].Outcome)
-
-	storageOpenCalls.Store(0)
-	beginInjected := errors.New("injected attachment audit begin failure")
-	attachments.audits = &failingAttachmentBeginRecorder{Service: auditService, err: beginInjected}
-	file, _, _, err = attachments.Open(ctx, admin, view.ID)
-	if file != nil {
-		_ = file.Close()
-	}
-	require.ErrorIs(t, err, beginInjected)
-	assert.Nil(t, file)
-	assert.Zero(t, storageOpenCalls.Load(), "audit begin failure must occur before Storage Open")
+	assert.Empty(t, events)
 }
 
 func TestAttachmentDownloadAdminMissingStorageDoesNotRecordFalseSuccess(t *testing.T) {
@@ -917,11 +894,11 @@ func TestAttachmentDownloadAdminOpenFailureRecordsAuthorizationNotDelivery(t *te
 	require.ErrorIs(t, err, ErrNotFound)
 	events, err := auditRepository.List(ctx, audit.Filter{Action: audit.ActionAttachmentDownloaded, ResourceID: view.ID})
 	require.NoError(t, err)
-	require.Len(t, events, 2)
-	assert.Equal(t, audit.OutcomePending, events[0].Outcome)
-	assert.Equal(t, audit.OutcomeSuccess, events[1].Outcome)
+	require.Len(t, events, 1)
+	assert.Equal(t, audit.OutcomeSuccess, events[0].Outcome)
 	var metadata map[string]any
-	require.NoError(t, json.Unmarshal(events[1].Metadata, &metadata))
+	require.NoError(t, json.Unmarshal(events[0].Metadata, &metadata))
+	assert.ElementsMatch(t, []string{"attachment_id", "owner_user_id", "governance_action"}, mapKeys(metadata))
 	assert.Equal(t, "cross_owner_download_authorized", metadata["governance_action"])
 	assert.NotEqual(t, "download_delivered", metadata["governance_action"])
 }

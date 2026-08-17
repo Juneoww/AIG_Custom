@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"mime/multipart"
 	"net/http"
@@ -16,6 +17,18 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+type toggledAttachmentAuditRepository struct {
+	*audit.MemoryRepository
+	failErr error
+}
+
+func (repository *toggledAttachmentAuditRepository) Append(ctx context.Context, event *audit.Event) error {
+	if repository.failErr != nil {
+		return repository.failErr
+	}
+	return repository.MemoryRepository.Append(ctx, event)
+}
 
 func TestProtectedTaskHandlerRejectsAnonymousAndForgedIdentityHeaders(t *testing.T) {
 	router, _, _ := newTaskHandlerFixture(t)
@@ -108,7 +121,7 @@ func TestAttachmentHandlerReturnsOnlyOpaqueMetadataAndEnforcesOwnerDownload(t *t
 	admin, err := identityService.Authenticate(ctx, "admin", "secret")
 	require.NoError(t, err)
 	repository := NewMemoryRepository()
-	auditRepository := audit.NewMemoryRepository()
+	auditRepository := &toggledAttachmentAuditRepository{MemoryRepository: audit.NewMemoryRepository()}
 	auditService := audit.NewService(auditRepository)
 	attachmentService, err := NewAttachmentService(repository, AttachmentConfig{UploadDir: t.TempDir(), MaxFileBytes: 16, MaxChunkBytes: 8}, auditService)
 	require.NoError(t, err)
@@ -164,9 +177,16 @@ func TestAttachmentHandlerReturnsOnlyOpaqueMetadataAndEnforcesOwnerDownload(t *t
 	assert.Equal(t, "private", response.Body.String())
 	events, err := auditRepository.List(ctx, audit.Filter{Action: audit.ActionAttachmentDownloaded, ResourceID: attachment.ID})
 	require.NoError(t, err)
-	require.Len(t, events, 2)
-	assert.Equal(t, audit.OutcomePending, events[0].Outcome)
-	assert.Equal(t, audit.OutcomeSuccess, events[1].Outcome)
+	require.Len(t, events, 1)
+	assert.Equal(t, audit.OutcomeSuccess, events[0].Outcome)
+
+	auditRepository.failErr = errors.New("injected attachment audit append failure")
+	request = httptest.NewRequest(http.MethodGet, "/tasks/attachments/"+attachment.ID+"/download", nil)
+	request.AddCookie(&http.Cookie{Name: "aig_session", Value: admin.Token})
+	response = httptest.NewRecorder()
+	router.ServeHTTP(response, request)
+	assert.Equal(t, http.StatusInternalServerError, response.Code)
+	assert.Empty(t, response.Body.String())
 }
 
 func newTaskHandlerFixture(t *testing.T) (http.Handler, map[string]string, *recordingEngine) {

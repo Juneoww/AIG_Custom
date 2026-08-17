@@ -981,9 +981,10 @@ func affectedTaskError(result *gorm.DB) error {
 }
 
 var (
-	ErrAttachmentTooLarge     = errors.New("附件超过大小限制")
-	ErrAttachmentSizeMismatch = errors.New("附件大小不匹配")
-	ErrAttachmentNotReady     = errors.New("附件尚未就绪")
+	ErrAttachmentTooLarge      = errors.New("附件超过大小限制")
+	ErrAttachmentSizeMismatch  = errors.New("附件大小不匹配")
+	ErrAttachmentNotReady      = errors.New("附件尚未就绪")
+	errAttachmentDownloadAudit = errors.New("无法持久化附件下载授权审计")
 )
 
 const (
@@ -1337,17 +1338,14 @@ func (service *AttachmentService) Open(ctx context.Context, subject identity.Sub
 			"owner_user_id":     attachment.OwnerUserID,
 			"governance_action": "cross_owner_download_authorized",
 		}
-		// Success records durable governance authorization, not downstream
-		// file-stream delivery. The authorization must precede Storage Open;
-		// later I/O failures return no bytes and do not change that decision.
-		mutation, auditErr := audit.BeginMutation(ctx, service.audits, subject, audit.EventInput{
-			Action: audit.ActionAttachmentDownloaded, ResourceType: "attachment", ResourceID: attachment.ID, Metadata: metadata,
-		})
-		if auditErr != nil {
-			return nil, "", 0, auditErr
-		}
-		if auditErr := mutation.Succeeded(ctx, attachment.ID, metadata); auditErr != nil {
-			return nil, "", 0, auditErr
+		// This synchronous success records durable governance authorization,
+		// not downstream file-stream delivery. The authorization must precede
+		// Storage Open; later I/O failures return no bytes and do not change it.
+		if auditErr := service.audits.Record(ctx, subject, audit.EventInput{
+			Action: audit.ActionAttachmentDownloaded, ResourceType: "attachment", ResourceID: attachment.ID,
+			Outcome: audit.OutcomeSuccess, Metadata: metadata,
+		}); auditErr != nil {
+			return nil, "", 0, errAttachmentDownloadAudit
 		}
 	}
 	file, err := service.openFile(path)

@@ -181,7 +181,6 @@ func TestAttachmentRouteOwnerAuditorAndAdminAuditAuthorization(t *testing.T) {
 		Action: platformaudit.ActionAttachmentDownloaded, ResourceID: attachment.ID,
 	})
 	require.NoError(t, err)
-	require.Len(t, events, 2)
-	assert.Equal(t, platformaudit.OutcomePending, events[0].Outcome)
-	assert.Equal(t, platformaudit.OutcomeSuccess, events[1].Outcome)
+	require.Len(t, events, 1)
+	assert.Equal(t, platformaudit.OutcomeSuccess, events[0].Outcome)
 }
