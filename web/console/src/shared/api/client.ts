@@ -209,10 +209,16 @@ export interface BinaryResponse {
   contentDisposition: string | null
 }
 
+export interface BinaryResponsePolicy {
+  expectedContentType?: string
+  maximumBytes?: number
+}
+
 export async function apiBinaryRequest(
   path: string,
-  init: Pick<RequestInit, 'signal'> = {},
+  init: Pick<RequestInit, 'signal' | 'method'> = {},
   policy: ApiRequestPolicy = {},
+  responsePolicy: BinaryResponsePolicy = {},
 ): Promise<BinaryResponse> {
   let requestURL: URL
   try {
@@ -226,9 +232,15 @@ export async function apiBinaryRequest(
 
   const authorization = policy.authorization ?? defaultAuthorizationGeneration
   const requestGeneration = authorization.current()
+  const method = (init.method ?? 'GET').toUpperCase()
+  const headers = new Headers()
+  if (!SAFE_METHODS.has(method)) {
+    const csrfToken = readCookie(CSRF_COOKIE_NAME)
+    if (csrfToken) headers.set(CSRF_HEADER_NAME, csrfToken)
+  }
   let response: Response
   try {
-    response = await fetch(requestURL.href, { signal: init.signal, method: 'GET', credentials: 'same-origin' })
+    response = await fetch(requestURL.href, { signal: init.signal, method, headers, credentials: 'same-origin' })
   } catch {
     throw new NetworkError()
   }
@@ -239,11 +251,17 @@ export async function apiBinaryRequest(
     await cancelResponseBody(response)
     throw apiErrorFromStatus(response.status)
   }
-  if (response.headers.get('Content-Type')?.split(';', 1)[0]?.trim().toLowerCase() !== 'application/octet-stream') {
+  if (policy.expectedStatus !== undefined && response.status !== policy.expectedStatus) {
     await cancelResponseBody(response)
     throw new ApiError('unexpected-response', response.status)
   }
-  if (declaredResponseTooLargeFor(response.headers.get('Content-Length'), MAX_BINARY_BYTES) || !response.body) {
+  const expectedContentType = responsePolicy.expectedContentType ?? 'application/octet-stream'
+  const maximumBytes = responsePolicy.maximumBytes ?? MAX_BINARY_BYTES
+  if (response.headers.get('Content-Type')?.split(';', 1)[0]?.trim().toLowerCase() !== expectedContentType) {
+    await cancelResponseBody(response)
+    throw new ApiError('unexpected-response', response.status)
+  }
+  if (declaredResponseTooLargeFor(response.headers.get('Content-Length'), maximumBytes) || !response.body) {
     await cancelResponseBody(response)
     throw new ApiError('unexpected-response', response.status)
   }
@@ -255,18 +273,18 @@ export async function apiBinaryRequest(
     await cancelResponseBody(response)
     throw new ApiError('unexpected-response', response.status)
   }
-  const declaredLength = boundedDeclaredLength(response.headers.get('Content-Length'), MAX_BINARY_BYTES)
-  let bytes = new Uint8Array(declaredLength ?? Math.min(64 * 1024, MAX_BINARY_BYTES))
+  const declaredLength = boundedDeclaredLength(response.headers.get('Content-Length'), maximumBytes)
+  let bytes = new Uint8Array(declaredLength ?? Math.min(64 * 1024, maximumBytes))
   let total = 0
   try {
     for (;;) {
       const { done, value } = await reader.read()
       if (done) break
-      if (value.byteLength > MAX_BINARY_BYTES - total) throw new ApiError('unexpected-response', response.status)
+      if (value.byteLength > maximumBytes - total) throw new ApiError('unexpected-response', response.status)
       const required = total + value.byteLength
       if (required > bytes.byteLength) {
         let capacity = Math.max(1, bytes.byteLength)
-        while (capacity < required) capacity = Math.min(MAX_BINARY_BYTES, capacity * 2)
+        while (capacity < required) capacity = Math.min(maximumBytes, capacity * 2)
         const grown = new Uint8Array(capacity)
         grown.set(bytes.subarray(0, total))
         bytes = grown
@@ -275,7 +293,7 @@ export async function apiBinaryRequest(
       total += value.byteLength
     }
     return {
-      blob: new Blob([bytes.subarray(0, total)], { type: 'application/octet-stream' }),
+      blob: new Blob([bytes.subarray(0, total)], { type: expectedContentType }),
       contentDisposition: response.headers.get('Content-Disposition'),
     }
   } catch {

@@ -110,9 +110,9 @@ describe('DashboardPage', () => {
     const trendRegion = screen.getByRole('region', { name: '最近 30 日趋势' })
     expect(within(trendRegion).getAllByRole('listitem')).toHaveLength(30)
     expect(screen.getByRole('region', { name: '高风险待办' })).toHaveTextContent('MCP 扫描')
-    expect(screen.getByRole('link', { name: '查看任务 task-opaque-1' })).toHaveAttribute(
+    expect(screen.getByRole('link', { name: '查看报告 report-opaque-1' })).toHaveAttribute(
       'href',
-      '/tasks/task-opaque-1',
+      '/reports/report-opaque-1',
     )
     expect(screen.getByRole('region', { name: '最近任务' })).toHaveTextContent('AI 基础设施扫描')
     expect(screen.getByRole('link', { name: '查看任务 task-opaque-2' })).toHaveAttribute(

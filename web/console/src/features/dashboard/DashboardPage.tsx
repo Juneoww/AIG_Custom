@@ -110,8 +110,8 @@ function AttentionTable({ items }: { items: readonly AttentionItem[] }) {
       id: 'action',
       header: '操作',
       render: (item) => (
-        <Link className={styles.taskLink} to={`/tasks/${encodeURIComponent(item.task_id)}`} aria-label={`查看任务 ${item.task_id}`}>
-          查看任务
+        <Link className={styles.taskLink} to={`/reports/${encodeURIComponent(item.report_id)}`} aria-label={`查看报告 ${item.report_id}`}>
+          查看报告
         </Link>
       ),
     },

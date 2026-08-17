@@ -13,6 +13,8 @@ import { LoginPage } from '../features/auth/LoginPage'
 import { ResetPasswordPage } from '../features/auth/ResetPasswordPage'
 import { useSession } from '../features/auth/session'
 import { DashboardPage } from '../features/dashboard/DashboardPage'
+import { ReportDetailPage } from '../features/reports/ReportDetailPage'
+import { ReportListPage } from '../features/reports/ReportListPage'
 import { TaskCreatePage } from '../features/tasks/TaskCreatePage'
 import { TaskDetailPage } from '../features/tasks/TaskDetailPage'
 import { TaskListPage } from '../features/tasks/TaskListPage'
@@ -156,7 +158,13 @@ export const identityRoutes: RouteObject[] = [
 ]
 
 function routeForNavigation(item: NavigationItem): RouteObject {
-  const featurePage = item.id === 'overview' ? <DashboardPage /> : item.id === 'tasks' ? <TaskListPage /> : <PendingFeaturePage item={item} />
+  const featurePage = item.id === 'overview'
+    ? <DashboardPage />
+    : item.id === 'tasks'
+      ? <TaskListPage />
+      : item.id === 'reports'
+        ? <ReportListPage />
+        : <PendingFeaturePage item={item} />
   const element = (
     <RequireRole allowedRoles={item.allowedRoles}>
       {featurePage}
@@ -187,6 +195,14 @@ export const appRoutes: RouteObject[] = [
             element: (
               <RequireRole allowedRoles={['user', 'auditor', 'admin']}>
                 <TaskDetailPage />
+              </RequireRole>
+            ),
+          },
+          {
+            path: 'reports/:reportId',
+            element: (
+              <RequireRole allowedRoles={['user', 'auditor', 'admin']}>
+                <ReportDetailPage />
               </RequireRole>
             ),
           },

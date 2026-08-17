@@ -7,7 +7,7 @@
  */
 import { fireEvent, render, screen } from '@testing-library/react'
 import { MemoryRouter, useLocation } from 'react-router-dom'
-import { describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import type { SessionState } from '../features/auth/session'
 import type { SubjectRole } from '../shared/api/types'
@@ -39,6 +39,8 @@ function renderRoute(initialState: SessionState, path: string) {
     </ThemeProvider>,
   )
 }
+
+afterEach(() => vi.unstubAllGlobals())
 
 describe('production routes', () => {
   it('allows anonymous users to open password reset outside the shell', () => {
@@ -152,6 +154,18 @@ describe('production routes', () => {
     renderRoute(subjectState('auditor'), '/tasks/new')
 
     expect(screen.getByRole('heading', { name: '无权访问' })).toBeInTheDocument()
+    expect(screen.queryByRole('heading', { name: '页面不存在' })).not.toBeInTheDocument()
+  })
+
+  it.each(['user', 'auditor', 'admin'] as const)('让%s角色读取真实报告列表与详情路由', (role) => {
+    vi.stubGlobal('fetch', vi.fn(() => new Promise<Response>(() => undefined)))
+    const list = renderRoute(subjectState(role), '/reports')
+    expect(screen.getByRole('progressbar', { name: '正在加载安全报告' })).toBeInTheDocument()
+    expect(screen.queryByText('安全报告尚未接入')).not.toBeInTheDocument()
+    list.unmount()
+
+    renderRoute(subjectState(role), '/reports/report-opaque-1')
+    expect(screen.getByRole('progressbar', { name: '正在加载安全报告' })).toBeInTheDocument()
     expect(screen.queryByRole('heading', { name: '页面不存在' })).not.toBeInTheDocument()
   })
 })
