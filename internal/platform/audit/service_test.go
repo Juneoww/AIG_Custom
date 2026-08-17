@@ -4,7 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"testing"
+	"time"
 
 	"github.com/Juneoww/AIG_Custom/internal/platform/identity"
 	"github.com/stretchr/testify/assert"
@@ -154,6 +156,35 @@ func TestAuditQueryIsReadOnlyForAdminAndAuditor(t *testing.T) {
 	require.NoError(t, err)
 	_, err = service.Query(ctx, user, Filter{})
 	assert.ErrorIs(t, err, ErrForbidden)
+}
+
+func TestAuditPaginationUsesFilteredCountAndSanitizesStoredMetadata(t *testing.T) {
+	repository := NewMemoryRepository()
+	base := time.Date(2026, 8, 17, 8, 0, 0, 0, time.UTC)
+	for index := 0; index < 13; index++ {
+		action := ActionModelUpdated
+		if index%2 != 0 {
+			action = ActionTaskChanged
+		}
+		require.NoError(t, repository.Append(context.Background(), &Event{
+			ID: fmt.Sprintf("event-%02d", index), OccurredAt: base.Add(time.Duration(index) * time.Second),
+			Action: action, Outcome: OutcomeSuccess,
+			Metadata: json.RawMessage(`{"internal_error":"database-sentinel","token":"token-sentinel","safe":"kept"}`),
+		}))
+	}
+
+	events, total, err := NewService(repository).QueryPage(
+		context.Background(), identity.Subject{Role: identity.RoleAuditor}, Filter{Action: ActionModelUpdated}, 2, 3,
+	)
+	require.NoError(t, err)
+	assert.Equal(t, int64(7), total)
+	require.Len(t, events, 3)
+	encoded, err := json.Marshal(events)
+	require.NoError(t, err)
+	assert.NotContains(t, string(encoded), "database-sentinel")
+	assert.NotContains(t, string(encoded), "token-sentinel")
+	assert.Contains(t, string(encoded), RedactedValue)
+	assert.Contains(t, string(encoded), "kept")
 }
 
 func TestAuthenticationAttemptsHaveStableAuditBoundary(t *testing.T) {

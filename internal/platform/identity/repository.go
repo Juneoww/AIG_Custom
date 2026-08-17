@@ -14,10 +14,15 @@ import (
 
 var ErrNotFound = errors.New("身份记录不存在")
 
+type UserListQuery struct {
+	Limit  int
+	Offset int
+}
+
 type Repository interface {
 	CreateUser(context.Context, *User) error
 	CreateInitialAdministrator(context.Context, *User) (bool, error)
-	ListUsers(context.Context) ([]User, error)
+	ListUsers(context.Context, UserListQuery) ([]User, int64, error)
 	UserByUsername(context.Context, string) (*User, error)
 	UserByID(context.Context, string) (*User, error)
 	UpdateUserRole(context.Context, string, Role, time.Time) error
@@ -57,9 +62,16 @@ func (r *GormRepository) CreateUser(ctx context.Context, user *User) error {
 	return txcontext.Gorm(ctx, r.db).Create(user).Error
 }
 
-func (r *GormRepository) ListUsers(ctx context.Context) ([]User, error) {
+func (r *GormRepository) ListUsers(ctx context.Context, query UserListQuery) ([]User, int64, error) {
+	db := txcontext.Gorm(ctx, r.db).Model(&User{})
+	var total int64
+	if err := db.Count(&total).Error; err != nil {
+		return nil, 0, err
+	}
 	var users []User
-	return users, txcontext.Gorm(ctx, r.db).Order("created_at ASC, id ASC").Find(&users).Error
+	err := db.Select("id", "username", "role", "active", "must_change_password", "created_at", "updated_at").
+		Order("created_at ASC, id ASC").Limit(query.Limit).Offset(query.Offset).Find(&users).Error
+	return users, total, err
 }
 
 // CreateInitialAdministrator atomically creates the first administrator.
@@ -194,12 +206,15 @@ func (r *MemoryRepository) CreateUser(_ context.Context, v *User) error {
 	r.usersByID[v.ID] = r.users[v.Username]
 	return nil
 }
-func (r *MemoryRepository) ListUsers(_ context.Context) ([]User, error) {
+func (r *MemoryRepository) ListUsers(_ context.Context, query UserListQuery) ([]User, int64, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	users := make([]User, 0, len(r.usersByID))
 	for _, user := range r.usersByID {
-		users = append(users, *cloneUser(user))
+		users = append(users, User{
+			ID: user.ID, Username: user.Username, Role: user.Role, Active: user.Active,
+			MustChangePassword: user.MustChangePassword, CreatedAt: user.CreatedAt, UpdatedAt: user.UpdatedAt,
+		})
 	}
 	sort.Slice(users, func(i, j int) bool {
 		if users[i].CreatedAt.Equal(users[j].CreatedAt) {
@@ -207,7 +222,17 @@ func (r *MemoryRepository) ListUsers(_ context.Context) ([]User, error) {
 		}
 		return users[i].CreatedAt.Before(users[j].CreatedAt)
 	})
-	return users, nil
+	total := int64(len(users))
+	if query.Offset >= len(users) {
+		return []User{}, total, nil
+	}
+	if query.Offset > 0 {
+		users = users[query.Offset:]
+	}
+	if query.Limit > 0 && len(users) > query.Limit {
+		users = users[:query.Limit]
+	}
+	return users, total, nil
 }
 func (r *MemoryRepository) CreateInitialAdministrator(_ context.Context, v *User) (bool, error) {
 	r.mu.Lock()

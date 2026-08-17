@@ -29,10 +29,18 @@ func TestProtectedReportsHandlerUsesAuthenticatedRBACAndCSRF(t *testing.T) {
 
 	aliceList := performReportRequest(router, tokens["alice"], http.MethodGet, "/api/v1/platform/reports", nil, false)
 	require.Equal(t, http.StatusOK, aliceList.Code, aliceList.Body.String())
-	var listed []ReportSummary
+	var listed struct {
+		Items    []ReportSummary `json:"items"`
+		Total    int64           `json:"total"`
+		Page     int             `json:"page"`
+		PageSize int             `json:"page_size"`
+	}
 	require.NoError(t, json.Unmarshal(aliceList.Body.Bytes(), &listed))
-	require.Len(t, listed, 1)
-	assert.Equal(t, "alice-report", listed[0].ID)
+	require.Len(t, listed.Items, 1)
+	assert.Equal(t, int64(1), listed.Total)
+	assert.Equal(t, 1, listed.Page)
+	assert.Equal(t, 20, listed.PageSize)
+	assert.Equal(t, "alice-report", listed.Items[0].ID)
 	assert.Equal(t, http.StatusNotFound, performReportRequest(router, tokens["alice"], http.MethodGet, "/api/v1/platform/reports/bob-report", nil, false).Code)
 	for _, role := range []string{"auditor", "admin"} {
 		response = performReportRequest(router, tokens[role], http.MethodGet, "/api/v1/platform/reports", nil, false)
@@ -66,17 +74,28 @@ func TestReportsWireResponsesNeverExposeStoredRawRenderOrBrandSecrets(t *testing
 	}
 }
 
-func TestReportsListCapsPaginationAndFiltersOwnerBeforePaging(t *testing.T) {
+func TestReportsListEnvelopePaginationCapsAndFiltersOwnerBeforePaging(t *testing.T) {
 	router, tokens, _ := newReportsHandlerFixture(t)
 	response := performReportRequest(router, tokens["alice"], http.MethodGet, "/api/v1/platform/reports?page=1&page_size=1000", nil, false)
 	require.Equal(t, http.StatusOK, response.Code, response.Body.String())
-	var listed []ReportSummary
+	var listed struct {
+		Items    []ReportSummary `json:"items"`
+		Total    int64           `json:"total"`
+		Page     int             `json:"page"`
+		PageSize int             `json:"page_size"`
+	}
 	require.NoError(t, json.Unmarshal(response.Body.Bytes(), &listed))
-	require.Len(t, listed, 1)
-	assert.Equal(t, "alice-report", listed[0].ID)
-	assert.Equal(t, "企业安全平台", listed[0].BrandProductName)
-	response = performReportRequest(router, tokens["alice"], http.MethodGet, "/api/v1/platform/reports?page=1001&page_size=20", nil, false)
-	assert.Equal(t, http.StatusBadRequest, response.Code)
+	require.Len(t, listed.Items, 1)
+	assert.Equal(t, int64(1), listed.Total)
+	assert.Equal(t, 1, listed.Page)
+	assert.Equal(t, 100, listed.PageSize)
+	assert.Equal(t, "alice-report", listed.Items[0].ID)
+	assert.Equal(t, "企业安全平台", listed.Items[0].BrandProductName)
+	for _, query := range []string{"?page=0", "?page=bad", "?page=1001", "?page=9223372036854775807", "?page_size=0", "?page_size=bad"} {
+		response = performReportRequest(router, tokens["alice"], http.MethodGet, "/api/v1/platform/reports"+query, nil, false)
+		assert.Equal(t, http.StatusBadRequest, response.Code, query)
+		assert.JSONEq(t, `{"error":"invalid report"}`, response.Body.String(), query)
+	}
 }
 
 func TestReportDetailNeverExposesNaturalLanguageOrStructuredCredentials(t *testing.T) {

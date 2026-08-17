@@ -358,6 +358,85 @@ func TestLegacyModelCreateFailsClosedWhenYAMLSourceCannotLoad(t *testing.T) {
 	assert.ErrorIs(t, err, platformmodels.ErrNotFound)
 }
 
+func TestGovernanceModelSafeCatalogListEnvelopePaginationPreservesYAMLCollision(t *testing.T) {
+	ctx := context.Background()
+	identityService := identity.NewService(identity.NewMemoryRepository())
+	adminUser, err := identityService.CreateUser(ctx, identity.CreateUserInput{
+		Username: "catalog-admin", Password: "catalog-password", Role: identity.RoleAdmin,
+	})
+	require.NoError(t, err)
+	login, err := identityService.Authenticate(ctx, adminUser.Username, "catalog-password")
+	require.NoError(t, err)
+	modelRepository := platformmodels.NewMemoryRepository()
+	keyring, err := platformmodels.NewKeyring("catalog-key", bytes.Repeat([]byte{0x45}, 32), nil)
+	require.NoError(t, err)
+	modelService := platformmodels.NewService(modelRepository, keyring, platformaudit.NewService(platformaudit.NewMemoryRepository()))
+	_, err = modelService.CreateWithCompatibilityID(ctx, login.Subject, "collision-id", platformmodels.CreateInput{
+		Name: "database collision", ProviderModel: "database-provider", BaseURL: "https://database.invalid/v1",
+		Token: "database-plaintext-token", Scope: platformmodels.ScopeGlobal,
+	})
+	require.NoError(t, err)
+	yamlSource := &stubYAMLModelSource{models: []*database.Model{
+		{ModelID: "collision-id", ModelName: "yaml-collision", BaseURL: "https://yaml-collision.invalid/v1", Token: "yaml-collision-token"},
+		{ModelID: "yaml-only", ModelName: "yaml-only", BaseURL: "https://yaml-only.invalid/v1", Token: "yaml-only-token"},
+	}}
+
+	gin.SetMode(gin.TestMode)
+	router := gin.New()
+	policy := identity.CookiePolicy{}
+	platformGroup := router.Group("/api/v1/platform", setupIdentityMiddleware(identityService, policy), identity.RequirePasswordChangeCompleted(), identity.RequireCSRF(policy))
+	registerGovernanceModelRoutes(platformGroup.Group("/models"), modelService)
+	legacyGroup := router.Group("/api/v1/app/models", setupIdentityMiddleware(identityService, policy), identity.RequirePasswordChangeCompleted(), identity.RequireCSRF(policy))
+	registerPlatformModelRoutes(legacyGroup, modelService, yamlSource)
+
+	response := governanceRequest(t, router, login.Token, http.MethodGet, "/api/v1/platform/models?page=1&page_size=20", nil)
+	require.Equal(t, http.StatusOK, response.Code, response.Body.String())
+	var envelope struct {
+		Items []struct {
+			ID       string `json:"id"`
+			Token    string `json:"token"`
+			Source   string `json:"source"`
+			ReadOnly bool   `json:"read_only"`
+		} `json:"items"`
+		Total    int64 `json:"total"`
+		Page     int   `json:"page"`
+		PageSize int   `json:"page_size"`
+	}
+	require.NoError(t, json.Unmarshal(response.Body.Bytes(), &envelope))
+	assert.Equal(t, int64(3), envelope.Total)
+	assert.Equal(t, 1, envelope.Page)
+	assert.Equal(t, 20, envelope.PageSize)
+	require.Len(t, envelope.Items, 3)
+	assert.Equal(t, "collision-id", envelope.Items[0].ID)
+	assert.Equal(t, "platform", envelope.Items[0].Source)
+	assert.False(t, envelope.Items[0].ReadOnly)
+	assert.Equal(t, "collision-id", envelope.Items[1].ID)
+	assert.Equal(t, "yaml", envelope.Items[1].Source)
+	assert.True(t, envelope.Items[1].ReadOnly)
+	for _, item := range envelope.Items {
+		assert.Equal(t, platformmodels.MaskedToken, item.Token)
+	}
+	for _, secret := range []string{"database-plaintext-token", "yaml-collision-token", "yaml-only-token"} {
+		assert.NotContains(t, response.Body.String(), secret)
+	}
+	response = governanceRequest(t, router, login.Token, http.MethodGet, "/api/v1/platform/models?page_size=1000", nil)
+	require.Equal(t, http.StatusOK, response.Code, response.Body.String())
+	require.NoError(t, json.Unmarshal(response.Body.Bytes(), &envelope))
+	assert.Equal(t, 100, envelope.PageSize)
+
+	for _, query := range []string{"?page=0", "?page=bad", "?page=1001", "?page=9223372036854775807", "?page_size=0", "?page_size=bad"} {
+		response = governanceRequest(t, router, login.Token, http.MethodGet, "/api/v1/platform/models"+query, nil)
+		assert.Equal(t, http.StatusBadRequest, response.Code, query)
+		assert.JSONEq(t, `{"error":"invalid model request"}`, response.Body.String(), query)
+	}
+	yamlSource.loadErr = errors.New("C:/private/models.yaml: yaml-loader-token-sentinel")
+	response = governanceRequest(t, router, login.Token, http.MethodGet, "/api/v1/platform/models", nil)
+	assert.Equal(t, http.StatusInternalServerError, response.Code)
+	assert.JSONEq(t, `{"error":"model catalog request failed"}`, response.Body.String())
+	assert.NotContains(t, response.Body.String(), "models.yaml")
+	assert.NotContains(t, response.Body.String(), "yaml-loader-token-sentinel")
+}
+
 type legacyModelMutationRows struct {
 	PlatformModels int64
 	LegacyModels   int64

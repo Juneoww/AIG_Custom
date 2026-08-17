@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/Juneoww/AIG_Custom/internal/platform/brand"
+	"github.com/Juneoww/AIG_Custom/internal/platform/identity"
 	"github.com/Juneoww/AIG_Custom/internal/platform/txcontext"
 	"github.com/google/uuid"
 	"gorm.io/gorm"
@@ -30,6 +31,10 @@ type Repository interface {
 	GetByTaskID(context.Context, string) (*Snapshot, error)
 	List(context.Context, ListQuery) ([]Snapshot, error)
 	Trend(context.Context, TrendQuery) ([]TrendPoint, error)
+}
+
+type pageRepository interface {
+	ListPage(context.Context, ListQuery) ([]Snapshot, int64, error)
 }
 
 type MemoryRepository struct {
@@ -140,6 +145,39 @@ func (repository *GormRepository) List(ctx context.Context, query ListQuery) ([]
 	return snapshots, nil
 }
 
+func (repository *GormRepository) ListPage(ctx context.Context, query ListQuery) ([]Snapshot, int64, error) {
+	filtered := txcontext.Gorm(ctx, repository.db).Table("report_snapshots")
+	if query.OwnerUserID != "" {
+		filtered = filtered.Where("owner_user_id = ?", query.OwnerUserID)
+	}
+	var total int64
+	if err := filtered.Count(&total).Error; err != nil {
+		return nil, 0, err
+	}
+	listed := filtered.
+		Select("id, task_id, task_type, completed_at, created_at, risk_summary, COALESCE(brand_snapshot ->> 'product_name', '') AS brand_product_name").
+		Order("created_at DESC, id DESC").
+		Limit(query.Limit).
+		Offset(query.Offset)
+	var records []summaryRecord
+	if err := listed.Find(&records).Error; err != nil {
+		return nil, 0, err
+	}
+	snapshots := make([]Snapshot, 0, len(records))
+	for _, record := range records {
+		var risk RiskSummary
+		if json.Unmarshal(record.RiskSummary, &risk) != nil {
+			return nil, 0, ErrInvalidSnapshot
+		}
+		snapshots = append(snapshots, Snapshot{
+			ID: record.ID, TaskID: record.TaskID, TaskType: record.TaskType,
+			CompletedAt: record.CompletedAt, CreatedAt: record.CreatedAt, Risk: risk,
+			Brand: brand.Config{ProductName: record.BrandProductName},
+		})
+	}
+	return snapshots, total, nil
+}
+
 func (repository *GormRepository) Trend(ctx context.Context, query TrendQuery) ([]TrendPoint, error) {
 	if query.Now.IsZero() || query.Days < 0 {
 		return nil, ErrInvalidSnapshot
@@ -238,6 +276,56 @@ func (repository *MemoryRepository) List(_ context.Context, query ListQuery) ([]
 		snapshots = snapshots[:query.Limit]
 	}
 	return snapshots, nil
+}
+
+func (repository *MemoryRepository) ListPage(_ context.Context, query ListQuery) ([]Snapshot, int64, error) {
+	repository.mu.RLock()
+	defer repository.mu.RUnlock()
+	snapshots := make([]Snapshot, 0, len(repository.byID))
+	for _, snapshot := range repository.byID {
+		if query.OwnerUserID != "" && snapshot.OwnerUserID != query.OwnerUserID {
+			continue
+		}
+		snapshots = append(snapshots, Snapshot{
+			ID: snapshot.ID, TaskID: snapshot.TaskID, TaskType: snapshot.TaskType,
+			CompletedAt: snapshot.CompletedAt, CreatedAt: snapshot.CreatedAt, Risk: snapshot.Risk,
+			Brand: brand.Config{ProductName: snapshot.Brand.ProductName},
+		})
+	}
+	sort.Slice(snapshots, func(left, right int) bool {
+		if snapshots[left].CreatedAt.Equal(snapshots[right].CreatedAt) {
+			return snapshots[left].ID > snapshots[right].ID
+		}
+		return snapshots[left].CreatedAt.After(snapshots[right].CreatedAt)
+	})
+	total := int64(len(snapshots))
+	if query.Offset >= len(snapshots) {
+		return []Snapshot{}, total, nil
+	}
+	if query.Offset > 0 {
+		snapshots = snapshots[query.Offset:]
+	}
+	if query.Limit > 0 && len(snapshots) > query.Limit {
+		snapshots = snapshots[:query.Limit]
+	}
+	return snapshots, total, nil
+}
+
+func (service *Service) ListPage(ctx context.Context, subject identity.Subject, page, pageSize int) ([]Snapshot, int64, error) {
+	query, err := listQueryFor(subject)
+	if err != nil {
+		return nil, 0, err
+	}
+	if page < 1 || page > maxReportPage || pageSize < 1 || pageSize > maxReportPageSize {
+		return nil, 0, ErrInvalidSnapshot
+	}
+	repository, ok := service.repository.(pageRepository)
+	if !ok {
+		return nil, 0, ErrInvalidSnapshot
+	}
+	query.Limit = pageSize
+	query.Offset = (page - 1) * pageSize
+	return repository.ListPage(ctx, query)
 }
 
 func (repository *MemoryRepository) Trend(_ context.Context, query TrendQuery) ([]TrendPoint, error) {

@@ -118,6 +118,39 @@ func TestPrivateAndGlobalModelVisibilityAndWrites(t *testing.T) {
 	}
 }
 
+func TestModelSafeCatalogPaginationPreservesReadOnlyYAMLCollision(t *testing.T) {
+	ctx := context.Background()
+	repository := NewMemoryRepository()
+	service := NewService(repository, mustTestKeyring(t, "catalog", bytesOf(9), nil), audit.NewService(audit.NewMemoryRepository()))
+	admin := identity.Subject{UserID: "admin-id", Username: "admin", Role: identity.RoleAdmin}
+	_, err := service.CreateWithCompatibilityID(ctx, admin, "collision-id", CreateInput{
+		Name: "database", ProviderModel: "database-provider", BaseURL: "https://database.invalid", Token: "database-secret", Scope: ScopeGlobal,
+	})
+	require.NoError(t, err)
+	service.SetCatalogLoader(func() ([]CatalogView, error) {
+		return []CatalogView{
+			{ID: "collision-id", ProviderModel: "yaml-provider", Token: "yaml-secret"},
+			{ID: "yaml-only", ProviderModel: "yaml-only-provider", Token: "yaml-only-secret"},
+		}, nil
+	})
+
+	page, err := service.SafeCatalog(ctx, admin, 1, 2)
+	require.NoError(t, err)
+	assert.Equal(t, int64(3), page.Total)
+	require.Len(t, page.Items, 2)
+	assert.Equal(t, CatalogSourcePlatform, page.Items[0].Source)
+	assert.False(t, page.Items[0].ReadOnly)
+	assert.Equal(t, CatalogSourceYAML, page.Items[1].Source)
+	assert.True(t, page.Items[1].ReadOnly)
+	for _, item := range page.Items {
+		assert.Equal(t, MaskedToken, item.Token)
+	}
+	page, err = service.SafeCatalog(ctx, admin, 2, 2)
+	require.NoError(t, err)
+	require.Len(t, page.Items, 1)
+	assert.Equal(t, "yaml-only", page.Items[0].ID)
+}
+
 func TestTokenUsesAuthenticatedEncryptionAndSupportsKeyRotationBoundary(t *testing.T) {
 	ctx := context.Background()
 	repository := NewMemoryRepository()

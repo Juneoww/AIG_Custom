@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -34,6 +35,10 @@ func (repository *failFirstReadyAdminAuditRepository) Append(ctx context.Context
 
 func (repository *failFirstReadyAdminAuditRepository) List(ctx context.Context, filter audit.Filter) ([]audit.Event, error) {
 	return repository.delegate.List(ctx, filter)
+}
+
+func (repository *failFirstReadyAdminAuditRepository) ListPage(ctx context.Context, filter audit.PageFilter) ([]audit.Event, int64, error) {
+	return repository.delegate.ListPage(ctx, filter)
 }
 
 func (repository *failFirstReadyAdminAuditRepository) EnqueueCompletion(ctx context.Context, completion *audit.CompletionOutbox) error {
@@ -75,6 +80,10 @@ func (repository *failingAdminAuditRepository) Append(ctx context.Context, event
 
 func (repository *failingAdminAuditRepository) List(ctx context.Context, filter audit.Filter) ([]audit.Event, error) {
 	return repository.delegate.List(ctx, filter)
+}
+
+func (repository *failingAdminAuditRepository) ListPage(ctx context.Context, filter audit.PageFilter) ([]audit.Event, int64, error) {
+	return repository.delegate.ListPage(ctx, filter)
 }
 
 func (repository *failingAdminAuditRepository) EnqueueCompletion(ctx context.Context, completion *audit.CompletionOutbox) error {
@@ -174,6 +183,107 @@ func TestAuditorCannotMutateUsersEvenWhenHandlerIsMountedWithoutRoleMiddleware(t
 	events, queryErr := auditService.Query(ctx, identity.Subject{Role: identity.RoleAdmin}, audit.Filter{})
 	require.NoError(t, queryErr)
 	assert.Empty(t, events)
+}
+
+func TestAdminUsersListEnvelopePaginationIsSafe(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	ctx := context.Background()
+	identityService := identity.NewService(identity.NewMemoryRepository())
+	adminUser, err := identityService.CreateUser(ctx, identity.CreateUserInput{ID: "admin-01", Username: "admin", Password: "admin-secret", Role: identity.RoleAdmin})
+	require.NoError(t, err)
+	for index := 0; index < 24; index++ {
+		_, err = identityService.CreateUser(ctx, identity.CreateUserInput{
+			ID:       fmt.Sprintf("user-%02d", index),
+			Username: fmt.Sprintf("member-%02d", index),
+			Password: fmt.Sprintf("private-password-%02d", index),
+			Role:     identity.RoleUser,
+		})
+		require.NoError(t, err)
+	}
+	login, err := identityService.Authenticate(ctx, adminUser.Username, "admin-secret")
+	require.NoError(t, err)
+	router := gin.New()
+	NewHandler(identityService, audit.NewService(audit.NewMemoryRepository())).Register(
+		router.Group("/admin", identity.Authenticate(identityService, identity.CookiePolicy{})),
+	)
+
+	response := performJSON(t, router, login.Token, http.MethodGet, "/admin/users?page=2&page_size=10", nil)
+	require.Equal(t, http.StatusOK, response.Code, response.Body.String())
+	var envelope struct {
+		Items    []UserResponse `json:"items"`
+		Total    int64          `json:"total"`
+		Page     int            `json:"page"`
+		PageSize int            `json:"page_size"`
+	}
+	require.NoError(t, json.Unmarshal(response.Body.Bytes(), &envelope))
+	assert.Equal(t, int64(25), envelope.Total)
+	assert.Equal(t, 2, envelope.Page)
+	assert.Equal(t, 10, envelope.PageSize)
+	require.Len(t, envelope.Items, 10)
+	assert.Equal(t, "member-09", envelope.Items[0].Username)
+	for _, forbidden := range []string{"password_hash", "token_hash", "reset", "session", "private-password", "admin-secret"} {
+		assert.NotContains(t, response.Body.String(), forbidden)
+	}
+
+	for _, query := range []string{"?page=0", "?page=bad", "?page=1001", "?page=9223372036854775807", "?page_size=0", "?page_size=bad"} {
+		response = performJSON(t, router, login.Token, http.MethodGet, "/admin/users"+query, nil)
+		assert.Equal(t, http.StatusBadRequest, response.Code, query)
+		assert.JSONEq(t, `{"error":"invalid list request"}`, response.Body.String(), query)
+	}
+}
+
+func TestAdminAuditListEnvelopePaginationFiltersAndSanitizesMetadata(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	ctx := context.Background()
+	identityService := identity.NewService(identity.NewMemoryRepository())
+	adminUser, err := identityService.CreateUser(ctx, identity.CreateUserInput{Username: "admin", Password: "secret", Role: identity.RoleAdmin})
+	require.NoError(t, err)
+	login, err := identityService.Authenticate(ctx, adminUser.Username, "secret")
+	require.NoError(t, err)
+	auditService := audit.NewService(audit.NewMemoryRepository())
+	actor := identity.Subject{UserID: adminUser.ID, Username: adminUser.Username, Role: adminUser.Role}
+	for index := 0; index < 23; index++ {
+		action := audit.ActionTaskChanged
+		if index%2 == 0 {
+			action = audit.ActionModelUpdated
+		}
+		require.NoError(t, auditService.Record(ctx, actor, audit.EventInput{
+			Action: action, ResourceType: "model", ResourceID: fmt.Sprintf("model-%02d", index),
+			Metadata: map[string]any{
+				"safe": index, "api_token": "raw-token-sentinel", "internal_error": "database-error-sentinel",
+				"raw_result": "raw-result-sentinel", "config_path": "private-path-sentinel",
+				"nested": map[string]any{"password": "raw-password-sentinel"},
+			},
+		}))
+	}
+	router := gin.New()
+	NewHandler(identityService, auditService).Register(router.Group("/admin", identity.Authenticate(identityService, identity.CookiePolicy{})))
+
+	response := performJSON(t, router, login.Token, http.MethodGet, "/admin/audit-events?action=model.updated&page=2&page_size=5", nil)
+	require.Equal(t, http.StatusOK, response.Code, response.Body.String())
+	var envelope struct {
+		Items    []audit.Event `json:"items"`
+		Total    int64         `json:"total"`
+		Page     int           `json:"page"`
+		PageSize int           `json:"page_size"`
+	}
+	require.NoError(t, json.Unmarshal(response.Body.Bytes(), &envelope))
+	assert.Equal(t, int64(12), envelope.Total)
+	assert.Equal(t, 2, envelope.Page)
+	assert.Equal(t, 5, envelope.PageSize)
+	require.Len(t, envelope.Items, 5)
+	assert.NotContains(t, response.Body.String(), "raw-token-sentinel")
+	assert.NotContains(t, response.Body.String(), "raw-password-sentinel")
+	assert.NotContains(t, response.Body.String(), "database-error-sentinel")
+	assert.NotContains(t, response.Body.String(), "raw-result-sentinel")
+	assert.NotContains(t, response.Body.String(), "private-path-sentinel")
+	assert.Contains(t, response.Body.String(), audit.RedactedValue)
+
+	for _, query := range []string{"?page=0", "?page=bad", "?page=1001", "?page=9223372036854775807", "?page_size=0", "?page_size=bad"} {
+		response = performJSON(t, router, login.Token, http.MethodGet, "/admin/audit-events"+query, nil)
+		assert.Equal(t, http.StatusBadRequest, response.Code, query)
+		assert.JSONEq(t, `{"error":"invalid list request"}`, response.Body.String(), query)
+	}
 }
 
 func TestAdminMutationDoesNotStartWhenDurableAuditIntentFails(t *testing.T) {
@@ -280,10 +390,10 @@ func TestAdminFinalizesPreparedKnowledgeCompletionWithoutRepeatingFileMutation(t
 
 	list := performJSON(t, router, adminAccount.login.Token, http.MethodGet, "/admin/audit-events?action=knowledge.changed", nil)
 	require.Equal(t, http.StatusOK, list.Code, list.Body.String())
-	var pending []audit.Event
+	var pending AuditListResponse
 	require.NoError(t, json.Unmarshal(list.Body.Bytes(), &pending))
-	require.Len(t, pending, 1)
-	assert.Equal(t, requestID, pending[0].RequestID)
+	require.Len(t, pending.Items, 1)
+	assert.Equal(t, requestID, pending.Items[0].RequestID)
 
 	finalizePath := "/admin/audit-events/prepared/" + requestID + "/finalize"
 	for _, role := range []identity.Role{identity.RoleAuditor, identity.RoleUser} {
