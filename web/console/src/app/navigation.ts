@@ -23,7 +23,7 @@ export const navigationItems: readonly NavigationItem[] = [
   { id: 'overview', path: '/', label: '治理总览', description: '查看安全评分、30 日趋势、风险待办与最近任务。', allowedRoles: ALL_ROLES },
   { id: 'tasks', path: '/tasks', label: '扫描任务', description: '创建、筛选并跟踪受治理的扫描任务。', allowedRoles: ALL_ROLES },
   { id: 'reports', path: '/reports', label: '安全报告', description: '查看不可变报告快照并执行受审计 PDF 导出。', allowedRoles: ALL_ROLES },
-  { id: 'models', path: '/models', label: '模型与凭据', description: '模型与凭据管理将在后续任务接入。', allowedRoles: ALL_ROLES },
+  { id: 'models', path: '/models', label: '模型与凭据', description: '查看受治理模型，并按角色管理加密凭据。', allowedRoles: ALL_ROLES },
   { id: 'knowledge', path: '/knowledge', label: '规则与知识库', description: '规则与知识库管理将在后续任务接入。', allowedRoles: ALL_ROLES },
   { id: 'users', path: '/admin/users', label: '用户管理', description: '用户管理将在后续任务接入。', allowedRoles: ADMIN_ONLY },
   { id: 'audit', path: '/admin/audit', label: '审计日志', description: '审计日志将在后续任务接入。', allowedRoles: AUDIT_ROLES },

@@ -186,10 +186,22 @@ func TestPlatformGovernanceHandlersUsePostgresSubjectPoliciesAndNeverLeakModelTo
 
 	otherRead := governanceRequest(t, router, bobLogin.Token, http.MethodGet, "/api/v1/platform/models/"+privateView.ID, nil)
 	assert.Equal(t, http.StatusForbidden, otherRead.Code)
+	privateStoredBefore, err := modelRepository.Get(ctx, privateView.ID)
+	require.NoError(t, err)
+	privateRotate := governanceRequest(t, router, adminLogin.Token, http.MethodPost, "/api/v1/platform/models/"+privateView.ID+"/rotate-encryption", nil)
+	assert.Equal(t, http.StatusForbidden, privateRotate.Code)
+	privateStoredAfter, err := modelRepository.Get(ctx, privateView.ID)
+	require.NoError(t, err)
+	assert.Equal(t, privateStoredBefore.EncryptedToken, privateStoredAfter.EncryptedToken)
+	var globalView platformmodels.View
+	require.NoError(t, json.Unmarshal(globalModel.Body.Bytes(), &globalView))
+	globalRotate := governanceRequest(t, router, adminLogin.Token, http.MethodPost, "/api/v1/platform/models/"+globalView.ID+"/rotate-encryption", nil)
+	assert.Equal(t, http.StatusNoContent, globalRotate.Code)
 	auditRead := governanceRequest(t, router, adminLogin.Token, http.MethodGet, "/api/v1/platform/admin/audit-events", nil)
 	require.Equal(t, http.StatusOK, auditRead.Code, auditRead.Body.String())
 	assert.Contains(t, auditRead.Body.String(), string(audit.ActionAccountCreated))
 	assert.Contains(t, auditRead.Body.String(), string(audit.ActionModelCreated))
+	assert.Contains(t, auditRead.Body.String(), string(audit.ActionModelEncryptionRotated))
 	assert.NotContains(t, auditRead.Body.String(), globalToken)
 	assert.NotContains(t, auditRead.Body.String(), privateToken)
 }

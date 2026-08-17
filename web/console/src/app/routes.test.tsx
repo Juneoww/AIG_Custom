@@ -168,4 +168,13 @@ describe('production routes', () => {
     expect(screen.getByRole('progressbar', { name: '正在加载安全报告' })).toBeInTheDocument()
     expect(screen.queryByRole('heading', { name: '页面不存在' })).not.toBeInTheDocument()
   })
+
+  it.each(['user', 'auditor', 'admin'] as const)('让%s角色读取真实模型治理路由', (role) => {
+    vi.stubGlobal('fetch', vi.fn(() => new Promise<Response>(() => undefined)))
+    renderRoute(subjectState(role), '/models?page=2')
+
+    expect(screen.getByRole('heading', { name: '模型与凭据' })).toBeInTheDocument()
+    expect(screen.getByRole('progressbar', { name: '正在加载模型目录' })).toBeInTheDocument()
+    expect(screen.queryByText('模型与凭据尚未接入')).not.toBeInTheDocument()
+  })
 })

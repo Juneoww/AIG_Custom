@@ -526,6 +526,9 @@ func (service *Service) RotateEncryption(ctx context.Context, subject identity.S
 	if err != nil {
 		return err
 	}
+	if !canWrite(subject, model) {
+		return ErrForbidden
+	}
 	plaintext, err := service.keyring.OpenToken(model)
 	if err != nil {
 		return err

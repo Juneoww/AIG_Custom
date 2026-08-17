@@ -235,8 +235,11 @@ func TestTokenUsesAuthenticatedEncryptionAndSupportsKeyRotationBoundary(t *testi
 	ctx := context.Background()
 	repository := NewMemoryRepository()
 	oldRing := mustTestKeyring(t, "old", bytesOf(2), nil)
-	service := NewService(repository, oldRing, audit.NewService(audit.NewMemoryRepository()))
+	auditRepository := audit.NewMemoryRepository()
+	auditService := audit.NewService(auditRepository)
+	service := NewService(repository, oldRing, auditService)
 	owner := identity.Subject{UserID: "owner-id", Username: "owner", Role: identity.RoleUser}
+	admin := identity.Subject{UserID: "admin-id", Username: "admin", Role: identity.RoleAdmin}
 	created, err := service.Create(ctx, owner, CreateInput{Name: "private", Token: "rotate-me", Scope: ScopePrivate})
 	require.NoError(t, err)
 
@@ -260,8 +263,22 @@ func TestTokenUsesAuthenticatedEncryptionAndSupportsKeyRotationBoundary(t *testi
 	plaintext, err := newRing.OpenToken(stored)
 	require.NoError(t, err)
 	assert.Equal(t, "rotate-me", plaintext)
-	require.NoError(t, NewService(repository, newRing, audit.NewService(audit.NewMemoryRepository())).RotateEncryption(ctx, identity.Subject{Role: identity.RoleAdmin}, created.ID))
-	rotated, err := repository.Get(ctx, created.ID)
+	rotationService := NewService(repository, newRing, auditService)
+	eventsBefore, err := auditRepository.List(ctx, audit.Filter{})
+	require.NoError(t, err)
+	require.ErrorIs(t, rotationService.RotateEncryption(ctx, admin, created.ID), ErrForbidden)
+	unchanged, err := repository.Get(ctx, created.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "old", unchanged.KeyID)
+	assert.Equal(t, stored.EncryptedToken, unchanged.EncryptedToken)
+	eventsAfter, err := auditRepository.List(ctx, audit.Filter{})
+	require.NoError(t, err)
+	assert.Len(t, eventsAfter, len(eventsBefore), "forbidden private rotation must not start an audit mutation")
+
+	global, err := service.Create(ctx, admin, CreateInput{Name: "global", Token: "rotate-global", Scope: ScopeGlobal})
+	require.NoError(t, err)
+	require.NoError(t, rotationService.RotateEncryption(ctx, admin, global.ID))
+	rotated, err := repository.Get(ctx, global.ID)
 	require.NoError(t, err)
 	assert.Equal(t, "new", rotated.KeyID)
 

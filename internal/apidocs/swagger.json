@@ -1074,7 +1074,7 @@
         },
         "/api/v1/platform/models/{modelID}/rotate-encryption": {
             "post": {
-                "description": "Re-encrypts a stored token with the active environment-injected master key. Administrator only; plaintext is never returned or logged.",
+                "description": "Re-encrypts a stored global model token with the active environment-injected master key. Administrator only; private platform models and immutable YAML models cannot be rotated, and plaintext is never returned or logged.",
                 "parameters": [
                     {
                         "in": "path",
@@ -1095,7 +1095,7 @@
                         "description": "Unauthenticated."
                     },
                     "403": {
-                        "description": "Administrator role, completed password change, and valid CSRF required."
+                        "description": "Administrator role, writable global model, completed password change, and valid CSRF required."
                     },
                     "404": {
                         "description": "Model not found."

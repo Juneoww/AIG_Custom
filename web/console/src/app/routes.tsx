@@ -13,6 +13,7 @@ import { LoginPage } from '../features/auth/LoginPage'
 import { ResetPasswordPage } from '../features/auth/ResetPasswordPage'
 import { useSession } from '../features/auth/session'
 import { DashboardPage } from '../features/dashboard/DashboardPage'
+import { ModelListPage } from '../features/models/ModelListPage'
 import { ReportDetailPage } from '../features/reports/ReportDetailPage'
 import { ReportListPage } from '../features/reports/ReportListPage'
 import { TaskCreatePage } from '../features/tasks/TaskCreatePage'
@@ -164,7 +165,9 @@ function routeForNavigation(item: NavigationItem): RouteObject {
       ? <TaskListPage />
       : item.id === 'reports'
         ? <ReportListPage />
-        : <PendingFeaturePage item={item} />
+        : item.id === 'models'
+          ? <ModelListPage />
+          : <PendingFeaturePage item={item} />
   const element = (
     <RequireRole allowedRoles={item.allowedRoles}>
       {featurePage}
