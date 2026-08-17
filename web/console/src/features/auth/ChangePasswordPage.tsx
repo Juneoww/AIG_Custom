@@ -78,7 +78,8 @@ function changePasswordErrorMessage(error: unknown): string {
 
 export function ChangePasswordPage() {
   const styles = useStyles()
-  const { changePassword } = useSession()
+  const { changePassword, state } = useSession()
+  const isRequiredChange = state.status === 'must-change'
   const [oldPassword, setOldPassword] = useState('')
   const [newPassword, setNewPassword] = useState('')
   const [confirmation, setConfirmation] = useState('')
@@ -117,9 +118,13 @@ export function ChangePasswordPage() {
     <main className={styles.page}>
       <section className={styles.panel} aria-labelledby="change-password-heading">
         <Text as="h1" className={styles.heading} id="change-password-heading">
-          更新初始密码
+          {isRequiredChange ? '更新初始密码' : '修改登录密码'}
         </Text>
-        <Text className={styles.description}>完成密码更新后，系统将清除当前会话并要求重新登录。</Text>
+        <Text className={styles.description}>
+          {isRequiredChange
+            ? '完成密码更新后，系统将清除当前会话并要求重新登录。'
+            : '更新成功后，系统将清除当前会话并要求重新登录。'}
+        </Text>
 
         <form className={styles.form} onSubmit={handleSubmit}>
           {errorMessage ? (

@@ -1,6 +1,6 @@
 /**
  * 功能：提供本地账号登录表单并展示固定中文认证反馈。
- * 实现：使用 Fluent 表单组件提交 Session 登录动作，保留失败时的输入上下文。
+ * 实现：消费公共品牌并使用 Fluent 表单提交 Session 登录动作，保留失败时的输入上下文。
  * 输入：用户手工输入的用户名和密码。
  * 输出：登录请求、提交状态与脱敏错误提示。
  * 依赖：React、Fluent UI 与身份会话上下文。
@@ -20,6 +20,7 @@ import {
 } from '@fluentui/react-components'
 
 import { ApiError, NetworkError } from '../../shared/api/errors'
+import { usePublicBrand } from '../../shared/brand/PublicBrandProvider'
 import { useSession } from './session'
 
 const useStyles = makeStyles({
@@ -43,9 +44,35 @@ const useStyles = makeStyles({
       padding: '28px 20px',
     },
   },
-  brand: {
-    display: 'block',
+  brandIdentity: {
+    minWidth: 0,
+    display: 'flex',
+    alignItems: 'center',
+    gap: tokens.spacingHorizontalM,
     marginBottom: tokens.spacingVerticalM,
+  },
+  brandMark: {
+    width: '32px',
+    height: '32px',
+    flexShrink: 0,
+    display: 'grid',
+    placeItems: 'center',
+    overflow: 'hidden',
+    borderRadius: tokens.borderRadiusMedium,
+    backgroundColor: tokens.colorBrandBackground,
+    color: tokens.colorNeutralForegroundOnBrand,
+    fontWeight: tokens.fontWeightSemibold,
+  },
+  brandLogo: {
+    width: '100%',
+    height: '100%',
+    objectFit: 'contain',
+  },
+  brand: {
+    minWidth: 0,
+    overflow: 'hidden',
+    textOverflow: 'ellipsis',
+    whiteSpace: 'nowrap',
     color: tokens.colorBrandForeground1,
     fontWeight: tokens.fontWeightSemibold,
   },
@@ -92,6 +119,7 @@ function loginErrorMessage(error: unknown): string {
 export function LoginPage() {
   const styles = useStyles()
   const { login } = useSession()
+  const { productName, logoDataURL } = usePublicBrand()
   const [username, setUsername] = useState('')
   const [password, setPassword] = useState('')
   const [errorMessage, setErrorMessage] = useState('')
@@ -118,9 +146,14 @@ export function LoginPage() {
   return (
     <main className={styles.page}>
       <section className={styles.panel} aria-labelledby="login-heading">
-        <Text className={styles.brand} size={200}>
-          AI 安全治理平台
-        </Text>
+        <div className={styles.brandIdentity}>
+          <span className={styles.brandMark} aria-hidden="true">
+            {logoDataURL ? <img alt="" className={styles.brandLogo} src={logoDataURL} /> : '安'}
+          </span>
+          <Text aria-label={productName} className={styles.brand} size={200} title={productName}>
+            {productName}
+          </Text>
+        </div>
         <Text as="h1" className={styles.heading} id="login-heading">
           登录平台
         </Text>

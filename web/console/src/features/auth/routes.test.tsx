@@ -80,10 +80,24 @@ describe('身份路由守卫', () => {
     expect(screen.getByRole('button', { name: '触发改密' })).toHaveTextContent('/change-password|/reports/42')
   })
 
-  it('只有强制改密账户能进入改密流程', () => {
+  it('匿名账户不能进入改密流程', () => {
     renderGuard({ status: 'anonymous' }, '/change-password')
 
     expect(screen.getByLabelText('当前位置')).toHaveTextContent('/login|/')
+  })
+
+  it('已认证账户可主动进入改密流程并保留安全来源', () => {
+    renderGuard(
+      {
+        status: 'authenticated',
+        subject: { id: 'user-2', username: 'operator', role: 'user', must_change_password: false },
+      },
+      { pathname: '/change-password', state: { from: '/models?page=2#credential' } },
+    )
+
+    expect(screen.getByRole('button', { name: '触发改密' })).toHaveTextContent(
+      '/change-password|/models?page=2#credential',
+    )
   })
 
   it('登录到强制改密再重新登录的链路持续传递合法来源', () => {

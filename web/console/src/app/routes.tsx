@@ -1,6 +1,6 @@
 /**
- * 功能：声明身份页面路由以及匿名、已认证和强制改密守卫。
- * 实现：守卫校验站内来源并贯穿登录、强制改密和重新登录链路，不在模块加载时请求网络。
+ * 功能：声明身份页面、生产应用壳、角色授权和未知页路由。
+ * 实现：守卫校验站内来源，并用统一导航元数据驱动已知路由的角色许可。
  * 输入：当前路由位置、会话状态与可选受保护子视图。
  * 输出：目标页面、Outlet 或安全重定向。
  * 依赖：React Router、身份页面与 Session 上下文。
@@ -12,6 +12,13 @@ import { ChangePasswordPage } from '../features/auth/ChangePasswordPage'
 import { LoginPage } from '../features/auth/LoginPage'
 import { ResetPasswordPage } from '../features/auth/ResetPasswordPage'
 import { useSession } from '../features/auth/session'
+import type { SubjectRole } from '../shared/api/types'
+import { PageHeader } from '../shared/components/PageHeader'
+import { StatePanel } from '../shared/components/StatePanel'
+import { ForbiddenPage } from './ForbiddenPage'
+import { NotFoundPage } from './NotFoundPage'
+import { AppShell } from './layout/AppShell'
+import { navigationItems, type NavigationItem } from './navigation'
 
 interface GuardProps {
   children?: ReactNode
@@ -89,7 +96,6 @@ export function RequirePasswordChange({ children }: GuardProps) {
   if (state.status === 'anonymous') {
     return <Navigate replace to="/login" state={{ from: returnToFromState(location.state) }} />
   }
-  if (state.status === 'authenticated') return <Navigate replace to={returnToFromState(location.state)} />
   return <GuardContent>{children}</GuardContent>
 }
 
@@ -107,6 +113,26 @@ export function RequireAnonymous({ children }: GuardProps) {
   return <GuardContent>{children}</GuardContent>
 }
 
+export function RequireRole({ allowedRoles, children }: GuardProps & { allowedRoles: readonly SubjectRole[] }) {
+  const { state } = useSession()
+  if (state.status !== 'authenticated') return null
+  if (!allowedRoles.includes(state.subject.role)) return <ForbiddenPage />
+  return <GuardContent>{children}</GuardContent>
+}
+
+function PendingFeaturePage({ item }: { item: NavigationItem }) {
+  return (
+    <section>
+      <PageHeader title={item.label} description={item.description} />
+      <StatePanel
+        state="empty"
+        title={`${item.label}尚未接入`}
+        description="当前仅提供应用壳与访问边界，真实功能将在后续开发任务中替换。"
+      />
+    </section>
+  )
+}
+
 export const identityRoutes: RouteObject[] = [
   {
     path: '/login',
@@ -121,5 +147,30 @@ export const identityRoutes: RouteObject[] = [
   {
     path: '/reset-password',
     element: <ResetPasswordPage />,
+  },
+]
+
+function routeForNavigation(item: NavigationItem): RouteObject {
+  const element = (
+    <RequireRole allowedRoles={item.allowedRoles}>
+      <PendingFeaturePage item={item} />
+    </RequireRole>
+  )
+  return item.path === '/' ? { index: true, element } : { path: item.path.slice(1), element }
+}
+
+export const appRoutes: RouteObject[] = [
+  ...identityRoutes,
+  {
+    element: <RequireAuthenticated />,
+    children: [
+      {
+        element: <AppShell />,
+        children: [
+          ...navigationItems.map(routeForNavigation),
+          { path: '*', element: <NotFoundPage /> },
+        ],
+      },
+    ],
   },
 ]

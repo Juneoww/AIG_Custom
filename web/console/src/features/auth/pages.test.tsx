@@ -107,6 +107,16 @@ describe('LoginPage', () => {
 })
 
 describe('ChangePasswordPage', () => {
+  it('为已认证用户展示主动改密语义', () => {
+    renderPage(<ChangePasswordPage />, {
+      status: 'authenticated',
+      subject: { id: 'user-2', username: 'operator', role: 'user', must_change_password: false },
+    })
+
+    expect(screen.getByRole('heading', { name: '修改登录密码' })).toBeInTheDocument()
+    expect(screen.getByText('更新成功后，系统将清除当前会话并要求重新登录。')).toBeInTheDocument()
+  })
+
   it('要求确认新密码且不会在不一致时调用接口', async () => {
     const fetchMock = vi.fn()
     vi.stubGlobal('fetch', fetchMock)
