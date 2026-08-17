@@ -17,13 +17,14 @@
     ]
   },
   "scripts": {
-    "dev": "vite",
+    "prepare:fonts": "node scripts/prepare-fonts.mjs",
+    "dev": "pnpm run prepare:fonts && vite",
     "lint": "eslint . --ext .ts,.tsx --max-warnings=0",
     "typecheck": "tsc -b",
-    "test": "vitest",
-    "test:run": "vitest run",
+    "test": "pnpm run prepare:fonts && vitest",
+    "test:run": "pnpm run prepare:fonts && vitest run",
     "test:e2e": "playwright test",
-    "build": "tsc -b && vite build"
+    "build": "pnpm run prepare:fonts && tsc -b && vite build"
   },
   "dependencies": {
     "@fluentui/react-components": "9.74.6",

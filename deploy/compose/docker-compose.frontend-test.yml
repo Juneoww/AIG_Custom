@@ -12,6 +12,7 @@ services:
       CI: "true"
       PNPM_HOME: /pnpm
       npm_config_store_dir: /pnpm/store
+      AIG_DROID_FONT_SOURCE: /workspace/.font-sources/DroidSansFallbackFull.ttf
     volumes:
       - ../../web/console/package.json:/workspace/package.json:ro
       - ../../web/console/pnpm-lock.yaml:/workspace/pnpm-lock.yaml:ro
@@ -22,6 +23,10 @@ services:
       - ../../web/console/playwright.config.ts:/workspace/playwright.config.ts:ro
       - ../../web/console/index.html:/workspace/index.html:ro
       - ../../web/console/src:/workspace/src:ro
+      - ../../web/console/scripts:/workspace/scripts:ro
+      - ../../web/console/assets:/workspace/assets:ro
+      - ../../internal/platform/reports/assets/DroidSansFallbackFull.ttf:/workspace/.font-sources/DroidSansFallbackFull.ttf:ro
       - /workspace/node_modules
       - /workspace/dist
+      - /workspace/.generated
       - /pnpm/store

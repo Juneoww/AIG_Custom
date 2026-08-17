@@ -22,6 +22,7 @@ web/console/dist/
 web/console/coverage/
 web/console/playwright-report/
 web/console/test-results/
+web/console/.generated/
 
 # OpenClaw internal workspace file
 openclaw.md

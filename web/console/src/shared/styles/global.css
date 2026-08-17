@@ -1,0 +1,88 @@
+/**
+ * 功能：建立监管台账的本地字体、基础画布、焦点和减少动效规则。
+ * 实现：仅从 Vite 生成目录加载字体，并通过 data-theme 切换同构语义变量。
+ * 输入：ThemeProvider 写入的 data-theme 属性与本地字体文件。
+ * 输出：全局排版、冷灰画布、指标字体和可访问性样式。
+ * 依赖：prepare-fonts.mjs 生成的 /fonts 资源。
+ */
+@font-face {
+  font-family: 'Droid Sans Fallback';
+  src: url('/fonts/DroidSansFallbackFull.ttf') format('truetype');
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: 'IBM Plex Sans';
+  src: url('/fonts/IBMPlexSans-Regular.woff2') format('woff2');
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: 'IBM Plex Sans';
+  src: url('/fonts/IBMPlexSans-SemiBold.woff2') format('woff2');
+  font-style: normal;
+  font-weight: 600;
+  font-display: swap;
+}
+
+:root {
+  color-scheme: light;
+  --ledger-canvas: #f4f7fb;
+  --ledger-surface: #ffffff;
+  --ledger-text: #172033;
+  --ledger-focus: #0f62d6;
+}
+
+:root[data-theme='dark'] {
+  color-scheme: dark;
+  --ledger-canvas: #111827;
+  --ledger-surface: #1d2939;
+  --ledger-text: #edf2f7;
+  --ledger-focus: #8ab4ff;
+}
+
+html,
+body,
+#root {
+  min-height: 100%;
+}
+
+body {
+  margin: 0;
+  background: var(--ledger-canvas);
+  color: var(--ledger-text);
+  font-family: 'Droid Sans Fallback', 'Microsoft YaHei UI', sans-serif;
+  text-rendering: optimizeLegibility;
+}
+
+button,
+input,
+select,
+textarea {
+  font: inherit;
+}
+
+.ledger-metric {
+  font-family: 'IBM Plex Sans', 'Droid Sans Fallback', sans-serif;
+  font-variant-numeric: tabular-nums;
+}
+
+:focus-visible {
+  outline: 2px solid var(--ledger-focus);
+  outline-offset: 2px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    scroll-behavior: auto !important;
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}
