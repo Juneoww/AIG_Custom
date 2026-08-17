@@ -64,6 +64,18 @@ func (engine *controlledReferenceEngine) ValidateTaskReferences(context.Context,
 	return engine.referenceErr
 }
 
+type toggledTaskAuditRepository struct {
+	*audit.MemoryRepository
+	failErr error
+}
+
+func (repository *toggledTaskAuditRepository) Append(ctx context.Context, event *audit.Event) error {
+	if repository.failErr != nil {
+		return repository.failErr
+	}
+	return repository.MemoryRepository.Append(ctx, event)
+}
+
 type gatedReferenceEngine struct {
 	recordingEngine
 	referenceCalls atomic.Int64
@@ -316,7 +328,8 @@ func TestCancelCannotOverwriteConcurrentTerminalEngineState(t *testing.T) {
 func TestConcurrentIdempotentCreatePersistsOneTaskAndSubmitsOnce(t *testing.T) {
 	repository := NewMemoryRepository()
 	engine := &recordingEngine{}
-	service := NewService(repository, engine, audit.NewService(audit.NewMemoryRepository()))
+	auditRepository := audit.NewMemoryRepository()
+	service := NewService(repository, engine, audit.NewService(auditRepository))
 	subject := identity.Subject{UserID: "user-1", Username: "alice", Role: identity.RoleUser}
 	input := CreateInput{IdempotencyKey: "same-key", TaskType: "mcp_scan", Content: "scan", Params: json.RawMessage(`{"model_id":"model-1"}`)}
 
@@ -354,6 +367,9 @@ func TestConcurrentIdempotentCreatePersistsOneTaskAndSubmitsOnce(t *testing.T) {
 	require.Len(t, tasks, 1)
 	assert.Equal(t, int64(1), engine.submits.Load())
 	assert.Equal(t, StatusRunning, tasks[0].Status)
+	events, err := auditRepository.List(context.Background(), audit.Filter{ResourceID: taskID, Action: audit.Action("task.created")})
+	require.NoError(t, err)
+	assert.Len(t, events, 2, "并发同键创建只能保留一组 pending/success 审计")
 }
 
 func TestIdempotentCreateReturnsPersistedTaskWhenLiveReferencesBecomeUnavailable(t *testing.T) {
@@ -382,6 +398,57 @@ func TestIdempotentCreateReturnsPersistedTaskWhenLiveReferencesBecomeUnavailable
 			assert.Equal(t, int64(1), engine.submits.Load(), "幂等重试不得重复分发任务")
 		})
 	}
+}
+
+func TestIdempotentRetryBypassesCreationAuditOutage(t *testing.T) {
+	repository := NewMemoryRepository()
+	engine := &recordingEngine{}
+	auditRepository := &toggledTaskAuditRepository{MemoryRepository: audit.NewMemoryRepository()}
+	service := NewService(repository, engine, audit.NewService(auditRepository))
+	subject := identity.Subject{UserID: "audit-retry-owner", Username: "alice", Role: identity.RoleUser}
+	input := CreateInput{IdempotencyKey: "audit-retry", TaskType: "mcp_scan", Content: "scan"}
+
+	created, err := service.Create(context.Background(), subject, input)
+	require.NoError(t, err)
+	eventsBefore, err := auditRepository.List(context.Background(), audit.Filter{ResourceID: created.ID, Action: audit.Action("task.created")})
+	require.NoError(t, err)
+	require.Len(t, eventsBefore, 2)
+	auditRepository.failErr = errors.New("audit append unavailable")
+
+	retried, err := service.Create(context.Background(), subject, input)
+	require.NoError(t, err)
+	assert.Equal(t, created.ID, retried.ID)
+	assert.Equal(t, int64(1), engine.submits.Load(), "已有任务重放不得重复提交")
+	eventsAfter, err := auditRepository.List(context.Background(), audit.Filter{ResourceID: created.ID, Action: audit.Action("task.created")})
+	require.NoError(t, err)
+	assert.Len(t, eventsAfter, len(eventsBefore), "已有任务重放不得追加创建审计")
+}
+
+func TestExistingPendingTaskRecoversDuringCreationAuditOutage(t *testing.T) {
+	repository := NewMemoryRepository()
+	engine := &recordingEngine{}
+	auditRepository := &toggledTaskAuditRepository{
+		MemoryRepository: audit.NewMemoryRepository(), failErr: errors.New("audit append unavailable"),
+	}
+	service := NewService(repository, engine, audit.NewService(auditRepository))
+	subject := identity.Subject{UserID: "audit-recovery-owner", Username: "alice", Role: identity.RoleUser}
+	input := CreateInput{IdempotencyKey: "audit-recovery", TaskType: "mcp_scan", Content: "scan"}
+	taskID := uuid.NewSHA1(taskIDNamespace, []byte(subject.UserID+"\x00"+input.IdempotencyKey)).String()
+	now := time.Now().UTC()
+	_, created, err := repository.CreateOrGet(context.Background(), &Task{
+		ID: taskID, OwnerUserID: subject.UserID, OwnerUsername: subject.Username,
+		IdempotencyKey: input.IdempotencyKey, EngineSessionID: taskID, TaskType: input.TaskType,
+		Content: input.Content, Params: json.RawMessage(`{}`), AttachmentRefs: json.RawMessage(`[]`),
+		Status: StatusPending, CreatedAt: now, UpdatedAt: now,
+	})
+	require.NoError(t, err)
+	require.True(t, created)
+
+	view, err := service.Create(context.Background(), subject, input)
+	require.NoError(t, err)
+	assert.Equal(t, taskID, view.ID)
+	assert.Equal(t, StatusRunning, view.Status)
+	assert.Equal(t, int64(1), engine.submits.Load(), "已有pending任务仍应恢复其一次分发")
 }
 
 func TestIdempotentCreateRejectsDifferentPersistedPayloadBeforeSideEffects(t *testing.T) {

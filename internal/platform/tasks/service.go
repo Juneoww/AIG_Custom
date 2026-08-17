@@ -191,6 +191,7 @@ func (service *Service) createLocked(
 		if !sameCreateRequest(existing, candidate) {
 			return nil, ErrInvalid
 		}
+		return existing, nil
 	} else if !errors.Is(getErr, ErrNotFound) {
 		return nil, getErr
 	} else {
