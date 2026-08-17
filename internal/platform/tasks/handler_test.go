@@ -74,7 +74,7 @@ func TestProtectedTaskListRejectsHeadersAndAppliesOwnerRBAC(t *testing.T) {
 		var tasks TaskListResponse
 		require.NoError(t, json.Unmarshal(response.Body.Bytes(), &tasks))
 		assert.Len(t, tasks.Items, expected)
-		assert.Equal(t, expected, tasks.Total)
+		assert.Equal(t, int64(expected), tasks.Total)
 	}
 }
 

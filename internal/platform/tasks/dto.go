@@ -18,7 +18,7 @@ type TaskSummary struct {
 
 type TaskListResponse struct {
 	Items    []TaskSummary `json:"items"`
-	Total    int           `json:"total"`
+	Total    int64         `json:"total"`
 	Page     int           `json:"page"`
 	PageSize int           `json:"page_size"`
 }

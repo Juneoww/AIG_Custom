@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -17,7 +18,19 @@ import (
 	"github.com/stretchr/testify/require"
 	"gorm.io/driver/postgres"
 	"gorm.io/gorm"
+	"gorm.io/gorm/logger"
 )
+
+type taskQueryCaptureLogger struct {
+	logger.Interface
+	statements []string
+}
+
+func (capture *taskQueryCaptureLogger) Trace(ctx context.Context, begin time.Time, fc func() (string, int64), err error) {
+	statement, _ := fc()
+	capture.statements = append(capture.statements, strings.ToLower(statement))
+	capture.Interface.Trace(ctx, begin, func() (string, int64) { return statement, 0 }, err)
+}
 
 func TestTaskBrowserListReturnsSafePagedOwnerScopedContract(t *testing.T) {
 	router, tokens, repository, _ := newTaskBrowserFixture(t)
@@ -41,7 +54,7 @@ func TestTaskBrowserListReturnsSafePagedOwnerScopedContract(t *testing.T) {
 	require.Equal(t, http.StatusOK, response.Code, response.Body.String())
 	var listed TaskListResponse
 	require.NoError(t, json.Unmarshal(response.Body.Bytes(), &listed))
-	assert.Equal(t, 16, listed.Total)
+	assert.Equal(t, int64(16), listed.Total)
 	assert.Equal(t, 1, listed.Page)
 	assert.Equal(t, 5, listed.PageSize)
 	require.Len(t, listed.Items, 5)
@@ -59,7 +72,7 @@ func TestTaskBrowserListReturnsSafePagedOwnerScopedContract(t *testing.T) {
 	global := performTaskJSON(t, router, tokens["auditor"], http.MethodGet, "/tasks?page=2&page_size=20", "", nil)
 	require.Equal(t, http.StatusOK, global.Code, global.Body.String())
 	require.NoError(t, json.Unmarshal(global.Body.Bytes(), &listed))
-	assert.Equal(t, 24, listed.Total)
+	assert.Equal(t, int64(24), listed.Total)
 	assert.Equal(t, 2, listed.Page)
 	assert.Len(t, listed.Items, 4)
 }
@@ -87,12 +100,35 @@ func TestTaskBrowserPaginationDefaultsCapsAndRejectsInvalidValues(t *testing.T) 
 	require.NoError(t, json.Unmarshal(response.Body.Bytes(), &listed))
 	assert.Equal(t, 100, listed.PageSize)
 	assert.Len(t, listed.Items, 100)
+	response = performTaskJSON(t, router, tokens["alice"], http.MethodGet, "/tasks?page=1000", "", nil)
+	require.Equal(t, http.StatusOK, response.Code, response.Body.String())
+	require.NoError(t, json.Unmarshal(response.Body.Bytes(), &listed))
+	assert.Equal(t, 1000, listed.Page)
 
-	for _, query := range []string{"?page=0", "?page=bad", "?page_size=0", "?page_size=bad"} {
+	for _, query := range []string{"?page=0", "?page=bad", "?page=1001", "?page=9223372036854775807", "?page_size=0", "?page_size=bad"} {
 		response = performTaskJSON(t, router, tokens["alice"], http.MethodGet, "/tasks"+query, "", nil)
 		assert.Equal(t, http.StatusBadRequest, response.Code, query)
 		assert.JSONEq(t, `{"error":"invalid task request"}`, response.Body.String(), query)
 	}
+}
+
+func TestTaskBrowserServiceRejectsPageBeyondMaximum(t *testing.T) {
+	service := NewService(NewMemoryRepository(), &recordingEngine{}, audit.NewService(audit.NewMemoryRepository()))
+	subject := identity.Subject{UserID: "user-alice", Username: "alice", Role: identity.RoleUser}
+	response, err := service.Browse(context.Background(), subject, 1000, 20)
+	require.NoError(t, err)
+	assert.Equal(t, 1000, response.Page)
+	_, err = service.Browse(context.Background(), subject, 1001, 20)
+	require.ErrorIs(t, err, ErrInvalid)
+}
+
+func TestTaskBrowserTotalUsesInt64Contract(t *testing.T) {
+	var responseTotal int64 = (TaskListResponse{}).Total
+	_, repositoryTotal, err := NewMemoryRepository().ListBrowser(context.Background(), TaskListQuery{})
+	require.NoError(t, err)
+	var checkedRepositoryTotal int64 = repositoryTotal
+	assert.Zero(t, responseTotal)
+	assert.Zero(t, checkedRepositoryTotal)
 }
 
 func TestTaskBrowserCanonicalizesOnlyRegisteredTaskTypeAliases(t *testing.T) {
@@ -237,12 +273,23 @@ func TestTaskBrowserGormRepositoryFiltersOwnerBeforePagingAndCountsFilteredTotal
 		})
 	}
 
+	capture := &taskQueryCaptureLogger{Interface: logger.Default.LogMode(logger.Silent)}
+	db.Config.Logger = capture
 	service := NewService(repository, &recordingEngine{}, audit.NewService(audit.NewMemoryRepository()))
 	listed, err := service.Browse(context.Background(), identity.Subject{UserID: "user-alice", Username: "alice", Role: identity.RoleUser}, 1, 1)
 	require.NoError(t, err)
-	assert.Equal(t, 2, listed.Total)
+	assert.Equal(t, int64(2), listed.Total)
 	require.Len(t, listed.Items, 1)
 	assert.Equal(t, "alice-01", listed.Items[0].ID)
+	require.NotEmpty(t, capture.statements)
+	listSQL := capture.statements[len(capture.statements)-1]
+	projection := strings.SplitN(listSQL, " from ", 2)[0]
+	for _, column := range []string{"id", "owner_username", "task_type", "status", "created_at", "updated_at"} {
+		assert.Contains(t, projection, column)
+	}
+	for _, forbidden := range []string{"*", "owner_user_id", "content", "params", "attachment_refs", "engine_session_id", "dispatch_error", "dispatch_claim_token", "dispatch_lease_until"} {
+		assert.NotContains(t, projection, forbidden)
+	}
 
 	_, err = repository.GetBrowser(context.Background(), "bob-19", "user-alice")
 	require.ErrorIs(t, err, ErrNotFound)

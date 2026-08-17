@@ -59,7 +59,7 @@ type Repository interface {
 	GetBrowser(context.Context, string, string) (*Task, error)
 	GetByEngineSessionID(context.Context, string) (*Task, error)
 	List(context.Context) ([]Task, error)
-	ListBrowser(context.Context, TaskListQuery) ([]Task, int, error)
+	ListBrowser(context.Context, TaskListQuery) ([]Task, int64, error)
 	ListRecoverable(context.Context, string, int) ([]Task, error)
 }
 
@@ -341,7 +341,7 @@ func (service *Service) Browse(ctx context.Context, subject identity.Subject, pa
 	if err != nil {
 		return TaskListResponse{}, err
 	}
-	if page < 1 || pageSize < 1 || pageSize > maxTaskPageSize || page-1 > int(^uint(0)>>1)/pageSize {
+	if page < 1 || page > maxTaskPage || pageSize < 1 || pageSize > maxTaskPageSize || page-1 > int(^uint(0)>>1)/pageSize {
 		return TaskListResponse{}, ErrInvalid
 	}
 	query.Limit = pageSize
@@ -896,7 +896,7 @@ func (repository *GormRepository) List(ctx context.Context) ([]Task, error) {
 	return tasks, err
 }
 
-func (repository *GormRepository) ListBrowser(ctx context.Context, query TaskListQuery) ([]Task, int, error) {
+func (repository *GormRepository) ListBrowser(ctx context.Context, query TaskListQuery) ([]Task, int64, error) {
 	db := txcontext.Gorm(ctx, repository.db).Model(&Task{})
 	if query.OwnerUserID != "" {
 		db = db.Where("owner_user_id = ?", query.OwnerUserID)
@@ -905,7 +905,8 @@ func (repository *GormRepository) ListBrowser(ctx context.Context, query TaskLis
 	if err := db.Count(&total).Error; err != nil {
 		return nil, 0, err
 	}
-	db = db.Order("created_at DESC, id DESC")
+	db = db.Select("id", "owner_username", "task_type", "status", "created_at", "updated_at").
+		Order("created_at DESC, id DESC")
 	if query.Offset > 0 {
 		db = db.Offset(query.Offset)
 	}
@@ -916,7 +917,7 @@ func (repository *GormRepository) ListBrowser(ctx context.Context, query TaskLis
 	if err := db.Find(&tasks).Error; err != nil {
 		return nil, 0, err
 	}
-	return tasks, int(total), nil
+	return tasks, total, nil
 }
 
 func (repository *GormRepository) ListRecoverable(ctx context.Context, afterID string, limit int) ([]Task, error) {
@@ -1576,7 +1577,7 @@ func (repository *MemoryRepository) List(_ context.Context) ([]Task, error) {
 	return tasks, nil
 }
 
-func (repository *MemoryRepository) ListBrowser(_ context.Context, query TaskListQuery) ([]Task, int, error) {
+func (repository *MemoryRepository) ListBrowser(_ context.Context, query TaskListQuery) ([]Task, int64, error) {
 	repository.mu.Lock()
 	defer repository.mu.Unlock()
 	tasks := make([]Task, 0, len(repository.tasks))
@@ -1593,7 +1594,7 @@ func (repository *MemoryRepository) ListBrowser(_ context.Context, query TaskLis
 	})
 	total := len(tasks)
 	if query.Offset >= total {
-		return []Task{}, total, nil
+		return []Task{}, int64(total), nil
 	}
 	if query.Offset > 0 {
 		tasks = tasks[query.Offset:]
@@ -1601,7 +1602,7 @@ func (repository *MemoryRepository) ListBrowser(_ context.Context, query TaskLis
 	if query.Limit > 0 && len(tasks) > query.Limit {
 		tasks = tasks[:query.Limit]
 	}
-	return tasks, total, nil
+	return tasks, int64(total), nil
 }
 
 func (repository *MemoryRepository) ListRecoverable(_ context.Context, afterID string, limit int) ([]Task, error) {

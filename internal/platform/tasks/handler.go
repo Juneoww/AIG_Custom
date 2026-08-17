@@ -19,6 +19,7 @@ type Handler struct {
 const (
 	defaultTaskPageSize = 20
 	maxTaskPageSize     = 100
+	maxTaskPage         = 1000
 )
 
 func NewHandler(service *Service, attachments ...*AttachmentService) *Handler {
@@ -70,7 +71,7 @@ func taskPage(c *gin.Context) (int, int, error) {
 	page, pageSize := 1, defaultTaskPageSize
 	if raw := c.Query("page"); raw != "" {
 		value, err := strconv.Atoi(raw)
-		if err != nil || value < 1 {
+		if err != nil || value < 1 || value > maxTaskPage {
 			return 0, 0, ErrInvalid
 		}
 		page = value
