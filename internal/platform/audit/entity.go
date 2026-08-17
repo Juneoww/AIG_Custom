@@ -23,6 +23,7 @@ const (
 	ActionAttachmentCreated          Action = "attachment.created"
 	ActionAttachmentChunkUploaded    Action = "attachment.chunk_uploaded"
 	ActionAttachmentMerged           Action = "attachment.merged"
+	ActionAttachmentDownloaded       Action = "attachment.downloaded"
 	ActionReportExported             Action = "report.exported"
 	ActionReportBackfilled           Action = "report.backfilled"
 	ActionBrandUpdated               Action = "brand.updated"

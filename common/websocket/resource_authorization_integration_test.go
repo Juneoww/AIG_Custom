@@ -6,11 +6,17 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
+	platformadmin "github.com/Juneoww/AIG_Custom/internal/platform/admin"
+	platformaudit "github.com/Juneoww/AIG_Custom/internal/platform/audit"
 	"github.com/Juneoww/AIG_Custom/internal/platform/identity"
+	platformmodels "github.com/Juneoww/AIG_Custom/internal/platform/models"
+	platformtasks "github.com/Juneoww/AIG_Custom/internal/platform/tasks"
 	"github.com/Juneoww/AIG_Custom/pkg/database"
 	"github.com/gin-gonic/gin"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
@@ -102,4 +108,80 @@ func TestTaskAndModelHandlersEnforceSubjectRoleMatrix(t *testing.T) {
 		require.Equal(t, http.StatusForbidden, request(t, tokens["alice"], http.MethodGet, "/models/bob-model", "").Code)
 		require.Equal(t, http.StatusForbidden, request(t, tokens["alice"], http.MethodPut, "/models/bob-model", `{"model":{"note":"forbidden"}}`).Code)
 	})
+}
+
+func TestAttachmentRouteOwnerAuditorAndAdminAuditAuthorization(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	ctx := context.Background()
+	identityService := identity.NewService(identity.NewMemoryRepository())
+	tokens := make(map[string]string)
+	subjects := make(map[string]identity.Subject)
+	for _, account := range []struct {
+		id, username string
+		role         identity.Role
+	}{
+		{id: "user-owner", username: "owner", role: identity.RoleUser},
+		{id: "user-other", username: "other", role: identity.RoleUser},
+		{id: "user-auditor", username: "auditor", role: identity.RoleAuditor},
+		{id: "user-admin", username: "admin", role: identity.RoleAdmin},
+	} {
+		_, err := identityService.CreateUser(ctx, identity.CreateUserInput{
+			ID: account.id, Username: account.username, Password: "test-password", Role: account.role,
+		})
+		require.NoError(t, err)
+		login, err := identityService.Authenticate(ctx, account.username, "test-password")
+		require.NoError(t, err)
+		tokens[account.username] = login.Token
+		subjects[account.username] = login.Subject
+	}
+
+	auditRepository := platformaudit.NewMemoryRepository()
+	auditService := platformaudit.NewService(auditRepository)
+	repository := platformtasks.NewMemoryRepository()
+	attachmentService, err := platformtasks.NewAttachmentService(repository, platformtasks.AttachmentConfig{
+		UploadDir: t.TempDir(), MaxFileBytes: 32, MaxChunkBytes: 8,
+	}, auditService)
+	require.NoError(t, err)
+	attachment, err := attachmentService.Upload(ctx, subjects["owner"], "private.txt", strings.NewReader("private"))
+	require.NoError(t, err)
+	taskService := platformtasks.NewService(repository, nil, auditService)
+	taskService.SetAttachmentService(attachmentService)
+	taskHandler := platformtasks.NewHandler(taskService, attachmentService)
+	keyring, err := platformmodels.NewKeyring("attachment-route-authorization", bytes.Repeat([]byte{7}, 32), nil)
+	require.NoError(t, err)
+	modelService := platformmodels.NewService(platformmodels.NewMemoryRepository(), keyring, auditService)
+	policy := identity.CookiePolicy{SessionCookieName: "aig_session"}
+	router := gin.New()
+	registerPlatformGovernanceRoutes(
+		router.Group("/api/v1/platform"), identityService, policy,
+		platformadmin.NewHandler(identityService, auditService), modelService, taskHandler,
+	)
+
+	download := func(username, attachmentID string) *httptest.ResponseRecorder {
+		request := httptest.NewRequest(http.MethodGet, "/api/v1/platform/tasks/attachments/"+attachmentID+"/download", nil)
+		request.AddCookie(&http.Cookie{Name: policy.SessionCookieName, Value: tokens[username]})
+		response := httptest.NewRecorder()
+		router.ServeHTTP(response, request)
+		return response
+	}
+
+	ownerResponse := download("owner", attachment.ID)
+	require.Equal(t, http.StatusOK, ownerResponse.Code)
+	assert.Equal(t, "private", ownerResponse.Body.String())
+	assert.Equal(t, http.StatusNotFound, download("other", attachment.ID).Code)
+	assert.Equal(t, http.StatusNotFound, download("other", "missing-attachment").Code)
+	assert.Equal(t, http.StatusForbidden, download("auditor", attachment.ID).Code)
+	assert.Equal(t, http.StatusForbidden, download("auditor", "missing-attachment").Code)
+	adminResponse := download("admin", attachment.ID)
+	require.Equal(t, http.StatusOK, adminResponse.Code)
+	assert.Equal(t, "private", adminResponse.Body.String())
+	assert.Equal(t, http.StatusNotFound, download("admin", "missing-attachment").Code)
+
+	events, err := auditRepository.List(ctx, platformaudit.Filter{
+		Action: platformaudit.ActionAttachmentDownloaded, ResourceID: attachment.ID,
+	})
+	require.NoError(t, err)
+	require.Len(t, events, 2)
+	assert.Equal(t, platformaudit.OutcomePending, events[0].Outcome)
+	assert.Equal(t, platformaudit.OutcomeSuccess, events[1].Outcome)
 }

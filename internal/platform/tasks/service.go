@@ -1045,6 +1045,7 @@ type AttachmentService struct {
 	audits     audit.Recorder
 	config     AttachmentConfig
 	now        func() time.Time
+	openFile   func(string) (*os.File, error)
 }
 
 func NewAttachmentService(repository PlatformTaskAttachmentRepository, config AttachmentConfig, audits audit.Recorder) (*AttachmentService, error) {
@@ -1060,7 +1061,10 @@ func NewAttachmentService(repository PlatformTaskAttachmentRepository, config At
 	if err := os.MkdirAll(config.UploadDir, 0700); err != nil {
 		return nil, errors.New("无法初始化附件目录")
 	}
-	return &AttachmentService{repository: repository, tasks: repository, audits: audits, config: config, now: func() time.Time { return time.Now().UTC() }}, nil
+	return &AttachmentService{
+		repository: repository, tasks: repository, audits: audits, config: config,
+		now: func() time.Time { return time.Now().UTC() }, openFile: os.Open,
+	}, nil
 }
 
 func (service *AttachmentService) MaxFileBytes() int64 { return service.config.MaxFileBytes }
@@ -1303,11 +1307,17 @@ func (service *AttachmentService) Merge(ctx context.Context, subject identity.Su
 }
 
 func (service *AttachmentService) Open(ctx context.Context, subject identity.Subject, id string) (*os.File, string, int64, error) {
+	if subject.Role == identity.RoleAuditor {
+		return nil, "", 0, ErrForbidden
+	}
 	attachment, err := service.repository.GetAttachment(ctx, id)
 	if err != nil {
 		return nil, "", 0, err
 	}
-	if !canReadAttachment(subject, attachment) {
+	if subject.Role == identity.RoleUser && subject.UserID != attachment.OwnerUserID {
+		return nil, "", 0, ErrNotFound
+	}
+	if subject.Role != identity.RoleUser && subject.Role != identity.RoleAdmin {
 		return nil, "", 0, ErrForbidden
 	}
 	if attachment.State != AttachmentStateReady {
@@ -1317,7 +1327,30 @@ func (service *AttachmentService) Open(ctx context.Context, subject identity.Sub
 	if err != nil {
 		return nil, "", 0, err
 	}
-	file, err := os.Open(path)
+	if subject.Role == identity.RoleAdmin && subject.UserID != attachment.OwnerUserID {
+		info, statErr := os.Stat(path)
+		if statErr != nil || !info.Mode().IsRegular() {
+			return nil, "", 0, ErrNotFound
+		}
+		metadata := map[string]any{
+			"attachment_id":     attachment.ID,
+			"owner_user_id":     attachment.OwnerUserID,
+			"governance_action": "cross_owner_download_authorized",
+		}
+		// Success records durable governance authorization, not downstream
+		// file-stream delivery. The authorization must precede Storage Open;
+		// later I/O failures return no bytes and do not change that decision.
+		mutation, auditErr := audit.BeginMutation(ctx, service.audits, subject, audit.EventInput{
+			Action: audit.ActionAttachmentDownloaded, ResourceType: "attachment", ResourceID: attachment.ID, Metadata: metadata,
+		})
+		if auditErr != nil {
+			return nil, "", 0, auditErr
+		}
+		if auditErr := mutation.Succeeded(ctx, attachment.ID, metadata); auditErr != nil {
+			return nil, "", 0, auditErr
+		}
+	}
+	file, err := service.openFile(path)
 	if err != nil {
 		return nil, "", 0, ErrNotFound
 	}
@@ -1390,11 +1423,6 @@ func validAttachmentFilename(filename string) bool {
 
 func attachmentCreator(subject identity.Subject) bool {
 	return subject.UserID != "" && (subject.Role == identity.RoleUser || subject.Role == identity.RoleAdmin)
-}
-
-func canReadAttachment(subject identity.Subject, attachment *Attachment) bool {
-	return subject.Role == identity.RoleAdmin || subject.Role == identity.RoleAuditor ||
-		subject.Role == identity.RoleUser && subject.UserID == attachment.OwnerUserID
 }
 
 func canWriteAttachment(subject identity.Subject, attachment *Attachment) bool {

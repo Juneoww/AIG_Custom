@@ -93,6 +93,8 @@ func TestAttachmentHandlerReturnsOnlyOpaqueMetadataAndEnforcesOwnerDownload(t *t
 	for _, input := range []identity.CreateUserInput{
 		{ID: "user-alice", Username: "alice", Password: "secret", Role: identity.RoleUser},
 		{ID: "user-bob", Username: "bob", Password: "secret", Role: identity.RoleUser},
+		{ID: "user-auditor", Username: "auditor", Password: "secret", Role: identity.RoleAuditor},
+		{ID: "user-admin", Username: "admin", Password: "secret", Role: identity.RoleAdmin},
 	} {
 		_, err := identityService.CreateUser(ctx, input)
 		require.NoError(t, err)
@@ -101,8 +103,14 @@ func TestAttachmentHandlerReturnsOnlyOpaqueMetadataAndEnforcesOwnerDownload(t *t
 	require.NoError(t, err)
 	bob, err := identityService.Authenticate(ctx, "bob", "secret")
 	require.NoError(t, err)
+	auditor, err := identityService.Authenticate(ctx, "auditor", "secret")
+	require.NoError(t, err)
+	admin, err := identityService.Authenticate(ctx, "admin", "secret")
+	require.NoError(t, err)
 	repository := NewMemoryRepository()
-	attachmentService, err := NewAttachmentService(repository, AttachmentConfig{UploadDir: t.TempDir(), MaxFileBytes: 16, MaxChunkBytes: 8}, audit.NewService(audit.NewMemoryRepository()))
+	auditRepository := audit.NewMemoryRepository()
+	auditService := audit.NewService(auditRepository)
+	attachmentService, err := NewAttachmentService(repository, AttachmentConfig{UploadDir: t.TempDir(), MaxFileBytes: 16, MaxChunkBytes: 8}, auditService)
 	require.NoError(t, err)
 	taskService := NewService(repository, &recordingEngine{}, audit.NewService(audit.NewMemoryRepository()))
 	taskService.SetAttachmentService(attachmentService)
@@ -128,10 +136,37 @@ func TestAttachmentHandlerReturnsOnlyOpaqueMetadataAndEnforcesOwnerDownload(t *t
 	require.NoError(t, json.Unmarshal(response.Body.Bytes(), &attachment))
 
 	request = httptest.NewRequest(http.MethodGet, "/tasks/attachments/"+attachment.ID+"/download", nil)
+	request.AddCookie(&http.Cookie{Name: "aig_session", Value: alice.Token})
+	response = httptest.NewRecorder()
+	router.ServeHTTP(response, request)
+	require.Equal(t, http.StatusOK, response.Code)
+	assert.Equal(t, "private", response.Body.String())
+
+	request = httptest.NewRequest(http.MethodGet, "/tasks/attachments/"+attachment.ID+"/download", nil)
 	request.AddCookie(&http.Cookie{Name: "aig_session", Value: bob.Token})
 	response = httptest.NewRecorder()
 	router.ServeHTTP(response, request)
-	assert.Equal(t, http.StatusForbidden, response.Code)
+	assert.Equal(t, http.StatusNotFound, response.Code)
+
+	for _, attachmentID := range []string{attachment.ID, "missing-attachment"} {
+		request = httptest.NewRequest(http.MethodGet, "/tasks/attachments/"+attachmentID+"/download", nil)
+		request.AddCookie(&http.Cookie{Name: "aig_session", Value: auditor.Token})
+		response = httptest.NewRecorder()
+		router.ServeHTTP(response, request)
+		assert.Equal(t, http.StatusForbidden, response.Code)
+	}
+
+	request = httptest.NewRequest(http.MethodGet, "/tasks/attachments/"+attachment.ID+"/download", nil)
+	request.AddCookie(&http.Cookie{Name: "aig_session", Value: admin.Token})
+	response = httptest.NewRecorder()
+	router.ServeHTTP(response, request)
+	require.Equal(t, http.StatusOK, response.Code)
+	assert.Equal(t, "private", response.Body.String())
+	events, err := auditRepository.List(ctx, audit.Filter{Action: audit.ActionAttachmentDownloaded, ResourceID: attachment.ID})
+	require.NoError(t, err)
+	require.Len(t, events, 2)
+	assert.Equal(t, audit.OutcomePending, events[0].Outcome)
+	assert.Equal(t, audit.OutcomeSuccess, events[1].Outcome)
 }
 
 func newTaskHandlerFixture(t *testing.T) (http.Handler, map[string]string, *recordingEngine) {
