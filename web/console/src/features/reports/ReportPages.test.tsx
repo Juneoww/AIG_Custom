@@ -7,7 +7,7 @@
  */
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { act, fireEvent, render, screen, waitFor } from '@testing-library/react'
-import { MemoryRouter, Route, Routes } from 'react-router-dom'
+import { MemoryRouter, Route, Routes, useNavigate } from 'react-router-dom'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { ThemeProvider } from '../../shared/theme/ThemeProvider'
@@ -62,6 +62,16 @@ function renderAt(page: React.ReactNode, path: string, routePath: string) {
         </MemoryRouter>
       </QueryClientProvider>
     </ThemeProvider>,
+  )
+}
+
+function ReportSwitchHarness() {
+  const navigate = useNavigate()
+  return (
+    <>
+      <button type="button" onClick={() => navigate('/reports/report-B')}>切换报告</button>
+      <Routes><Route path="/reports/:reportId" element={<ReportDetailPage />} /></Routes>
+    </>
   )
 }
 
@@ -224,5 +234,53 @@ describe('ReportDetailPage', () => {
 
     expect(createObjectURL).not.toHaveBeenCalled()
     expect(click).not.toHaveBeenCalled()
+  })
+
+  it('同组件切换报告时隔离旧路由导出且新报告仍可正常导出', async () => {
+    let resolveA: ((response: Response) => void) | undefined
+    let signalA: AbortSignal | undefined
+    const pdf = () => new Response(new Uint8Array([0x25, 0x50, 0x44, 0x46]), {
+      status: 200, headers: { 'Content-Type': 'application/pdf' },
+    })
+    const fetchMock = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input)
+      if (init?.method === 'POST' && url.includes('/report-A/')) {
+        signalA = init.signal ?? undefined
+        return new Promise<Response>((resolve) => { resolveA = resolve })
+      }
+      if (init?.method === 'POST' && url.includes('/report-B/')) return Promise.resolve(pdf())
+      if (url.endsWith('/report-B')) return Promise.resolve(jsonResponse(detail({ id: 'report-B' })))
+      return Promise.resolve(jsonResponse(detail({ id: 'report-A' })))
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    const createObjectURL = vi.fn().mockReturnValue('blob:current-report')
+    const revokeObjectURL = vi.fn()
+    const NativeURL = URL
+    class TestURL extends NativeURL {
+      static createObjectURL = createObjectURL
+      static revokeObjectURL = revokeObjectURL
+    }
+    vi.stubGlobal('URL', TestURL)
+    const click = vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => undefined)
+    renderAt(<ReportSwitchHarness />, '/reports/report-A', '*')
+
+    fireEvent.click(await screen.findByRole('button', { name: '导出 PDF' }))
+    await waitFor(() => expect(resolveA).toBeTypeOf('function'))
+    fireEvent.click(screen.getByRole('button', { name: '切换报告' }))
+    expect(await screen.findByText('report-B')).toBeInTheDocument()
+    expect.soft(signalA?.aborted).toBe(true)
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument()
+    const exportB = screen.getByRole('button', { name: /导出/ })
+    expect(exportB).toBeEnabled()
+    fireEvent.click(exportB)
+    await waitFor(() => expect(click).toHaveBeenCalledTimes(1))
+
+    await act(async () => {
+      resolveA?.(pdf())
+      await Promise.resolve()
+      await Promise.resolve()
+    })
+    expect(createObjectURL).toHaveBeenCalledTimes(1)
+    await waitFor(() => expect(revokeObjectURL).toHaveBeenCalledWith('blob:current-report'))
   })
 })

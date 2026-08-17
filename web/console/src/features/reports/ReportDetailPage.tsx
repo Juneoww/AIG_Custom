@@ -7,7 +7,7 @@
  */
 import { Button, Card, MessageBar, MessageBarBody, Text, makeStyles, tokens } from '@fluentui/react-components'
 import { useMutation, useQuery } from '@tanstack/react-query'
-import { useEffect, useRef } from 'react'
+import { useEffect, useLayoutEffect, useRef } from 'react'
 import { useParams } from 'react-router-dom'
 
 import { ApiError } from '../../shared/api/errors'
@@ -47,6 +47,7 @@ export function ReportDetailPage() {
   const exporting = useRef(false)
   const mounted = useRef(false)
   const exportEpoch = useRef(0)
+  const activeReportID = useRef(reportId)
   const activeURLs = useRef(new Set<string>())
   const releaseTimers = useRef(new Set<number>())
   const query = useQuery({
@@ -64,16 +65,17 @@ export function ReportDetailPage() {
       exportController.current = controller
       const epoch = ++exportEpoch.current
       try {
-        return { blob: await exportReportPDF(id, controller.signal), epoch }
+        return { blob: await exportReportPDF(id, controller.signal), epoch, reportID: id }
       } finally {
         if (exportEpoch.current === epoch) exporting.current = false
       }
     },
-    onSuccess: ({ blob, epoch }) => {
-      if (!mounted.current || exportEpoch.current !== epoch) return
+    onSuccess: ({ blob, epoch, reportID }) => {
+      const isCurrent = () => mounted.current && exportEpoch.current === epoch && activeReportID.current === reportID
+      if (!isCurrent()) return
       const url = URL.createObjectURL(blob)
       activeURLs.current.add(url)
-      if (!mounted.current || exportEpoch.current !== epoch) {
+      if (!isCurrent()) {
         URL.revokeObjectURL(url)
         activeURLs.current.delete(url)
         return
@@ -81,13 +83,13 @@ export function ReportDetailPage() {
       const anchor = document.createElement('a')
       anchor.href = url
       anchor.download = '安全报告.pdf'
-      if (!mounted.current || exportEpoch.current !== epoch) {
+      if (!isCurrent()) {
         URL.revokeObjectURL(url)
         activeURLs.current.delete(url)
         return
       }
       anchor.click()
-      if (!mounted.current || exportEpoch.current !== epoch) {
+      if (!isCurrent()) {
         URL.revokeObjectURL(url)
         activeURLs.current.delete(url)
         return
@@ -100,18 +102,34 @@ export function ReportDetailPage() {
       releaseTimers.current.add(timer)
     },
   })
+  const resetExportMutation = mutation.reset
   useEffect(() => {
     mounted.current = true
     return () => {
       mounted.current = false
+      activeReportID.current = ''
       exportEpoch.current += 1
+      exporting.current = false
       exportController.current?.abort()
+      exportController.current = null
       for (const timer of releaseTimers.current) window.clearTimeout(timer)
       for (const url of activeURLs.current) URL.revokeObjectURL(url)
       releaseTimers.current.clear()
       activeURLs.current.clear()
     }
   }, [])
+  useLayoutEffect(() => {
+    activeReportID.current = reportId
+    exportEpoch.current += 1
+    exporting.current = false
+    exportController.current?.abort()
+    exportController.current = null
+    for (const timer of releaseTimers.current) window.clearTimeout(timer)
+    for (const url of activeURLs.current) URL.revokeObjectURL(url)
+    releaseTimers.current.clear()
+    activeURLs.current.clear()
+    resetExportMutation()
+  }, [reportId, resetExportMutation])
 
   if (query.isPending) return <StatePanel state="loading" title="正在加载安全报告" />
   if (query.isError) return <DetailError error={query.error} retry={() => void query.refetch()} />
