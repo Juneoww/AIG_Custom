@@ -69,6 +69,15 @@ type TaskListQuery struct {
 	Offset      int
 }
 
+// RecentRepository is an optional bounded browser-summary read model.
+type RecentRepository interface {
+	ListRecent(context.Context, TaskListQuery) ([]Task, error)
+}
+
+type dashboardTaskStatusRepository interface {
+	DashboardTaskSucceeded(context.Context, string, string) (bool, error)
+}
+
 type Service struct {
 	repository          Repository
 	engine              EngineAdapter
@@ -355,6 +364,41 @@ func (service *Service) Browse(ctx context.Context, subject identity.Subject, pa
 		items = append(items, taskSummaryOf(&tasks[index]))
 	}
 	return TaskListResponse{Items: items, Total: total, Page: page, PageSize: pageSize}, nil
+}
+
+func (service *Service) Recent(ctx context.Context, subject identity.Subject, limit int) ([]TaskSummary, error) {
+	query, err := taskListQueryFor(subject)
+	if err != nil {
+		return nil, err
+	}
+	if limit < 1 || limit > 5 {
+		return nil, ErrInvalid
+	}
+	repository, ok := service.repository.(RecentRepository)
+	if !ok {
+		return nil, ErrInvalid
+	}
+	query.Limit = limit
+	recent, err := repository.ListRecent(ctx, query)
+	if err != nil {
+		return nil, err
+	}
+	items := make([]TaskSummary, 0, len(recent))
+	for index := range recent {
+		items = append(items, taskSummaryOf(&recent[index]))
+	}
+	return items, nil
+}
+
+func (service *Service) DashboardTaskSucceeded(ctx context.Context, taskID, ownerUserID string) (bool, error) {
+	if taskID == "" || ownerUserID == "" {
+		return false, nil
+	}
+	repository, ok := service.repository.(dashboardTaskStatusRepository)
+	if !ok {
+		return false, ErrInvalid
+	}
+	return repository.DashboardTaskSucceeded(ctx, taskID, ownerUserID)
 }
 
 func (service *Service) List(ctx context.Context, subject identity.Subject) ([]View, error) {
@@ -918,6 +962,20 @@ func (repository *GormRepository) ListBrowser(ctx context.Context, query TaskLis
 		return nil, 0, err
 	}
 	return tasks, total, nil
+}
+
+func (repository *GormRepository) ListRecent(ctx context.Context, query TaskListQuery) ([]Task, error) {
+	db := txcontext.Gorm(ctx, repository.db).Model(&Task{}).
+		Select("id", "owner_username", "task_type", "status", "created_at", "updated_at").
+		Order("updated_at DESC, id DESC").Limit(query.Limit)
+	if query.OwnerUserID != "" {
+		db = db.Where("owner_user_id = ?", query.OwnerUserID)
+	}
+	var recent []Task
+	if err := db.Find(&recent).Error; err != nil {
+		return nil, err
+	}
+	return recent, nil
 }
 
 func (repository *GormRepository) ListRecoverable(ctx context.Context, afterID string, limit int) ([]Task, error) {
@@ -1653,6 +1711,37 @@ func (repository *MemoryRepository) ListBrowser(_ context.Context, query TaskLis
 		tasks = tasks[:query.Limit]
 	}
 	return tasks, int64(total), nil
+}
+
+func (repository *MemoryRepository) ListRecent(_ context.Context, query TaskListQuery) ([]Task, error) {
+	repository.mu.Lock()
+	defer repository.mu.Unlock()
+	recent := make([]Task, 0, len(repository.tasks))
+	for _, task := range repository.tasks {
+		if query.OwnerUserID == "" || task.OwnerUserID == query.OwnerUserID {
+			recent = append(recent, Task{
+				ID: task.ID, OwnerUsername: task.OwnerUsername, TaskType: task.TaskType, Status: task.Status,
+				CreatedAt: task.CreatedAt, UpdatedAt: task.UpdatedAt,
+			})
+		}
+	}
+	sort.Slice(recent, func(left, right int) bool {
+		if recent[left].UpdatedAt.Equal(recent[right].UpdatedAt) {
+			return recent[left].ID > recent[right].ID
+		}
+		return recent[left].UpdatedAt.After(recent[right].UpdatedAt)
+	})
+	if query.Limit > 0 && len(recent) > query.Limit {
+		recent = recent[:query.Limit]
+	}
+	return recent, nil
+}
+
+func (repository *MemoryRepository) DashboardTaskSucceeded(_ context.Context, taskID, ownerUserID string) (bool, error) {
+	repository.mu.Lock()
+	defer repository.mu.Unlock()
+	task, exists := repository.tasks[taskID]
+	return exists && task.OwnerUserID == ownerUserID && task.Status == StatusSucceeded, nil
 }
 
 func (repository *MemoryRepository) ListRecoverable(_ context.Context, afterID string, limit int) ([]Task, error) {

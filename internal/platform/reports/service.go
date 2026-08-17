@@ -126,6 +126,26 @@ func (service *Service) Trend(ctx context.Context, subject identity.Subject, day
 	return service.repository.Trend(ctx, TrendQuery{Now: now, Days: days, OwnerUserID: query.OwnerUserID})
 }
 
+func (service *Service) Dashboard(ctx context.Context, subject identity.Subject, from, to time.Time, attentionLimit int) (DashboardProjection, error) {
+	query, err := listQueryFor(subject)
+	if err != nil {
+		return DashboardProjection{}, err
+	}
+	repository, ok := service.repository.(DashboardRepository)
+	if !ok {
+		return DashboardProjection{}, ErrInvalidSnapshot
+	}
+	return repository.Dashboard(ctx, DashboardQuery{
+		OwnerUserID: query.OwnerUserID, From: from, To: to, AttentionLimit: attentionLimit,
+	})
+}
+
+func (service *Service) SetDashboardTaskVerifier(verifier DashboardTaskVerifier) {
+	if repository, ok := service.repository.(*MemoryRepository); ok {
+		repository.SetDashboardTaskVerifier(verifier)
+	}
+}
+
 func (service *Service) ExportPDF(ctx context.Context, subject identity.Subject, reportID string) ([]byte, error) {
 	snapshot, err := service.Get(ctx, subject, reportID)
 	if err != nil {

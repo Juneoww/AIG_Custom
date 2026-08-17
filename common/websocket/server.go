@@ -37,6 +37,7 @@ import (
 	platformadmin "github.com/Juneoww/AIG_Custom/internal/platform/admin"
 	platformaudit "github.com/Juneoww/AIG_Custom/internal/platform/audit"
 	platformbrand "github.com/Juneoww/AIG_Custom/internal/platform/brand"
+	platformdashboard "github.com/Juneoww/AIG_Custom/internal/platform/dashboard"
 	"github.com/Juneoww/AIG_Custom/internal/platform/identity"
 	platformknowledge "github.com/Juneoww/AIG_Custom/internal/platform/knowledge"
 	platformmodels "github.com/Juneoww/AIG_Custom/internal/platform/models"
@@ -140,6 +141,7 @@ func RunWebServer(options *version.Options) {
 	taskManager.SetPlatformTaskEventSink(platformTaskService)
 	platformTaskHandler := platformtasks.NewHandler(platformTaskService, attachmentService)
 	reportHandler := platformreports.NewHandler(reportService)
+	dashboardHandler := platformdashboard.NewHandler(platformdashboard.NewService(reportService, platformTaskService))
 	brandHandler := platformbrand.NewHandler(brandService)
 	err = taskManager.taskStore.ResetRunningTasks()
 	if err != nil {
@@ -158,6 +160,7 @@ func RunWebServer(options *version.Options) {
 		identity.RegisterRoutesWithObserver(auth, identityService, identityPolicy, auditService)
 		platformGroup := v1.Group("/platform")
 		registerPlatformGovernanceRoutes(platformGroup, identityService, identityPolicy, adminHandler, platformModelService, platformTaskHandler)
+		registerPlatformDashboardRoutes(platformGroup, dashboardHandler)
 		registerPlatformReportRoutes(platformGroup, reportHandler, brandHandler)
 		// 1. 知识库模块
 		knowledge := v1.Group("/knowledge")
@@ -330,6 +333,12 @@ func registerPlatformGovernanceRoutes(
 	registerGovernanceModelRoutes(group.Group("/models"), modelService)
 	if len(taskHandlers) > 0 && taskHandlers[0] != nil {
 		taskHandlers[0].Register(group.Group("/tasks"))
+	}
+}
+
+func registerPlatformDashboardRoutes(group *gin.RouterGroup, handler *platformdashboard.Handler) {
+	if handler != nil {
+		handler.Register(group)
 	}
 }
 

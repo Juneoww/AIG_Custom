@@ -37,10 +37,56 @@ type pageRepository interface {
 	ListPage(context.Context, ListQuery) ([]Snapshot, int64, error)
 }
 
+type DashboardQuery struct {
+	OwnerUserID    string
+	From           time.Time
+	To             time.Time
+	AttentionLimit int
+}
+
+type DashboardProjection struct {
+	SnapshotCount   int
+	ScoreSum        int
+	MappingVersions []string
+	Risk            RiskSummary
+	Trend           []DashboardTrendPoint
+	Attention       []DashboardAttention
+}
+
+type DashboardTrendPoint struct {
+	Date      time.Time
+	Completed int
+	ScoreSum  int
+	High      int
+	Medium    int
+	Low       int
+}
+
+type DashboardAttention struct {
+	ReportID    string
+	TaskID      string
+	TaskType    string
+	CompletedAt time.Time
+	Score       int
+	High        int
+	Medium      int
+	Low         int
+	ProductName string
+}
+
+// DashboardRepository is an optional bounded read model. Keeping it separate
+// avoids expanding the persistence contract required by task/report writers.
+type DashboardRepository interface {
+	Dashboard(context.Context, DashboardQuery) (DashboardProjection, error)
+}
+
+type DashboardTaskVerifier func(context.Context, string, string) (bool, error)
+
 type MemoryRepository struct {
-	mu       sync.RWMutex
-	byID     map[string]*Snapshot
-	byTaskID map[string]string
+	mu                     sync.RWMutex
+	byID                   map[string]*Snapshot
+	byTaskID               map[string]string
+	dashboardTaskSucceeded DashboardTaskVerifier
 }
 
 type GormRepository struct{ db *gorm.DB }
@@ -202,8 +248,96 @@ func (repository *GormRepository) Trend(ctx context.Context, query TrendQuery) (
 	return completeTrend(records, query), nil
 }
 
+func (repository *GormRepository) Dashboard(ctx context.Context, query DashboardQuery) (DashboardProjection, error) {
+	if err := validateDashboardQuery(query); err != nil {
+		return DashboardProjection{}, err
+	}
+	base := repository.dashboardBase(ctx, query)
+	type aggregateRecord struct {
+		SnapshotCount   int             `gorm:"column:snapshot_count"`
+		ScoreSum        int             `gorm:"column:score_sum"`
+		High            int             `gorm:"column:high"`
+		Medium          int             `gorm:"column:medium"`
+		Low             int             `gorm:"column:low"`
+		MappingVersions json.RawMessage `gorm:"column:mapping_versions"`
+	}
+	var aggregate aggregateRecord
+	if err := base.Session(&gorm.Session{}).Select(`
+		COUNT(*) AS snapshot_count,
+		COALESCE(SUM((reports.risk_summary ->> 'score')::integer), 0) AS score_sum,
+		COALESCE(SUM((reports.risk_summary ->> 'high')::integer), 0) AS high,
+		COALESCE(SUM((reports.risk_summary ->> 'medium')::integer), 0) AS medium,
+		COALESCE(SUM((reports.risk_summary ->> 'low')::integer), 0) AS low,
+		COALESCE(jsonb_agg(DISTINCT (reports.risk_summary ->> 'mapping_version') ORDER BY (reports.risk_summary ->> 'mapping_version'))
+			FILTER (WHERE (reports.risk_summary ->> 'mapping_version') <> ''), '[]'::jsonb) AS mapping_versions`).
+		Scan(&aggregate).Error; err != nil {
+		return DashboardProjection{}, err
+	}
+	projection := DashboardProjection{
+		SnapshotCount: aggregate.SnapshotCount,
+		ScoreSum:      aggregate.ScoreSum,
+		Risk:          RiskSummary{High: aggregate.High, Medium: aggregate.Medium, Low: aggregate.Low},
+	}
+	if len(aggregate.MappingVersions) > 0 && json.Unmarshal(aggregate.MappingVersions, &projection.MappingVersions) != nil {
+		return DashboardProjection{}, ErrInvalidSnapshot
+	}
+
+	if err := base.Session(&gorm.Session{}).Select(`
+		date_trunc('day', reports.completed_at AT TIME ZONE 'UTC') AS date,
+		COUNT(*) AS completed,
+		COALESCE(SUM((reports.risk_summary ->> 'score')::integer), 0) AS score_sum,
+		COALESCE(SUM((reports.risk_summary ->> 'high')::integer), 0) AS high,
+		COALESCE(SUM((reports.risk_summary ->> 'medium')::integer), 0) AS medium,
+		COALESCE(SUM((reports.risk_summary ->> 'low')::integer), 0) AS low`).
+		Group("date_trunc('day', reports.completed_at AT TIME ZONE 'UTC')").
+		Order("date ASC").Scan(&projection.Trend).Error; err != nil {
+		return DashboardProjection{}, err
+	}
+
+	attention := base.Session(&gorm.Session{}).
+		Select(`reports.id AS report_id, reports.task_id, reports.task_type, reports.completed_at,
+			(reports.risk_summary ->> 'score')::integer AS score,
+			(reports.risk_summary ->> 'high')::integer AS high,
+			(reports.risk_summary ->> 'medium')::integer AS medium,
+			(reports.risk_summary ->> 'low')::integer AS low,
+			COALESCE(reports.brand_snapshot ->> 'product_name', '') AS product_name`).
+		Where("((reports.risk_summary ->> 'high')::integer > 0 OR (reports.risk_summary ->> 'score')::integer < 60)").
+		Order("high DESC, score ASC, completed_at DESC, report_id DESC").
+		Limit(query.AttentionLimit)
+	if err := attention.Scan(&projection.Attention).Error; err != nil {
+		return DashboardProjection{}, err
+	}
+	return projection, nil
+}
+
+func (repository *GormRepository) dashboardBase(ctx context.Context, query DashboardQuery) *gorm.DB {
+	db := txcontext.Gorm(ctx, repository.db).Table("report_snapshots AS reports").
+		Joins("JOIN platform_tasks AS tasks ON tasks.id = reports.task_id AND tasks.owner_user_id = reports.owner_user_id").
+		Where("tasks.status = ?", "succeeded").
+		Where("reports.completed_at >= ? AND reports.completed_at < ?", query.From.UTC(), query.To.UTC())
+	db = db.Where("jsonb_typeof(reports.risk_summary -> 'mapping_version') = 'string' AND btrim(reports.risk_summary ->> 'mapping_version') <> ''")
+	for field, maximum := range map[string]int{"score": 100, "high": 2147483647, "medium": 2147483647, "low": 2147483647} {
+		db = db.Where(dashboardIntegerIsValid(field, maximum))
+	}
+	if query.OwnerUserID != "" {
+		db = db.Where("reports.owner_user_id = ?", query.OwnerUserID)
+	}
+	return db
+}
+
+func dashboardIntegerIsValid(field string, maximum int) string {
+	expression := fmt.Sprintf("CASE WHEN jsonb_typeof(reports.risk_summary -> '%s') = 'number' THEN (reports.risk_summary ->> '%s')::numeric END", field, field)
+	return fmt.Sprintf("(%s BETWEEN 0 AND %d AND mod(%s, 1) = 0)", expression, maximum, expression)
+}
+
 func NewMemoryRepository() *MemoryRepository {
 	return &MemoryRepository{byID: map[string]*Snapshot{}, byTaskID: map[string]string{}}
+}
+
+func (repository *MemoryRepository) SetDashboardTaskVerifier(verifier DashboardTaskVerifier) {
+	repository.mu.Lock()
+	defer repository.mu.Unlock()
+	repository.dashboardTaskSucceeded = verifier
 }
 
 func (repository *MemoryRepository) Create(_ context.Context, snapshot *Snapshot) error {
@@ -335,6 +469,108 @@ func (repository *MemoryRepository) Trend(_ context.Context, query TrendQuery) (
 	repository.mu.RLock()
 	defer repository.mu.RUnlock()
 	return trendOfSnapshots(repository.byID, query)
+}
+
+func (repository *MemoryRepository) Dashboard(ctx context.Context, query DashboardQuery) (DashboardProjection, error) {
+	if err := validateDashboardQuery(query); err != nil {
+		return DashboardProjection{}, err
+	}
+	repository.mu.RLock()
+	verifier := repository.dashboardTaskSucceeded
+	type safeSnapshot struct {
+		ID, TaskID, OwnerUserID, TaskType, ProductName string
+		CompletedAt                                    time.Time
+		Risk                                           RiskSummary
+	}
+	snapshots := make([]safeSnapshot, 0, len(repository.byID))
+	for _, snapshot := range repository.byID {
+		snapshots = append(snapshots, safeSnapshot{
+			ID: snapshot.ID, TaskID: snapshot.TaskID, OwnerUserID: snapshot.OwnerUserID, TaskType: snapshot.TaskType,
+			ProductName: snapshot.Brand.ProductName, CompletedAt: snapshot.CompletedAt, Risk: snapshot.Risk,
+		})
+	}
+	repository.mu.RUnlock()
+	projection := DashboardProjection{}
+	if verifier == nil {
+		return projection, nil
+	}
+	versions := map[string]struct{}{}
+	trend := map[time.Time]DashboardTrendPoint{}
+	for _, snapshot := range snapshots {
+		if query.OwnerUserID != "" && snapshot.OwnerUserID != query.OwnerUserID ||
+			snapshot.CompletedAt.Before(query.From) || !snapshot.CompletedAt.Before(query.To) || !validDashboardRisk(snapshot.Risk) {
+			continue
+		}
+		succeeded, err := verifier(ctx, snapshot.TaskID, snapshot.OwnerUserID)
+		if err != nil {
+			return DashboardProjection{}, err
+		}
+		if !succeeded {
+			continue
+		}
+		projection.SnapshotCount++
+		projection.ScoreSum += snapshot.Risk.Score
+		projection.Risk.High += snapshot.Risk.High
+		projection.Risk.Medium += snapshot.Risk.Medium
+		projection.Risk.Low += snapshot.Risk.Low
+		if snapshot.Risk.MappingVersion != "" {
+			versions[snapshot.Risk.MappingVersion] = struct{}{}
+		}
+		day := utcDay(snapshot.CompletedAt)
+		point := trend[day]
+		point.Date = day
+		point.Completed++
+		point.ScoreSum += snapshot.Risk.Score
+		point.High += snapshot.Risk.High
+		point.Medium += snapshot.Risk.Medium
+		point.Low += snapshot.Risk.Low
+		trend[day] = point
+		if snapshot.Risk.High > 0 || snapshot.Risk.Score < 60 {
+			projection.Attention = append(projection.Attention, DashboardAttention{
+				ReportID: snapshot.ID, TaskID: snapshot.TaskID, TaskType: snapshot.TaskType,
+				CompletedAt: snapshot.CompletedAt.UTC(), Score: snapshot.Risk.Score,
+				High: snapshot.Risk.High, Medium: snapshot.Risk.Medium, Low: snapshot.Risk.Low,
+				ProductName: snapshot.ProductName,
+			})
+		}
+	}
+	for version := range versions {
+		projection.MappingVersions = append(projection.MappingVersions, version)
+	}
+	sort.Strings(projection.MappingVersions)
+	for _, point := range trend {
+		projection.Trend = append(projection.Trend, point)
+	}
+	sort.Slice(projection.Trend, func(left, right int) bool { return projection.Trend[left].Date.Before(projection.Trend[right].Date) })
+	sort.Slice(projection.Attention, func(left, right int) bool {
+		first, second := projection.Attention[left], projection.Attention[right]
+		if first.High != second.High {
+			return first.High > second.High
+		}
+		if first.Score != second.Score {
+			return first.Score < second.Score
+		}
+		if !first.CompletedAt.Equal(second.CompletedAt) {
+			return first.CompletedAt.After(second.CompletedAt)
+		}
+		return first.ReportID > second.ReportID
+	})
+	if len(projection.Attention) > query.AttentionLimit {
+		projection.Attention = projection.Attention[:query.AttentionLimit]
+	}
+	return projection, nil
+}
+
+func validDashboardRisk(risk RiskSummary) bool {
+	return strings.TrimSpace(risk.MappingVersion) != "" && risk.Score >= 0 && risk.Score <= 100 &&
+		risk.High >= 0 && risk.Medium >= 0 && risk.Low >= 0
+}
+
+func validateDashboardQuery(query DashboardQuery) error {
+	if query.From.IsZero() || query.To.IsZero() || !query.To.After(query.From) || query.AttentionLimit < 1 || query.AttentionLimit > 5 {
+		return ErrInvalidSnapshot
+	}
+	return nil
 }
 
 func trendOfSnapshots(snapshots map[string]*Snapshot, query TrendQuery) ([]TrendPoint, error) {
