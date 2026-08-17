@@ -27,14 +27,11 @@ type TaskListResponse struct {
 // Raw content, raw params, credentials, URLs, attachment IDs and engine data
 // are intentionally not representable by this type.
 type TaskInputSummary struct {
-	AgentID      string   `json:"agent_id,omitempty"`
-	Language     string   `json:"language,omitempty"`
-	Thread       int      `json:"thread,omitempty"`
-	Timeout      int      `json:"timeout,omitempty"`
-	TargetCount  int      `json:"target_count,omitempty"`
-	DatasetNames []string `json:"dataset_names,omitempty"`
-	NumPrompts   int      `json:"num_prompts,omitempty"`
-	Techniques   []string `json:"techniques,omitempty"`
+	Language    string `json:"language,omitempty"`
+	Thread      int    `json:"thread,omitempty"`
+	Timeout     int    `json:"timeout,omitempty"`
+	TargetCount int    `json:"target_count,omitempty"`
+	NumPrompts  int    `json:"num_prompts,omitempty"`
 }
 
 type TaskDetail struct {
@@ -49,7 +46,7 @@ type TaskDetail struct {
 
 func taskSummaryOf(task *Task) TaskSummary {
 	return TaskSummary{
-		ID: task.ID, Owner: task.OwnerUsername, TaskType: task.TaskType, Status: task.Status,
+		ID: task.ID, Owner: task.OwnerUsername, TaskType: canonicalTaskType(task.TaskType), Status: task.Status,
 		CreatedAt: task.CreatedAt, UpdatedAt: task.UpdatedAt,
 	}
 }
@@ -67,79 +64,62 @@ func safeInputSummary(task *Task) TaskInputSummary {
 		return TaskInputSummary{}
 	}
 	type displayParams struct {
-		AgentID    string   `json:"agent_id"`
-		Language   string   `json:"language"`
-		Thread     int      `json:"thread"`
-		Timeout    int      `json:"timeout"`
-		Techniques []string `json:"techniques"`
-		Dataset    struct {
-			DataFile   []string `json:"dataFile"`
-			NumPrompts int      `json:"numPrompts"`
+		Thread  int `json:"thread"`
+		Timeout int `json:"timeout"`
+		Dataset struct {
+			NumPrompts int `json:"numPrompts"`
 		} `json:"dataset"`
 	}
 	var params displayParams
 	_ = json.Unmarshal(task.Params, &params)
-	taskType := strings.ToLower(strings.ReplaceAll(strings.TrimSpace(task.TaskType), "-", "_"))
-	switch taskType {
+	switch canonicalTaskType(task.TaskType) {
 	case "mcp_scan":
 		return TaskInputSummary{
-			Language: safeDisplayString(params.Language),
+			Language: safeLanguage(task.CountryIsoCode),
 			Thread:   safePositiveInt(params.Thread, 1024),
 		}
 	case "ai_infra_scan":
 		return TaskInputSummary{
-			Language:    safeDisplayString(task.CountryIsoCode),
+			Language:    safeLanguage(task.CountryIsoCode),
 			Timeout:     safePositiveInt(params.Timeout, 86400),
 			TargetCount: nonEmptyLineCount(task.Content),
 		}
 	case "model_redteam_report":
 		return TaskInputSummary{
-			Language:     safeDisplayString(task.CountryIsoCode),
-			DatasetNames: safeDisplayStrings(params.Dataset.DataFile, 20),
-			NumPrompts:   safePositiveInt(params.Dataset.NumPrompts, 1_000_000),
-			Techniques:   safeDisplayStrings(params.Techniques, 20),
+			Language:   safeLanguage(task.CountryIsoCode),
+			NumPrompts: safePositiveInt(params.Dataset.NumPrompts, 1_000_000),
 		}
 	case "agent_scan":
-		return TaskInputSummary{
-			AgentID:  safeDisplayString(params.AgentID),
-			Language: safeDisplayString(task.CountryIsoCode),
-		}
-	case "model_jailbreak":
-		return TaskInputSummary{Language: safeDisplayString(task.CountryIsoCode)}
+		return TaskInputSummary{Language: safeLanguage(task.CountryIsoCode)}
 	default:
 		return TaskInputSummary{}
 	}
 }
 
-func safeDisplayString(value string) string {
-	value = strings.TrimSpace(value)
-	if len(value) > 128 || strings.ContainsAny(value, "\r\n\t") {
-		return ""
+func canonicalTaskType(value string) string {
+	switch value {
+	case "mcp_scan", "Mcp-Scan":
+		return "mcp_scan"
+	case "ai_infra_scan", "AI-Infra-Scan":
+		return "ai_infra_scan"
+	case "model_redteam_report", "Model-Redteam-Report":
+		return "model_redteam_report"
+	case "agent_scan", "Agent-Scan":
+		return "agent_scan"
+	default:
+		return "unknown"
 	}
-	normalized := strings.ToLower(value)
-	for _, unsafe := range []string{"authorization", "bearer ", "password", "secret", "api_key", "apikey", "token"} {
-		if strings.Contains(normalized, unsafe) {
-			return ""
-		}
-	}
-	if strings.HasPrefix(normalized, "sk-") || strings.Contains(normalized, "://") {
-		return ""
-	}
-	return value
 }
 
-func safeDisplayStrings(values []string, limit int) []string {
-	if len(values) == 0 || len(values) > limit {
-		return nil
+func safeLanguage(value string) string {
+	switch value {
+	case "zh", "zh_CN":
+		return "zh"
+	case "en":
+		return "en"
+	default:
+		return ""
 	}
-	result := make([]string, 0, len(values))
-	for _, value := range values {
-		value = safeDisplayString(value)
-		if value != "" {
-			result = append(result, value)
-		}
-	}
-	return result
 }
 
 func safePositiveInt(value, maximum int) int {

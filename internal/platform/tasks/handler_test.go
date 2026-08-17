@@ -45,7 +45,7 @@ func TestProtectedTaskHandlerUsesCookieSubjectAndOwnerUserID(t *testing.T) {
 	assert.Equal(t, int64(1), engine.submits.Load())
 
 	forbidden := performTaskJSON(t, router, tokens["bob"], http.MethodGet, "/tasks/"+task.ID, "", nil)
-	assert.Equal(t, http.StatusForbidden, forbidden.Code)
+	assert.Equal(t, http.StatusNotFound, forbidden.Code)
 	auditorRead := performTaskJSON(t, router, tokens["auditor"], http.MethodGet, "/tasks/"+task.ID, "", nil)
 	assert.Equal(t, http.StatusOK, auditorRead.Code)
 	auditorCancel := performTaskJSON(t, router, tokens["auditor"], http.MethodPost, "/tasks/"+task.ID+"/cancel", "", nil)

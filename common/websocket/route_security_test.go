@@ -13,8 +13,10 @@ import (
 	"testing"
 	"time"
 
+	platformadmin "github.com/Juneoww/AIG_Custom/internal/platform/admin"
 	platformaudit "github.com/Juneoww/AIG_Custom/internal/platform/audit"
 	"github.com/Juneoww/AIG_Custom/internal/platform/identity"
+	platformmodels "github.com/Juneoww/AIG_Custom/internal/platform/models"
 	platformtasks "github.com/Juneoww/AIG_Custom/internal/platform/tasks"
 	"github.com/Juneoww/AIG_Custom/pkg/database"
 	"github.com/gin-gonic/gin"
@@ -96,13 +98,18 @@ func TestRetiredPlatformTaskResultUsesProductionIdentityPasswordChainAndNeverRea
 	require.NoError(t, err)
 	policy := identity.CookiePolicy{SessionCookieName: "aig_session", CSRFCookieName: "aig_csrf"}
 	engine := &retiredResultEngine{}
+	auditService := platformaudit.NewService(platformaudit.NewMemoryRepository())
 	taskHandler := platformtasks.NewHandler(platformtasks.NewService(
-		platformtasks.NewMemoryRepository(), engine, platformaudit.NewService(platformaudit.NewMemoryRepository()),
+		platformtasks.NewMemoryRepository(), engine, auditService,
 	))
+	keyring, err := platformmodels.NewKeyring("route-security", bytes.Repeat([]byte{7}, 32), nil)
+	require.NoError(t, err)
+	modelService := platformmodels.NewService(platformmodels.NewMemoryRepository(), keyring, auditService)
 	router := gin.New()
 	group := router.Group("/api/v1/platform")
-	group.Use(setupIdentityMiddleware(identityService, policy), identity.RequirePasswordChangeCompleted(), identity.RequireCSRF(policy))
-	taskHandler.Register(group.Group("/tasks"))
+	registerPlatformGovernanceRoutes(
+		group, identityService, policy, platformadmin.NewHandler(identityService, auditService), modelService, taskHandler,
+	)
 
 	request := httptest.NewRequest(http.MethodGet, "/api/v1/platform/tasks/browser-task/result", nil)
 	response := httptest.NewRecorder()

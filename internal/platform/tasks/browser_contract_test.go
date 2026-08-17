@@ -95,6 +95,48 @@ func TestTaskBrowserPaginationDefaultsCapsAndRejectsInvalidValues(t *testing.T) 
 	}
 }
 
+func TestTaskBrowserCanonicalizesOnlyRegisteredTaskTypeAliases(t *testing.T) {
+	router, tokens, repository, _ := newTaskBrowserFixture(t)
+	now := time.Now().UTC()
+	aliases := []struct {
+		id       string
+		stored   string
+		expected string
+	}{
+		{id: "mcp-snake", stored: "mcp_scan", expected: "mcp_scan"},
+		{id: "mcp-agent", stored: "Mcp-Scan", expected: "mcp_scan"},
+		{id: "infra-snake", stored: "ai_infra_scan", expected: "ai_infra_scan"},
+		{id: "infra-agent", stored: "AI-Infra-Scan", expected: "ai_infra_scan"},
+		{id: "redteam-snake", stored: "model_redteam_report", expected: "model_redteam_report"},
+		{id: "redteam-agent", stored: "Model-Redteam-Report", expected: "model_redteam_report"},
+		{id: "agent-snake", stored: "agent_scan", expected: "agent_scan"},
+		{id: "agent-native", stored: "Agent-Scan", expected: "agent_scan"},
+		{id: "unregistered", stored: "Model-Jailbreak", expected: "unknown"},
+		{id: "wrong-case", stored: "mCp-ScAn", expected: "unknown"},
+		{id: "unsafe-type", stored: "ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ1234567890", expected: "unknown"},
+	}
+	for _, alias := range aliases {
+		putBrowserTask(t, repository, Task{
+			ID: alias.id, OwnerUserID: "user-alice", OwnerUsername: "alice", IdempotencyKey: alias.id,
+			TaskType: alias.stored, Params: json.RawMessage(`{}`), AttachmentRefs: json.RawMessage(`[]`),
+			Status: StatusPending, CreatedAt: now, UpdatedAt: now,
+		})
+	}
+
+	response := performTaskJSON(t, router, tokens["alice"], http.MethodGet, "/tasks?page_size=100", "", nil)
+	require.Equal(t, http.StatusOK, response.Code, response.Body.String())
+	var listed TaskListResponse
+	require.NoError(t, json.Unmarshal(response.Body.Bytes(), &listed))
+	actual := make(map[string]string, len(listed.Items))
+	for _, item := range listed.Items {
+		actual[item.ID] = item.TaskType
+	}
+	for _, alias := range aliases {
+		assert.Equal(t, alias.expected, actual[alias.id], alias.id)
+	}
+	assert.NotContains(t, response.Body.String(), "ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ1234567890")
+}
+
 func TestTaskBrowserDetailUsesTaskTypeWhitelistAndDropsUnsafeFields(t *testing.T) {
 	router, tokens, repository, _ := newTaskBrowserFixture(t)
 	now := time.Now().UTC()
@@ -116,13 +158,22 @@ func TestTaskBrowserDetailUsesTaskTypeWhitelistAndDropsUnsafeFields(t *testing.T
 		AttachmentRefs: json.RawMessage(`[]`), CountryIsoCode: "Bearer language-secret", Status: StatusPending,
 		CreatedAt: now, UpdatedAt: now,
 	})
+	putBrowserTask(t, repository, Task{
+		ID: "redteam-unsafe-values", OwnerUserID: "user-alice", OwnerUsername: "alice", IdempotencyKey: "redteam-unsafe-values",
+		TaskType: "Model-Redteam-Report", CountryIsoCode: "zh_CN", Status: StatusPending,
+		Params: json.RawMessage(`{
+			"dataset":{"dataFile":["eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJhIn0.signature","ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ1234567890","AKIAIOSFODNN7EXAMPLE","e7W9qL2mN8vR4xC6bH1kP5sT3yU0iO9a"],"numPrompts":25},
+			"techniques":["https://example.invalid/?token=hidden","dGhpcy1pcy1oaWdoLWVudHJvcHktZnJlZS10ZXh0"]
+		}`),
+		AttachmentRefs: json.RawMessage(`[]`), CreatedAt: now, UpdatedAt: now,
+	})
 
 	response := performTaskJSON(t, router, tokens["alice"], http.MethodGet, "/tasks/agent-detail", "", nil)
 	require.Equal(t, http.StatusOK, response.Code, response.Body.String())
 	var detail TaskDetail
 	require.NoError(t, json.Unmarshal(response.Body.Bytes(), &detail))
-	assert.Equal(t, "display-agent", detail.InputSummary.AgentID)
 	assert.Equal(t, "zh", detail.InputSummary.Language)
+	assert.NotContains(t, response.Body.String(), "agent_id")
 	for _, secret := range []string{"user-alice", "engine-detail-secret", "prompt-secret", "yaml-secret", "token-secret", "drop-secret", "attachment-secret", "dispatch-secret", "claim-secret"} {
 		assert.NotContains(t, response.Body.String(), secret)
 	}
@@ -139,6 +190,25 @@ func TestTaskBrowserDetailUsesTaskTypeWhitelistAndDropsUnsafeFields(t *testing.T
 	require.Equal(t, http.StatusOK, response.Code, response.Body.String())
 	assert.NotContains(t, response.Body.String(), "sk-browser-sensitive-value")
 	assert.NotContains(t, response.Body.String(), "language-secret")
+
+	response = performTaskJSON(t, router, tokens["alice"], http.MethodGet, "/tasks/redteam-unsafe-values", "", nil)
+	require.Equal(t, http.StatusOK, response.Code, response.Body.String())
+	var redteamWire map[string]any
+	require.NoError(t, json.Unmarshal(response.Body.Bytes(), &redteamWire))
+	inputSummary := redteamWire["input_summary"].(map[string]any)
+	assert.ElementsMatch(t, []string{"language", "num_prompts"}, mapKeys(inputSummary))
+	assert.Equal(t, "zh", inputSummary["language"])
+	assert.Equal(t, float64(25), inputSummary["num_prompts"])
+	for _, unsafe := range []string{
+		"eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJhIn0.signature",
+		"ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ1234567890",
+		"AKIAIOSFODNN7EXAMPLE",
+		"e7W9qL2mN8vR4xC6bH1kP5sT3yU0iO9a",
+		"https://example.invalid/?token=hidden",
+		"dGhpcy1pcy1oaWdoLWVudHJvcHktZnJlZS10ZXh0",
+	} {
+		assert.NotContains(t, response.Body.String(), unsafe)
+	}
 }
 
 func TestTaskBrowserGormRepositoryFiltersOwnerBeforePagingAndCountsFilteredTotal(t *testing.T) {
@@ -173,6 +243,15 @@ func TestTaskBrowserGormRepositoryFiltersOwnerBeforePagingAndCountsFilteredTotal
 	assert.Equal(t, 2, listed.Total)
 	require.Len(t, listed.Items, 1)
 	assert.Equal(t, "alice-01", listed.Items[0].ID)
+
+	_, err = repository.GetBrowser(context.Background(), "bob-19", "user-alice")
+	require.ErrorIs(t, err, ErrNotFound)
+	visible, err := repository.GetBrowser(context.Background(), "alice-01", "user-alice")
+	require.NoError(t, err)
+	assert.Equal(t, "alice-01", visible.ID)
+
+	_, err = service.BrowserGet(context.Background(), identity.Subject{UserID: "user-alice", Username: "alice", Role: identity.RoleUser}, "bob-19")
+	require.ErrorIs(t, err, ErrNotFound)
 }
 
 func newTaskBrowserFixture(t *testing.T) (http.Handler, map[string]string, *MemoryRepository, *recordingEngine) {

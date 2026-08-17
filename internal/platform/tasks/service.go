@@ -56,6 +56,7 @@ type Repository interface {
 	UpdateStatus(context.Context, string, Status, time.Time) error
 	TransitionStatus(context.Context, string, []Status, Status, string, time.Time) (bool, error)
 	Get(context.Context, string) (*Task, error)
+	GetBrowser(context.Context, string, string) (*Task, error)
 	GetByEngineSessionID(context.Context, string) (*Task, error)
 	List(context.Context) ([]Task, error)
 	ListBrowser(context.Context, TaskListQuery) ([]Task, int, error)
@@ -324,12 +325,13 @@ func (service *Service) Get(ctx context.Context, subject identity.Subject, id st
 }
 
 func (service *Service) BrowserGet(ctx context.Context, subject identity.Subject, id string) (TaskDetail, error) {
-	task, err := service.repository.Get(ctx, id)
+	query, err := taskListQueryFor(subject)
 	if err != nil {
 		return TaskDetail{}, err
 	}
-	if !canRead(subject, task) {
-		return TaskDetail{}, ErrForbidden
+	task, err := service.repository.GetBrowser(ctx, id, query.OwnerUserID)
+	if err != nil {
+		return TaskDetail{}, err
 	}
 	return taskDetailOf(task), nil
 }
@@ -854,6 +856,21 @@ func (repository *GormRepository) WithinEngineEventLock(ctx context.Context, eng
 func (repository *GormRepository) Get(ctx context.Context, id string) (*Task, error) {
 	var task Task
 	if err := txcontext.Gorm(ctx, repository.db).Where("id = ?", id).First(&task).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, ErrNotFound
+		}
+		return nil, err
+	}
+	return &task, nil
+}
+
+func (repository *GormRepository) GetBrowser(ctx context.Context, id, ownerUserID string) (*Task, error) {
+	query := txcontext.Gorm(ctx, repository.db).Where("id = ?", id)
+	if ownerUserID != "" {
+		query = query.Where("owner_user_id = ?", ownerUserID)
+	}
+	var task Task
+	if err := query.First(&task).Error; err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			return nil, ErrNotFound
 		}
@@ -1517,6 +1534,16 @@ func (repository *MemoryRepository) Get(_ context.Context, id string) (*Task, er
 	defer repository.mu.Unlock()
 	task, exists := repository.tasks[id]
 	if !exists {
+		return nil, ErrNotFound
+	}
+	return cloneTask(task), nil
+}
+
+func (repository *MemoryRepository) GetBrowser(_ context.Context, id, ownerUserID string) (*Task, error) {
+	repository.mu.Lock()
+	defer repository.mu.Unlock()
+	task, exists := repository.tasks[id]
+	if !exists || ownerUserID != "" && task.OwnerUserID != ownerUserID {
 		return nil, ErrNotFound
 	}
 	return cloneTask(task), nil
