@@ -63,7 +63,7 @@ The list endpoints use explicit envelopes with `items`, int64 `total`, `page`, a
 
 | Endpoint | Envelope | Scope and safe item contract |
 |---|---|---|
-| `GET /api/v1/platform/tasks` | `TaskListResponse` | Users: own tasks; auditors/admins: global. `TaskSummary` has only ID, owner display name, canonical type/status, and timestamps. |
+| `GET /api/v1/platform/tasks` | `TaskListResponse` | Users: own tasks; auditors/admins: global. `TaskSummary` has only ID, owner display name, canonical type/status, and timestamps. Optional `status` and `task_type` accept only the documented exact canonical values and are filtered server-side before total and pagination; invalid values return fixed `400`. |
 | `GET /api/v1/platform/reports` | `ReportListResponse` | Users: own reports; auditors/admins: global. Each item is an immutable safe summary. |
 | `GET /api/v1/platform/admin/users` | `UserListResponse` | Administrator only. No credential material. |
 | `GET /api/v1/platform/admin/audit-events` | `AuditListResponse` | Auditors/admins only. Metadata is recursively sanitized. |

@@ -12,6 +12,10 @@ import { ChangePasswordPage } from '../features/auth/ChangePasswordPage'
 import { LoginPage } from '../features/auth/LoginPage'
 import { ResetPasswordPage } from '../features/auth/ResetPasswordPage'
 import { useSession } from '../features/auth/session'
+import { DashboardPage } from '../features/dashboard/DashboardPage'
+import { TaskCreatePage } from '../features/tasks/TaskCreatePage'
+import { TaskDetailPage } from '../features/tasks/TaskDetailPage'
+import { TaskListPage } from '../features/tasks/TaskListPage'
 import type { SubjectRole } from '../shared/api/types'
 import { PageHeader } from '../shared/components/PageHeader'
 import { StatePanel } from '../shared/components/StatePanel'
@@ -152,9 +156,10 @@ export const identityRoutes: RouteObject[] = [
 ]
 
 function routeForNavigation(item: NavigationItem): RouteObject {
+  const featurePage = item.id === 'overview' ? <DashboardPage /> : item.id === 'tasks' ? <TaskListPage /> : <PendingFeaturePage item={item} />
   const element = (
     <RequireRole allowedRoles={item.allowedRoles}>
-      <PendingFeaturePage item={item} />
+      {featurePage}
     </RequireRole>
   )
   return item.path === '/' ? { index: true, element } : { path: item.path.slice(1), element }
@@ -169,6 +174,22 @@ export const appRoutes: RouteObject[] = [
         element: <AppShell />,
         children: [
           ...navigationItems.map(routeForNavigation),
+          {
+            path: 'tasks/new',
+            element: (
+              <RequireRole allowedRoles={['user', 'admin']}>
+                <TaskCreatePage />
+              </RequireRole>
+            ),
+          },
+          {
+            path: 'tasks/:taskId',
+            element: (
+              <RequireRole allowedRoles={['user', 'auditor', 'admin']}>
+                <TaskDetailPage />
+              </RequireRole>
+            ),
+          },
           { path: '*', element: <NotFoundPage /> },
         ],
       },

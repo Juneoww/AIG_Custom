@@ -137,4 +137,21 @@ describe('production routes', () => {
     expect(screen.getByRole('heading', { name: '用户管理' })).toBeInTheDocument()
     expect(screen.getByText('用户管理尚未接入')).toBeInTheDocument()
   })
+
+  it('replaces overview and task placeholders with governed Task12 pages', () => {
+    renderRoute(subjectState('user'), '/')
+    expect(screen.getByRole('heading', { name: '治理总览' })).toBeInTheDocument()
+    expect(screen.queryByText('治理总览尚未接入')).not.toBeInTheDocument()
+
+    renderRoute(subjectState('user'), '/tasks/new')
+    expect(screen.getByRole('heading', { name: '创建扫描任务' })).toBeInTheDocument()
+    expect(screen.queryByText('扫描任务尚未接入')).not.toBeInTheDocument()
+  })
+
+  it('keeps task creation as a known role-guarded route', () => {
+    renderRoute(subjectState('auditor'), '/tasks/new')
+
+    expect(screen.getByRole('heading', { name: '无权访问' })).toBeInTheDocument()
+    expect(screen.queryByRole('heading', { name: '页面不存在' })).not.toBeInTheDocument()
+  })
 })

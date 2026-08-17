@@ -11,6 +11,7 @@ const CSRF_COOKIE_NAME = 'aig_csrf'
 const CSRF_HEADER_NAME = 'X-CSRF-Token'
 const SAFE_METHODS = new Set(['GET', 'HEAD', 'OPTIONS'])
 const MAX_JSON_BYTES = 2 * 1024 * 1024
+const MAX_BINARY_BYTES = 50 * 1024 * 1024
 const unauthorizedListeners = new Set<(event: UnauthorizedEvent) => void>()
 
 export interface AuthorizationGeneration {
@@ -195,4 +196,95 @@ export async function apiRequest<T>(
   if (response.status === 204) return undefined as T
 
   return (await readBoundedJSON(response)) as T
+}
+
+export interface BinaryResponse {
+  blob: Blob
+  contentDisposition: string | null
+}
+
+export async function apiBinaryRequest(
+  path: string,
+  init: Pick<RequestInit, 'signal'> = {},
+  policy: ApiRequestPolicy = {},
+): Promise<BinaryResponse> {
+  let requestURL: URL
+  try {
+    requestURL = new URL(path, window.location.origin)
+  } catch {
+    throw new ApiError('bad-request', 0)
+  }
+  if (requestURL.origin !== window.location.origin || !['http:', 'https:'].includes(requestURL.protocol)) {
+    throw new ApiError('bad-request', 0)
+  }
+
+  const authorization = policy.authorization ?? defaultAuthorizationGeneration
+  const requestGeneration = authorization.current()
+  let response: Response
+  try {
+    response = await fetch(requestURL.href, { signal: init.signal, method: 'GET', credentials: 'same-origin' })
+  } catch {
+    throw new NetworkError()
+  }
+  if (!response.ok) {
+    if (response.status === 401 && policy.unauthorized !== 'suppress') {
+      notifyUnauthorized({ authorization, generation: requestGeneration })
+    }
+    await cancelResponseBody(response)
+    throw apiErrorFromStatus(response.status)
+  }
+  if (response.headers.get('Content-Type')?.split(';', 1)[0]?.trim().toLowerCase() !== 'application/octet-stream') {
+    await cancelResponseBody(response)
+    throw new ApiError('unexpected-response', response.status)
+  }
+  if (declaredResponseTooLargeFor(response.headers.get('Content-Length'), MAX_BINARY_BYTES) || !response.body) {
+    await cancelResponseBody(response)
+    throw new ApiError('unexpected-response', response.status)
+  }
+
+  let reader: ReadableStreamDefaultReader<Uint8Array>
+  try {
+    reader = response.body.getReader()
+  } catch {
+    await cancelResponseBody(response)
+    throw new ApiError('unexpected-response', response.status)
+  }
+  const bytes = new Uint8Array(MAX_BINARY_BYTES)
+  let total = 0
+  try {
+    for (;;) {
+      const { done, value } = await reader.read()
+      if (done) break
+      if (value.byteLength > MAX_BINARY_BYTES - total) throw new ApiError('unexpected-response', response.status)
+      bytes.set(value, total)
+      total += value.byteLength
+    }
+    return {
+      blob: new Blob([bytes.slice(0, total)], { type: 'application/octet-stream' }),
+      contentDisposition: response.headers.get('Content-Disposition'),
+    }
+  } catch {
+    try {
+      await reader.cancel()
+    } catch {
+      // 下载流取消失败不改变固定响应错误。
+    }
+    throw new ApiError('unexpected-response', response.status)
+  } finally {
+    try {
+      reader.releaseLock()
+    } catch {
+      // 下载流释放失败不向调用方暴露底层信息。
+    }
+  }
+}
+
+function declaredResponseTooLargeFor(value: string | null, maximum: number): boolean {
+  const length = value?.trim() ?? ''
+  if (!/^\d+$/.test(length)) return false
+  try {
+    return BigInt(length) > BigInt(maximum)
+  } catch {
+    return false
+  }
 }

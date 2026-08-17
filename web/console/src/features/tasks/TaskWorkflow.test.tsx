@@ -1,0 +1,105 @@
+/**
+ * 功能：锁定任务分页筛选、幂等提交、短轮询与不确定取消的真实浏览器合同。
+ * 实现：以受控 fetch 响应验证请求路径、调用次数、固定安全 DTO 和终态边界。
+ * 输入：任务列表、详情、创建及取消的后端响应夹具。
+ * 输出：Task12 任务主流程的安全回归断言。
+ * 依赖：Vitest、Testing Library 与任务 API 模块。
+ */
+import { afterEach, describe, expect, it, vi } from 'vitest'
+
+import { NetworkError } from '../../shared/api/errors'
+import {
+  cancelTaskGoverned,
+  createTaskSubmission,
+  fetchTaskList,
+  taskPollDelay,
+  type TaskCreateRequest,
+} from './api'
+
+const runningTask = {
+  id: 'task-opaque-1',
+  owner: 'alice',
+  task_type: 'mcp_scan',
+  status: 'running',
+  created_at: '2026-08-18T01:00:00Z',
+  updated_at: '2026-08-18T01:01:00Z',
+  input_summary: { language: 'zh', thread: 4 },
+} as const
+
+function jsonResponse(body: unknown, status = 200) {
+  return new Response(JSON.stringify(body), {
+    status,
+    headers: { 'Content-Type': 'application/json' },
+  })
+}
+
+afterEach(() => {
+  vi.unstubAllGlobals()
+  vi.restoreAllMocks()
+})
+
+describe('任务服务端列表合同', () => {
+  it('只发送服务端支持的分页和精确筛选，并校验安全摘要', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      jsonResponse({
+        items: [runningTask],
+        total: 1,
+        page: 2,
+        page_size: 20,
+        raw_result: '不得渲染',
+      }),
+    )
+    vi.stubGlobal('fetch', fetchMock)
+
+    const result = await fetchTaskList({ page: 2, pageSize: 20, status: 'running', taskType: 'mcp_scan' })
+
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+    expect(fetchMock.mock.calls[0]?.[0]).toBe(
+      'http://localhost:3000/api/v1/platform/tasks?page=2&page_size=20&status=running&task_type=mcp_scan',
+    )
+    expect(result).toEqual({ items: [expect.objectContaining({ id: 'task-opaque-1' })], total: 1, page: 2, page_size: 20 })
+    expect(JSON.stringify(result)).not.toContain('raw_result')
+  })
+})
+
+describe('任务写入和短轮询边界', () => {
+  it('同一次逻辑提交显式重试复用幂等键且不会自动重放', async () => {
+    const fetchMock = vi
+      .fn()
+      .mockRejectedValueOnce(new TypeError('network'))
+      .mockResolvedValueOnce(jsonResponse(runningTask, 202))
+    vi.stubGlobal('fetch', fetchMock)
+    const input: TaskCreateRequest = { task_type: 'mcp_scan', content: 'https://target.invalid', params: {} }
+    const submission = createTaskSubmission(input, 'task-submit-fixed-key')
+
+    await expect(submission.submit()).rejects.toBeInstanceOf(NetworkError)
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+    await expect(submission.submit()).resolves.toEqual(expect.objectContaining({ id: 'task-opaque-1' }))
+
+    const keys = fetchMock.mock.calls.map(([, init]) => new Headers((init as RequestInit).headers).get('Idempotency-Key'))
+    expect(keys).toEqual(['task-submit-fixed-key', 'task-submit-fixed-key'])
+  })
+
+  it('短轮询对终态停止，并以有界退避在最大次数后停止', () => {
+    expect(taskPollDelay(runningTask, 0)).toBe(2_000)
+    expect(taskPollDelay(runningTask, 2)).toBe(4_000)
+    expect(taskPollDelay(runningTask, 7)).toBe(8_000)
+    expect(taskPollDelay(runningTask, 8)).toBe(false)
+    expect(taskPollDelay({ ...runningTask, status: 'succeeded' }, 0)).toBe(false)
+  })
+
+  it('取消遇到网络不确定只读取一次详情，不自动再次写入', async () => {
+    const fetchMock = vi
+      .fn()
+      .mockRejectedValueOnce(new TypeError('network'))
+      .mockResolvedValueOnce(jsonResponse(runningTask))
+    vi.stubGlobal('fetch', fetchMock)
+
+    const result = await cancelTaskGoverned('task-opaque-1')
+
+    expect(result).toEqual({ status: 'uncertain', task: runningTask })
+    expect(fetchMock).toHaveBeenCalledTimes(2)
+    expect((fetchMock.mock.calls[0]?.[1] as RequestInit).method).toBe('POST')
+    expect((fetchMock.mock.calls[1]?.[1] as RequestInit).method).toBe('GET')
+  })
+})

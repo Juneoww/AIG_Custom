@@ -112,13 +112,66 @@ func TestTaskBrowserPaginationDefaultsCapsAndRejectsInvalidValues(t *testing.T) 
 	}
 }
 
+func TestTaskBrowserListFiltersStatusAndTaskTypeBeforePaging(t *testing.T) {
+	router, tokens, repository, _ := newTaskBrowserFixture(t)
+	now := time.Now().UTC()
+	fixtures := []Task{
+		{ID: "alice-canonical", OwnerUserID: "user-alice", OwnerUsername: "alice", TaskType: "mcp_scan", Status: StatusRunning},
+		{ID: "alice-alias", OwnerUserID: "user-alice", OwnerUsername: "alice", TaskType: "Mcp-Scan", Status: StatusRunning},
+		{ID: "alice-pending", OwnerUserID: "user-alice", OwnerUsername: "alice", TaskType: "mcp_scan", Status: StatusPending},
+		{ID: "alice-agent", OwnerUserID: "user-alice", OwnerUsername: "alice", TaskType: "agent_scan", Status: StatusRunning},
+		{ID: "bob-running", OwnerUserID: "user-bob", OwnerUsername: "bob", TaskType: "mcp_scan", Status: StatusRunning},
+	}
+	for index := range fixtures {
+		fixtures[index].IdempotencyKey = fixtures[index].ID
+		fixtures[index].Params = json.RawMessage(`{}`)
+		fixtures[index].AttachmentRefs = json.RawMessage(`[]`)
+		fixtures[index].CreatedAt = now.Add(time.Duration(index) * time.Minute)
+		fixtures[index].UpdatedAt = fixtures[index].CreatedAt
+		putBrowserTask(t, repository, fixtures[index])
+	}
+
+	response := performTaskJSON(t, router, tokens["alice"], http.MethodGet, "/tasks?status=running&task_type=mcp_scan&page=1&page_size=1", "", nil)
+	require.Equal(t, http.StatusOK, response.Code, response.Body.String())
+	var listed TaskListResponse
+	require.NoError(t, json.Unmarshal(response.Body.Bytes(), &listed))
+	assert.Equal(t, int64(2), listed.Total)
+	require.Len(t, listed.Items, 1)
+	assert.Equal(t, "alice-alias", listed.Items[0].ID)
+
+	global := performTaskJSON(t, router, tokens["auditor"], http.MethodGet, "/tasks?status=running&task_type=mcp_scan&page_size=20", "", nil)
+	require.Equal(t, http.StatusOK, global.Code, global.Body.String())
+	require.NoError(t, json.Unmarshal(global.Body.Bytes(), &listed))
+	assert.Equal(t, int64(3), listed.Total)
+	assert.Equal(t, []string{"bob-running", "alice-alias", "alice-canonical"}, taskSummaryIDs(listed.Items))
+}
+
+func TestTaskBrowserListRejectsInvalidExactFilters(t *testing.T) {
+	router, tokens, _, _ := newTaskBrowserFixture(t)
+	for _, query := range []string{
+		"?status=done",
+		"?status=RUNNING",
+		"?task_type=unknown",
+		"?task_type=Mcp-Scan",
+		"?task_type=not_registered",
+	} {
+		response := performTaskJSON(t, router, tokens["alice"], http.MethodGet, "/tasks"+query, "", nil)
+		assert.Equal(t, http.StatusBadRequest, response.Code, query)
+		assert.JSONEq(t, `{"error":"invalid task request"}`, response.Body.String(), query)
+	}
+}
+
 func TestTaskBrowserServiceRejectsPageBeyondMaximum(t *testing.T) {
 	service := NewService(NewMemoryRepository(), &recordingEngine{}, audit.NewService(audit.NewMemoryRepository()))
 	subject := identity.Subject{UserID: "user-alice", Username: "alice", Role: identity.RoleUser}
-	response, err := service.Browse(context.Background(), subject, 1000, 20)
+	response, err := service.Browse(context.Background(), subject, 1000, 20, TaskListFilters{})
 	require.NoError(t, err)
 	assert.Equal(t, 1000, response.Page)
-	_, err = service.Browse(context.Background(), subject, 1001, 20)
+	_, err = service.Browse(context.Background(), subject, 1001, 20, TaskListFilters{})
+	require.ErrorIs(t, err, ErrInvalid)
+	_, err = service.Browse(context.Background(), subject, 1, 20, TaskListFilters{Status: "done"})
+	require.ErrorIs(t, err, ErrInvalid)
+	_, err = service.Browse(context.Background(), subject, 1, 20, TaskListFilters{TaskType: "unknown"})
 	require.ErrorIs(t, err, ErrInvalid)
 }
 
@@ -295,11 +348,22 @@ func TestTaskBrowserGormRepositoryFiltersOwnerBeforePagingAndCountsFilteredTotal
 			CreatedAt: base.Add(time.Duration(index) * time.Minute), UpdatedAt: base,
 		})
 	}
+	putBrowserTask(t, repository, Task{
+		ID: "alice-filtered-out", OwnerUserID: "user-alice", OwnerUsername: "alice", IdempotencyKey: "alice-filtered-out",
+		EngineSessionID: "engine-filtered-out", TaskType: "agent_scan", Status: StatusRunning,
+		Params: json.RawMessage(`{}`), AttachmentRefs: json.RawMessage(`[]`), CreatedAt: base.Add(30 * time.Minute), UpdatedAt: base,
+	})
 
 	capture := &taskQueryCaptureLogger{Interface: logger.Default.LogMode(logger.Silent)}
 	db.Config.Logger = capture
 	service := NewService(repository, &recordingEngine{}, audit.NewService(audit.NewMemoryRepository()))
-	listed, err := service.Browse(context.Background(), identity.Subject{UserID: "user-alice", Username: "alice", Role: identity.RoleUser}, 1, 1)
+	listed, err := service.Browse(
+		context.Background(),
+		identity.Subject{UserID: "user-alice", Username: "alice", Role: identity.RoleUser},
+		1,
+		1,
+		TaskListFilters{Status: StatusPending, TaskType: "mcp_scan"},
+	)
 	require.NoError(t, err)
 	assert.Equal(t, int64(2), listed.Total)
 	require.Len(t, listed.Items, 1)

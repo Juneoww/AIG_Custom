@@ -56,7 +56,12 @@ func (handler *Handler) list(c *gin.Context) {
 		respondTaskError(c, ErrInvalid)
 		return
 	}
-	response, err := handler.service.Browse(c.Request.Context(), subject, page, pageSize)
+	filters, err := taskFilters(c)
+	if err != nil {
+		respondTaskError(c, ErrInvalid)
+		return
+	}
+	response, err := handler.service.Browse(c.Request.Context(), subject, page, pageSize, filters)
 	switch {
 	case errors.Is(err, ErrForbidden):
 		respondTaskError(c, err)
@@ -65,6 +70,23 @@ func (handler *Handler) list(c *gin.Context) {
 	default:
 		c.JSON(http.StatusOK, response)
 	}
+}
+
+func taskFilters(c *gin.Context) (TaskListFilters, error) {
+	filters := TaskListFilters{}
+	if values, exists := c.GetQueryArray("status"); exists {
+		if len(values) != 1 || !isBrowserTaskStatus(Status(values[0])) {
+			return TaskListFilters{}, ErrInvalid
+		}
+		filters.Status = Status(values[0])
+	}
+	if values, exists := c.GetQueryArray("task_type"); exists {
+		if len(values) != 1 || !isBrowserTaskType(values[0]) {
+			return TaskListFilters{}, ErrInvalid
+		}
+		filters.TaskType = values[0]
+	}
+	return filters, nil
 }
 
 func taskPage(c *gin.Context) (int, int, error) {

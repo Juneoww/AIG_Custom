@@ -1131,7 +1131,7 @@ const docTemplate = `{
         },
         "/api/v1/platform/tasks": {
             "get": {
-                "description": "Lists persisted platform tasks as TaskListResponse without polling the engine or mutating state. Users see only their own tasks; auditors and administrators see the stable global list. Items use the narrow TaskSummary only. page defaults to 1, page_size defaults to 20, values over 100 are capped at 100, and page cannot exceed 1000.",
+                "description": "Lists persisted platform tasks as TaskListResponse without polling the engine or mutating state. Users see only their own tasks; auditors and administrators see the stable global list. Items use the narrow TaskSummary only. page defaults to 1, page_size defaults to 20, values over 100 are capped at 100, and page cannot exceed 1000. Optional status and task_type filters accept only the documented exact canonical values and are applied before total and pagination.",
                 "parameters": [
                     {
                         "default": 1,
@@ -1148,6 +1148,32 @@ const docTemplate = `{
                         "minimum": 1,
                         "name": "page_size",
                         "type": "integer"
+                    },
+                    {
+                        "enum": [
+                            "pending",
+                            "dispatching",
+                            "running",
+                            "succeeded",
+                            "failed",
+                            "dispatch_failed",
+                            "dispatch_unknown",
+                            "cancelled"
+                        ],
+                        "in": "query",
+                        "name": "status",
+                        "type": "string"
+                    },
+                    {
+                        "enum": [
+                            "mcp_scan",
+                            "ai_infra_scan",
+                            "model_redteam_report",
+                            "agent_scan"
+                        ],
+                        "in": "query",
+                        "name": "task_type",
+                        "type": "string"
                     }
                 ],
                 "responses": {
@@ -1158,7 +1184,7 @@ const docTemplate = `{
                         }
                     },
                     "400": {
-                        "description": "Invalid page or page_size."
+                        "description": "Invalid page, page_size, status, or task_type; filter values must be exact canonical values."
                     },
                     "401": {
                         "description": "Unauthenticated."

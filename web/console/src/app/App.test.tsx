@@ -127,8 +127,10 @@ describe('App production tree', () => {
   it('shares configured brand with the authenticated shell', async () => {
     vi.stubGlobal(
       'fetch',
-      vi.fn().mockResolvedValue(
-        jsonResponse({ product_name: '企业安全台账', primary_color: '#005a9e', logo_data_url: '' }),
+      vi.fn((input: RequestInfo | URL) =>
+        String(input).endsWith('/api/v1/public/brand')
+          ? Promise.resolve(jsonResponse({ product_name: '企业安全台账', primary_color: '#005a9e', logo_data_url: '' }))
+          : Promise.resolve(new Response(null, { status: 500 })),
       ),
     )
     renderApp(authenticated)

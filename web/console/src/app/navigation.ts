@@ -20,8 +20,8 @@ const AUDIT_ROLES: readonly SubjectRole[] = ['auditor', 'admin']
 const ADMIN_ONLY: readonly SubjectRole[] = ['admin']
 
 export const navigationItems: readonly NavigationItem[] = [
-  { id: 'overview', path: '/', label: '治理总览', description: '治理总览将在后续任务接入真实平台指标。', allowedRoles: ALL_ROLES },
-  { id: 'tasks', path: '/tasks', label: '扫描任务', description: '扫描任务台账将在后续任务接入。', allowedRoles: ALL_ROLES },
+  { id: 'overview', path: '/', label: '治理总览', description: '查看安全评分、30 日趋势、风险待办与最近任务。', allowedRoles: ALL_ROLES },
+  { id: 'tasks', path: '/tasks', label: '扫描任务', description: '创建、筛选并跟踪受治理的扫描任务。', allowedRoles: ALL_ROLES },
   { id: 'reports', path: '/reports', label: '安全报告', description: '安全报告能力将在后续任务接入。', allowedRoles: ALL_ROLES },
   { id: 'models', path: '/models', label: '模型与凭据', description: '模型与凭据管理将在后续任务接入。', allowedRoles: ALL_ROLES },
   { id: 'knowledge', path: '/knowledge', label: '规则与知识库', description: '规则与知识库管理将在后续任务接入。', allowedRoles: ALL_ROLES },

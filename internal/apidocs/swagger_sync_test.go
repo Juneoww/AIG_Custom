@@ -622,6 +622,28 @@ func TestSwaggerDocumentsTaskCreateAndLegacySecurityCorrections(t *testing.T) {
 	}
 }
 
+func TestSwaggerDocumentsTaskListExactFilters(t *testing.T) {
+	for name, document := range loadSwaggerDocuments(t) {
+		t.Run(name, func(t *testing.T) {
+			path := "/api/v1/platform/tasks"
+			status := swaggerParameterValue(t, document, path, "get", "status", "enum").([]interface{})
+			if !reflect.DeepEqual(status, []interface{}{"pending", "dispatching", "running", "succeeded", "failed", "dispatch_failed", "dispatch_unknown", "cancelled"}) {
+				t.Errorf("task status filter enum = %v", status)
+			}
+			taskType := swaggerParameterValue(t, document, path, "get", "task_type", "enum").([]interface{})
+			if !reflect.DeepEqual(taskType, []interface{}{"mcp_scan", "ai_infra_scan", "model_redteam_report", "agent_scan"}) {
+				t.Errorf("task_type filter enum = %v", taskType)
+			}
+			description := swaggerValue(t, document, "paths", path, "get", "responses", "400", "description").(string)
+			for _, term := range []string{"status", "task_type", "exact"} {
+				if !strings.Contains(description, term) {
+					t.Errorf("task list 400 description lacks %q", term)
+				}
+			}
+		})
+	}
+}
+
 func TestAPIGuidesDocumentHTTPSBootstrapPasswordChangeAndTaskCreateMigration(t *testing.T) {
 	for _, guide := range []struct {
 		path     string

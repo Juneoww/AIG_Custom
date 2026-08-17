@@ -63,7 +63,7 @@ AIG Custom Platform 是基于 Tencent Zhuque Lab AI-Infra-Guard（https://github
 
 | 端点 | Envelope | Scope 与安全 item 契约 |
 |---|---|---|
-| `GET /api/v1/platform/tasks` | `TaskListResponse` | 普通用户仅本人；审计员/管理员全局。`TaskSummary` 仅含 ID、owner 展示名、规范化类型/状态与时间戳。 |
+| `GET /api/v1/platform/tasks` | `TaskListResponse` | 普通用户仅本人；审计员/管理员全局。`TaskSummary` 仅含 ID、owner 展示名、规范化类型/状态与时间戳。可选 `status` 与 `task_type` 仅接受文档列出的精确规范值，并在 total 与分页前由服务端筛选；非法值返回固定 `400`。 |
 | `GET /api/v1/platform/reports` | `ReportListResponse` | 普通用户仅本人；审计员/管理员全局。item 是不可变安全摘要。 |
 | `GET /api/v1/platform/admin/users` | `UserListResponse` | 仅管理员；不含任何凭据材料。 |
 | `GET /api/v1/platform/admin/audit-events` | `AuditListResponse` | 仅审计员/管理员；metadata 递归脱敏。 |

@@ -65,8 +65,15 @@ type Repository interface {
 
 type TaskListQuery struct {
 	OwnerUserID string
+	Status      Status
+	TaskType    string
 	Limit       int
 	Offset      int
+}
+
+type TaskListFilters struct {
+	Status   Status
+	TaskType string
 }
 
 // RecentRepository is an optional bounded browser-summary read model.
@@ -345,14 +352,18 @@ func (service *Service) BrowserGet(ctx context.Context, subject identity.Subject
 	return taskDetailOf(task), nil
 }
 
-func (service *Service) Browse(ctx context.Context, subject identity.Subject, page, pageSize int) (TaskListResponse, error) {
+func (service *Service) Browse(ctx context.Context, subject identity.Subject, page, pageSize int, filters TaskListFilters) (TaskListResponse, error) {
 	query, err := taskListQueryFor(subject)
 	if err != nil {
 		return TaskListResponse{}, err
 	}
-	if page < 1 || page > maxTaskPage || pageSize < 1 || pageSize > maxTaskPageSize || page-1 > int(^uint(0)>>1)/pageSize {
+	if page < 1 || page > maxTaskPage || pageSize < 1 || pageSize > maxTaskPageSize || page-1 > int(^uint(0)>>1)/pageSize ||
+		filters.Status != "" && !isBrowserTaskStatus(filters.Status) ||
+		filters.TaskType != "" && !isBrowserTaskType(filters.TaskType) {
 		return TaskListResponse{}, ErrInvalid
 	}
+	query.Status = filters.Status
+	query.TaskType = filters.TaskType
 	query.Limit = pageSize
 	query.Offset = (page - 1) * pageSize
 	tasks, total, err := service.repository.ListBrowser(ctx, query)
@@ -364,6 +375,40 @@ func (service *Service) Browse(ctx context.Context, subject identity.Subject, pa
 		items = append(items, taskSummaryOf(&tasks[index]))
 	}
 	return TaskListResponse{Items: items, Total: total, Page: page, PageSize: pageSize}, nil
+}
+
+func isBrowserTaskStatus(status Status) bool {
+	switch status {
+	case StatusPending, StatusDispatching, StatusRunning, StatusSucceeded, StatusEngineFailed,
+		StatusDispatchFailed, StatusDispatchUnknown, StatusCancelled:
+		return true
+	default:
+		return false
+	}
+}
+
+func isBrowserTaskType(taskType string) bool {
+	switch taskType {
+	case "mcp_scan", "ai_infra_scan", "model_redteam_report", "agent_scan":
+		return true
+	default:
+		return false
+	}
+}
+
+func browserStoredTaskTypes(taskType string) []string {
+	switch taskType {
+	case "mcp_scan":
+		return []string{"mcp_scan", "Mcp-Scan"}
+	case "ai_infra_scan":
+		return []string{"ai_infra_scan", "AI-Infra-Scan"}
+	case "model_redteam_report":
+		return []string{"model_redteam_report", "Model-Redteam-Report"}
+	case "agent_scan":
+		return []string{"agent_scan", "Agent-Scan"}
+	default:
+		return nil
+	}
 }
 
 func (service *Service) Recent(ctx context.Context, subject identity.Subject, limit int) ([]TaskSummary, error) {
@@ -944,6 +989,12 @@ func (repository *GormRepository) ListBrowser(ctx context.Context, query TaskLis
 	db := txcontext.Gorm(ctx, repository.db).Model(&Task{})
 	if query.OwnerUserID != "" {
 		db = db.Where("owner_user_id = ?", query.OwnerUserID)
+	}
+	if query.Status != "" {
+		db = db.Where("status = ?", query.Status)
+	}
+	if query.TaskType != "" {
+		db = db.Where("task_type IN ?", browserStoredTaskTypes(query.TaskType))
 	}
 	var total int64
 	if err := db.Count(&total).Error; err != nil {
@@ -1690,9 +1741,16 @@ func (repository *MemoryRepository) ListBrowser(_ context.Context, query TaskLis
 	defer repository.mu.Unlock()
 	tasks := make([]Task, 0, len(repository.tasks))
 	for _, task := range repository.tasks {
-		if query.OwnerUserID == "" || task.OwnerUserID == query.OwnerUserID {
-			tasks = append(tasks, *cloneTask(task))
+		if query.OwnerUserID != "" && task.OwnerUserID != query.OwnerUserID {
+			continue
 		}
+		if query.Status != "" && task.Status != query.Status {
+			continue
+		}
+		if query.TaskType != "" && canonicalTaskType(task.TaskType) != query.TaskType {
+			continue
+		}
+		tasks = append(tasks, *cloneTask(task))
 	}
 	sort.Slice(tasks, func(left, right int) bool {
 		if tasks[left].CreatedAt.Equal(tasks[right].CreatedAt) {
