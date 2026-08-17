@@ -97,6 +97,47 @@ describe('任务页面', () => {
     expect(requestSignal?.aborted).toBe(true)
   })
 
+  it('列表从可分享URL恢复服务端分页和精确筛选', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(jsonResponse({ items: [], total: 0, page: 3, page_size: 20 }))
+    vi.stubGlobal('fetch', fetchMock)
+    renderPage(
+      <TaskListPage />,
+      { id: 'user-1', username: 'alice', role: 'user', must_change_password: false },
+      '/tasks?page=3&status=running&task_type=agent_scan',
+    )
+
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1))
+    expect(fetchMock.mock.calls[0]?.[0]).toBe(
+      'http://localhost:3000/api/v1/platform/tasks?page=3&page_size=20&status=running&task_type=agent_scan',
+    )
+  })
+
+  it('列表对恶意URL参数安全回到第一页且不发送未知筛选', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(jsonResponse({ items: [], total: 0, page: 1, page_size: 20 }))
+    vi.stubGlobal('fetch', fetchMock)
+    renderPage(
+      <TaskListPage />,
+      { id: 'user-1', username: 'alice', role: 'user', must_change_password: false },
+      '/tasks?page=-9&status=constructor&task_type=unknown',
+    )
+
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1))
+    expect(fetchMock.mock.calls[0]?.[0]).toBe('http://localhost:3000/api/v1/platform/tasks?page=1&page_size=20')
+  })
+
+  it('列表拒绝超出服务端分页上限的页码', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(jsonResponse({ items: [], total: 0, page: 1, page_size: 20 }))
+    vi.stubGlobal('fetch', fetchMock)
+    renderPage(
+      <TaskListPage />,
+      { id: 'user-1', username: 'alice', role: 'user', must_change_password: false },
+      '/tasks?page=1001',
+    )
+
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1))
+    expect(fetchMock.mock.calls[0]?.[0]).toBe('http://localhost:3000/api/v1/platform/tasks?page=1&page_size=20')
+  })
+
   it('详情按角色与真实状态显示取消能力，审计员无写按钮', async () => {
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue(jsonResponse(task)))
     renderPage(
@@ -122,6 +163,31 @@ describe('任务页面', () => {
     )
 
     expect(await screen.findByRole('button', { name: '取消任务' })).toBeInTheDocument()
+  })
+
+  it('取消写入不确定时复用确认详情且不触发第三次读取', async () => {
+    const cancelled = { ...task, status: 'cancelled', updated_at: '2026-08-18T01:02:00Z' }
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(jsonResponse(task))
+      .mockResolvedValueOnce(jsonResponse({ status: 'unexpected-success-body' }))
+      .mockResolvedValueOnce(jsonResponse(cancelled))
+    vi.stubGlobal('fetch', fetchMock)
+    renderPage(
+      <TaskDetailPage />,
+      { id: 'user-1', username: 'alice', role: 'user', must_change_password: false },
+      '/tasks/task-opaque-1',
+      '/tasks/:taskId',
+    )
+
+    const button = await screen.findByRole('button', { name: '取消任务' })
+    button.click()
+
+    expect(await screen.findByText('网络确认中断，已重新读取任务状态，未自动重复取消。')).toBeInTheDocument()
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(3))
+    await new Promise((resolve) => window.setTimeout(resolve, 0))
+    expect(fetchMock).toHaveBeenCalledTimes(3)
+    expect(screen.getByText('已取消')).toBeInTheDocument()
   })
 
   it('详情后续请求持续失败时仍在固定次数内停止轮询', async () => {
@@ -162,6 +228,48 @@ describe('任务页面', () => {
     expect(screen.getByRole('group', { name: '第二步：参数' })).toBeInTheDocument()
     expect(screen.getByRole('group', { name: '第三步：附件' })).toBeInTheDocument()
     expect(screen.queryByLabelText(/密钥|Token|API Key/i)).not.toBeInTheDocument()
+  })
+
+  it.each([
+    {
+      taskType: 'model_redteam_report',
+      fields: [
+        ['评测模型 ID（逗号分隔）', 'model-1, model-2'],
+        ['裁判模型 ID', 'eval-model-1'],
+      ],
+      params: {
+        model_id: ['model-1', 'model-2'],
+        eval_model_id: 'eval-model-1',
+        dataset: { numPrompts: 100 },
+      },
+    },
+    {
+      taskType: 'agent_scan',
+      fields: [
+        ['Agent 配置 ID', 'agent-config-1'],
+        ['裁判模型 ID', 'eval-model-1'],
+      ],
+      params: { agent_id: 'agent-config-1', eval_model_id: 'eval-model-1' },
+    },
+  ])('$taskType 创建只发送该类真实治理引用', async ({ taskType, fields, params }) => {
+    const fetchMock = vi.fn().mockResolvedValue(jsonResponse(task))
+    vi.stubGlobal('fetch', fetchMock)
+    renderPage(
+      <TaskCreatePage />,
+      { id: 'user-1', username: 'alice', role: 'user', must_change_password: false },
+      '/tasks/new',
+    )
+    fireEvent.change(screen.getByRole('combobox', { name: '扫描类型' }), { target: { value: taskType } })
+    fireEvent.change(screen.getByRole('textbox', { name: '扫描目标或任务说明' }), { target: { value: '安全评测说明' } })
+    for (const [label, value] of fields) {
+      fireEvent.change(screen.getByRole('textbox', { name: label }), { target: { value } })
+    }
+
+    screen.getByRole('button', { name: '创建任务' }).click()
+
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1))
+    const body = JSON.parse(String((fetchMock.mock.calls[0]?.[1] as RequestInit).body))
+    expect(body).toEqual(expect.objectContaining({ task_type: taskType, params }))
   })
 
   it('StrictMode 重新挂载后仍能呈现本地表单校验错误', async () => {

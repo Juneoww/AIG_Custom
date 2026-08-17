@@ -16,13 +16,21 @@ import {
   uploadAttachment,
 } from './attachments'
 
+const originalCreateObjectURL = Object.getOwnPropertyDescriptor(URL, 'createObjectURL')
+const originalRevokeObjectURL = Object.getOwnPropertyDescriptor(URL, 'revokeObjectURL')
+
 function jsonResponse(body: unknown, status = 200) {
   return new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json' } })
 }
 
 afterEach(() => {
+  vi.useRealTimers()
   vi.unstubAllGlobals()
   vi.restoreAllMocks()
+  if (originalCreateObjectURL) Object.defineProperty(URL, 'createObjectURL', originalCreateObjectURL)
+  else Reflect.deleteProperty(URL, 'createObjectURL')
+  if (originalRevokeObjectURL) Object.defineProperty(URL, 'revokeObjectURL', originalRevokeObjectURL)
+  else Reflect.deleteProperty(URL, 'revokeObjectURL')
 })
 
 describe('附件上传', () => {
@@ -88,6 +96,21 @@ describe('附件上传', () => {
     expect(fetchMock.mock.calls[2]?.[0]).toContain('/attachments/opaque%2Fid/chunks')
     expect(fetchMock.mock.calls[3]?.[0]).toContain('/attachments/opaque%2Fid/merge')
   })
+
+  it('分片上传部分失败后best-effort删除上传会话且不掩盖原错误', async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(jsonResponse({ id: 'partial/id', filename: 'large.bin', size: 5_242_881, state: 'uploading', created_at: '2026-08-18T01:00:00Z' }, 201))
+      .mockResolvedValueOnce(new Response(null, { status: 413 }))
+      .mockResolvedValueOnce(new Response(null, { status: 500 }))
+    vi.stubGlobal('fetch', fetchMock)
+
+    await expect(uploadAttachment(new File([new Uint8Array(5_242_881)], 'large.bin'))).rejects.toMatchObject({ status: 413 })
+
+    expect(fetchMock).toHaveBeenCalledTimes(3)
+    expect(fetchMock.mock.calls.map(([, init]) => (init as RequestInit).method)).toEqual(['POST', 'POST', 'DELETE'])
+    expect(fetchMock.mock.calls[2]?.[0]).toContain('/attachments/partial%2Fid')
+  })
 })
 
 describe('附件下载授权投影', () => {
@@ -99,6 +122,7 @@ describe('附件下载授权投影', () => {
   })
 
   it('只接受有界octet-stream并清理服务端文件名', async () => {
+    vi.useFakeTimers()
     let downloadedFilename = ''
     const click = vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(function (this: HTMLAnchorElement) {
       downloadedFilename = this.download
@@ -123,7 +147,30 @@ describe('附件下载授权投影', () => {
     expect(fetchMock.mock.calls[0]?.[0]).toContain('/attachments/opaque%2Fid/download')
     expect(click).toHaveBeenCalledTimes(1)
     expect(downloadedFilename).toBe('_secret.txt')
+    expect(revokeObjectURL).not.toHaveBeenCalled()
+    await vi.runAllTimersAsync()
     expect(revokeObjectURL).toHaveBeenCalledWith('blob:safe-download')
+  })
+
+  it('小文件下载不预先分配固定50MiB缓冲区', async () => {
+    const NativeUint8Array = Uint8Array
+    const allocations: number[] = []
+    vi.stubGlobal('Uint8Array', new Proxy(NativeUint8Array, {
+      construct(target, argumentsList, newTarget) {
+        if (typeof argumentsList[0] === 'number') allocations.push(argumentsList[0])
+        return Reflect.construct(target, argumentsList, newTarget)
+      },
+    }))
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(
+      new Response(new NativeUint8Array([1, 2, 3]), {
+        headers: { 'Content-Type': 'application/octet-stream', 'Content-Length': '3' },
+      }),
+    ))
+
+    const result = await apiBinaryRequest('/api/v1/platform/tasks/attachments/id/download')
+
+    expect(result.blob.size).toBe(3)
+    expect(allocations).not.toContain(50 * 1024 * 1024)
   })
 
   it('二进制401沿用会话失效通知，错误MIME会取消响应体', async () => {

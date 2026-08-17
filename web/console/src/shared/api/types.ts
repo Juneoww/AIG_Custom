@@ -92,10 +92,13 @@ export interface TaskCreateRequest {
   task_type: Exclude<TaskType, 'unknown'>
   content: string
   params: {
-    model_id?: string
+    model_id?: string | string[]
+    eval_model_id?: string
+    agent_id?: string
     thread?: number
     timeout?: number
-    dataset?: { numPrompts: number }
+    dataset?: { numPrompts: number; randomSeed?: number; promptColumn?: string }
+    techniques?: string[]
   }
   attachment_ids?: string[]
   country_iso_code?: 'zh' | 'zh_CN' | 'en'

@@ -84,23 +84,23 @@ AIG Custom Platform 是基于 Tencent Zhuque Lab AI-Infra-Guard（https://github
 
 可信分发失败以 `503` 返回 `{ "error": "task dispatch unavailable", "task": { ...TaskDetail } }`，绝不返回分发诊断。客户端必须同时升级 `202` 解码与 `503` 错误路径，停止读取已删除字段，并把未知任务类型视为 `unknown` 和空 `input_summary`。
 
-附件变更请求要求 CSRF。普通用户只能创建/写入本人 opaque 附件，管理员可治理任意附件，审计员只读。下载时，owner 成功，其他普通用户得到 `404`，审计员得到 `403`，管理员可跨 owner 下载。管理员跨 owner 打开存储前，服务端必须先持久化脱敏的 `attachment.download_authorized` 授权事件；该事件证明授权而非后续流传输成功，响应也不返回存储位置。
+附件变更请求要求 CSRF。普通用户只能创建/写入本人 opaque 附件，管理员可治理任意附件，审计员只读。分片必须非空，索引和合并数量不得超过 `ceil(AIG_MAX_UPLOAD_BYTES/AIG_MAX_CHUNK_BYTES)`（默认 `50 MiB/5 MiB=10`）。`DELETE /api/v1/platform/tasks/attachments/{attachmentID}` 可中止并删除 owner 范围内尚未绑定任务的 uploading 或 ready 附件：owner 或管理员成功，其他普通用户得到 `404`，审计员得到 `403`；已绑定任务的附件永不由该端点删除。删除先写入 deleting 墓碑，存储清理成功后才最终删记录，失败会保留可重试墓碑。未绑定 uploading/ready 记录的 TTL 默认 24 小时，可由正 duration 的 `AIG_ATTACHMENT_UPLOAD_TTL` 配置；开始普通或分片上传时，服务端均以最多 100 条的批次回收过期未绑定记录与历史 deleting 墓碑及其私有文件。下载时，owner 成功，其他普通用户得到 `404`，审计员得到 `403`，管理员可跨 owner 下载。管理员跨 owner 打开存储前，服务端必须先持久化脱敏的 `attachment.download_authorized` 授权事件；该事件证明授权而非后续流传输成功，响应也不返回存储位置。
 
 ## 任务 API 迁移边界
 
 浏览器任务执行只能使用上文受保护的平台任务 API。原 `/api/v1/app/taskapi*` 和 `/api/v1/app/tasks*` 浏览器路由族仅是历史名称，不是可调用的兼容 API；只有通过正常会话、首次改密与 CSRF 校验后才返回 `410 Gone`（CSRF 适用于变更请求）。它们不能用于创建任务、上传、查询状态、获取结果、流式更新，也不能在连接中断后作为回退。
 
-平台任务创建仅引用受治理模型 ID；明文模型凭据和旧 model 对象会被拒绝。浏览器附件只使用 opaque 附件 ID，并按 owner 隔离。内部 Agent WebSocket 与旧形状制品传输属于独立的 internal-token 边界，不是浏览器 API。
+平台任务创建 JSON body 最大 256 KiB，`content` 最大 32 KiB，最多引用 10 个不重复且不超过 128 字节的 opaque 附件 ID；只接受 canonical `mcp_scan`、`ai_infra_scan`、`model_redteam_report`、`agent_scan`，服务端在私有 Adapter 边界分别映射为真实 Agent Alias。参数采用逐类型白名单：MCP 仅 `model_id`/`thread`；基础设施仅 `model_id`/`timeout`；模型红队要求 `model_id` 字符串数组和 `eval_model_id`，可带 `dataset.numPrompts/randomSeed/promptColumn` 与 `techniques`；Agent 扫描要求 `agent_id` 与 `eval_model_id`。所有 `model_id`/`eval_model_id` 必须在持久化任务前通过受治理模型解析器验证，`agent_id` 必须解析到该用户或公共只读 Agent 配置；未知或不可见引用固定拒绝且不写入任务。未知字段、嵌套凭据对象、明文模型凭据、旧 model 对象和任务 Alias 均被拒绝。浏览器附件只使用 opaque 附件 ID，并按 owner 隔离。内部 Agent WebSocket 与旧形状制品传输属于独立的 internal-token 边界，不是浏览器 API。
 
 ### 受保护平台边界
 
 浏览器客户端使用安全 Cookie session 认证。匿名请求返回 `401`；已认证但无权限的 Subject 返回 `403`。身份和角色请求头绝不是认证回退。
 
-平台任务使用 `GET /api/v1/platform/tasks`、`POST /api/v1/platform/tasks`，以及按 owner 授权的详情、取消、结果和 opaque 附件操作。创建必须携带 `Idempotency-Key`；任务 owner 始终来自认证 Subject。普通用户只能看到本人任务，审计员全局只读，管理员可治理全部任务。网络 ACK 无法可信确认时进入 `dispatch_unknown`，且绝不自动再次提交。
+平台任务使用 `GET /api/v1/platform/tasks`、`POST /api/v1/platform/tasks`，以及按 owner 授权的详情、取消、结果和 opaque 附件操作。创建必须携带 `Idempotency-Key`；任务 owner 始终来自认证 Subject。普通用户只能看到本人任务，审计员全局只读，管理员可治理全部任务。网络 ACK 无法可信确认时进入 `dispatch_unknown`，且绝不自动再次提交。取消只有精确 `204` 才能直接视为成功；网络错误、服务端错误或非合同 2xx 都只允许执行一次 GET 状态确认，明确 4xx 直接返回，任何分支都不得自动再次 POST。
 
 独立受治理模型 API 是 `/api/v1/platform/models`。已弃用的 `/api/v1/app/models/{modelId}` facade 仅保留模型兼容：集合 DELETE 与嵌套请求体继续使用 `{status,message,data}` envelope 和 HTTP `200` 应用错误约定。响应凭据始终脱敏。YAML 模型 ID 不能遮蔽加密平台行；YAML 加载失败时，在数据库或审计变更前失败关闭。
 
-只有 `aig migrate` 可以执行数据库 DDL。全新或升级后的 PostgreSQL schema 到达 v8；runtime 启动只做校验。迁移可安全处理旧表为空的情况，且不依赖 runtime AutoMigrate。版本 8 新增 `idx_platform_tasks_updated_at` 与 `idx_platform_tasks_owner_updated_at`，分别支持全局和 owner 范围按 `updated_at DESC, id DESC` 稳定读取最近任务。
+只有 `aig migrate` 可以执行数据库 DDL。全新或升级后的 PostgreSQL schema 到达 v9；runtime 启动只做校验。迁移可安全处理旧表为空的情况，且不依赖 runtime AutoMigrate。版本 8 新增 `idx_platform_tasks_updated_at` 与 `idx_platform_tasks_owner_updated_at`，分别支持全局和 owner 范围按 `updated_at DESC, id DESC` 稳定读取最近任务；版本 9 将已被历史任务引用的 ready 附件幂等回填为 attached，未绑定 ready 附件保持可回收。
 
 ## 不可变报告与品牌 API
 

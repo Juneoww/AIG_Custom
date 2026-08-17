@@ -36,6 +36,7 @@ func (handler *Handler) Register(group *gin.RouterGroup) {
 		group.POST("/attachments/chunked", handler.beginChunkedAttachment)
 		group.POST("/attachments/:attachmentID/chunks", handler.uploadAttachmentChunk)
 		group.POST("/attachments/:attachmentID/merge", handler.mergeAttachment)
+		group.DELETE("/attachments/:attachmentID", handler.abortAttachment)
 		group.GET("/attachments/:attachmentID/download", handler.downloadAttachment)
 	}
 	group.POST("", handler.create)
@@ -224,6 +225,19 @@ func (handler *Handler) mergeAttachment(c *gin.Context) {
 	c.JSON(http.StatusOK, view)
 }
 
+func (handler *Handler) abortAttachment(c *gin.Context) {
+	subject, ok := identity.CurrentSubject(c)
+	if !ok {
+		c.Status(http.StatusUnauthorized)
+		return
+	}
+	if err := handler.attachments.Abort(c.Request.Context(), subject, c.Param("attachmentID")); err != nil {
+		respondAttachmentError(c, err)
+		return
+	}
+	c.Status(http.StatusNoContent)
+}
+
 func (handler *Handler) downloadAttachment(c *gin.Context) {
 	subject, ok := identity.CurrentSubject(c)
 	if !ok {
@@ -271,6 +285,7 @@ func (handler *Handler) create(c *gin.Context) {
 		c.Status(http.StatusUnauthorized)
 		return
 	}
+	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, 256<<10)
 	var input CreateInput
 	if c.ShouldBindJSON(&input) != nil {
 		c.JSON(http.StatusBadRequest, TaskCreateBadRequestResponse{Error: "invalid task request"})

@@ -80,6 +80,7 @@ func TestGeneratedSwaggerArtifactsStayInSync(t *testing.T) {
 			{"/api/v1/platform/tasks/attachments/chunked", "post"},
 			{"/api/v1/platform/tasks/attachments/{attachmentID}/chunks", "post"},
 			{"/api/v1/platform/tasks/attachments/{attachmentID}/merge", "post"},
+			{"/api/v1/platform/tasks/attachments/{attachmentID}", "delete"},
 			{"/api/v1/platform/tasks/attachments/{attachmentID}/download", "get"},
 		} {
 			_ = swaggerValue(t, document, "paths", endpoint.path, endpoint.method)
@@ -573,10 +574,24 @@ func TestSwaggerDocumentsTaskCreateAndLegacySecurityCorrections(t *testing.T) {
 				t.Errorf("task create 400 error enum = %v", badRequestEnum)
 			}
 			createDescription := strings.ToLower(swaggerValue(t, document, "paths", createPath, "post", "description").(string))
-			for _, term := range []string{"breaking", "security hardening", "taskdetail", "input_summary"} {
+			for _, term := range []string{"breaking", "security hardening", "taskdetail", "input_summary", "mcp_scan", "ai_infra_scan", "model_redteam_report", "agent_scan", "agent_id", "eval_model_id", "governed", "before persistence"} {
 				if !strings.Contains(createDescription, term) {
 					t.Errorf("task create description lacks %q", term)
 				}
+			}
+			body := swaggerBodyParameterSchema(t, document, createPath, "post")
+			if got := swaggerValue(t, body, "properties", "content", "maxLength"); got != float64(32768) && got != 32768 {
+				t.Errorf("task content maxLength = %v", got)
+			}
+			if got := swaggerValue(t, body, "properties", "attachment_ids", "maxItems"); got != float64(10) && got != 10 {
+				t.Errorf("attachment_ids maxItems = %v", got)
+			}
+			if got := swaggerValue(t, body, "properties", "attachment_ids", "items", "maxLength"); got != float64(128) && got != 128 {
+				t.Errorf("attachment id maxLength = %v", got)
+			}
+			taskTypes := swaggerValue(t, body, "properties", "task_type", "enum").([]interface{})
+			if !reflect.DeepEqual(taskTypes, []interface{}{"mcp_scan", "ai_infra_scan", "model_redteam_report", "agent_scan"}) {
+				t.Errorf("task create type enum = %v", taskTypes)
 			}
 			badRequestDescription := strings.ToLower(swaggerValue(t, document, "paths", createPath, "post", "responses", "400", "description").(string))
 			for _, term := range []string{"invalid task request", "attachment unavailable", "missing", "not ready"} {
@@ -588,6 +603,21 @@ func TestSwaggerDocumentsTaskCreateAndLegacySecurityCorrections(t *testing.T) {
 			mergeResponses := swaggerValue(t, document, "paths", "/api/v1/platform/tasks/attachments/{attachmentID}/merge", "post", "responses").(map[string]interface{})
 			if _, ok := mergeResponses["401"]; !ok {
 				t.Error("attachment merge must document unauthenticated 401")
+			}
+			abort := swaggerValue(t, document, "paths", "/api/v1/platform/tasks/attachments/{attachmentID}", "delete").(map[string]interface{})
+			for _, status := range []string{"204", "400", "401", "403", "404", "500"} {
+				_ = swaggerValue(t, abort, "responses", status)
+			}
+			for _, term := range []string{"uploading", "ready", "unbound", "task-bound", "deleting", "owner", "administrators", "csrf"} {
+				if !strings.Contains(strings.ToLower(swaggerValue(t, abort, "description").(string)), term) {
+					t.Errorf("attachment abort description lacks %q", term)
+				}
+			}
+			cancel := swaggerValue(t, document, "paths", "/api/v1/platform/tasks/{taskID}/cancel", "post").(map[string]interface{})
+			for _, term := range []string{"exact 204", "one status get", "never automatically repeat"} {
+				if !strings.Contains(strings.ToLower(swaggerValue(t, cancel, "description").(string)), term) {
+					t.Errorf("task cancel description lacks %q", term)
+				}
 			}
 
 			for _, operation := range []struct {
@@ -693,7 +723,7 @@ func TestAPIGuidesDocumentEnterpriseConsoleContracts(t *testing.T) {
 			"## Browser identity, CSRF, and public bootstrap", "/api/v1/auth/csrf", "/api/v1/auth/me", "/api/v1/public/brand", "/api/v1/version",
 			"## Enterprise console collections", "/api/v1/platform/dashboard", "exactly 30 UTC", "security_score=null",
 			"TaskListResponse", "ReportListResponse", "UserListResponse", "AuditListResponse", "CatalogPage", "page=1..1000", "page_size=1..100",
-			"attachment.download_authorized", "other users receive `404`", "auditors receive `403`", "schema reaches v8",
+			"attachment.download_authorized", "other users receive `404`", "auditors receive `403`", "schema reaches v9", "deleting tombstone",
 			"GET `/api/v1/auth/csrf` before login", "persistent cookie jar", "session.cookies.get(\"aig_csrf\")", "X-CSRF-Token", `-b "$COOKIE_JAR"`,
 			"idx_platform_tasks_updated_at", "idx_platform_tasks_owner_updated_at",
 		}},
@@ -701,7 +731,7 @@ func TestAPIGuidesDocumentEnterpriseConsoleContracts(t *testing.T) {
 			"## 浏览器身份、CSRF 与公开初始化", "/api/v1/auth/csrf", "/api/v1/auth/me", "/api/v1/public/brand", "/api/v1/version",
 			"## 企业控制台集合契约", "/api/v1/platform/dashboard", "恰好 30 个 UTC", "security_score=null",
 			"TaskListResponse", "ReportListResponse", "UserListResponse", "AuditListResponse", "CatalogPage", "page=1..1000", "page_size=1..100",
-			"attachment.download_authorized", "其他普通用户得到 `404`", "审计员得到 `403`", "schema 到达 v8",
+			"attachment.download_authorized", "其他普通用户得到 `404`", "审计员得到 `403`", "schema 到达 v9", "deleting 墓碑",
 			"登录前先 GET `/api/v1/auth/csrf`", "持久 Cookie jar", "session.cookies.get(\"aig_csrf\")", "X-CSRF-Token", `-b "$COOKIE_JAR"`,
 			"idx_platform_tasks_updated_at", "idx_platform_tasks_owner_updated_at",
 		}},
@@ -715,8 +745,8 @@ func TestAPIGuidesDocumentEnterpriseConsoleContracts(t *testing.T) {
 				t.Errorf("%s does not document %q", guide.path, required)
 			}
 		}
-		if strings.Contains(string(contents), "schema reaches v7") || strings.Contains(string(contents), "schema 到达 v7") {
-			t.Errorf("%s retains the obsolete schema v7 statement", guide.path)
+		if strings.Contains(string(contents), "schema reaches v8") || strings.Contains(string(contents), "schema 到达 v8") {
+			t.Errorf("%s retains the obsolete schema v8 statement", guide.path)
 		}
 	}
 }
@@ -732,7 +762,7 @@ func TestAPIGuidesDocumentLegacyModelAndMigrationBoundaries(t *testing.T) {
 				"/api/v1/app/models/{modelId}", "collection DELETE", "{status,message,data}",
 				"HTTP `200`", "`401`", "`403`", "masked", "/api/v1/platform/models",
 				"cannot shadow", "fails closed",
-				"Only `aig migrate` may apply database DDL", "schema reaches v8", "empty legacy table",
+				"Only `aig migrate` may apply database DDL", "schema reaches v9", "empty legacy table",
 				"/api/v1/platform/tasks", "Idempotency-Key", "opaque attachment IDs", "410 Gone", "password-change and CSRF checks",
 				"/api/v1/platform/reports", "page_size", "safe summary", "immutable RenderModel", "30 fixed UTC day buckets",
 				"/api/v1/platform/reports/{reportID}/exports/pdf", "durable pending/completion audit outbox",
@@ -746,7 +776,7 @@ func TestAPIGuidesDocumentLegacyModelAndMigrationBoundaries(t *testing.T) {
 				"/api/v1/app/models/{modelId}", "集合 DELETE", "{status,message,data}",
 				"HTTP `200`", "`401`", "`403`", "始终脱敏", "/api/v1/platform/models",
 				"不能遮蔽", "失败关闭",
-				"只有 `aig migrate` 可以执行数据库 DDL", "schema 到达 v8", "旧表为空",
+				"只有 `aig migrate` 可以执行数据库 DDL", "schema 到达 v9", "旧表为空",
 				"/api/v1/platform/tasks", "Idempotency-Key", "opaque 附件 ID", "410 Gone", "首次改密与 CSRF 校验",
 				"/api/v1/platform/reports", "page_size", "安全摘要", "不可变 RenderModel", "30 个固定 UTC 日桶",
 				"/api/v1/platform/reports/{reportID}/exports/pdf", "持久化 pending/completion 审计 outbox",
@@ -858,6 +888,27 @@ func swaggerBodyParameterRef(t *testing.T, document interface{}, path, method st
 	}
 	t.Fatalf("Swagger body parameter at %s.%s is missing", path, method)
 	return ""
+}
+
+func swaggerBodyParameterSchema(t *testing.T, document interface{}, path, method string) map[string]interface{} {
+	t.Helper()
+	parameters, ok := swaggerValue(t, document, "paths", path, method, "parameters").([]interface{})
+	if !ok {
+		t.Fatalf("Swagger parameters at %s.%s are not an array", path, method)
+	}
+	for _, parameter := range parameters {
+		object, ok := parameter.(map[string]interface{})
+		if !ok || object["in"] != "body" {
+			continue
+		}
+		schema, ok := object["schema"].(map[string]interface{})
+		if !ok {
+			t.Fatalf("Swagger body schema at %s.%s is not an object", path, method)
+		}
+		return schema
+	}
+	t.Fatalf("Swagger body parameter at %s.%s is missing", path, method)
+	return nil
 }
 
 func swaggerNestedRef(t *testing.T, value interface{}, path ...string) string {

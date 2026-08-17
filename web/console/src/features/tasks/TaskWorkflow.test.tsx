@@ -7,7 +7,7 @@
  */
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
-import { NetworkError } from '../../shared/api/errors'
+import { ApiError, NetworkError } from '../../shared/api/errors'
 import {
   cancelTaskGoverned,
   createTaskSubmission,
@@ -101,5 +101,33 @@ describe('任务写入和短轮询边界', () => {
     expect(fetchMock).toHaveBeenCalledTimes(2)
     expect((fetchMock.mock.calls[0]?.[1] as RequestInit).method).toBe('POST')
     expect((fetchMock.mock.calls[1]?.[1] as RequestInit).method).toBe('GET')
+  })
+
+  it.each([
+    ['服务端错误', new Response(null, { status: 503 })],
+    ['成功响应解析异常', new Response('{', { status: 200, headers: { 'Content-Type': 'application/json' } })],
+    ['非契约成功状态', jsonResponse({ status: 'accepted-but-not-cancelled' })],
+  ])('取消遇到%s时只读取一次详情确认', async (_name, failedResponse) => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(failedResponse)
+      .mockResolvedValueOnce(jsonResponse(runningTask))
+    vi.stubGlobal('fetch', fetchMock)
+
+    await expect(cancelTaskGoverned('task-opaque-1')).resolves.toEqual({ status: 'uncertain', task: runningTask })
+
+    expect(fetchMock).toHaveBeenCalledTimes(2)
+    expect(fetchMock.mock.calls.map(([, init]) => (init as RequestInit).method)).toEqual(['POST', 'GET'])
+  })
+
+  it('取消遇到明确4xx时直接抛出且绝不确认或重写', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(new Response(null, { status: 403 }))
+    vi.stubGlobal('fetch', fetchMock)
+
+    const error = await cancelTaskGoverned('task-opaque-1').catch((caught: unknown) => caught)
+    expect(error).toBeInstanceOf(ApiError)
+    expect((error as ApiError).kind).toBe('forbidden')
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+    expect((fetchMock.mock.calls[0]?.[1] as RequestInit).method).toBe('POST')
   })
 })

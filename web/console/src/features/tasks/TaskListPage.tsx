@@ -7,8 +7,8 @@
  */
 import { Button, Field, Select, makeStyles, tokens } from '@fluentui/react-components'
 import { useQuery } from '@tanstack/react-query'
-import { useState } from 'react'
-import { Link } from 'react-router-dom'
+import { useEffect } from 'react'
+import { Link, useSearchParams } from 'react-router-dom'
 
 import { useSession } from '../auth/session'
 import { ApiError } from '../../shared/api/errors'
@@ -56,6 +56,25 @@ const formatter = new Intl.DateTimeFormat('zh-CN', {
   hour12: false,
 })
 
+const selectableStatuses = new Set<TaskStatus>(Object.keys(taskStatusLabels) as TaskStatus[])
+const selectableTaskTypes = new Set<Exclude<TaskType, 'unknown'>>(
+  (Object.keys(taskTypeLabels) as TaskType[]).filter((value): value is Exclude<TaskType, 'unknown'> => value !== 'unknown'),
+)
+
+function positivePage(value: string | null): number {
+  if (!value || !/^\d+$/.test(value)) return 1
+  const page = Number(value)
+  return Number.isSafeInteger(page) && page >= 1 && page <= 1_000 ? page : 1
+}
+
+function normalizedTaskSearch(page: number, status?: TaskStatus, taskType?: Exclude<TaskType, 'unknown'>): string {
+  const next = new URLSearchParams()
+  if (page > 1) next.set('page', String(page))
+  if (status) next.set('status', status)
+  if (taskType) next.set('task_type', taskType)
+  return next.toString()
+}
+
 export function formatTaskTime(value: string): string {
   return formatter.format(new Date(value))
 }
@@ -63,9 +82,19 @@ export function formatTaskTime(value: string): string {
 export function TaskListPage() {
   const styles = useStyles()
   const { state } = useSession()
-  const [page, setPage] = useState(1)
-  const [status, setStatus] = useState<TaskStatus | undefined>()
-  const [taskType, setTaskType] = useState<Exclude<TaskType, 'unknown'> | undefined>()
+  const [searchParams, setSearchParams] = useSearchParams()
+  const page = positivePage(searchParams.get('page'))
+  const statusValue = searchParams.get('status') as TaskStatus | null
+  const taskTypeValue = searchParams.get('task_type') as Exclude<TaskType, 'unknown'> | null
+  const status = statusValue && selectableStatuses.has(statusValue) ? statusValue : undefined
+  const taskType = taskTypeValue && selectableTaskTypes.has(taskTypeValue) ? taskTypeValue : undefined
+  const normalizedSearch = normalizedTaskSearch(page, status, taskType)
+  useEffect(() => {
+    if (searchParams.toString() !== normalizedSearch) setSearchParams(normalizedSearch, { replace: true })
+  }, [normalizedSearch, searchParams, setSearchParams])
+  const updateSearch = (nextPage: number, nextStatus = status, nextTaskType = taskType) => {
+    setSearchParams(normalizedTaskSearch(nextPage, nextStatus, nextTaskType))
+  }
   const query = useQuery({
     queryKey: ['tasks', { page, pageSize: 20, status, taskType }],
     queryFn: ({ signal }) => fetchTaskList({ page, pageSize: 20, status, taskType }, signal),
@@ -105,8 +134,7 @@ export function TaskListPage() {
           <Select
             value={status ?? ''}
             onChange={(_, data) => {
-              setStatus((data.value || undefined) as TaskStatus | undefined)
-              setPage(1)
+              updateSearch(1, (data.value || undefined) as TaskStatus | undefined, taskType)
             }}
           >
             <option value="">全部状态</option>
@@ -119,8 +147,7 @@ export function TaskListPage() {
           <Select
             value={taskType ?? ''}
             onChange={(_, data) => {
-              setTaskType((data.value || undefined) as Exclude<TaskType, 'unknown'> | undefined)
-              setPage(1)
+              updateSearch(1, status, (data.value || undefined) as Exclude<TaskType, 'unknown'> | undefined)
             }}
           >
             <option value="">全部类型</option>
@@ -145,8 +172,8 @@ export function TaskListPage() {
         <nav className={styles.pagination} aria-label="任务分页">
           <span>共 {query.data.total} 条，第 {query.data.page} 页</span>
           <div>
-            <Button appearance="secondary" disabled={page <= 1} onClick={() => setPage((current) => current - 1)}>上一页</Button>{' '}
-            <Button appearance="secondary" disabled={page * query.data.page_size >= query.data.total} onClick={() => setPage((current) => current + 1)}>下一页</Button>
+            <Button appearance="secondary" disabled={page <= 1} onClick={() => updateSearch(page - 1)}>上一页</Button>{' '}
+            <Button appearance="secondary" disabled={page * query.data.page_size >= query.data.total} onClick={() => updateSearch(page + 1)}>下一页</Button>
           </div>
         </nav>
       ) : null}

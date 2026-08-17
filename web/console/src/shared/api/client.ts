@@ -39,6 +39,7 @@ export const defaultAuthorizationGeneration = createAuthorizationGeneration()
 
 export interface ApiRequestPolicy {
   authorization?: AuthorizationGeneration
+  expectedStatus?: number
   unauthorized?: 'notify' | 'suppress'
 }
 
@@ -193,6 +194,11 @@ export async function apiRequest<T>(
     throw apiErrorFromStatus(response.status)
   }
 
+  if (policy.expectedStatus !== undefined && response.status !== policy.expectedStatus) {
+    await cancelResponseBody(response)
+    throw new ApiError('unexpected-response', response.status)
+  }
+
   if (response.status === 204) return undefined as T
 
   return (await readBoundedJSON(response)) as T
@@ -249,18 +255,27 @@ export async function apiBinaryRequest(
     await cancelResponseBody(response)
     throw new ApiError('unexpected-response', response.status)
   }
-  const bytes = new Uint8Array(MAX_BINARY_BYTES)
+  const declaredLength = boundedDeclaredLength(response.headers.get('Content-Length'), MAX_BINARY_BYTES)
+  let bytes = new Uint8Array(declaredLength ?? Math.min(64 * 1024, MAX_BINARY_BYTES))
   let total = 0
   try {
     for (;;) {
       const { done, value } = await reader.read()
       if (done) break
       if (value.byteLength > MAX_BINARY_BYTES - total) throw new ApiError('unexpected-response', response.status)
+      const required = total + value.byteLength
+      if (required > bytes.byteLength) {
+        let capacity = Math.max(1, bytes.byteLength)
+        while (capacity < required) capacity = Math.min(MAX_BINARY_BYTES, capacity * 2)
+        const grown = new Uint8Array(capacity)
+        grown.set(bytes.subarray(0, total))
+        bytes = grown
+      }
       bytes.set(value, total)
       total += value.byteLength
     }
     return {
-      blob: new Blob([bytes.slice(0, total)], { type: 'application/octet-stream' }),
+      blob: new Blob([bytes.subarray(0, total)], { type: 'application/octet-stream' }),
       contentDisposition: response.headers.get('Content-Disposition'),
     }
   } catch {
@@ -277,6 +292,13 @@ export async function apiBinaryRequest(
       // 下载流释放失败不向调用方暴露底层信息。
     }
   }
+}
+
+function boundedDeclaredLength(value: string | null, maximum: number): number | null {
+  const length = value?.trim() ?? ''
+  if (!/^\d+$/.test(length)) return null
+  const parsed = Number(length)
+  return Number.isSafeInteger(parsed) && parsed >= 0 && parsed <= maximum ? parsed : null
 }
 
 function declaredResponseTooLargeFor(value: string | null, maximum: number): boolean {

@@ -1205,7 +1205,7 @@ const docTemplate = `{
                 "consumes": [
                     "application/json"
                 ],
-                "description": "Breaking security hardening: create responses now use the browser-safe TaskDetail with bounded input_summary instead of the former internal task View; clients must migrate field access. Creates an owner-scoped platform task from the authenticated Cookie Subject. Idempotency-Key is required and unique per owner; retries return the same task. Dispatch uses persisted claims and a global attempt budget. An uncertain network acknowledgement becomes dispatch_unknown and is never submitted automatically again; this is at-most-once dispatch, not exactly-once execution. raw model credentials are rejected: use governed model_id references. Attachments are supplied only as opaque attachment IDs. Requires CSRF protection.",
+                "description": "Breaking security hardening: create responses now use the browser-safe TaskDetail with bounded input_summary instead of the former internal task View; clients must migrate field access. The JSON body is limited to 256 KiB. Creates an owner-scoped platform task from the authenticated Cookie Subject. Idempotency-Key is required and unique per owner; retries return the same task. Only exact canonical task types are accepted and the platform maps them to private Agent aliases: mcp_scan params allow model_id and thread; ai_infra_scan params allow model_id and timeout; model_redteam_report params require model_id as a bounded string array plus eval_model_id and may include dataset numPrompts/randomSeed/promptColumn and techniques; agent_scan params require agent_id and eval_model_id. Every model_id/eval_model_id must resolve through the governed model boundary, and agent_id through the user or public Agent registry, before persistence; unknown or invisible references write no task. Unknown fields, nested credential objects, raw model credentials, and legacy aliases are rejected. Attachments are supplied only as at most ten opaque attachment IDs. Dispatch uses persisted claims and a global attempt budget. An uncertain network acknowledgement becomes dispatch_unknown and is never submitted automatically again; this is at-most-once dispatch, not exactly-once execution. Requires CSRF protection.",
                 "parameters": [
                     {
                         "in": "header",
@@ -1222,21 +1222,37 @@ const docTemplate = `{
                             "properties": {
                                 "attachment_ids": {
                                     "items": {
-                                        "type": "string"
+                                        "type": "string",
+                                        "maxLength": 128
                                     },
-                                    "type": "array"
+                                    "type": "array",
+                                    "maxItems": 10
                                 },
                                 "content": {
-                                    "type": "string"
+                                    "type": "string",
+                                    "maxLength": 32768
                                 },
                                 "country_iso_code": {
-                                    "type": "string"
+                                    "type": "string",
+                                    "enum": [
+                                        "",
+                                        "zh",
+                                        "zh_CN",
+                                        "en"
+                                    ]
                                 },
                                 "params": {
-                                    "type": "object"
+                                    "type": "object",
+                                    "description": "Exact per-task schema described by this operation; arbitrary and credential-bearing fields are rejected."
                                 },
                                 "task_type": {
-                                    "type": "string"
+                                    "type": "string",
+                                    "enum": [
+                                        "mcp_scan",
+                                        "ai_infra_scan",
+                                        "model_redteam_report",
+                                        "agent_scan"
+                                    ]
                                 }
                             },
                             "required": [
@@ -1349,7 +1365,7 @@ const docTemplate = `{
         },
         "/api/v1/platform/tasks/{taskID}/cancel": {
             "post": {
-                "description": "Cancels an owned task or, for administrators, any task. Auditors are read-only. Requires CSRF protection and records a durable audit event.",
+                "description": "Cancels an owned task or, for administrators, any task. A task owned by another user is indistinguishable from an absent task and returns 404; auditors remain read-only with 403. Only the exact 204 response represents confirmed cancellation; clients may perform one status GET after an uncertain transport/server/non-contract-2xx outcome but must never automatically repeat the POST. Requires CSRF protection and records a durable audit event.",
                 "parameters": [
                     {
                         "in": "path",
@@ -1366,10 +1382,10 @@ const docTemplate = `{
                         "description": "Unauthenticated."
                     },
                     "403": {
-                        "description": "Owner or administrator role required."
+                        "description": "Auditors or unsupported roles cannot cancel tasks; password change or CSRF may also be incomplete."
                     },
                     "404": {
-                        "description": "Task not found."
+                        "description": "Task not found or owned by another ordinary user."
                     },
                     "500": {
                         "description": "Cancellation or durable audit failed; internal details are not exposed."
@@ -1386,7 +1402,7 @@ const docTemplate = `{
                 "consumes": [
                     "multipart/form-data"
                 ],
-                "description": "Streams one private attachment owned by the authenticated user or administrator within the configured size limit. Auditors cannot create attachments. Requires CSRF. The response exposes only an opaque attachment ID and safe metadata, never a storage name or path.",
+                "description": "Streams one private attachment owned by the authenticated user or administrator within the configured size limit. Before creation, one bounded batch (at most 100) of expired unbound uploading or ready records plus prior deleting tombstones is cleaned; records finalize only after private storage removal. Auditors cannot create attachments. Requires CSRF. The response exposes only an opaque attachment ID and safe metadata, never a storage name or path.",
                 "parameters": [
                     {
                         "in": "formData",
@@ -1429,7 +1445,7 @@ const docTemplate = `{
                 "consumes": [
                     "application/json"
                 ],
-                "description": "Begins an owner-scoped chunked upload for an authenticated user or administrator after validating the declared total size. Auditors cannot create attachments. Requires CSRF.",
+                "description": "Begins an owner-scoped chunked upload for an authenticated user or administrator after validating the declared total size. Before creation, one bounded batch (at most 100) of expired unbound uploading or ready records plus prior deleting tombstones is cleaned. Records are finalized only after private storage removal succeeds, so failures remain retryable. The configured TTL is 24 hours by default. Auditors cannot create attachments. Requires CSRF.",
                 "parameters": [
                     {
                         "in": "body",
@@ -1487,7 +1503,7 @@ const docTemplate = `{
                 "consumes": [
                     "multipart/form-data"
                 ],
-                "description": "Streams one bounded chunk. Owner users may write their own attachment; administrators may write any attachment; auditors are read-only. Cumulative size is enforced atomically. Requires CSRF.",
+                "description": "Streams one non-empty bounded chunk. chunk_index must be non-negative and less than the configured ceil(max upload bytes / max chunk bytes); the default maximum is ten chunks. Owner users may write their own attachment; administrators may write any attachment; auditors are read-only. Cumulative size is enforced atomically. Requires CSRF.",
                 "parameters": [
                     {
                         "in": "path",
@@ -1542,7 +1558,7 @@ const docTemplate = `{
                 "consumes": [
                     "application/json"
                 ],
-                "description": "Merges chunks by streaming while enforcing declared, cumulative, and actual size equality. Owner users may merge their own attachment; administrators may merge any attachment; auditors are read-only. Requires CSRF.",
+                "description": "Merges a positive configured-bounded chunk count by streaming while enforcing declared, cumulative, and actual size equality. Owner users may merge their own attachment; administrators may merge any attachment; auditors are read-only. Requires CSRF.",
                 "parameters": [
                     {
                         "in": "path",
@@ -1603,7 +1619,7 @@ const docTemplate = `{
         },
         "/api/v1/platform/tasks/attachments/{attachmentID}/download": {
             "get": {
-                "description": "Downloads a ready private attachment after authorization. An owner user may read their own attachment; other users receive 404 to avoid existence disclosure; auditors receive 403; administrators may read any attachment. Before an administrator cross-owner storage open, the server durably records a successful attachment.download_authorized event with sanitized authorization metadata; this records authorization, not stream delivery. Storage names and paths are never exposed.",
+                "description": "Downloads a ready or task-bound private attachment after authorization. An owner user may read their own attachment; other users receive 404 to avoid existence disclosure; auditors receive 403; administrators may read any attachment. Before an administrator cross-owner storage open, the server durably records a successful attachment.download_authorized event with sanitized authorization metadata; this records authorization, not stream delivery. Storage names and paths are never exposed.",
                 "parameters": [
                     {
                         "in": "path",
@@ -1817,7 +1833,7 @@ const docTemplate = `{
         },
         "/api/v1/auth/password-resets/{userID}": {
             "post": {
-                "description": "Requires HTTPS, an administrator session, and a matching X-CSRF-Token header. This HTTP endpoint never returns a reset token. A trusted local administrator must run ai-infra-guard create-password-reset --username <username> to obtain the sensitive one-time token for secure delivery; it must never be logged or persisted.",
+                "description": "Requires HTTPS, an administrator session, and a matching X-CSRF-Token header. This HTTP endpoint never returns a reset token. A trusted local administrator must run ai-infra-guard create-password-reset --username \u003cusername\u003e to obtain the sensitive one-time token for secure delivery; it must never be logged or persisted.",
                 "parameters": [
                     {
                         "description": "Identity user ID",
@@ -2301,6 +2317,43 @@ const docTemplate = `{
                 "summary": "Upload file",
                 "tags": [
                     "taskapi"
+                ]
+            }
+        },
+        "/api/v1/platform/tasks/attachments/{attachmentID}": {
+            "delete": {
+                "description": "Aborts and deletes an owner-scoped uploading or ready attachment only while it remains unbound. Owner users may delete their own unbound attachment; administrators may govern any unbound attachment; other users receive 404 and auditors receive 403. Task-bound attachments are never deleted. The server first persists a deleting tombstone and finalizes the record only after private storage cleanup succeeds; failures remain retryable and TTL cleanup is the fallback. Requires CSRF.",
+                "parameters": [
+                    {
+                        "in": "path",
+                        "name": "attachmentID",
+                        "required": true,
+                        "type": "string"
+                    }
+                ],
+                "responses": {
+                    "204": {
+                        "description": "Uploading attachment deleted."
+                    },
+                    "400": {
+                        "description": "Attachment is task-bound or otherwise not abortable."
+                    },
+                    "401": {
+                        "description": "Unauthenticated."
+                    },
+                    "403": {
+                        "description": "Auditor or unsupported role cannot delete attachments; password change or CSRF may also be incomplete."
+                    },
+                    "404": {
+                        "description": "Attachment is absent or belongs to another ordinary user."
+                    },
+                    "500": {
+                        "description": "Storage or persistence cleanup failed; internal details are not exposed."
+                    }
+                },
+                "summary": "Abort private attachment upload",
+                "tags": [
+                    "platform-task-attachments"
                 ]
             }
         }

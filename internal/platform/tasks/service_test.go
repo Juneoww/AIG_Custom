@@ -36,6 +36,28 @@ type recordingEngine struct {
 	last        EngineTask
 }
 
+type readerCallback func([]byte) (int, error)
+
+func (callback readerCallback) Read(buffer []byte) (int, error) { return callback(buffer) }
+
+func (*recordingEngine) ValidateTaskReferences(context.Context, EngineTask) error { return nil }
+
+type countingAttachmentRepository struct {
+	*MemoryRepository
+	reads atomic.Int64
+}
+
+type rejectingReferenceEngine struct{ recordingEngine }
+
+func (*rejectingReferenceEngine) ValidateTaskReferences(context.Context, EngineTask) error {
+	return ErrInvalid
+}
+
+func (repository *countingAttachmentRepository) GetAttachment(ctx context.Context, id string) (*Attachment, error) {
+	repository.reads.Add(1)
+	return repository.MemoryRepository.GetAttachment(ctx, id)
+}
+
 func (engine *recordingEngine) SubmitTask(_ context.Context, task EngineTask) (string, error) {
 	engine.submits.Add(1)
 	engine.mu.Lock()
@@ -70,6 +92,8 @@ type leaseRaceEngine struct {
 	releaseFirst chan struct{}
 }
 
+func (*leaseRaceEngine) ValidateTaskReferences(context.Context, EngineTask) error { return nil }
+
 func (engine *leaseRaceEngine) SubmitTask(_ context.Context, task EngineTask) (string, error) {
 	if engine.submits.Add(1) == 1 {
 		close(engine.firstEntered)
@@ -99,6 +123,8 @@ type recoveryTimeoutEngine struct {
 	statusReads atomic.Int64
 	statuses    map[string]EngineStatus
 }
+
+func (*recoveryTimeoutEngine) ValidateTaskReferences(context.Context, EngineTask) error { return nil }
 
 func (*recoveryTimeoutEngine) SubmitTask(context.Context, EngineTask) (string, error) {
 	return "", ErrEngineTaskNotFound
@@ -287,16 +313,19 @@ func TestConcurrentIdempotentCreatePersistsOneTaskAndSubmitsOnce(t *testing.T) {
 	assert.Equal(t, StatusRunning, tasks[0].Status)
 }
 
-func TestCreateRejectsRawModelCredentialsRecursivelyButAllowsModelIDs(t *testing.T) {
+func TestCreateUsesExactPerTaskParameterSchemas(t *testing.T) {
 	repository := NewMemoryRepository()
 	engine := &recordingEngine{}
 	service := NewService(repository, engine, audit.NewService(audit.NewMemoryRepository()))
 	subject := identity.Subject{UserID: "user-1", Username: "alice", Role: identity.RoleUser}
 
 	for name, params := range map[string]string{
-		"top-level token": `{"token":"plain-secret"}`,
-		"nested api key":  `{"provider":{"api_key":"plain-secret"}}`,
-		"legacy model":    `{"model":{"token":"plain-secret","base_url":"https://model.invalid"}}`,
+		"top-level token":    `{"token":"plain-secret"}`,
+		"nested api key":     `{"provider":{"api_key":"plain-secret"}}`,
+		"legacy model":       `{"model":{"token":"plain-secret","base_url":"https://model.invalid"}}`,
+		"access token alias": `{"access_token":"plain-secret"}`,
+		"nested credentials": `{"metadata":{"credentials":{"value":"plain-secret"}}}`,
+		"wrong type field":   `{"thread":"4"}`,
 	} {
 		t.Run(name, func(t *testing.T) {
 			_, err := service.Create(context.Background(), subject, CreateInput{
@@ -307,12 +336,64 @@ func TestCreateRejectsRawModelCredentialsRecursivelyButAllowsModelIDs(t *testing
 	}
 	assert.Zero(t, engine.submits.Load())
 
-	_, err := service.Create(context.Background(), subject, CreateInput{
-		IdempotencyKey: "model-ids", TaskType: "mcp_scan", Content: "scan",
-		Params: json.RawMessage(`{"model_id":"model-1","eval_model_id":"model-2"}`),
-	})
+	valid := []CreateInput{
+		{IdempotencyKey: "valid-mcp", TaskType: "mcp_scan", Content: "scan", Params: json.RawMessage(`{"model_id":"model-1","thread":4}`)},
+		{IdempotencyKey: "valid-infra", TaskType: "ai_infra_scan", Content: "target", Params: json.RawMessage(`{"model_id":"model-1","timeout":30}`)},
+		{IdempotencyKey: "valid-redteam", TaskType: "model_redteam_report", Content: "prompt", Params: json.RawMessage(`{"model_id":["model-1"],"eval_model_id":"model-2","dataset":{"numPrompts":10,"randomSeed":7,"promptColumn":"prompt"},"techniques":["BASE64"]}`)},
+		{IdempotencyKey: "valid-agent", TaskType: "agent_scan", Content: "scan", Params: json.RawMessage(`{"agent_id":"agent-1","eval_model_id":"model-2"}`)},
+	}
+	for _, input := range valid {
+		_, err := service.Create(context.Background(), subject, input)
+		require.NoError(t, err, input.TaskType)
+	}
+	assert.Equal(t, int64(len(valid)), engine.submits.Load())
+}
+
+func TestCreateRejectsUnboundedOrNonCanonicalInputBeforeAttachmentReads(t *testing.T) {
+	repository := &countingAttachmentRepository{MemoryRepository: NewMemoryRepository()}
+	audits := audit.NewService(audit.NewMemoryRepository())
+	service := NewService(repository, &recordingEngine{}, audits)
+	attachments, err := NewAttachmentService(repository, AttachmentConfig{
+		UploadDir: t.TempDir(), MaxFileBytes: 8, MaxChunkBytes: 4, UploadTTL: time.Hour,
+	}, audits)
 	require.NoError(t, err)
-	assert.Equal(t, int64(1), engine.submits.Load())
+	service.SetAttachmentService(attachments)
+	subject := identity.Subject{UserID: "user-1", Username: "alice", Role: identity.RoleUser}
+	tests := map[string]CreateInput{
+		"unknown task":          {IdempotencyKey: "unknown", TaskType: "future_task", Content: "scan"},
+		"legacy alias":          {IdempotencyKey: "alias", TaskType: "Mcp-Scan", Content: "scan"},
+		"large content":         {IdempotencyKey: "content", TaskType: "mcp_scan", Content: strings.Repeat("x", (32<<10)+1)},
+		"invalid country":       {IdempotencyKey: "country", TaskType: "mcp_scan", Content: "scan", CountryIsoCode: "zh_CN_extra"},
+		"too many attachments":  {IdempotencyKey: "many-attachments", TaskType: "mcp_scan", Content: "scan", AttachmentIDs: []string{"1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11"}},
+		"duplicate attachments": {IdempotencyKey: "duplicate-attachments", TaskType: "mcp_scan", Content: "scan", AttachmentIDs: []string{"opaque-1", "opaque-1"}},
+		"long attachment id":    {IdempotencyKey: "long-attachment", TaskType: "mcp_scan", Content: "scan", AttachmentIDs: []string{strings.Repeat("a", 129)}},
+	}
+	for name, input := range tests {
+		t.Run(name, func(t *testing.T) {
+			before := repository.reads.Load()
+			_, err := service.Create(context.Background(), subject, input)
+			require.ErrorIs(t, err, ErrInvalid)
+			assert.Equal(t, before, repository.reads.Load(), "非法输入不得触发附件数据库读取")
+		})
+	}
+}
+
+func TestCreateValidatesGovernedReferencesBeforePersistence(t *testing.T) {
+	repository := NewMemoryRepository()
+	engine := &rejectingReferenceEngine{}
+	service := NewService(repository, engine, audit.NewService(audit.NewMemoryRepository()))
+	subject := identity.Subject{UserID: "user-1", Username: "alice", Role: identity.RoleUser}
+
+	_, err := service.Create(context.Background(), subject, CreateInput{
+		IdempotencyKey: "raw-reference", TaskType: "model_redteam_report", Content: "scan",
+		Params: json.RawMessage(`{"model_id":["sk-browser-sensitive-value"],"eval_model_id":"model-safe"}`),
+	})
+
+	require.ErrorIs(t, err, ErrInvalid)
+	tasks, listErr := repository.List(context.Background())
+	require.NoError(t, listErr)
+	assert.Empty(t, tasks)
+	assert.Zero(t, engine.submits.Load())
 }
 
 func TestDispatchFailureRetainsTaskAndRecordsSeparateStatus(t *testing.T) {
@@ -702,11 +783,54 @@ func TestAttachmentUploadIsPrivateBoundedAndResolvesOnlyForOwningTask(t *testing
 	assert.NotEqual(t, view.ID, engine.last.Attachments[0])
 	assert.NotContains(t, engine.last.Attachments[0], attachments.config.UploadDir)
 	engine.mu.Unlock()
+	bound, err := repository.GetAttachment(context.Background(), view.ID)
+	require.NoError(t, err)
+	assert.Equal(t, AttachmentStateAttached, bound.State)
+	require.ErrorIs(t, attachments.Abort(context.Background(), owner, view.ID), ErrAttachmentNotReady, "已绑定附件不得被回收")
+	file, _, _, err := attachments.Open(context.Background(), owner, view.ID)
+	require.NoError(t, err)
+	require.NoError(t, file.Close())
+	retried, err := service.Create(context.Background(), owner, CreateInput{
+		IdempotencyKey: "with-attachment", TaskType: "ai_infra_scan", Content: "scan", AttachmentIDs: []string{view.ID},
+	})
+	require.NoError(t, err)
+	assert.Equal(t, created.ID, retried.ID)
 
 	_, err = service.Create(context.Background(), identity.Subject{UserID: "other", Username: "mallory", Role: identity.RoleUser}, CreateInput{
 		IdempotencyKey: "forged-attachment", TaskType: "ai_infra_scan", Content: "scan", AttachmentIDs: []string{view.ID},
 	})
 	require.ErrorIs(t, err, ErrForbidden)
+}
+
+func TestRegularAttachmentUploadIsTraceableBeforeReadingRequestBytes(t *testing.T) {
+	repository := NewMemoryRepository()
+	attachments, err := NewAttachmentService(repository, AttachmentConfig{
+		UploadDir: t.TempDir(), MaxFileBytes: 8, MaxChunkBytes: 4,
+	}, audit.NewService(audit.NewMemoryRepository()))
+	require.NoError(t, err)
+	owner := identity.Subject{UserID: "user-1", Username: "alice", Role: identity.RoleUser}
+	observedUploading := false
+	sent := false
+	reader := readerCallback(func(buffer []byte) (int, error) {
+		repository.mu.Lock()
+		for _, attachment := range repository.attachments {
+			observedUploading = observedUploading || attachment.State == AttachmentStateUploading
+		}
+		repository.mu.Unlock()
+		if sent {
+			return 0, io.EOF
+		}
+		sent = true
+		return copy(buffer, "1234"), nil
+	})
+
+	view, err := attachments.Upload(context.Background(), owner, "traceable.txt", reader)
+	require.NoError(t, err)
+	assert.True(t, observedUploading, "请求字节写入前必须已有可供TTL回收的记录")
+	stored, err := repository.GetAttachment(context.Background(), view.ID)
+	require.NoError(t, err)
+	assert.Equal(t, AttachmentStateReady, stored.State)
+	assert.NoFileExists(t, filepath.Join(attachments.config.UploadDir, stored.StorageName+".uploading"))
 }
 
 type failingAttachmentAuditRecorder struct {
@@ -1011,13 +1135,17 @@ func TestChunkUploadEnforcesSingleAndCumulativeLimitsAndMergeSize(t *testing.T) 
 	view, err := attachments.BeginChunked(context.Background(), owner, "chunked.txt", 7)
 	require.NoError(t, err)
 
+	err = attachments.UploadChunk(context.Background(), owner, view.ID, 0, strings.NewReader(""))
+	require.ErrorIs(t, err, ErrInvalid)
 	err = attachments.UploadChunk(context.Background(), owner, view.ID, 0, strings.NewReader("12345"))
 	require.ErrorIs(t, err, ErrAttachmentTooLarge)
 	require.NoError(t, attachments.UploadChunk(context.Background(), owner, view.ID, 0, strings.NewReader("1234")))
 	require.NoError(t, attachments.UploadChunk(context.Background(), owner, view.ID, 1, strings.NewReader("567")))
 	err = attachments.UploadChunk(context.Background(), owner, view.ID, 2, strings.NewReader("8"))
-	require.ErrorIs(t, err, ErrAttachmentTooLarge)
+	require.ErrorIs(t, err, ErrInvalid)
 
+	_, err = attachments.Merge(context.Background(), owner, view.ID, 3, 7)
+	require.ErrorIs(t, err, ErrInvalid)
 	_, err = attachments.Merge(context.Background(), owner, view.ID, 2, 6)
 	require.ErrorIs(t, err, ErrAttachmentSizeMismatch)
 	merged, err := attachments.Merge(context.Background(), owner, view.ID, 2, 7)
@@ -1032,18 +1160,213 @@ func TestChunkUploadEnforcesSingleAndCumulativeLimitsAndMergeSize(t *testing.T) 
 	assert.NoDirExists(t, filepath.Join(attachments.config.UploadDir, ".chunks", view.ID))
 }
 
+func TestAttachmentAbortIsOwnerScopedAndRemovesUploadingChunks(t *testing.T) {
+	repository := NewMemoryRepository()
+	attachments, err := NewAttachmentService(repository, AttachmentConfig{
+		UploadDir: t.TempDir(), MaxFileBytes: 8, MaxChunkBytes: 4, UploadTTL: time.Hour,
+	}, audit.NewService(audit.NewMemoryRepository()))
+	require.NoError(t, err)
+	owner := identity.Subject{UserID: "user-owner", Username: "owner", Role: identity.RoleUser}
+	other := identity.Subject{UserID: "user-other", Username: "other", Role: identity.RoleUser}
+	auditor := identity.Subject{UserID: "user-auditor", Username: "auditor", Role: identity.RoleAuditor}
+	admin := identity.Subject{UserID: "user-admin", Username: "admin", Role: identity.RoleAdmin}
+	view, err := attachments.BeginChunked(context.Background(), owner, "chunked.txt", 7)
+	require.NoError(t, err)
+	require.NoError(t, attachments.UploadChunk(context.Background(), owner, view.ID, 0, strings.NewReader("1234")))
+
+	require.ErrorIs(t, attachments.Abort(context.Background(), other, view.ID), ErrNotFound)
+	require.ErrorIs(t, attachments.Abort(context.Background(), auditor, view.ID), ErrForbidden)
+	require.NoError(t, attachments.Abort(context.Background(), owner, view.ID))
+	_, err = repository.GetAttachment(context.Background(), view.ID)
+	require.ErrorIs(t, err, ErrNotFound)
+	assert.NoDirExists(t, filepath.Join(attachments.config.UploadDir, ".chunks", view.ID))
+
+	adminTarget, err := attachments.BeginChunked(context.Background(), owner, "admin.txt", 4)
+	require.NoError(t, err)
+	require.NoError(t, attachments.Abort(context.Background(), admin, adminTarget.ID))
+
+	ready, err := attachments.Upload(context.Background(), owner, "ready.txt", strings.NewReader("1234"))
+	require.NoError(t, err)
+	require.NoError(t, attachments.Abort(context.Background(), owner, ready.ID), "未绑定 ready 附件也必须可回收")
+	_, err = repository.GetAttachment(context.Background(), ready.ID)
+	require.ErrorIs(t, err, ErrNotFound)
+}
+
+func TestAttachmentAbortRetainsDeletingTombstoneUntilStorageCleanupSucceeds(t *testing.T) {
+	repository := NewMemoryRepository()
+	attachments, err := NewAttachmentService(repository, AttachmentConfig{
+		UploadDir: t.TempDir(), MaxFileBytes: 8, MaxChunkBytes: 4, UploadTTL: time.Hour,
+	}, audit.NewService(audit.NewMemoryRepository()))
+	require.NoError(t, err)
+	owner := identity.Subject{UserID: "user-owner", Username: "owner", Role: identity.RoleUser}
+	ready, err := attachments.Upload(context.Background(), owner, "retry.txt", strings.NewReader("1234"))
+	require.NoError(t, err)
+
+	attachments.removeFile = func(string) error { return errors.New("storage unavailable") }
+	require.ErrorIs(t, attachments.Abort(context.Background(), owner, ready.ID), ErrAttachmentStorage)
+	retained, err := repository.GetAttachment(context.Background(), ready.ID)
+	require.NoError(t, err)
+	assert.Equal(t, AttachmentStateDeleting, retained.State)
+
+	attachments.removeFile = os.Remove
+	require.NoError(t, attachments.Abort(context.Background(), owner, ready.ID))
+	_, err = repository.GetAttachment(context.Background(), ready.ID)
+	require.ErrorIs(t, err, ErrNotFound)
+}
+
+func TestAttachmentServicePurgesExpiredUploadingRecordsAtBeginBoundary(t *testing.T) {
+	repository := NewMemoryRepository()
+	attachments, err := NewAttachmentService(repository, AttachmentConfig{
+		UploadDir: t.TempDir(), MaxFileBytes: 8, MaxChunkBytes: 4, UploadTTL: time.Hour,
+	}, audit.NewService(audit.NewMemoryRepository()))
+	require.NoError(t, err)
+	owner := identity.Subject{UserID: "user-owner", Username: "owner", Role: identity.RoleUser}
+	base := time.Date(2026, 8, 18, 0, 0, 0, 0, time.UTC)
+	attachments.now = func() time.Time { return base }
+	expired, err := attachments.BeginChunked(context.Background(), owner, "expired.txt", 4)
+	require.NoError(t, err)
+	require.NoError(t, attachments.UploadChunk(context.Background(), owner, expired.ID, 0, strings.NewReader("1234")))
+	ready, err := attachments.Upload(context.Background(), owner, "ready.txt", strings.NewReader("1234"))
+	require.NoError(t, err)
+
+	attachments.now = func() time.Time { return base.Add(2 * time.Hour) }
+	_, err = attachments.BeginChunked(context.Background(), owner, "next.txt", 4)
+	require.NoError(t, err)
+	_, err = repository.GetAttachment(context.Background(), expired.ID)
+	require.ErrorIs(t, err, ErrNotFound)
+	_, err = repository.GetAttachment(context.Background(), ready.ID)
+	require.ErrorIs(t, err, ErrNotFound)
+	assert.NoDirExists(t, filepath.Join(attachments.config.UploadDir, ".chunks", expired.ID))
+}
+
+func TestAttachmentServicePurgesExpiredUnboundRecordsAtRegularUploadBoundary(t *testing.T) {
+	repository := NewMemoryRepository()
+	attachments, err := NewAttachmentService(repository, AttachmentConfig{
+		UploadDir: t.TempDir(), MaxFileBytes: 8, MaxChunkBytes: 4, UploadTTL: time.Hour,
+	}, audit.NewService(audit.NewMemoryRepository()))
+	require.NoError(t, err)
+	owner := identity.Subject{UserID: "user-owner", Username: "owner", Role: identity.RoleUser}
+	base := time.Date(2026, 8, 18, 0, 0, 0, 0, time.UTC)
+	attachments.now = func() time.Time { return base }
+	stale, err := attachments.Upload(context.Background(), owner, "stale.txt", strings.NewReader("1234"))
+	require.NoError(t, err)
+
+	attachments.now = func() time.Time { return base.Add(2 * time.Hour) }
+	_, err = attachments.Upload(context.Background(), owner, "next.txt", strings.NewReader("5678"))
+	require.NoError(t, err)
+	_, err = repository.GetAttachment(context.Background(), stale.ID)
+	require.ErrorIs(t, err, ErrNotFound)
+}
+
+func TestAttachmentPurgeProcessesAtMostOneBoundedBatch(t *testing.T) {
+	repository := NewMemoryRepository()
+	attachments, err := NewAttachmentService(repository, AttachmentConfig{
+		UploadDir: t.TempDir(), MaxFileBytes: 8, MaxChunkBytes: 4, UploadTTL: time.Hour,
+	}, audit.NewService(audit.NewMemoryRepository()))
+	require.NoError(t, err)
+	base := time.Date(2026, 8, 18, 0, 0, 0, 0, time.UTC)
+	attachments.now = func() time.Time { return base.Add(2 * time.Hour) }
+	for index := 0; index < expiredUploadBatchSize+1; index++ {
+		require.NoError(t, repository.CreateAttachment(context.Background(), &Attachment{
+			ID: fmt.Sprintf("stale-%03d", index), OwnerUserID: "owner", OriginalName: "old", StorageName: fmt.Sprintf("old-%03d", index),
+			State: AttachmentStateUploading, CreatedAt: base, UpdatedAt: base,
+		}))
+	}
+	require.NoError(t, attachments.PurgeExpiredUploads(context.Background()))
+	repository.mu.Lock()
+	remaining := len(repository.attachments)
+	repository.mu.Unlock()
+	assert.Equal(t, 1, remaining)
+}
+
+func TestAttachmentPurgeRemovesTrackedTemporaryFilesAfterProcessCrash(t *testing.T) {
+	repository := NewMemoryRepository()
+	uploadDir := t.TempDir()
+	attachments, err := NewAttachmentService(repository, AttachmentConfig{
+		UploadDir: uploadDir, MaxFileBytes: 8, MaxChunkBytes: 4, UploadTTL: time.Hour,
+	}, audit.NewService(audit.NewMemoryRepository()))
+	require.NoError(t, err)
+	base := time.Date(2026, 8, 18, 0, 0, 0, 0, time.UTC)
+	for _, fixture := range []struct {
+		id, storage, suffix string
+	}{
+		{id: "crashed-upload", storage: "upload-artifact", suffix: ".uploading"},
+		{id: "crashed-merge", storage: "merge-artifact", suffix: ".merging"},
+	} {
+		require.NoError(t, repository.CreateAttachment(context.Background(), &Attachment{
+			ID: fixture.id, OwnerUserID: "owner", OriginalName: fixture.id + ".txt", StorageName: fixture.storage,
+			State: AttachmentStateUploading, CreatedAt: base, UpdatedAt: base,
+		}))
+		require.NoError(t, os.WriteFile(filepath.Join(uploadDir, fixture.storage+fixture.suffix), []byte("partial"), 0o600))
+	}
+	attachments.now = func() time.Time { return base.Add(2 * time.Hour) }
+
+	require.NoError(t, attachments.PurgeExpiredUploads(context.Background()))
+	assert.NoFileExists(t, filepath.Join(uploadDir, "upload-artifact.uploading"))
+	assert.NoFileExists(t, filepath.Join(uploadDir, "merge-artifact.merging"))
+	_, err = repository.GetAttachment(context.Background(), "crashed-upload")
+	require.ErrorIs(t, err, ErrNotFound)
+	_, err = repository.GetAttachment(context.Background(), "crashed-merge")
+	require.ErrorIs(t, err, ErrNotFound)
+}
+
+func TestGormAttachmentCleanupUsesUnboundStatesAndDeletingTombstone(t *testing.T) {
+	dsn := os.Getenv("AIG_TEST_DB_DSN")
+	require.NotEmpty(t, dsn)
+	db, err := gorm.Open(postgres.Open(dsn), &gorm.Config{DisableForeignKeyConstraintWhenMigrating: true})
+	require.NoError(t, err)
+	require.NoError(t, database.Migrate(db))
+	require.NoError(t, db.Exec("DELETE FROM platform_attachments").Error)
+	repository := NewGormRepository(db)
+	base := time.Date(2026, 8, 18, 0, 0, 0, 0, time.UTC)
+	for _, attachment := range []*Attachment{
+		{ID: "expired-upload", OwnerUserID: "owner", OriginalName: "old", StorageName: "old", Size: 4, State: AttachmentStateUploading, CreatedAt: base, UpdatedAt: base},
+		{ID: "active-upload", OwnerUserID: "owner", OriginalName: "new", StorageName: "new", Size: 4, State: AttachmentStateUploading, CreatedAt: base, UpdatedAt: base.Add(2 * time.Hour)},
+		{ID: "ready-old", OwnerUserID: "owner", OriginalName: "ready", StorageName: "ready", Size: 4, State: AttachmentStateReady, CreatedAt: base, UpdatedAt: base},
+		{ID: "attached-old", OwnerUserID: "owner", OriginalName: "bound", StorageName: "bound", Size: 4, State: AttachmentStateAttached, CreatedAt: base, UpdatedAt: base},
+		{ID: "deleting", OwnerUserID: "owner", OriginalName: "retry", StorageName: "retry", Size: 4, State: AttachmentStateDeleting, CreatedAt: base, UpdatedAt: base.Add(2 * time.Hour)},
+	} {
+		require.NoError(t, repository.CreateAttachment(context.Background(), attachment))
+	}
+	expired, err := repository.ListAttachmentCleanupCandidates(context.Background(), base.Add(time.Hour), 100)
+	require.NoError(t, err)
+	require.Len(t, expired, 3)
+	assert.Equal(t, []string{"expired-upload", "ready-old", "deleting"}, []string{expired[0].ID, expired[1].ID, expired[2].ID})
+	marked, err := repository.MarkAttachmentDeleting(context.Background(), "expired-upload", "owner", base.Add(time.Hour), base.Add(3*time.Hour))
+	require.NoError(t, err)
+	assert.True(t, marked)
+	deleted, err := repository.DeleteMarkedAttachment(context.Background(), "expired-upload", "owner")
+	require.NoError(t, err)
+	assert.True(t, deleted)
+	_, err = repository.GetAttachment(context.Background(), "expired-upload")
+	require.ErrorIs(t, err, ErrNotFound)
+	_, err = repository.GetAttachment(context.Background(), "active-upload")
+	require.NoError(t, err)
+	_, err = repository.GetAttachment(context.Background(), "ready-old")
+	require.NoError(t, err)
+	_, err = repository.GetAttachment(context.Background(), "attached-old")
+	require.NoError(t, err)
+}
+
 func TestAttachmentConfigHasSafeDefaultsAndRejectsInvalidValues(t *testing.T) {
 	uploadDir := t.TempDir()
 	t.Setenv("AIG_MAX_UPLOAD_BYTES", "")
 	t.Setenv("AIG_MAX_CHUNK_BYTES", "")
+	t.Setenv("AIG_ATTACHMENT_UPLOAD_TTL", "")
 	config, err := LoadAttachmentConfigFromEnv(uploadDir)
 	require.NoError(t, err)
 	assert.Greater(t, config.MaxFileBytes, int64(0))
 	assert.Greater(t, config.MaxChunkBytes, int64(0))
 	assert.LessOrEqual(t, config.MaxChunkBytes, config.MaxFileBytes)
+	assert.Greater(t, config.UploadTTL, time.Duration(0))
 
 	t.Setenv("AIG_MAX_UPLOAD_BYTES", "not-a-number")
 	_, err = LoadAttachmentConfigFromEnv(uploadDir)
 	require.Error(t, err)
 	assert.NotContains(t, fmt.Sprint(err), uploadDir)
+
+	t.Setenv("AIG_MAX_UPLOAD_BYTES", "")
+	t.Setenv("AIG_ATTACHMENT_UPLOAD_TTL", "0s")
+	_, err = LoadAttachmentConfigFromEnv(uploadDir)
+	require.Error(t, err)
 }

@@ -343,9 +343,84 @@ func (tm *TaskManager) AddTaskApi(req *TaskCreateRequest) error {
 // SubmitTask is the narrow platform-to-engine adapter boundary. The platform
 // task ID is also the stable engine session ID, so a lost acknowledgement can
 // be resolved by status readback without creating a second scan.
+func (tm *TaskManager) ValidateTaskReferences(ctx context.Context, task platformtasks.EngineTask) error {
+	var params map[string]any
+	if len(task.Params) == 0 || json.Unmarshal(task.Params, &params) != nil || params == nil {
+		return platformtasks.ErrInvalid
+	}
+	modelIDs := make([]string, 0, 12)
+	if rawModelID, exists := params["model_id"]; exists {
+		switch typed := rawModelID.(type) {
+		case string:
+			modelIDs = append(modelIDs, typed)
+		case []any:
+			for _, item := range typed {
+				value, ok := item.(string)
+				if !ok {
+					return platformtasks.ErrInvalid
+				}
+				modelIDs = append(modelIDs, value)
+			}
+		default:
+			return platformtasks.ErrInvalid
+		}
+	}
+	if rawEvalID, exists := params["eval_model_id"]; exists {
+		value, ok := rawEvalID.(string)
+		if !ok {
+			return platformtasks.ErrInvalid
+		}
+		modelIDs = append(modelIDs, value)
+	}
+	for _, modelID := range modelIDs {
+		if err := tm.validateGovernedModelReference(ctx, task.OwnerUsername, modelID); err != nil {
+			return normalizeGovernedReferenceError(err)
+		}
+	}
+	if rawAgentID, exists := params["agent_id"]; exists {
+		agentID, ok := rawAgentID.(string)
+		if !ok {
+			return platformtasks.ErrInvalid
+		}
+		if _, err := readAgentConfigContent(task.OwnerUsername, agentID); err != nil {
+			return normalizeGovernedReferenceError(err)
+		}
+	}
+	return nil
+}
+
+func (tm *TaskManager) validateGovernedModelReference(ctx context.Context, username, modelID string) error {
+	if tm == nil || tm.modelResolver == nil {
+		return errors.New("模型解析器不可用")
+	}
+	if _, err := tm.modelResolver.Describe(ctx, username, modelID); err == nil {
+		return nil
+	} else if !errors.Is(err, platformmodels.ErrNotFound) || tm.yamlModels == nil {
+		return err
+	}
+	yamlModel := tm.yamlModels.GetYamlModel(modelID)
+	if yamlModel == nil {
+		return platformmodels.ErrNotFound
+	}
+	_, err := platformmodels.NewScannerModel(yamlModel.ModelName, yamlModel.Token, yamlModel.BaseURL, yamlModel.Limit)
+	return err
+}
+
+func normalizeGovernedReferenceError(err error) error {
+	if errors.Is(err, platformmodels.ErrNotFound) || errors.Is(err, platformmodels.ErrForbidden) ||
+		errors.Is(err, platformmodels.ErrInvalid) || errors.Is(err, os.ErrNotExist) {
+		return platformtasks.ErrInvalid
+	}
+	return err
+}
+
 func (tm *TaskManager) SubmitTask(ctx context.Context, task platformtasks.EngineTask) (string, error) {
 	if err := ctx.Err(); err != nil {
 		return "", err
+	}
+	engineTaskType, ok := platformEngineTaskType(task.TaskType)
+	if !ok {
+		return "", fmt.Errorf("任务类型无效")
 	}
 	var params map[string]interface{}
 	if len(task.Params) > 0 {
@@ -358,12 +433,12 @@ func (tm *TaskManager) SubmitTask(ctx context.Context, task platformtasks.Engine
 	}
 	req := &TaskCreateRequest{
 		ID: task.PlatformTaskID, SessionID: task.PlatformTaskID, Username: task.OwnerUsername,
-		Task: task.TaskType, Timestamp: time.Now().UnixMilli(), Content: task.Content, Params: params,
+		Task: engineTaskType, Timestamp: time.Now().UnixMilli(), Content: task.Content, Params: params,
 		Attachments: append([]string(nil), task.Attachments...), CountryIsoCode: task.CountryIsoCode,
 	}
 	existing, err := tm.taskStore.GetSession(task.PlatformTaskID)
 	if err == nil && existing != nil {
-		if existing.Username != task.OwnerUsername || existing.TaskType != task.TaskType {
+		if existing.Username != task.OwnerUsername || existing.TaskType != engineTaskType && existing.TaskType != task.TaskType {
 			return "", fmt.Errorf("engine session mapping conflict")
 		}
 		if existing.Status == TaskStatusTodo && existing.AssignedAgent != "" {
@@ -375,7 +450,7 @@ func (tm *TaskManager) SubmitTask(ctx context.Context, task platformtasks.Engine
 	} else {
 		session := &database.Session{
 			ID: task.PlatformTaskID, Username: task.OwnerUsername, Title: tm.generateTaskTitle(req),
-			TaskType: task.TaskType, Content: task.Content, Params: mustMarshalJSON(params),
+			TaskType: engineTaskType, Content: task.Content, Params: mustMarshalJSON(params),
 			Attachments: mustMarshalJSON(task.Attachments), Status: TaskStatusTodo,
 			CountryIsoCode: task.CountryIsoCode, Share: false,
 		}
@@ -397,6 +472,21 @@ func (tm *TaskManager) SubmitTask(ctx context.Context, task platformtasks.Engine
 		return "", err
 	}
 	return task.PlatformTaskID, nil
+}
+
+func platformEngineTaskType(taskType string) (string, bool) {
+	switch taskType {
+	case "mcp_scan":
+		return "Mcp-Scan", true
+	case "ai_infra_scan":
+		return "AI-Infra-Scan", true
+	case "model_redteam_report":
+		return "Model-Redteam-Report", true
+	case "agent_scan":
+		return "Agent-Scan", true
+	default:
+		return "", false
+	}
 }
 
 func (tm *TaskManager) GetTaskStatus(ctx context.Context, sessionID string) (platformtasks.EngineStatus, error) {
@@ -508,8 +598,8 @@ func (tm *TaskManager) dispatchTask(sessionId string, traceID string) error {
 	addModel := func(modelId string) (*database.ModelParams, error) {
 		model, err := tm.resolveTaskModel(context.Background(), task.Username, modelId)
 		if err != nil {
-			log.Errorf("模型解析失败: trace_id=%s, sessionId=%s, modelID=%s", traceID, sessionId, modelId)
-			return nil, fmt.Errorf("模型ID '%s' 不存在或不可用", modelId)
+			log.Errorf("模型解析失败: trace_id=%s, sessionId=%s", traceID, sessionId)
+			return nil, fmt.Errorf("模型引用不存在或不可用")
 		}
 		// 测试模型是否有效
 		//ai := models.NewOpenAI(model.Token, model.ModelName, model.BaseURL)
@@ -522,7 +612,6 @@ func (tm *TaskManager) dispatchTask(sessionId string, traceID string) error {
 	}
 	if task.Params != nil {
 		if modelID, exists := task.Params["model_id"]; exists {
-			log.Infof("找到模型ID: trace_id=%s, sessionId=%s, modelID=%v", traceID, sessionId, modelID)
 			switch v := modelID.(type) {
 			case string:
 				modelInfo, err := addModel(v)
@@ -532,11 +621,10 @@ func (tm *TaskManager) dispatchTask(sessionId string, traceID string) error {
 				enhancedParams["model"] = modelInfo
 			case []interface{}:
 				modelsList := make([]*database.ModelParams, 0)
-				log.Infof("找到多个模型ID: trace_id=%s, sessionId=%s, modelID=%v", traceID, sessionId, v)
 				for _, vv := range v {
 					vv, ok := vv.(string)
 					if !ok {
-						log.Errorf("无效的模型ID类型: trace_id=%s, sessionId=%s, modelID=%v", traceID, sessionId, vv)
+						log.Errorf("无效的模型引用类型: trace_id=%s, sessionId=%s", traceID, sessionId)
 						continue
 					}
 					modelInfo, err := addModel(vv)
@@ -547,7 +635,7 @@ func (tm *TaskManager) dispatchTask(sessionId string, traceID string) error {
 				}
 				enhancedParams["model"] = modelsList
 			default:
-				log.Errorf("无效的模型ID类型: trace_id=%s, sessionId=%s, modelID=%v", traceID, sessionId, v)
+				log.Errorf("无效的模型引用类型: trace_id=%s, sessionId=%s", traceID, sessionId)
 			}
 		}
 		if evalModelStr, exists := task.Params["eval_model_id"]; exists {
@@ -564,7 +652,6 @@ func (tm *TaskManager) dispatchTask(sessionId string, traceID string) error {
 		if agentIdStr, exists := task.Params["agent_id"]; exists {
 			agentId, ok := agentIdStr.(string)
 			if ok && agentId != "" {
-				log.Infof("找到AgentID: trace_id=%s, sessionId=%s, agentID=%s", traceID, sessionId, agentId)
 				// 使用任务的用户名读取配置，如果为空则使用公共用户
 				username := task.Username
 				if username == "" {
@@ -572,8 +659,8 @@ func (tm *TaskManager) dispatchTask(sessionId string, traceID string) error {
 				}
 				agentData, err := readAgentConfigContent(username, agentId)
 				if err != nil {
-					log.Errorf("获取Agent配置失败: trace_id=%s, sessionId=%s, agentID=%s, error=%v", traceID, sessionId, agentId, err)
-					return fmt.Errorf("获取Agent配置 '%s' 失败: %v", agentId, err)
+					log.Errorf("获取Agent配置失败: trace_id=%s, sessionId=%s", traceID, sessionId)
+					return fmt.Errorf("获取Agent配置失败")
 				}
 				enhancedParams["agent_data"] = string(agentData)
 			}

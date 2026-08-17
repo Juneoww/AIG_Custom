@@ -1,6 +1,7 @@
 package tasks
 
 import (
+	"bytes"
 	"context"
 	"database/sql/driver"
 	"encoding/json"
@@ -27,6 +28,10 @@ import (
 const (
 	MaxIdempotencyKeyLength = 128
 	MaxDispatchAttempts     = 3
+	MaxTaskContentLength    = 32 << 10
+	MaxTaskParamsLength     = 64 << 10
+	MaxTaskAttachmentCount  = 10
+	MaxTaskReferenceLength  = 128
 	dispatchLeaseDuration   = 30 * time.Second
 )
 
@@ -122,33 +127,47 @@ func (service *Service) Create(ctx context.Context, subject identity.Subject, in
 	input.IdempotencyKey = strings.TrimSpace(input.IdempotencyKey)
 	input.TaskType = strings.TrimSpace(input.TaskType)
 	if subject.Role != identity.RoleUser && subject.Role != identity.RoleAdmin || subject.UserID == "" ||
-		input.IdempotencyKey == "" || len(input.IdempotencyKey) > MaxIdempotencyKeyLength || input.TaskType == "" {
+		input.IdempotencyKey == "" || len(input.IdempotencyKey) > MaxIdempotencyKeyLength ||
+		!isBrowserTaskType(input.TaskType) || len(input.Content) > MaxTaskContentLength ||
+		!validTaskCountry(input.CountryIsoCode) || !validTaskAttachmentIDs(input.AttachmentIDs) {
 		return View{}, ErrInvalid
 	}
 	params := input.Params
 	if len(params) == 0 {
 		params = json.RawMessage(`{}`)
 	}
-	if !json.Valid(params) {
+	if len(params) > MaxTaskParamsLength || !validTaskParams(input.TaskType, params) {
 		return View{}, ErrInvalid
 	}
-	if containsForbiddenTaskParameter(params) {
-		return View{}, ErrInvalid
+	if err := service.engine.ValidateTaskReferences(ctx, EngineTask{
+		OwnerUsername: subject.Username, TaskType: input.TaskType, Params: append(json.RawMessage(nil), params...),
+	}); err != nil {
+		if errors.Is(err, ErrInvalid) {
+			return View{}, ErrInvalid
+		}
+		return View{}, err
 	}
 	attachmentRefs, err := json.Marshal(input.AttachmentIDs)
 	if err != nil {
 		return View{}, ErrInvalid
 	}
+	taskID := uuid.NewSHA1(taskIDNamespace, []byte(subject.UserID+"\x00"+input.IdempotencyKey)).String()
 	if len(input.AttachmentIDs) > 0 {
 		if service.attachments == nil {
 			return View{}, ErrInvalid
 		}
-		if _, err := service.attachments.ResolveReady(ctx, subject.UserID, input.AttachmentIDs); err != nil {
-			return View{}, err
+		existing, getErr := service.repository.Get(ctx, taskID)
+		if errors.Is(getErr, ErrNotFound) {
+			if _, resolveErr := service.attachments.ResolveReady(ctx, subject.UserID, input.AttachmentIDs); resolveErr != nil {
+				return View{}, resolveErr
+			}
+		} else if getErr != nil {
+			return View{}, getErr
+		} else if existing.OwnerUserID != subject.UserID {
+			return View{}, ErrForbidden
 		}
 	}
 	now := service.now()
-	taskID := uuid.NewSHA1(taskIDNamespace, []byte(subject.UserID+"\x00"+input.IdempotencyKey)).String()
 	candidate := &Task{
 		ID: taskID, OwnerUserID: subject.UserID, OwnerUsername: subject.Username,
 		IdempotencyKey: input.IdempotencyKey, EngineSessionID: taskID, TaskType: input.TaskType,
@@ -163,9 +182,15 @@ func (service *Service) Create(ctx context.Context, subject identity.Subject, in
 		return View{}, err
 	}
 	var persisted *Task
+	var created bool
 	var repositoryErr error
 	err = mutation.Run(ctx, taskID, map[string]any{"task_type": input.TaskType}, func(transactionContext context.Context) error {
-		persisted, _, repositoryErr = service.repository.CreateOrGet(transactionContext, candidate)
+		persisted, created, repositoryErr = service.repository.CreateOrGet(transactionContext, candidate)
+		if repositoryErr == nil && created && len(input.AttachmentIDs) > 0 {
+			repositoryErr = service.attachments.repository.BindReadyAttachments(
+				transactionContext, subject.UserID, input.AttachmentIDs, now,
+			)
+		}
 		return repositoryErr
 	})
 	if repositoryErr != nil {
@@ -191,38 +216,132 @@ func (service *Service) Create(ctx context.Context, subject identity.Subject, in
 	return viewOf(current), err
 }
 
-func containsForbiddenTaskParameter(params json.RawMessage) bool {
-	var value any
-	if json.Unmarshal(params, &value) != nil {
-		return true
-	}
-	forbidden := map[string]struct{}{
-		"token": {}, "apikey": {}, "authorization": {}, "secret": {}, "password": {},
-		"model": {}, "evalmodel": {},
-	}
-	var visit func(any) bool
-	visit = func(current any) bool {
-		switch typed := current.(type) {
-		case map[string]any:
-			for key, child := range typed {
-				normalized := strings.ToLower(strings.NewReplacer("_", "", "-", "", ".", "").Replace(strings.TrimSpace(key)))
-				if _, blocked := forbidden[normalized]; blocked {
-					return true
-				}
-				if visit(child) {
-					return true
-				}
-			}
-		case []any:
-			for _, child := range typed {
-				if visit(child) {
-					return true
-				}
-			}
-		}
+type mcpTaskParams struct {
+	ModelID string `json:"model_id"`
+	Thread  *int   `json:"thread"`
+}
+
+type infrastructureTaskParams struct {
+	ModelID string `json:"model_id"`
+	Timeout *int   `json:"timeout"`
+}
+
+type redteamDatasetParams struct {
+	NumPrompts   *int   `json:"numPrompts"`
+	RandomSeed   *int64 `json:"randomSeed"`
+	PromptColumn string `json:"promptColumn"`
+}
+
+type redteamTaskParams struct {
+	ModelIDs    []string              `json:"model_id"`
+	EvalModelID string                `json:"eval_model_id"`
+	Dataset     *redteamDatasetParams `json:"dataset"`
+	Techniques  []string              `json:"techniques"`
+}
+
+type agentTaskParams struct {
+	AgentID     string `json:"agent_id"`
+	EvalModelID string `json:"eval_model_id"`
+}
+
+func validTaskParams(taskType string, raw json.RawMessage) bool {
+	var fields map[string]json.RawMessage
+	if json.Unmarshal(raw, &fields) != nil || fields == nil {
 		return false
 	}
-	return visit(value)
+	switch taskType {
+	case "mcp_scan":
+		var params mcpTaskParams
+		return decodeExactJSON(raw, &params) && validOptionalReference(fields, "model_id", params.ModelID) &&
+			(params.Thread == nil || *params.Thread >= 1 && *params.Thread <= 1_024)
+	case "ai_infra_scan":
+		var params infrastructureTaskParams
+		return decodeExactJSON(raw, &params) && validOptionalReference(fields, "model_id", params.ModelID) &&
+			(params.Timeout == nil || *params.Timeout >= 1 && *params.Timeout <= 86_400)
+	case "model_redteam_report":
+		var params redteamTaskParams
+		if !decodeExactJSON(raw, &params) || !validReferences(params.ModelIDs, 10) || !validReference(params.EvalModelID) ||
+			len(params.Techniques) > 64 || !validOptionalStrings(params.Techniques, 128) {
+			return false
+		}
+		return params.Dataset == nil ||
+			(params.Dataset.NumPrompts == nil || *params.Dataset.NumPrompts >= 1 && *params.Dataset.NumPrompts <= 1_000_000) &&
+				(params.Dataset.PromptColumn == "" || validBoundedString(params.Dataset.PromptColumn, 128))
+	case "agent_scan":
+		var params agentTaskParams
+		return decodeExactJSON(raw, &params) && validReference(params.AgentID) && validReference(params.EvalModelID)
+	default:
+		return false
+	}
+}
+
+func decodeExactJSON(raw json.RawMessage, target any) bool {
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder.DisallowUnknownFields()
+	if decoder.Decode(target) != nil {
+		return false
+	}
+	return decoder.Decode(&struct{}{}) == io.EOF
+}
+
+func validTaskCountry(country string) bool {
+	return country == "" || country == "zh" || country == "zh_CN" || country == "en"
+}
+
+func validTaskAttachmentIDs(ids []string) bool {
+	if len(ids) > MaxTaskAttachmentCount {
+		return false
+	}
+	seen := make(map[string]struct{}, len(ids))
+	for _, id := range ids {
+		if !validReference(id) {
+			return false
+		}
+		if _, exists := seen[id]; exists {
+			return false
+		}
+		seen[id] = struct{}{}
+	}
+	return true
+}
+
+func validOptionalReference(fields map[string]json.RawMessage, key, value string) bool {
+	_, exists := fields[key]
+	return !exists || validReference(value)
+}
+
+func validReferences(values []string, maximum int) bool {
+	if len(values) == 0 || len(values) > maximum {
+		return false
+	}
+	seen := make(map[string]struct{}, len(values))
+	for _, value := range values {
+		if !validReference(value) {
+			return false
+		}
+		if _, exists := seen[value]; exists {
+			return false
+		}
+		seen[value] = struct{}{}
+	}
+	return true
+}
+
+func validOptionalStrings(values []string, maximumLength int) bool {
+	for _, value := range values {
+		if !validBoundedString(value, maximumLength) {
+			return false
+		}
+	}
+	return true
+}
+
+func validReference(value string) bool {
+	return validBoundedString(value, MaxTaskReferenceLength)
+}
+
+func validBoundedString(value string, maximum int) bool {
+	return value != "" && value == strings.TrimSpace(value) && len(value) <= maximum
 }
 
 func (service *Service) dispatch(ctx context.Context, subject identity.Subject, task *Task, claim string) (*Task, error) {
@@ -236,7 +355,7 @@ func (service *Service) dispatch(ctx context.Context, subject identity.Subject, 
 		if service.attachments == nil {
 			return task, ErrInvalid
 		}
-		resolved, err := service.attachments.ResolveReady(ctx, task.OwnerUserID, attachmentIDs)
+		resolved, err := service.attachments.ResolveAttached(ctx, task.OwnerUserID, attachmentIDs)
 		if err != nil {
 			return task, err
 		}
@@ -541,6 +660,9 @@ func (service *Service) Cancel(ctx context.Context, subject identity.Subject, id
 		return err
 	}
 	if !canWrite(subject, task) {
+		if subject.Role == identity.RoleUser {
+			return ErrNotFound
+		}
 		return ErrForbidden
 	}
 	if task.Status == StatusCancelled || task.Status == StatusSucceeded || task.Status == StatusEngineFailed {
@@ -1079,6 +1201,52 @@ func (repository *GormRepository) MarkAttachmentReady(ctx context.Context, id, o
 	return affectedTaskError(result)
 }
 
+func (repository *GormRepository) BindReadyAttachments(ctx context.Context, owner string, ids []string, now time.Time) error {
+	if len(ids) == 0 {
+		return nil
+	}
+	result := txcontext.Gorm(ctx, repository.db).Model(&Attachment{}).
+		Where("owner_user_id = ? AND id IN ? AND state = ?", owner, ids, AttachmentStateReady).
+		Updates(map[string]any{"state": AttachmentStateAttached, "updated_at": now})
+	if result.Error != nil {
+		return result.Error
+	}
+	if result.RowsAffected != int64(len(ids)) {
+		return ErrAttachmentNotReady
+	}
+	return nil
+}
+
+func (repository *GormRepository) ListAttachmentCleanupCandidates(ctx context.Context, before time.Time, limit int) ([]Attachment, error) {
+	if limit <= 0 || limit > expiredUploadBatchSize {
+		limit = expiredUploadBatchSize
+	}
+	var attachments []Attachment
+	err := txcontext.Gorm(ctx, repository.db).
+		Where("(state IN ? AND updated_at < ?) OR state = ?", []AttachmentState{AttachmentStateUploading, AttachmentStateReady}, before, AttachmentStateDeleting).
+		Order("updated_at ASC, id ASC").Limit(limit).Find(&attachments).Error
+	return attachments, err
+}
+
+func (repository *GormRepository) MarkAttachmentDeleting(ctx context.Context, id, owner string, before, now time.Time) (bool, error) {
+	query := txcontext.Gorm(ctx, repository.db).Model(&Attachment{}).
+		Where("id = ? AND owner_user_id = ?", id, owner)
+	if !before.IsZero() {
+		query = query.Where("(state IN ? AND updated_at < ?) OR state = ?", []AttachmentState{AttachmentStateUploading, AttachmentStateReady}, before, AttachmentStateDeleting)
+	} else {
+		query = query.Where("state IN ?", []AttachmentState{AttachmentStateUploading, AttachmentStateReady, AttachmentStateDeleting})
+	}
+	result := query.Updates(map[string]any{"state": AttachmentStateDeleting, "updated_at": now})
+	return result.RowsAffected == 1, result.Error
+}
+
+func (repository *GormRepository) DeleteMarkedAttachment(ctx context.Context, id, owner string) (bool, error) {
+	result := txcontext.Gorm(ctx, repository.db).
+		Where("id = ? AND owner_user_id = ? AND state = ?", id, owner, AttachmentStateDeleting).
+		Delete(&Attachment{})
+	return result.RowsAffected == 1, result.Error
+}
+
 func affectedTaskError(result *gorm.DB) error {
 	if result.Error != nil {
 		return result.Error
@@ -1098,18 +1266,21 @@ var (
 )
 
 const (
-	defaultMaxFileBytes  int64 = 50 << 20
-	defaultMaxChunkBytes int64 = 5 << 20
+	defaultMaxFileBytes    int64 = 50 << 20
+	defaultMaxChunkBytes   int64 = 5 << 20
+	defaultUploadTTL             = 24 * time.Hour
+	expiredUploadBatchSize       = 100
 )
 
 type AttachmentConfig struct {
 	UploadDir     string
 	MaxFileBytes  int64
 	MaxChunkBytes int64
+	UploadTTL     time.Duration
 }
 
 func LoadAttachmentConfigFromEnv(uploadDir string) (AttachmentConfig, error) {
-	config := AttachmentConfig{UploadDir: uploadDir, MaxFileBytes: defaultMaxFileBytes, MaxChunkBytes: defaultMaxChunkBytes}
+	config := AttachmentConfig{UploadDir: uploadDir, MaxFileBytes: defaultMaxFileBytes, MaxChunkBytes: defaultMaxChunkBytes, UploadTTL: defaultUploadTTL}
 	for name, destination := range map[string]*int64{
 		"AIG_MAX_UPLOAD_BYTES": &config.MaxFileBytes,
 		"AIG_MAX_CHUNK_BYTES":  &config.MaxChunkBytes,
@@ -1127,6 +1298,13 @@ func LoadAttachmentConfigFromEnv(uploadDir string) (AttachmentConfig, error) {
 	if config.MaxChunkBytes > config.MaxFileBytes {
 		return AttachmentConfig{}, errors.New("AIG_MAX_CHUNK_BYTES must not exceed AIG_MAX_UPLOAD_BYTES")
 	}
+	if value := strings.TrimSpace(os.Getenv("AIG_ATTACHMENT_UPLOAD_TTL")); value != "" {
+		parsed, err := time.ParseDuration(value)
+		if err != nil || parsed <= 0 {
+			return AttachmentConfig{}, errors.New("AIG_ATTACHMENT_UPLOAD_TTL must be a positive duration")
+		}
+		config.UploadTTL = parsed
+	}
 	return config, nil
 }
 
@@ -1143,6 +1321,10 @@ type AttachmentRepository interface {
 	GetAttachment(context.Context, string) (*Attachment, error)
 	AddAttachmentChunkBytes(context.Context, string, string, int64, int64, time.Time) error
 	MarkAttachmentReady(context.Context, string, string, int64, time.Time) error
+	BindReadyAttachments(context.Context, string, []string, time.Time) error
+	ListAttachmentCleanupCandidates(context.Context, time.Time, int) ([]Attachment, error)
+	MarkAttachmentDeleting(context.Context, string, string, time.Time, time.Time) (bool, error)
+	DeleteMarkedAttachment(context.Context, string, string) (bool, error)
 }
 
 type PlatformTaskAttachmentRepository interface {
@@ -1157,11 +1339,16 @@ type AttachmentService struct {
 	config     AttachmentConfig
 	now        func() time.Time
 	openFile   func(string) (*os.File, error)
+	removeFile func(string) error
+	removeTree func(string) error
 }
 
 func NewAttachmentService(repository PlatformTaskAttachmentRepository, config AttachmentConfig, audits audit.Recorder) (*AttachmentService, error) {
+	if config.UploadTTL == 0 {
+		config.UploadTTL = defaultUploadTTL
+	}
 	if repository == nil || audits == nil || strings.TrimSpace(config.UploadDir) == "" || config.MaxFileBytes <= 0 ||
-		config.MaxChunkBytes <= 0 || config.MaxChunkBytes > config.MaxFileBytes {
+		config.MaxChunkBytes <= 0 || config.MaxChunkBytes > config.MaxFileBytes || config.UploadTTL <= 0 {
 		return nil, ErrInvalid
 	}
 	abs, err := filepath.Abs(config.UploadDir)
@@ -1175,10 +1362,126 @@ func NewAttachmentService(repository PlatformTaskAttachmentRepository, config At
 	return &AttachmentService{
 		repository: repository, tasks: repository, audits: audits, config: config,
 		now: func() time.Time { return time.Now().UTC() }, openFile: os.Open,
+		removeFile: os.Remove, removeTree: os.RemoveAll,
 	}, nil
 }
 
 func (service *AttachmentService) MaxFileBytes() int64 { return service.config.MaxFileBytes }
+
+func (service *AttachmentService) maxChunkCount() int64 {
+	count := service.config.MaxFileBytes / service.config.MaxChunkBytes
+	if service.config.MaxFileBytes%service.config.MaxChunkBytes != 0 {
+		count++
+	}
+	return count
+}
+
+func (service *AttachmentService) PurgeExpiredUploads(ctx context.Context) error {
+	before := service.now().Add(-service.config.UploadTTL)
+	expired, err := service.repository.ListAttachmentCleanupCandidates(ctx, before, expiredUploadBatchSize)
+	if err != nil {
+		return err
+	}
+	for index := range expired {
+		attachment := &expired[index]
+		marked, markErr := service.repository.MarkAttachmentDeleting(ctx, attachment.ID, attachment.OwnerUserID, before, service.now())
+		if markErr != nil {
+			return markErr
+		}
+		if !marked {
+			continue
+		}
+		if cleanupErr := service.cleanupAttachmentFiles(attachment); cleanupErr != nil {
+			return cleanupErr
+		}
+		if _, deleteErr := service.repository.DeleteMarkedAttachment(ctx, attachment.ID, attachment.OwnerUserID); deleteErr != nil {
+			return deleteErr
+		}
+	}
+	return nil
+}
+
+func (service *AttachmentService) Abort(ctx context.Context, subject identity.Subject, id string) error {
+	if subject.Role == identity.RoleAuditor {
+		return ErrForbidden
+	}
+	attachment, err := service.repository.GetAttachment(ctx, id)
+	if err != nil {
+		return err
+	}
+	if subject.Role == identity.RoleUser && subject.UserID != attachment.OwnerUserID {
+		return ErrNotFound
+	}
+	if subject.Role != identity.RoleUser && subject.Role != identity.RoleAdmin {
+		return ErrForbidden
+	}
+	if attachment.State == AttachmentStateAttached {
+		return ErrAttachmentNotReady
+	}
+	marked, err := service.repository.MarkAttachmentDeleting(ctx, attachment.ID, attachment.OwnerUserID, time.Time{}, service.now())
+	if err != nil {
+		return err
+	}
+	if !marked {
+		return ErrAttachmentNotReady
+	}
+	if err := service.cleanupAttachmentFiles(attachment); err != nil {
+		return err
+	}
+	deleted, err := service.repository.DeleteMarkedAttachment(ctx, attachment.ID, attachment.OwnerUserID)
+	if err != nil {
+		return err
+	}
+	if !deleted {
+		return ErrNotFound
+	}
+	return nil
+}
+
+func (service *AttachmentService) cleanupAttachmentFiles(attachment *Attachment) error {
+	for _, storageName := range []string{
+		attachment.StorageName,
+		attachment.StorageName + ".uploading",
+		attachment.StorageName + ".merging",
+	} {
+		storagePath, err := service.storagePath(storageName)
+		if err != nil {
+			return err
+		}
+		if err := service.removeFile(storagePath); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return ErrAttachmentStorage
+		}
+	}
+	chunkDir, err := service.storagePath(".chunks", attachment.ID)
+	if err != nil {
+		return err
+	}
+	if err := service.removeTree(chunkDir); err != nil {
+		return ErrAttachmentStorage
+	}
+	return nil
+}
+
+func (service *AttachmentService) discardUnboundAttachment(ctx context.Context, attachment *Attachment) error {
+	marked, err := service.repository.MarkAttachmentDeleting(ctx, attachment.ID, attachment.OwnerUserID, time.Time{}, service.now())
+	if err != nil {
+		return err
+	}
+	if !marked {
+		return ErrAttachmentNotReady
+	}
+	if err := service.cleanupAttachmentFiles(attachment); err != nil {
+		return err
+	}
+	deleted, err := service.repository.DeleteMarkedAttachment(ctx, attachment.ID, attachment.OwnerUserID)
+	if err != nil {
+		return err
+	}
+	if !deleted {
+		return ErrNotFound
+	}
+	return nil
+}
 
 func failAttachmentMutation(ctx context.Context, mutation *audit.Mutation, resourceID string, businessErr error) error {
 	if completionErr := mutation.Failed(ctx, resourceID, nil); completionErr != nil {
@@ -1190,6 +1493,9 @@ func failAttachmentMutation(ctx context.Context, mutation *audit.Mutation, resou
 func (service *AttachmentService) Upload(ctx context.Context, subject identity.Subject, filename string, source io.Reader) (AttachmentView, error) {
 	if !attachmentCreator(subject) || source == nil || !validAttachmentFilename(filename) {
 		return AttachmentView{}, ErrInvalid
+	}
+	if err := service.PurgeExpiredUploads(ctx); err != nil {
+		return AttachmentView{}, err
 	}
 	id := uuid.NewString()
 	mutation, err := audit.BeginMutation(ctx, service.audits, subject, audit.EventInput{
@@ -1203,33 +1509,47 @@ func (service *AttachmentService) Upload(ctx context.Context, subject identity.S
 	if err != nil {
 		return AttachmentView{}, failAttachmentMutation(ctx, mutation, id, err)
 	}
-	temporary := path + ".uploading"
-	written, err := copyBoundedFile(temporary, source, service.config.MaxFileBytes)
-	if err != nil {
-		return AttachmentView{}, failAttachmentMutation(ctx, mutation, id, err)
-	}
-	if err := os.Rename(temporary, path); err != nil {
-		_ = os.Remove(temporary)
-		return AttachmentView{}, failAttachmentMutation(ctx, mutation, id, errors.New("无法保存附件"))
-	}
 	now := service.now()
 	attachment := &Attachment{
 		ID: id, OwnerUserID: subject.UserID, OriginalName: filename, StorageName: storageName,
-		Size: written, ChunkBytes: written, State: AttachmentStateReady, CreatedAt: now, UpdatedAt: now,
+		State: AttachmentStateUploading, CreatedAt: now, UpdatedAt: now,
 	}
-	var createErr error
+	if err := service.repository.CreateAttachment(ctx, attachment); err != nil {
+		return AttachmentView{}, failAttachmentMutation(ctx, mutation, id, err)
+	}
+	failUpload := func(businessErr error) (AttachmentView, error) {
+		if cleanupErr := service.discardUnboundAttachment(ctx, attachment); cleanupErr != nil {
+			return AttachmentView{}, failAttachmentMutation(ctx, mutation, id, ErrAttachmentStorage)
+		}
+		return AttachmentView{}, failAttachmentMutation(ctx, mutation, id, businessErr)
+	}
+	temporary := path + ".uploading"
+	written, err := copyBoundedFile(temporary, source, service.config.MaxFileBytes)
+	if err != nil {
+		return failUpload(err)
+	}
+	if err := os.Rename(temporary, path); err != nil {
+		return failUpload(errors.New("无法保存附件"))
+	}
+	readyAt := service.now()
+	var readyErr error
 	err = mutation.Run(ctx, id, map[string]any{"size": written}, func(transactionContext context.Context) error {
-		createErr = service.repository.CreateAttachment(transactionContext, attachment)
-		return createErr
+		readyErr = service.repository.MarkAttachmentReady(transactionContext, attachment.ID, attachment.OwnerUserID, written, readyAt)
+		return readyErr
 	})
-	if createErr != nil {
-		_ = os.Remove(path)
-		return AttachmentView{}, createErr
+	if readyErr != nil {
+		if cleanupErr := service.discardUnboundAttachment(ctx, attachment); cleanupErr != nil {
+			return AttachmentView{}, ErrAttachmentStorage
+		}
+		return AttachmentView{}, readyErr
 	}
 	if err != nil {
-		_ = os.Remove(path)
+		if cleanupErr := service.discardUnboundAttachment(ctx, attachment); cleanupErr != nil {
+			return AttachmentView{}, ErrAttachmentStorage
+		}
 		return AttachmentView{}, err
 	}
+	attachment.State, attachment.Size, attachment.ChunkBytes, attachment.UpdatedAt = AttachmentStateReady, written, written, readyAt
 	return attachmentView(attachment), nil
 }
 
@@ -1251,6 +1571,9 @@ func (service *AttachmentService) BeginChunked(ctx context.Context, subject iden
 	}
 	if size > service.config.MaxFileBytes {
 		return AttachmentView{}, ErrAttachmentTooLarge
+	}
+	if err := service.PurgeExpiredUploads(ctx); err != nil {
+		return AttachmentView{}, err
 	}
 	now := service.now()
 	id := uuid.NewString()
@@ -1280,7 +1603,7 @@ func (service *AttachmentService) BeginChunked(ctx context.Context, subject iden
 }
 
 func (service *AttachmentService) UploadChunk(ctx context.Context, subject identity.Subject, id string, index int, source io.Reader) error {
-	if source == nil || index < 0 || index > 100000 {
+	if source == nil || index < 0 || int64(index) >= service.maxChunkCount() {
 		return ErrInvalid
 	}
 	attachment, err := service.repository.GetAttachment(ctx, id)
@@ -1314,6 +1637,10 @@ func (service *AttachmentService) UploadChunk(ctx context.Context, subject ident
 	if err != nil {
 		return failAttachmentMutation(ctx, mutation, attachment.ID, err)
 	}
+	if written == 0 {
+		_ = os.Remove(chunkPath)
+		return failAttachmentMutation(ctx, mutation, attachment.ID, ErrInvalid)
+	}
 	limit := attachment.Size
 	if service.config.MaxFileBytes < limit {
 		limit = service.config.MaxFileBytes
@@ -1335,7 +1662,7 @@ func (service *AttachmentService) UploadChunk(ctx context.Context, subject ident
 }
 
 func (service *AttachmentService) Merge(ctx context.Context, subject identity.Subject, id string, totalChunks int, declaredSize int64) (AttachmentView, error) {
-	if totalChunks <= 0 || totalChunks > 100000 || declaredSize <= 0 || declaredSize > service.config.MaxFileBytes {
+	if totalChunks <= 0 || int64(totalChunks) > service.maxChunkCount() || declaredSize <= 0 || declaredSize > service.config.MaxFileBytes {
 		return AttachmentView{}, ErrInvalid
 	}
 	attachment, err := service.repository.GetAttachment(ctx, id)
@@ -1431,7 +1758,7 @@ func (service *AttachmentService) Open(ctx context.Context, subject identity.Sub
 	if subject.Role != identity.RoleUser && subject.Role != identity.RoleAdmin {
 		return nil, "", 0, ErrForbidden
 	}
-	if attachment.State != AttachmentStateReady {
+	if attachment.State != AttachmentStateReady && attachment.State != AttachmentStateAttached {
 		return nil, "", 0, ErrAttachmentNotReady
 	}
 	path, err := service.storagePath(attachment.StorageName)
@@ -1489,6 +1816,14 @@ func classifyAttachmentStorageError(err error) error {
 }
 
 func (service *AttachmentService) ResolveReady(ctx context.Context, ownerUserID string, ids []string) ([]string, error) {
+	return service.resolveWithState(ctx, ownerUserID, ids, AttachmentStateReady)
+}
+
+func (service *AttachmentService) ResolveAttached(ctx context.Context, ownerUserID string, ids []string) ([]string, error) {
+	return service.resolveWithState(ctx, ownerUserID, ids, AttachmentStateAttached)
+}
+
+func (service *AttachmentService) resolveWithState(ctx context.Context, ownerUserID string, ids []string, state AttachmentState) ([]string, error) {
 	resolved := make([]string, 0, len(ids))
 	seen := map[string]struct{}{}
 	for _, id := range ids {
@@ -1503,7 +1838,7 @@ func (service *AttachmentService) ResolveReady(ctx context.Context, ownerUserID 
 		if attachment.OwnerUserID != ownerUserID {
 			return nil, ErrForbidden
 		}
-		if attachment.State != AttachmentStateReady {
+		if attachment.State != state {
 			return nil, ErrAttachmentNotReady
 		}
 		resolved = append(resolved, attachment.StorageName)
@@ -1562,7 +1897,11 @@ func canWriteAttachment(subject identity.Subject, attachment *Attachment) bool {
 }
 
 func attachmentView(attachment *Attachment) AttachmentView {
-	return AttachmentView{ID: attachment.ID, Filename: attachment.OriginalName, Size: attachment.Size, State: attachment.State, CreatedAt: attachment.CreatedAt}
+	state := attachment.State
+	if state == AttachmentStateAttached {
+		state = AttachmentStateReady
+	}
+	return AttachmentView{ID: attachment.ID, Filename: attachment.OriginalName, Size: attachment.Size, State: state, CreatedAt: attachment.CreatedAt}
 }
 
 func NewMemoryRepository() *MemoryRepository {
@@ -1877,4 +2216,76 @@ func (repository *MemoryRepository) MarkAttachmentReady(_ context.Context, id, o
 	}
 	attachment.State, attachment.Size, attachment.UpdatedAt = AttachmentStateReady, size, now
 	return nil
+}
+
+func (repository *MemoryRepository) BindReadyAttachments(_ context.Context, owner string, ids []string, now time.Time) error {
+	repository.mu.Lock()
+	defer repository.mu.Unlock()
+	for _, id := range ids {
+		attachment, exists := repository.attachments[id]
+		if !exists || attachment.OwnerUserID != owner || attachment.State != AttachmentStateReady {
+			return ErrAttachmentNotReady
+		}
+	}
+	for _, id := range ids {
+		attachment := repository.attachments[id]
+		attachment.State = AttachmentStateAttached
+		attachment.UpdatedAt = now
+	}
+	return nil
+}
+
+func (repository *MemoryRepository) ListAttachmentCleanupCandidates(_ context.Context, before time.Time, limit int) ([]Attachment, error) {
+	repository.mu.Lock()
+	defer repository.mu.Unlock()
+	if limit <= 0 || limit > expiredUploadBatchSize {
+		limit = expiredUploadBatchSize
+	}
+	attachments := make([]Attachment, 0, limit)
+	for _, attachment := range repository.attachments {
+		staleUnbound := (attachment.State == AttachmentStateUploading || attachment.State == AttachmentStateReady) && attachment.UpdatedAt.Before(before)
+		if staleUnbound || attachment.State == AttachmentStateDeleting {
+			attachments = append(attachments, *cloneAttachment(attachment))
+		}
+	}
+	sort.Slice(attachments, func(left, right int) bool {
+		if attachments[left].UpdatedAt.Equal(attachments[right].UpdatedAt) {
+			return attachments[left].ID < attachments[right].ID
+		}
+		return attachments[left].UpdatedAt.Before(attachments[right].UpdatedAt)
+	})
+	if len(attachments) > limit {
+		attachments = attachments[:limit]
+	}
+	return attachments, nil
+}
+
+func (repository *MemoryRepository) MarkAttachmentDeleting(_ context.Context, id, owner string, before, now time.Time) (bool, error) {
+	repository.mu.Lock()
+	defer repository.mu.Unlock()
+	attachment, exists := repository.attachments[id]
+	if !exists || attachment.OwnerUserID != owner || attachment.State == AttachmentStateAttached {
+		return false, nil
+	}
+	if !before.IsZero() && attachment.State != AttachmentStateDeleting &&
+		!((attachment.State == AttachmentStateUploading || attachment.State == AttachmentStateReady) && attachment.UpdatedAt.Before(before)) {
+		return false, nil
+	}
+	if before.IsZero() && attachment.State != AttachmentStateUploading && attachment.State != AttachmentStateReady && attachment.State != AttachmentStateDeleting {
+		return false, nil
+	}
+	attachment.State = AttachmentStateDeleting
+	attachment.UpdatedAt = now
+	return true, nil
+}
+
+func (repository *MemoryRepository) DeleteMarkedAttachment(_ context.Context, id, owner string) (bool, error) {
+	repository.mu.Lock()
+	defer repository.mu.Unlock()
+	attachment, exists := repository.attachments[id]
+	if !exists || attachment.OwnerUserID != owner || attachment.State != AttachmentStateDeleting {
+		return false, nil
+	}
+	delete(repository.attachments, id)
+	return true, nil
 }

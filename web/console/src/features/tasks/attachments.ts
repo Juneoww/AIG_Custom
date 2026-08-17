@@ -71,22 +71,31 @@ async function uploadChunked(file: File, signal?: AbortSignal): Promise<Attachme
       body: JSON.stringify({ filename: file.name, size: file.size }),
     }),
   )
-  const totalChunks = Math.ceil(file.size / ATTACHMENT_CHUNK_BYTES)
-  for (let index = 0; index < totalChunks; index += 1) {
-    const chunk = file.slice(index * ATTACHMENT_CHUNK_BYTES, Math.min(file.size, (index + 1) * ATTACHMENT_CHUNK_BYTES))
-    const body = new FormData()
-    body.append('chunk_index', String(index))
-    body.append('chunk', chunk, `chunk-${index}`)
-    await apiRequest<void>(`${attachmentPath(started.id)}/chunks`, { method: 'POST', body, signal })
+  try {
+    const totalChunks = Math.ceil(file.size / ATTACHMENT_CHUNK_BYTES)
+    for (let index = 0; index < totalChunks; index += 1) {
+      const chunk = file.slice(index * ATTACHMENT_CHUNK_BYTES, Math.min(file.size, (index + 1) * ATTACHMENT_CHUNK_BYTES))
+      const body = new FormData()
+      body.append('chunk_index', String(index))
+      body.append('chunk', chunk, `chunk-${index}`)
+      await apiRequest<void>(`${attachmentPath(started.id)}/chunks`, { method: 'POST', body, signal })
+    }
+    return parseAttachment(
+      await apiRequest<unknown>(`${attachmentPath(started.id)}/merge`, {
+        method: 'POST',
+        signal,
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ total_chunks: totalChunks, file_size: file.size }),
+      }),
+    )
+  } catch (error) {
+    try {
+      await apiRequest<void>(attachmentPath(started.id), { method: 'DELETE' })
+    } catch {
+      // 清理失败不覆盖原上传错误，服务端 TTL 会继续回收上传会话。
+    }
+    throw error
   }
-  return parseAttachment(
-    await apiRequest<unknown>(`${attachmentPath(started.id)}/merge`, {
-      method: 'POST',
-      signal,
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ total_chunks: totalChunks, file_size: file.size }),
-    }),
-  )
 }
 
 export async function uploadAttachment(file: File, signal?: AbortSignal): Promise<AttachmentView> {
@@ -122,6 +131,6 @@ export async function downloadAttachment(id: string, role: SubjectRole, signal?:
     anchor.rel = 'noopener'
     anchor.click()
   } finally {
-    URL.revokeObjectURL(url)
+    window.setTimeout(() => URL.revokeObjectURL(url), 0)
   }
 }

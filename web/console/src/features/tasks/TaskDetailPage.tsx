@@ -6,7 +6,7 @@
  * 依赖：Fluent UI、React Query、React Router、Session 与任务 API。
  */
 import { Button, Card, MessageBar, MessageBarBody, Text, makeStyles, tokens } from '@fluentui/react-components'
-import { useMutation, useQuery } from '@tanstack/react-query'
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { Link, useParams } from 'react-router-dom'
 
 import { useSession } from '../auth/session'
@@ -29,6 +29,7 @@ const terminal = new Set(['succeeded', 'failed', 'cancelled'])
 
 export function TaskDetailPage() {
   const styles = useStyles()
+  const queryClient = useQueryClient()
   const { taskId = '' } = useParams<{ taskId: string }>()
   const { state } = useSession()
   const query = useQuery({
@@ -42,7 +43,13 @@ export function TaskDetailPage() {
   const cancel = useMutation({
     mutationFn: () => cancelTaskGoverned(taskId),
     retry: false,
-    onSuccess: () => void query.refetch(),
+    onSuccess: (result) => {
+      if (result.status === 'uncertain') {
+        queryClient.setQueryData(['task', taskId], result.task)
+        return
+      }
+      void query.refetch()
+    },
   })
   const subject = state.status === 'authenticated' ? state.subject : undefined
   const canCancel = Boolean(

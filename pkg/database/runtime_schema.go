@@ -23,7 +23,7 @@ import (
 
 // LatestSchemaVersion is the schema version required by the running server.
 // Schema changes are applied only by the explicit `aig migrate` command.
-const LatestSchemaVersion int64 = 8
+const LatestSchemaVersion int64 = 9
 
 var requiredRuntimeTables = []string{
 	"users",

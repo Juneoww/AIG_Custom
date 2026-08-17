@@ -73,6 +73,8 @@ func TestProtectedTaskHandlerUsesCookieSubjectAndSafeOwner(t *testing.T) {
 
 	forbidden := performTaskJSON(t, router, tokens["bob"], http.MethodGet, "/tasks/"+task.ID, "", nil)
 	assert.Equal(t, http.StatusNotFound, forbidden.Code)
+	forbiddenCancel := performTaskJSON(t, router, tokens["bob"], http.MethodPost, "/tasks/"+task.ID+"/cancel", "", nil)
+	assert.Equal(t, http.StatusNotFound, forbiddenCancel.Code)
 	auditorRead := performTaskJSON(t, router, tokens["auditor"], http.MethodGet, "/tasks/"+task.ID, "", nil)
 	assert.Equal(t, http.StatusOK, auditorRead.Code)
 	auditorCancel := performTaskJSON(t, router, tokens["auditor"], http.MethodPost, "/tasks/"+task.ID+"/cancel", "", nil)
@@ -87,15 +89,31 @@ func TestTaskCreateAcceptedResponseUsesSafeDetailWire(t *testing.T) {
 
 	response := performTaskJSON(t, router, tokens["alice"], http.MethodPost, "/tasks", "safe-create-accepted", map[string]any{
 		"task_type": "mcp_scan", "content": "content-sentinel", "country_iso_code": "zh",
-		"params": map[string]any{"thread": 7, "label": "params-sentinel"},
+		"params": map[string]any{"thread": 7},
 	})
 	require.Equal(t, http.StatusAccepted, response.Code, response.Body.String())
 
 	assertSafeTaskCreateDetail(t, response.Body.Bytes(), map[string]any{
 		"task_type":     "mcp_scan",
 		"input_summary": map[string]any{"language": "zh", "thread": float64(7)},
-	}, "user-alice", "content-sentinel", "params-sentinel", "engine-session-sentinel")
+	}, "user-alice", "content-sentinel", "engine-session-sentinel")
 	assert.Zero(t, engine.statusReads.Load(), "rendering the response must not read the engine")
+}
+
+func TestTaskCreateRejectsOversizedJSONWithFixedBadRequest(t *testing.T) {
+	router, tokens, engine := newTaskHandlerFixture(t)
+	payload := `{"task_type":"mcp_scan","content":"` + strings.Repeat("x", 300<<10) + `"}`
+	request := httptest.NewRequest(http.MethodPost, "/tasks", strings.NewReader(payload))
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("Idempotency-Key", "oversized-json")
+	request.AddCookie(&http.Cookie{Name: "aig_session", Value: tokens["alice"]})
+	response := httptest.NewRecorder()
+
+	router.ServeHTTP(response, request)
+
+	assert.Equal(t, http.StatusBadRequest, response.Code)
+	assert.JSONEq(t, `{"error":"invalid task request"}`, response.Body.String())
+	assert.Zero(t, engine.submits.Load())
 }
 
 func TestTaskCreateDispatchFailureUsesFixedErrorAndSafeTaskWire(t *testing.T) {
@@ -104,8 +122,8 @@ func TestTaskCreateDispatchFailureUsesFixedErrorAndSafeTaskWire(t *testing.T) {
 	router, tokens := newTaskHandlerFixtureWithEngine(t, engine)
 
 	response := performTaskJSON(t, router, tokens["alice"], http.MethodPost, "/tasks", "safe-create-unavailable", map[string]any{
-		"task_type": "future-unsafe-task", "content": "failure-content-sentinel",
-		"params": map[string]any{"label": "failure-params-sentinel"},
+		"task_type": "mcp_scan", "content": "failure-content-sentinel",
+		"params": map[string]any{"thread": 4},
 	})
 	require.Equal(t, http.StatusServiceUnavailable, response.Code, response.Body.String())
 
@@ -118,9 +136,9 @@ func TestTaskCreateDispatchFailureUsesFixedErrorAndSafeTaskWire(t *testing.T) {
 	encoded, err := json.Marshal(task)
 	require.NoError(t, err)
 	assertSafeTaskCreateDetail(t, encoded, map[string]any{
-		"task_type":     "unknown",
-		"input_summary": map[string]any{},
-	}, "user-alice", "failure-content-sentinel", "failure-params-sentinel", "dispatch-error-sentinel")
+		"task_type":     "mcp_scan",
+		"input_summary": map[string]any{"thread": float64(4)},
+	}, "user-alice", "failure-content-sentinel", "dispatch-error-sentinel")
 	assert.Zero(t, engine.statusReads.Load(), "rendering the response must not read the engine")
 }
 
@@ -307,6 +325,20 @@ func TestAttachmentHandlerReturnsOnlyOpaqueMetadataAndEnforcesOwnerDownload(t *t
 	assert.Equal(t, http.StatusInternalServerError, response.Code)
 	assert.Empty(t, response.Body.String())
 	assert.NotContains(t, response.Body.String(), attachmentService.config.UploadDir)
+}
+
+func TestAttachmentAbortRouteKeepsOwnerAndRoleBoundary(t *testing.T) {
+	router, tokens, attachments := newTaskHandlerFixtureWithAttachments(t, &recordingEngine{})
+	owner := identity.Subject{UserID: "user-alice", Username: "alice", Role: identity.RoleUser}
+	view, err := attachments.BeginChunked(context.Background(), owner, "partial.txt", 7)
+	require.NoError(t, err)
+
+	other := performTaskJSON(t, router, tokens["bob"], http.MethodDelete, "/tasks/attachments/"+view.ID, "", nil)
+	assert.Equal(t, http.StatusNotFound, other.Code)
+	auditor := performTaskJSON(t, router, tokens["auditor"], http.MethodDelete, "/tasks/attachments/"+view.ID, "", nil)
+	assert.Equal(t, http.StatusForbidden, auditor.Code)
+	ownerResponse := performTaskJSON(t, router, tokens["alice"], http.MethodDelete, "/tasks/attachments/"+view.ID, "", nil)
+	assert.Equal(t, http.StatusNoContent, ownerResponse.Code)
 }
 
 func newTaskHandlerFixture(t *testing.T) (http.Handler, map[string]string, *recordingEngine) {

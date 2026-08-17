@@ -98,10 +98,10 @@
 | 登录前品牌摘要 | `GET /api/v1/public/brand` | 新增 | 仅返回产品名、主色和安全 Logo 表示；不得返回水印、`updated_by`、内部记录或原始存储信息 |
 | 安全总览 | `GET /api/v1/platform/dashboard` | 新增 | 返回服务端按 Subject 限定的评分、30 日趋势、风险分布、最近任务和待关注项；浏览器不读取原始结果重算 |
 | 任务列表 | `GET /api/v1/platform/tasks` | 调整 | 改为安全摘要分页 `{items,total,page,page_size}`；普通用户查询本人，管理员/审计员查询全局；不返回原始参数中的凭据 |
-| 创建任务 | `POST /api/v1/platform/tasks` | 现有 | 客户端生成并在同一次逻辑提交重试时复用 `Idempotency-Key`；只传模型 ID 和 opaque 附件 ID，不传模型密钥 |
-| 任务详情、取消 | `GET /api/v1/platform/tasks/:id`、`POST .../:id/cancel` | 调整 | 普通用户跨 owner 统一 `404`；详情短轮询且 GET 纯读；取消不确定时先读取状态，不自动重复提交 |
+| 创建任务 | `POST /api/v1/platform/tasks` | 现有 | 客户端生成并在同一次逻辑提交重试时复用 `Idempotency-Key`；只传模型 ID 和 opaque 附件 ID，不传模型密钥；服务端在持久化前验证受治理模型/Agent 引用并原子绑定 ready 附件 |
+| 任务详情、取消 | `GET /api/v1/platform/tasks/:id`、`POST .../:id/cancel` | 已调整 | 普通用户跨 owner 统一 `404`；详情短轮询且 GET 纯读；只有精确 `204` 直接确认取消，网络/5xx/非合同 2xx 只执行一次状态 GET，绝不自动重复 POST |
 | 原始任务结果 HTTP | 当前 `GET /api/v1/platform/tasks/:id/result` | 调整为退出浏览器契约 | 新控制台不调用；匿名请求仍为 `401`，完成身份与改密守卫后的请求统一 `410`；可信服务内部仍可经 `EngineAdapter` 读取并生成不可变脱敏报告 |
-| 附件上传、分片、合并、下载 | `/api/v1/platform/tasks/attachments/**` | 现有并调整权限 | 只使用 opaque ID；普通用户仅本人；审计员不得下载；管理员跨 owner 下载在持久化脱敏审计 P0 完成前禁用 |
+| 附件上传、分片、合并、下载 | `/api/v1/platform/tasks/attachments/**` | 已调整 | 只使用 opaque ID；普通用户仅本人；审计员不得下载；管理员跨 owner 下载前持久化脱敏授权审计；未绑定 uploading/ready 附件使用 deleting 墓碑安全回收，已绑定附件不可中止 |
 | 报告列表 | `GET /api/v1/platform/reports` | 调整 | 统一为安全摘要分页 `{items,total,page,page_size}`；不返回 `raw_result`、内部 `render_data`、Logo 字节或所有者内部字段 |
 | 报告趋势、详情、PDF | `GET /api/v1/platform/reports/trends`、`GET .../:id`、`POST .../:id/exports/pdf` | 现有 | 详情与 PDF 只消费同一不可变快照；导出写审计并带 CSRF |
 | 报告补建 | `POST /api/v1/platform/admin/reports/backfill` | 现有 | 仅管理员；输入只有任务 ID；不得接收浏览器提供的原始扫描结果 |

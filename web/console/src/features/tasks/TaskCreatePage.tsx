@@ -44,6 +44,8 @@ export function TaskCreatePage() {
   const [content, setContent] = useState('')
   const [language, setLanguage] = useState<'zh_CN' | 'en'>('zh_CN')
   const [modelID, setModelID] = useState('')
+  const [evalModelID, setEvalModelID] = useState('')
+  const [agentID, setAgentID] = useState('')
   const [thread, setThread] = useState('4')
   const [timeout, setTimeoutValue] = useState('300')
   const [numPrompts, setNumPrompts] = useState('100')
@@ -114,21 +116,35 @@ export function TaskCreatePage() {
     try {
       if (!content.trim()) throw new Error('请填写扫描目标或任务说明。')
       const params: TaskCreateRequest['params'] = {}
-      if (modelID.trim()) params.model_id = modelID.trim()
       if (taskType === 'mcp_scan') {
+        if (modelID.trim()) params.model_id = modelID.trim()
         const parsed = Number(thread)
         if (!Number.isInteger(parsed) || parsed < 1 || parsed > 1_024) throw new Error('请填写有效的并发数。')
         params.thread = parsed
       }
       if (taskType === 'ai_infra_scan') {
+        if (modelID.trim()) params.model_id = modelID.trim()
         const parsed = Number(timeout)
         if (!Number.isInteger(parsed) || parsed < 1 || parsed > 86_400) throw new Error('请填写有效的超时秒数。')
         params.timeout = parsed
       }
       if (taskType === 'model_redteam_report') {
+        const modelIDs = modelID.split(',').map((value) => value.trim()).filter(Boolean)
+        if (modelIDs.length === 0 || modelIDs.length > 10 || new Set(modelIDs).size !== modelIDs.length) {
+          throw new Error('请填写有效且不重复的评测模型 ID。')
+        }
+        if (!evalModelID.trim()) throw new Error('请填写裁判模型 ID。')
+        params.model_id = modelIDs
+        params.eval_model_id = evalModelID.trim()
         const parsed = Number(numPrompts)
         if (!Number.isInteger(parsed) || parsed < 1 || parsed > 1_000_000) throw new Error('请填写有效的提示词数量。')
         params.dataset = { numPrompts: parsed }
+      }
+      if (taskType === 'agent_scan') {
+        if (!agentID.trim()) throw new Error('请填写 Agent 配置 ID。')
+        if (!evalModelID.trim()) throw new Error('请填写裁判模型 ID。')
+        params.agent_id = agentID.trim()
+        params.eval_model_id = evalModelID.trim()
       }
       const input: TaskCreateRequest = {
         task_type: taskType,
@@ -192,9 +208,26 @@ export function TaskCreatePage() {
                 <option value="zh_CN">中文</option><option value="en">英文</option>
               </Select>
             </Field>
-            <Field label="模型 ID" hint="仅填写平台模型 ID，不填写密钥。">
-              <Input value={modelID} onChange={(_, data) => { setModelID(data.value); invalidateSubmission() }} autoComplete="off" />
-            </Field>
+            {taskType === 'mcp_scan' || taskType === 'ai_infra_scan' ? (
+              <Field label="模型 ID" hint="仅填写平台模型 ID，不填写密钥。">
+                <Input value={modelID} onChange={(_, data) => { setModelID(data.value); invalidateSubmission() }} autoComplete="off" />
+              </Field>
+            ) : null}
+            {taskType === 'model_redteam_report' ? (
+              <Field label="评测模型 ID（逗号分隔）" hint="仅填写平台模型 ID，不填写密钥。">
+                <Input value={modelID} onChange={(_, data) => { setModelID(data.value); invalidateSubmission() }} autoComplete="off" />
+              </Field>
+            ) : null}
+            {taskType === 'agent_scan' ? (
+              <Field label="Agent 配置 ID">
+                <Input value={agentID} onChange={(_, data) => { setAgentID(data.value); invalidateSubmission() }} autoComplete="off" />
+              </Field>
+            ) : null}
+            {taskType === 'model_redteam_report' || taskType === 'agent_scan' ? (
+              <Field label="裁判模型 ID" hint="仅填写平台模型 ID，不填写密钥。">
+                <Input value={evalModelID} onChange={(_, data) => { setEvalModelID(data.value); invalidateSubmission() }} autoComplete="off" />
+              </Field>
+            ) : null}
             {taskType === 'mcp_scan' ? <Field label="并发数"><Input type="number" min={1} max={1024} value={thread} onChange={(_, data) => { setThread(data.value); invalidateSubmission() }} /></Field> : null}
             {taskType === 'ai_infra_scan' ? <Field label="超时秒数"><Input type="number" min={1} max={86400} value={timeout} onChange={(_, data) => { setTimeoutValue(data.value); invalidateSubmission() }} /></Field> : null}
             {taskType === 'model_redteam_report' ? <Field label="提示词数量"><Input type="number" min={1} max={1000000} value={numPrompts} onChange={(_, data) => { setNumPrompts(data.value); invalidateSubmission() }} /></Field> : null}

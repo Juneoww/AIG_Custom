@@ -136,6 +136,10 @@ func TestRetiredPlatformTaskResultUsesProductionIdentityPasswordChainAndNeverRea
 
 type retiredResultEngine struct{ resultReads int }
 
+func (*retiredResultEngine) ValidateTaskReferences(context.Context, platformtasks.EngineTask) error {
+	return nil
+}
+
 func (*retiredResultEngine) SubmitTask(context.Context, platformtasks.EngineTask) (string, error) {
 	return "", nil
 }

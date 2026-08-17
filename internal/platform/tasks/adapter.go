@@ -33,6 +33,8 @@ type EngineStatus struct {
 }
 
 type EngineAdapter interface {
+	// ValidateTaskReferences verifies governed IDs before a browser task can be persisted.
+	ValidateTaskReferences(context.Context, EngineTask) error
 	// SubmitTask must treat PlatformTaskID as the stable engine session ID.
 	// Repeated calls for an already assigned/running/terminal session must never
 	// enqueue a second scan. If the original network acknowledgement cannot be

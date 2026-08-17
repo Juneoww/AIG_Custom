@@ -167,10 +167,13 @@ export type GovernedCancelResult =
 
 export async function cancelTaskGoverned(id: string, signal?: AbortSignal): Promise<GovernedCancelResult> {
   try {
-    await apiRequest<void>(`${taskPath(id)}/cancel`, { method: 'POST', signal })
+    await apiRequest<void>(`${taskPath(id)}/cancel`, { method: 'POST', signal }, { expectedStatus: 204 })
     return { status: 'confirmed' }
   } catch (error) {
-    if (!(error instanceof NetworkError)) throw error
+    const needsConfirmation = error instanceof NetworkError
+      || (error instanceof ApiError && error.kind === 'server')
+      || (error instanceof ApiError && error.kind === 'unexpected-response' && error.status >= 200 && error.status < 300)
+    if (!needsConfirmation) throw error
     const task = await fetchTaskDetail(id, signal)
     return { status: 'uncertain', task }
   }
