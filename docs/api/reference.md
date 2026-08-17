@@ -122,6 +122,36 @@ AIG Custom Platform 是基于 Tencent Zhuque Lab AI-Infra-Guard（https://github
 
 > **已弃用的兼容 API。** 本节端点保留浏览器契约：`/api/v1/app/models` 的 `GET`/`POST`/集合 `DELETE`，以及 `/api/v1/app/models/{modelId}` 的详情 `GET`/`PUT`。请求必须使用登录会话建立的 `Subject`，变更请求还必须通过 CSRF 校验；`username` 请求头会被忽略。POST/PUT 保留嵌套 `model` 对象，DELETE 保留 `{ "model_ids": [...] }`，所有操作使用上述旧 HTTP `200` envelope。列表/详情会合并只读 YAML 模型并保留其 `default` 字符串数组；加密平台模型返回空数组。token 永远是 `********`，YAML 模型不能被修改或被平台行遮蔽；重复 YAML ID 返回 `status: 1`，YAML 加载错误会在数据库和审计写入前失败关闭。非弃用的扁平契约请使用 `/api/v1/platform/models`。
 
+### 所有示例都必须先建立浏览器会话
+
+此兼容 API 不支持匿名访问。登录前先 GET `/api/v1/auth/csrf`；登录请求同时携带 `aig_csrf` Cookie 与 `X-CSRF-Token` 请求头，并在持久 Cookie jar 中保留登录后轮换的 `aig_session` 与 `aig_csrf` Cookie。`must_change_password=true` 的主体必须先改密，才能调用任何模型接口。以下每个变更请求都会把当前 `aig_csrf` Cookie 值再次放入 `X-CSRF-Token`。
+
+```python
+import requests
+
+base_url = "http://localhost:8088"
+session = requests.Session()  # 持久 Cookie jar
+bootstrap = session.get(f"{base_url}/api/v1/auth/csrf")
+bootstrap.raise_for_status()
+login = session.post(
+    f"{base_url}/api/v1/auth/login",
+    json={"username": "<username>", "password": "<password>"},
+    headers={"X-CSRF-Token": bootstrap.json()["csrf_token"]},
+)
+login.raise_for_status()
+csrf_headers = {"X-CSRF-Token": session.cookies.get("aig_csrf")}
+```
+
+cURL 示例需要在两次初始化请求间持久化 Cookie。只替换尖括号占位符；登录后从 `cookies.txt` 读取更新后的 `aig_csrf` 值，作为 `<session-csrf-token>`。
+
+```bash
+curl -sS -c cookies.txt http://localhost:8088/api/v1/auth/csrf
+curl -sS -b cookies.txt -c cookies.txt -X POST http://localhost:8088/api/v1/auth/login \
+  -H "Content-Type: application/json" \
+  -H "X-CSRF-Token: <bootstrap-csrf-token>" \
+  -d '{"username":"<username>","password":"<password>"}'
+```
+
 ### 1. 获取模型列表
 
 #### 接口信息
@@ -151,7 +181,7 @@ def get_model_list():
         "Content-Type": "application/json"
     }
     
-    response = requests.get(url, headers=headers)
+    response = session.get(url, headers=headers)
     return response.json()
 
 # 使用示例
@@ -168,7 +198,7 @@ if result['status'] == 0:
 
 #### cURL 示例
 ```bash
-curl -X GET http://localhost:8088/api/v1/app/models \
+curl -b cookies.txt -X GET http://localhost:8088/api/v1/app/models \
   -H "Content-Type: application/json"
 ```
 
@@ -236,7 +266,7 @@ def get_model_detail(model_id):
         "Content-Type": "application/json"
     }
     
-    response = requests.get(url, headers=headers)
+    response = session.get(url, headers=headers)
     return response.json()
 
 # 使用示例
@@ -251,7 +281,7 @@ if result['status'] == 0:
 
 #### cURL 示例
 ```bash
-curl -X GET http://localhost:8088/api/v1/app/models/gpt4-model \
+curl -b cookies.txt -X GET http://localhost:8088/api/v1/app/models/gpt4-model \
   -H "Content-Type: application/json"
 ```
 
@@ -298,9 +328,7 @@ curl -X GET http://localhost:8088/api/v1/app/models/gpt4-model \
 ```python
 def create_model():
     url = "http://localhost:8088/api/v1/app/models"
-    headers = {
-        "Content-Type": "application/json"
-    }
+    headers = {**csrf_headers, "Content-Type": "application/json"}
     data = {
         "model_id": "my-gpt4-model",
         "model": {
@@ -312,7 +340,7 @@ def create_model():
         }
     }
     
-    response = requests.post(url, json=data, headers=headers)
+    response = session.post(url, json=data, headers=headers)
     return response.json()
 
 # 使用示例
@@ -325,8 +353,9 @@ else:
 
 #### cURL 示例
 ```bash
-curl -X POST http://localhost:8088/api/v1/app/models \
+curl -b cookies.txt -X POST http://localhost:8088/api/v1/app/models \
   -H "Content-Type: application/json" \
+  -H "X-CSRF-Token: <session-csrf-token>" \
   -d '{
     "model_id": "my-gpt4-model",
     "model": {
@@ -374,9 +403,7 @@ curl -X POST http://localhost:8088/api/v1/app/models \
 ```python
 def update_model(model_id):
     url = f"http://localhost:8088/api/v1/app/models/{model_id}"
-    headers = {
-        "Content-Type": "application/json"
-    }
+    headers = {**csrf_headers, "Content-Type": "application/json"}
     # 只更新备注和限制，不修改token
     data = {
         "model": {
@@ -388,7 +415,7 @@ def update_model(model_id):
         }
     }
     
-    response = requests.put(url, json=data, headers=headers)
+    response = session.put(url, json=data, headers=headers)
     return response.json()
 
 # 使用示例
@@ -413,15 +440,16 @@ def update_model_token(model_id, new_token):
         }
     }
     
-    response = requests.put(url, json=data)
+    response = session.put(url, json=data, headers=csrf_headers)
     return response.json()
 ```
 
 #### cURL 示例
 ```bash
 # 只更新备注信息
-curl -X PUT http://localhost:8088/api/v1/app/models/my-gpt4-model \
+curl -b cookies.txt -X PUT http://localhost:8088/api/v1/app/models/my-gpt4-model \
   -H "Content-Type: application/json" \
+  -H "X-CSRF-Token: <session-csrf-token>" \
   -d '{
     "model": {
       "model": "gpt-4-turbo",
@@ -433,8 +461,9 @@ curl -X PUT http://localhost:8088/api/v1/app/models/my-gpt4-model \
   }'
 
 # 更新token
-curl -X PUT http://localhost:8088/api/v1/app/models/my-gpt4-model \
+curl -b cookies.txt -X PUT http://localhost:8088/api/v1/app/models/my-gpt4-model \
   -H "Content-Type: application/json" \
+  -H "X-CSRF-Token: <session-csrf-token>" \
   -d '{
     "model": {
       "model": "gpt-4",
@@ -471,14 +500,12 @@ curl -X PUT http://localhost:8088/api/v1/app/models/my-gpt4-model \
 ```python
 def delete_models(model_ids):
     url = "http://localhost:8088/api/v1/app/models"
-    headers = {
-        "Content-Type": "application/json"
-    }
+    headers = {**csrf_headers, "Content-Type": "application/json"}
     data = {
         "model_ids": model_ids
     }
     
-    response = requests.delete(url, json=data, headers=headers)
+    response = session.delete(url, json=data, headers=headers)
     return response.json()
 
 # 删除单个模型
@@ -495,15 +522,17 @@ if result['status'] == 0:
 #### cURL 示例
 ```bash
 # 删除单个模型
-curl -X DELETE http://localhost:8088/api/v1/app/models \
+curl -b cookies.txt -X DELETE http://localhost:8088/api/v1/app/models \
   -H "Content-Type: application/json" \
+  -H "X-CSRF-Token: <session-csrf-token>" \
   -d '{
     "model_ids": ["my-gpt4-model"]
   }'
 
 # 批量删除多个模型
-curl -X DELETE http://localhost:8088/api/v1/app/models \
+curl -b cookies.txt -X DELETE http://localhost:8088/api/v1/app/models \
   -H "Content-Type: application/json" \
+  -H "X-CSRF-Token: <session-csrf-token>" \
   -d '{
     "model_ids": ["model1", "model2", "model3"]
   }'

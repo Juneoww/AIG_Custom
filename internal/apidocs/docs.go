@@ -464,6 +464,9 @@ const docTemplate = `{
                     },
                     "401": {
                         "description": "Unauthenticated."
+                    },
+                    "403": {
+                        "description": "The must-change-password gate or model read scope forbids access."
                     }
                 }
             },
@@ -495,7 +498,7 @@ const docTemplate = `{
                         "description": "Unauthenticated."
                     },
                     "403": {
-                        "description": "Auditor role cannot create models."
+                        "description": "User or administrator role, the must-change-password gate, and a valid CSRF token are required; auditors cannot create models."
                     }
                 }
             },
@@ -527,7 +530,7 @@ const docTemplate = `{
                         "description": "Unauthenticated."
                     },
                     "403": {
-                        "description": "Subject cannot delete one or more requested models."
+                        "description": "Owner or administrator access to every requested platform model, the must-change-password gate, and a valid CSRF token are required; YAML models are read-only."
                     }
                 }
             }
@@ -560,7 +563,7 @@ const docTemplate = `{
                         "description": "Unauthenticated."
                     },
                     "403": {
-                        "description": "Subject cannot read this private model."
+                        "description": "The must-change-password gate or model read scope forbids access to this private model."
                     }
                 }
             },
@@ -599,7 +602,7 @@ const docTemplate = `{
                         "description": "Unauthenticated."
                     },
                     "403": {
-                        "description": "Subject cannot update this model."
+                        "description": "Owner or administrator access to the platform model, the must-change-password gate, and a valid CSRF token are required; YAML models are read-only."
                     }
                 }
             }
@@ -1219,7 +1222,10 @@ const docTemplate = `{
                 ],
                 "responses": {
                     "202": {
-                        "description": "Persisted task status; dispatch failures remain visible as dispatch_failed."
+                        "description": "Browser-safe persisted task detail; raw request, attachment, identity, and engine fields are absent.",
+                        "schema": {
+                            "$ref": "#/definitions/tasks.TaskDetail"
+                        }
                     },
                     "400": {
                         "description": "Missing idempotency key, invalid input, raw credentials, or unavailable attachment."
@@ -1234,7 +1240,10 @@ const docTemplate = `{
                         "description": "Persistence or durable audit failed; internal details are not exposed."
                     },
                     "503": {
-                        "description": "Task is persisted with dispatch_failed because trusted dispatch failed."
+                        "description": "Fixed safe error plus persisted browser-safe task detail; dispatch diagnostics are not exposed.",
+                        "schema": {
+                            "$ref": "#/definitions/tasks.TaskCreateErrorResponse"
+                        }
                     }
                 },
                 "summary": "Create an idempotent platform task",
@@ -1543,6 +1552,9 @@ const docTemplate = `{
                     },
                     "400": {
                         "description": "Chunk count or sizes do not match."
+                    },
+                    "401": {
+                        "description": "Unauthenticated."
                     },
                     "403": {
                         "description": "Subject cannot write this attachment, password change is incomplete, or CSRF is invalid."
@@ -3467,6 +3479,25 @@ const docTemplate = `{
                 "created_at",
                 "updated_at",
                 "input_summary"
+            ],
+            "type": "object"
+        },
+        "tasks.TaskCreateErrorResponse": {
+            "description": "Fixed dispatch-unavailable error with the same browser-safe task detail returned by a successful create.",
+            "properties": {
+                "error": {
+                    "enum": [
+                        "task dispatch unavailable"
+                    ],
+                    "type": "string"
+                },
+                "task": {
+                    "$ref": "#/definitions/tasks.TaskDetail"
+                }
+            },
+            "required": [
+                "error",
+                "task"
             ],
             "type": "object"
         },

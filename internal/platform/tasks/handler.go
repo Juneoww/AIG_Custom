@@ -256,17 +256,18 @@ func (handler *Handler) create(c *gin.Context) {
 	}
 	input.IdempotencyKey = c.GetHeader("Idempotency-Key")
 	view, err := handler.service.Create(c.Request.Context(), subject, input)
+	detail := taskDetailOfView(view)
 	switch {
 	case errors.Is(err, ErrInvalid):
 		c.Status(http.StatusBadRequest)
 	case errors.Is(err, ErrForbidden):
 		c.Status(http.StatusForbidden)
 	case errors.Is(err, ErrDispatchFailed):
-		c.JSON(http.StatusServiceUnavailable, view)
+		c.JSON(http.StatusServiceUnavailable, TaskCreateErrorResponse{Error: "task dispatch unavailable", Task: detail})
 	case err != nil:
 		c.Status(http.StatusInternalServerError)
 	default:
-		c.JSON(http.StatusAccepted, view)
+		c.JSON(http.StatusAccepted, detail)
 	}
 }
 

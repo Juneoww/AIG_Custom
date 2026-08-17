@@ -122,6 +122,36 @@ The primary color must be `#RRGGBB`. A Logo must be a real PNG or JPEG whose dec
 
 > **Deprecated compatibility API.** The endpoints in this section preserve the browser contract (`GET`/`POST`/collection `DELETE` on `/api/v1/app/models`, and detail `GET`/`PUT` on `/api/v1/app/models/{modelId}`). Requests require the authenticated session Subject and CSRF protection for mutations; a `username` header is ignored. POST and PUT keep the nested `model` object, DELETE keeps `{ "model_ids": [...] }`, and all operations use the legacy HTTP `200` envelope described above. List/detail merge read-only YAML models, preserve their `default` string arrays, and return an empty array for encrypted platform models. Tokens are always `********`; YAML models cannot be mutated or shadowed by a platform row. Duplicate YAML IDs return `status: 1`, and a YAML load error fails closed before database or audit writes. Use `/api/v1/platform/models` for the non-deprecated flat contract.
 
+### Authenticated browser session required by every example
+
+This compatibility API is not anonymous. GET `/api/v1/auth/csrf` before login, submit that token in both the `aig_csrf` cookie and `X-CSRF-Token` header when logging in, and retain the rotated `aig_session` and `aig_csrf` cookies in a persistent cookie jar. A subject with `must_change_password=true` must change the password before any model request. Every mutation below sends the current `aig_csrf` cookie value again in `X-CSRF-Token`.
+
+```python
+import requests
+
+base_url = "http://localhost:8088"
+session = requests.Session()  # persistent cookie jar
+bootstrap = session.get(f"{base_url}/api/v1/auth/csrf")
+bootstrap.raise_for_status()
+login = session.post(
+    f"{base_url}/api/v1/auth/login",
+    json={"username": "<username>", "password": "<password>"},
+    headers={"X-CSRF-Token": bootstrap.json()["csrf_token"]},
+)
+login.raise_for_status()
+csrf_headers = {"X-CSRF-Token": session.cookies.get("aig_csrf")}
+```
+
+For cURL, persist cookies across both bootstrap calls. Replace only the angle-bracket placeholders; after login, read the refreshed `aig_csrf` value from `cookies.txt` as `<session-csrf-token>`.
+
+```bash
+curl -sS -c cookies.txt http://localhost:8088/api/v1/auth/csrf
+curl -sS -b cookies.txt -c cookies.txt -X POST http://localhost:8088/api/v1/auth/login \
+  -H "Content-Type: application/json" \
+  -H "X-CSRF-Token: <bootstrap-csrf-token>" \
+  -d '{"username":"<username>","password":"<password>"}'
+```
+
 ### 1. Get Model List
 
 #### Interface Information
@@ -151,7 +181,7 @@ def get_model_list():
         "Content-Type": "application/json"
     }
     
-    response = requests.get(url, headers=headers)
+    response = session.get(url, headers=headers)
     return response.json()
 
 # Usage example
@@ -168,7 +198,7 @@ if result['status'] == 0:
 
 #### cURL Example
 ```bash
-curl -X GET http://localhost:8088/api/v1/app/models \
+curl -b cookies.txt -X GET http://localhost:8088/api/v1/app/models \
   -H "Content-Type: application/json"
 ```
 
@@ -236,7 +266,7 @@ def get_model_detail(model_id):
         "Content-Type": "application/json"
     }
     
-    response = requests.get(url, headers=headers)
+    response = session.get(url, headers=headers)
     return response.json()
 
 # Usage example
@@ -251,7 +281,7 @@ if result['status'] == 0:
 
 #### cURL Example
 ```bash
-curl -X GET http://localhost:8088/api/v1/app/models/gpt4-model \
+curl -b cookies.txt -X GET http://localhost:8088/api/v1/app/models/gpt4-model \
   -H "Content-Type: application/json"
 ```
 
@@ -298,9 +328,7 @@ curl -X GET http://localhost:8088/api/v1/app/models/gpt4-model \
 ```python
 def create_model():
     url = "http://localhost:8088/api/v1/app/models"
-    headers = {
-        "Content-Type": "application/json"
-    }
+    headers = {**csrf_headers, "Content-Type": "application/json"}
     data = {
         "model_id": "my-gpt4-model",
         "model": {
@@ -312,7 +340,7 @@ def create_model():
         }
     }
     
-    response = requests.post(url, json=data, headers=headers)
+    response = session.post(url, json=data, headers=headers)
     return response.json()
 
 # Usage example
@@ -325,8 +353,9 @@ else:
 
 #### cURL Example
 ```bash
-curl -X POST http://localhost:8088/api/v1/app/models \
+curl -b cookies.txt -X POST http://localhost:8088/api/v1/app/models \
   -H "Content-Type: application/json" \
+  -H "X-CSRF-Token: <session-csrf-token>" \
   -d '{
     "model_id": "my-gpt4-model",
     "model": {
@@ -374,9 +403,7 @@ curl -X POST http://localhost:8088/api/v1/app/models \
 ```python
 def update_model(model_id):
     url = f"http://localhost:8088/api/v1/app/models/{model_id}"
-    headers = {
-        "Content-Type": "application/json"
-    }
+    headers = {**csrf_headers, "Content-Type": "application/json"}
     # Only update note and limit, don't modify token
     data = {
         "model": {
@@ -388,7 +415,7 @@ def update_model(model_id):
         }
     }
     
-    response = requests.put(url, json=data, headers=headers)
+    response = session.put(url, json=data, headers=headers)
     return response.json()
 
 # Usage example
@@ -413,15 +440,16 @@ def update_model_token(model_id, new_token):
         }
     }
     
-    response = requests.put(url, json=data)
+    response = session.put(url, json=data, headers=csrf_headers)
     return response.json()
 ```
 
 #### cURL Example
 ```bash
 # Only update note information
-curl -X PUT http://localhost:8088/api/v1/app/models/my-gpt4-model \
+curl -b cookies.txt -X PUT http://localhost:8088/api/v1/app/models/my-gpt4-model \
   -H "Content-Type: application/json" \
+  -H "X-CSRF-Token: <session-csrf-token>" \
   -d '{
     "model": {
       "model": "gpt-4-turbo",
@@ -433,8 +461,9 @@ curl -X PUT http://localhost:8088/api/v1/app/models/my-gpt4-model \
   }'
 
 # Update token
-curl -X PUT http://localhost:8088/api/v1/app/models/my-gpt4-model \
+curl -b cookies.txt -X PUT http://localhost:8088/api/v1/app/models/my-gpt4-model \
   -H "Content-Type: application/json" \
+  -H "X-CSRF-Token: <session-csrf-token>" \
   -d '{
     "model": {
       "model": "gpt-4",
@@ -471,14 +500,12 @@ curl -X PUT http://localhost:8088/api/v1/app/models/my-gpt4-model \
 ```python
 def delete_models(model_ids):
     url = "http://localhost:8088/api/v1/app/models"
-    headers = {
-        "Content-Type": "application/json"
-    }
+    headers = {**csrf_headers, "Content-Type": "application/json"}
     data = {
         "model_ids": model_ids
     }
     
-    response = requests.delete(url, json=data, headers=headers)
+    response = session.delete(url, json=data, headers=headers)
     return response.json()
 
 # Delete single model
@@ -495,15 +522,17 @@ if result['status'] == 0:
 #### cURL Example
 ```bash
 # Delete single model
-curl -X DELETE http://localhost:8088/api/v1/app/models \
+curl -b cookies.txt -X DELETE http://localhost:8088/api/v1/app/models \
   -H "Content-Type: application/json" \
+  -H "X-CSRF-Token: <session-csrf-token>" \
   -d '{
     "model_ids": ["my-gpt4-model"]
   }'
 
 # Batch delete multiple models
-curl -X DELETE http://localhost:8088/api/v1/app/models \
+curl -b cookies.txt -X DELETE http://localhost:8088/api/v1/app/models \
   -H "Content-Type: application/json" \
+  -H "X-CSRF-Token: <session-csrf-token>" \
   -d '{
     "model_ids": ["model1", "model2", "model3"]
   }'

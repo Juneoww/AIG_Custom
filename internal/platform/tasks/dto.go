@@ -44,6 +44,13 @@ type TaskDetail struct {
 	InputSummary TaskInputSummary `json:"input_summary"`
 }
 
+// TaskCreateErrorResponse keeps a persisted task visible after dispatch
+// failure without exposing engine or request internals.
+type TaskCreateErrorResponse struct {
+	Error string     `json:"error"`
+	Task  TaskDetail `json:"task"`
+}
+
 func taskSummaryOf(task *Task) TaskSummary {
 	return TaskSummary{
 		ID: task.ID, Owner: task.OwnerUsername, TaskType: canonicalTaskType(task.TaskType), Status: task.Status,
@@ -56,6 +63,16 @@ func taskDetailOf(task *Task) TaskDetail {
 	return TaskDetail{
 		ID: summary.ID, Owner: summary.Owner, TaskType: summary.TaskType, Status: summary.Status,
 		CreatedAt: summary.CreatedAt, UpdatedAt: summary.UpdatedAt, InputSummary: safeInputSummary(task),
+	}
+}
+
+func taskDetailOfView(view View) TaskDetail {
+	return TaskDetail{
+		ID: view.ID, Owner: view.OwnerUsername, TaskType: canonicalTaskType(view.TaskType), Status: view.Status,
+		CreatedAt: view.CreatedAt, UpdatedAt: view.UpdatedAt,
+		InputSummary: safeInputSummary(&Task{
+			TaskType: view.TaskType, Content: view.Content, Params: view.Params, CountryIsoCode: view.CountryIsoCode,
+		}),
 	}
 }
 

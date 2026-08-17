@@ -524,6 +524,51 @@ func TestSwaggerDocumentsEnterpriseConsoleContracts(t *testing.T) {
 	}
 }
 
+func TestSwaggerDocumentsTaskCreateAndLegacySecurityCorrections(t *testing.T) {
+	for name, document := range loadSwaggerDocuments(t) {
+		t.Run(name, func(t *testing.T) {
+			createPath := "/api/v1/platform/tasks"
+			if got := swaggerNestedRef(t, swaggerValue(t, document, "paths", createPath, "post", "responses", "202", "schema")); got != "#/definitions/tasks.TaskDetail" {
+				t.Errorf("task create 202 schema = %q, want safe TaskDetail", got)
+			}
+			if got := swaggerNestedRef(t, swaggerValue(t, document, "paths", createPath, "post", "responses", "503", "schema")); got != "#/definitions/tasks.TaskCreateErrorResponse" {
+				t.Errorf("task create 503 schema = %q, want safe TaskCreateErrorResponse", got)
+			}
+			assertExactProperties(t, document, "tasks.TaskCreateErrorResponse", "error", "task")
+			if got := swaggerNestedRef(t, swaggerValue(t, document, "definitions", "tasks.TaskCreateErrorResponse", "properties", "task")); got != "#/definitions/tasks.TaskDetail" {
+				t.Errorf("task create error task schema = %q, want TaskDetail", got)
+			}
+
+			mergeResponses := swaggerValue(t, document, "paths", "/api/v1/platform/tasks/attachments/{attachmentID}/merge", "post", "responses").(map[string]interface{})
+			if _, ok := mergeResponses["401"]; !ok {
+				t.Error("attachment merge must document unauthenticated 401")
+			}
+
+			for _, operation := range []struct {
+				path, method string
+				mutation     bool
+				roleTerm     string
+			}{
+				{"/api/v1/app/models", "get", false, "read scope"},
+				{"/api/v1/app/models", "post", true, "user or administrator"},
+				{"/api/v1/app/models", "delete", true, "owner or administrator"},
+				{"/api/v1/app/models/{modelId}", "get", false, "read scope"},
+				{"/api/v1/app/models/{modelId}", "put", true, "owner or administrator"},
+			} {
+				description := strings.ToLower(swaggerValue(t, document, "paths", operation.path, operation.method, "responses", "403", "description").(string))
+				for _, term := range []string{"must-change-password", operation.roleTerm} {
+					if !strings.Contains(description, term) {
+						t.Errorf("legacy model %s %s 403 description lacks %q", operation.method, operation.path, term)
+					}
+				}
+				if operation.mutation && !strings.Contains(description, "csrf") {
+					t.Errorf("legacy model mutation %s %s 403 description must include CSRF", operation.method, operation.path)
+				}
+			}
+		})
+	}
+}
+
 func TestAPIGuidesDocumentEnterpriseConsoleContracts(t *testing.T) {
 	for _, guide := range []struct {
 		path     string
@@ -534,6 +579,7 @@ func TestAPIGuidesDocumentEnterpriseConsoleContracts(t *testing.T) {
 			"## Enterprise console collections", "/api/v1/platform/dashboard", "exactly 30 UTC", "security_score=null",
 			"TaskListResponse", "ReportListResponse", "UserListResponse", "AuditListResponse", "CatalogPage", "page=1..1000", "page_size=1..100",
 			"attachment.download_authorized", "other users receive `404`", "auditors receive `403`", "schema reaches v8",
+			"GET `/api/v1/auth/csrf` before login", "persistent cookie jar", "session.cookies.get(\"aig_csrf\")", "X-CSRF-Token", "-b cookies.txt",
 			"idx_platform_tasks_updated_at", "idx_platform_tasks_owner_updated_at",
 		}},
 		{"../../docs/api/reference.md", []string{
@@ -541,6 +587,7 @@ func TestAPIGuidesDocumentEnterpriseConsoleContracts(t *testing.T) {
 			"## 企业控制台集合契约", "/api/v1/platform/dashboard", "恰好 30 个 UTC", "security_score=null",
 			"TaskListResponse", "ReportListResponse", "UserListResponse", "AuditListResponse", "CatalogPage", "page=1..1000", "page_size=1..100",
 			"attachment.download_authorized", "其他普通用户得到 `404`", "审计员得到 `403`", "schema 到达 v8",
+			"登录前先 GET `/api/v1/auth/csrf`", "持久 Cookie jar", "session.cookies.get(\"aig_csrf\")", "X-CSRF-Token", "-b cookies.txt",
 			"idx_platform_tasks_updated_at", "idx_platform_tasks_owner_updated_at",
 		}},
 	} {

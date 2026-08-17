@@ -24,6 +24,19 @@ type toggledAttachmentAuditRepository struct {
 	failErr error
 }
 
+type taskCreateWireEngine struct {
+	recordingEngine
+	sessionID string
+}
+
+func (engine *taskCreateWireEngine) SubmitTask(ctx context.Context, task EngineTask) (string, error) {
+	_, err := engine.recordingEngine.SubmitTask(ctx, task)
+	if err != nil {
+		return "", err
+	}
+	return engine.sessionID, nil
+}
+
 func (repository *toggledAttachmentAuditRepository) Append(ctx context.Context, event *audit.Event) error {
 	if repository.failErr != nil {
 		return repository.failErr
@@ -45,17 +58,16 @@ func TestProtectedTaskHandlerRejectsAnonymousAndForgedIdentityHeaders(t *testing
 	assert.Equal(t, http.StatusUnauthorized, response.Code)
 }
 
-func TestProtectedTaskHandlerUsesCookieSubjectAndOwnerUserID(t *testing.T) {
+func TestProtectedTaskHandlerUsesCookieSubjectAndSafeOwner(t *testing.T) {
 	router, tokens, engine := newTaskHandlerFixture(t)
 
 	created := performTaskJSON(t, router, tokens["alice"], http.MethodPost, "/tasks", "owner-key", map[string]any{
 		"task_type": "mcp_scan", "content": "scan", "username": "mallory",
 	})
 	require.Equal(t, http.StatusAccepted, created.Code, created.Body.String())
-	var task View
+	var task TaskDetail
 	require.NoError(t, json.Unmarshal(created.Body.Bytes(), &task))
-	assert.Equal(t, "user-alice", task.OwnerUserID)
-	assert.Equal(t, "alice", task.OwnerUsername)
+	assert.Equal(t, "alice", task.Owner)
 	assert.Equal(t, int64(1), engine.submits.Load())
 
 	forbidden := performTaskJSON(t, router, tokens["bob"], http.MethodGet, "/tasks/"+task.ID, "", nil)
@@ -66,6 +78,49 @@ func TestProtectedTaskHandlerUsesCookieSubjectAndOwnerUserID(t *testing.T) {
 	assert.Equal(t, http.StatusForbidden, auditorCancel.Code)
 	adminCancel := performTaskJSON(t, router, tokens["admin"], http.MethodPost, "/tasks/"+task.ID+"/cancel", "", nil)
 	assert.Equal(t, http.StatusNoContent, adminCancel.Code)
+}
+
+func TestTaskCreateAcceptedResponseUsesSafeDetailWire(t *testing.T) {
+	engine := &taskCreateWireEngine{sessionID: "engine-session-sentinel"}
+	router, tokens := newTaskHandlerFixtureWithEngine(t, engine)
+
+	response := performTaskJSON(t, router, tokens["alice"], http.MethodPost, "/tasks", "safe-create-accepted", map[string]any{
+		"task_type": "mcp_scan", "content": "content-sentinel", "country_iso_code": "zh",
+		"params": map[string]any{"thread": 7, "label": "params-sentinel"},
+	})
+	require.Equal(t, http.StatusAccepted, response.Code, response.Body.String())
+
+	assertSafeTaskCreateDetail(t, response.Body.Bytes(), map[string]any{
+		"task_type":     "mcp_scan",
+		"input_summary": map[string]any{"language": "zh", "thread": float64(7)},
+	}, "user-alice", "content-sentinel", "params-sentinel", "engine-session-sentinel")
+	assert.Zero(t, engine.statusReads.Load(), "rendering the response must not read the engine")
+}
+
+func TestTaskCreateDispatchFailureUsesFixedErrorAndSafeTaskWire(t *testing.T) {
+	engine := &taskCreateWireEngine{}
+	engine.err = NewTransientDispatchError(errors.New("dispatch-error-sentinel"))
+	router, tokens := newTaskHandlerFixtureWithEngine(t, engine)
+
+	response := performTaskJSON(t, router, tokens["alice"], http.MethodPost, "/tasks", "safe-create-unavailable", map[string]any{
+		"task_type": "future-unsafe-task", "content": "failure-content-sentinel",
+		"params": map[string]any{"label": "failure-params-sentinel"},
+	})
+	require.Equal(t, http.StatusServiceUnavailable, response.Code, response.Body.String())
+
+	var wire map[string]any
+	require.NoError(t, json.Unmarshal(response.Body.Bytes(), &wire))
+	require.ElementsMatch(t, []string{"error", "task"}, mapKeys(wire))
+	assert.Equal(t, "task dispatch unavailable", wire["error"])
+	task, ok := wire["task"].(map[string]any)
+	require.True(t, ok)
+	encoded, err := json.Marshal(task)
+	require.NoError(t, err)
+	assertSafeTaskCreateDetail(t, encoded, map[string]any{
+		"task_type":     "unknown",
+		"input_summary": map[string]any{},
+	}, "user-alice", "failure-content-sentinel", "failure-params-sentinel", "dispatch-error-sentinel")
+	assert.Zero(t, engine.statusReads.Load(), "rendering the response must not read the engine")
 }
 
 func TestProtectedTaskListRejectsHeadersAndAppliesOwnerRBAC(t *testing.T) {
@@ -202,6 +257,13 @@ func TestAttachmentHandlerReturnsOnlyOpaqueMetadataAndEnforcesOwnerDownload(t *t
 
 func newTaskHandlerFixture(t *testing.T) (http.Handler, map[string]string, *recordingEngine) {
 	t.Helper()
+	engine := &recordingEngine{}
+	router, tokens := newTaskHandlerFixtureWithEngine(t, engine)
+	return router, tokens, engine
+}
+
+func newTaskHandlerFixtureWithEngine(t *testing.T, engine EngineAdapter) (http.Handler, map[string]string) {
+	t.Helper()
 	gin.SetMode(gin.TestMode)
 	ctx := context.Background()
 	identityService := identity.NewService(identity.NewMemoryRepository())
@@ -219,12 +281,28 @@ func newTaskHandlerFixture(t *testing.T) (http.Handler, map[string]string, *reco
 		require.NoError(t, err)
 		tokens[input.Username] = login.Token
 	}
-	engine := &recordingEngine{}
 	service := NewService(NewMemoryRepository(), engine, audit.NewService(audit.NewMemoryRepository()))
 	router := gin.New()
 	group := router.Group("/tasks", identity.Authenticate(identityService, identity.CookiePolicy{}))
 	NewHandler(service).Register(group)
-	return router, tokens, engine
+	return router, tokens
+}
+
+func assertSafeTaskCreateDetail(t *testing.T, encoded []byte, expected map[string]any, sentinels ...string) {
+	t.Helper()
+	var task map[string]any
+	require.NoError(t, json.Unmarshal(encoded, &task))
+	require.ElementsMatch(t, []string{"id", "owner", "task_type", "status", "created_at", "updated_at", "input_summary"}, mapKeys(task))
+	assert.Equal(t, "alice", task["owner"])
+	assert.Equal(t, expected["task_type"], task["task_type"])
+	assert.Equal(t, expected["input_summary"], task["input_summary"])
+	for _, forbidden := range []string{"owner_user_id", "owner_username", "content", "params", "attachment_ids", "engine_session_id", "dispatch_error", "dispatch_attempts", "country_iso_code"} {
+		assert.NotContains(t, task, forbidden)
+	}
+	body := string(encoded)
+	for _, sentinel := range sentinels {
+		assert.NotContains(t, body, sentinel)
+	}
 }
 
 func performTaskJSON(t *testing.T, router http.Handler, token, method, path, idempotencyKey string, body any) *httptest.ResponseRecorder {

@@ -896,6 +896,19 @@ definitions:
     - updated_at
     - input_summary
     type: object
+  tasks.TaskCreateErrorResponse:
+    description: Fixed dispatch-unavailable error with the same browser-safe task detail returned by a successful create.
+    properties:
+      error:
+        enum:
+        - task dispatch unavailable
+        type: string
+      task:
+        $ref: '#/definitions/tasks.TaskDetail'
+    required:
+    - error
+    - task
+    type: object
   tasks.TaskInputSummary:
     description: Task-type-specific display metadata; source content, arbitrary parameters, credentials, URLs, attachment references, and engine data are absent.
     properties:
@@ -1464,6 +1477,8 @@ paths:
             $ref: '#/definitions/websocket.LegacyModelListEnvelope'
         "401":
           description: Unauthenticated.
+        "403":
+          description: The must-change-password gate or model read scope forbids access.
     post:
       deprecated: true
       description: Deprecated browser compatibility path. Accepts the nested legacy request, stores the token only through authenticated encryption, and returns the legacy HTTP 200 status/message/data envelope. Before any mutation it loads the read-only YAML source once; a matching trimmed ID cannot shadow a YAML model and returns status one, while a source error fails closed with status one and no database or audit mutation. Use POST /api/v1/platform/models for new clients.
@@ -1484,7 +1499,7 @@ paths:
         "401":
           description: Unauthenticated.
         "403":
-          description: Auditor role cannot create models.
+          description: User or administrator role, the must-change-password gate, and a valid CSRF token are required; auditors cannot create models.
     delete:
       deprecated: true
       description: Deprecated collection-delete compatibility path. Accepts model_ids and returns the legacy HTTP 200 status/message/data envelope. Authorization is checked for every model before deletion.
@@ -1505,7 +1520,7 @@ paths:
         "401":
           description: Unauthenticated.
         "403":
-          description: Subject cannot delete one or more requested models.
+          description: Owner or administrator access to every requested platform model, the must-change-password gate, and a valid CSRF token are required; YAML models are read-only.
   /api/v1/app/models/{modelId}:
     get:
       deprecated: true
@@ -1527,7 +1542,7 @@ paths:
         "401":
           description: Unauthenticated.
         "403":
-          description: Subject cannot read this private model.
+          description: The must-change-password gate or model read scope forbids access to this private model.
     put:
       deprecated: true
       description: Deprecated browser compatibility path. Accepts the nested legacy update request; an omitted or masked token preserves the encrypted token. Returns the legacy HTTP 200 status/message/data envelope.
@@ -1553,7 +1568,7 @@ paths:
         "401":
           description: Unauthenticated.
         "403":
-          description: Subject cannot update this model.
+          description: Owner or administrator access to the platform model, the must-change-password gate, and a valid CSRF token are required; YAML models are read-only.
   /api/v1/platform/admin/users:
     get:
       description: Lists local accounts in a paginated safe envelope. Administrator only; credential material is never returned. page defaults to 1, page_size defaults to 20, values over 100 are capped at 100, and page cannot exceed 1000.
@@ -1960,7 +1975,9 @@ paths:
           type: object
       responses:
         "202":
-          description: Persisted task status; dispatch failures remain visible as dispatch_failed.
+          description: Browser-safe persisted task detail; raw request, attachment, identity, and engine fields are absent.
+          schema:
+            $ref: '#/definitions/tasks.TaskDetail'
         "400":
           description: Missing idempotency key, invalid input, raw credentials, or unavailable attachment.
         "401":
@@ -1970,7 +1987,9 @@ paths:
         "500":
           description: Persistence or durable audit failed; internal details are not exposed.
         "503":
-          description: Task is persisted with dispatch_failed because trusted dispatch failed.
+          description: Fixed safe error plus persisted browser-safe task detail; dispatch diagnostics are not exposed.
+          schema:
+            $ref: '#/definitions/tasks.TaskCreateErrorResponse'
       summary: Create an idempotent platform task
       tags:
       - platform-tasks
@@ -2172,6 +2191,8 @@ paths:
             $ref: '#/definitions/tasks.AttachmentView'
         "400":
           description: Chunk count or sizes do not match.
+        "401":
+          description: Unauthenticated.
         "403":
           description: Subject cannot write this attachment, password change is incomplete, or CSRF is invalid.
         "404":
