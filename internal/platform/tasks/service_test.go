@@ -53,6 +53,49 @@ func (*rejectingReferenceEngine) ValidateTaskReferences(context.Context, EngineT
 	return ErrInvalid
 }
 
+type controlledReferenceEngine struct {
+	recordingEngine
+	referenceCalls atomic.Int64
+	referenceErr   error
+}
+
+func (engine *controlledReferenceEngine) ValidateTaskReferences(context.Context, EngineTask) error {
+	engine.referenceCalls.Add(1)
+	return engine.referenceErr
+}
+
+type gatedReferenceEngine struct {
+	recordingEngine
+	referenceCalls atomic.Int64
+	firstEntered   chan struct{}
+	releaseFirst   chan struct{}
+	secondEntered  chan struct{}
+	releaseSecond  chan struct{}
+	secondErr      error
+}
+
+func (engine *gatedReferenceEngine) ValidateTaskReferences(context.Context, EngineTask) error {
+	switch engine.referenceCalls.Add(1) {
+	case 1:
+		close(engine.firstEntered)
+		<-engine.releaseFirst
+		return nil
+	case 2:
+		close(engine.secondEntered)
+		if engine.releaseSecond != nil {
+			<-engine.releaseSecond
+		}
+		return engine.secondErr
+	default:
+		return errors.New("unexpected repeated reference validation")
+	}
+}
+
+type createResult struct {
+	view View
+	err  error
+}
+
 func (repository *countingAttachmentRepository) GetAttachment(ctx context.Context, id string) (*Attachment, error) {
 	repository.reads.Add(1)
 	return repository.MemoryRepository.GetAttachment(ctx, id)
@@ -311,6 +354,179 @@ func TestConcurrentIdempotentCreatePersistsOneTaskAndSubmitsOnce(t *testing.T) {
 	require.Len(t, tasks, 1)
 	assert.Equal(t, int64(1), engine.submits.Load())
 	assert.Equal(t, StatusRunning, tasks[0].Status)
+}
+
+func TestIdempotentCreateReturnsPersistedTaskWhenLiveReferencesBecomeUnavailable(t *testing.T) {
+	for name, unavailableErr := range map[string]error{
+		"引用已删除":     ErrInvalid,
+		"引用服务暂时不可用": errors.New("reference registry unavailable"),
+	} {
+		t.Run(name, func(t *testing.T) {
+			repository := NewMemoryRepository()
+			engine := &controlledReferenceEngine{}
+			service := NewService(repository, engine, audit.NewService(audit.NewMemoryRepository()))
+			subject := identity.Subject{UserID: "user-1", Username: "alice", Role: identity.RoleUser}
+			input := CreateInput{
+				IdempotencyKey: "stable-retry", TaskType: "mcp_scan", Content: "scan",
+				Params: json.RawMessage(`{"model_id":"model-1"}`),
+			}
+
+			created, err := service.Create(context.Background(), subject, input)
+			require.NoError(t, err)
+			engine.referenceErr = unavailableErr
+
+			retried, err := service.Create(context.Background(), subject, input)
+			require.NoError(t, err)
+			assert.Equal(t, created.ID, retried.ID)
+			assert.Equal(t, int64(1), engine.referenceCalls.Load(), "已持久化的同载荷重试不得再次读取实时引用")
+			assert.Equal(t, int64(1), engine.submits.Load(), "幂等重试不得重复分发任务")
+		})
+	}
+}
+
+func TestIdempotentCreateRejectsDifferentPersistedPayloadBeforeSideEffects(t *testing.T) {
+	repository := NewMemoryRepository()
+	engine := &controlledReferenceEngine{}
+	auditRepository := audit.NewMemoryRepository()
+	service := NewService(repository, engine, audit.NewService(auditRepository))
+	subject := identity.Subject{UserID: "user-1", Username: "alice", Role: identity.RoleUser}
+	input := CreateInput{
+		IdempotencyKey: "payload-mismatch", TaskType: "mcp_scan", Content: "scan",
+		Params: json.RawMessage(`{"model_id":"model-1"}`),
+	}
+
+	created, err := service.Create(context.Background(), subject, input)
+	require.NoError(t, err)
+	eventsBefore, err := auditRepository.List(context.Background(), audit.Filter{ResourceID: created.ID})
+	require.NoError(t, err)
+	changed := input
+	changed.Content = "different scan"
+
+	_, err = service.Create(context.Background(), subject, changed)
+	require.ErrorIs(t, err, ErrInvalid)
+	assert.Equal(t, int64(1), engine.referenceCalls.Load(), "载荷冲突不得访问实时引用")
+	assert.Equal(t, int64(1), engine.submits.Load(), "载荷冲突不得分发任务")
+	stored, err := repository.Get(context.Background(), created.ID)
+	require.NoError(t, err)
+	assert.Equal(t, input.Content, stored.Content)
+	eventsAfter, err := auditRepository.List(context.Background(), audit.Filter{ResourceID: created.ID})
+	require.NoError(t, err)
+	assert.Len(t, eventsAfter, len(eventsBefore), "载荷冲突不得创建审计变更")
+}
+
+func TestConcurrentIdempotentRetrySerializesBeforeLiveReferenceValidation(t *testing.T) {
+	repository := NewMemoryRepository()
+	engine := &gatedReferenceEngine{
+		firstEntered: make(chan struct{}), releaseFirst: make(chan struct{}),
+		secondEntered: make(chan struct{}), secondErr: errors.New("reference registry unavailable"),
+	}
+	service := NewService(repository, engine, audit.NewService(audit.NewMemoryRepository()))
+	subject := identity.Subject{UserID: "user-1", Username: "alice", Role: identity.RoleUser}
+	input := CreateInput{IdempotencyKey: "concurrent-stable", TaskType: "mcp_scan", Content: "scan"}
+	firstDone := make(chan createResult, 1)
+	go func() {
+		view, err := service.Create(context.Background(), subject, input)
+		firstDone <- createResult{view: view, err: err}
+	}()
+	select {
+	case <-engine.firstEntered:
+	case <-time.After(2 * time.Second):
+		t.Fatal("first create did not enter reference validation")
+	}
+	secondStarted := make(chan struct{})
+	secondDone := make(chan createResult, 1)
+	go func() {
+		close(secondStarted)
+		view, err := service.Create(context.Background(), subject, input)
+		secondDone <- createResult{view: view, err: err}
+	}()
+	<-secondStarted
+	secondValidated := false
+	select {
+	case <-engine.secondEntered:
+		secondValidated = true
+	case <-time.After(100 * time.Millisecond):
+	}
+	close(engine.releaseFirst)
+	first := <-firstDone
+	second := <-secondDone
+
+	require.NoError(t, first.err)
+	require.NoError(t, second.err)
+	assert.False(t, secondValidated, "同键请求必须在读取与实时引用校验前串行")
+	assert.Equal(t, first.view.ID, second.view.ID)
+	assert.Equal(t, int64(1), engine.referenceCalls.Load())
+	assert.Equal(t, int64(1), engine.submits.Load())
+}
+
+func TestConcurrentIdempotencyConflictHasNoValidatorAuditOrSubmitSideEffects(t *testing.T) {
+	repository := NewMemoryRepository()
+	engine := &gatedReferenceEngine{
+		firstEntered: make(chan struct{}), releaseFirst: make(chan struct{}),
+		secondEntered: make(chan struct{}), releaseSecond: make(chan struct{}),
+	}
+	auditRepository := audit.NewMemoryRepository()
+	service := NewService(repository, engine, audit.NewService(auditRepository))
+	subject := identity.Subject{UserID: "user-1", Username: "alice", Role: identity.RoleUser}
+	input := CreateInput{IdempotencyKey: "concurrent-conflict", TaskType: "mcp_scan", Content: "scan"}
+	firstDone := make(chan createResult, 1)
+	go func() {
+		view, err := service.Create(context.Background(), subject, input)
+		firstDone <- createResult{view: view, err: err}
+	}()
+	select {
+	case <-engine.firstEntered:
+	case <-time.After(2 * time.Second):
+		t.Fatal("first create did not enter reference validation")
+	}
+	changed := input
+	changed.Content = "different scan"
+	secondStarted := make(chan struct{})
+	secondDone := make(chan createResult, 1)
+	go func() {
+		close(secondStarted)
+		view, err := service.Create(context.Background(), subject, changed)
+		secondDone <- createResult{view: view, err: err}
+	}()
+	<-secondStarted
+	select {
+	case <-engine.secondEntered:
+	case <-time.After(100 * time.Millisecond):
+	}
+	close(engine.releaseFirst)
+	first := <-firstDone
+	require.NoError(t, first.err)
+	eventsBefore, err := auditRepository.List(context.Background(), audit.Filter{ResourceID: first.view.ID})
+	require.NoError(t, err)
+	close(engine.releaseSecond)
+	second := <-secondDone
+
+	require.ErrorIs(t, second.err, ErrInvalid)
+	assert.Equal(t, int64(1), engine.referenceCalls.Load(), "冲突请求不得访问实时引用")
+	assert.Equal(t, int64(1), engine.submits.Load(), "冲突请求不得分发")
+	eventsAfter, err := auditRepository.List(context.Background(), audit.Filter{ResourceID: first.view.ID})
+	require.NoError(t, err)
+	assert.Len(t, eventsAfter, len(eventsBefore), "冲突请求不得创建审计变更")
+}
+
+func TestMemoryCreateKeyLockNeverAppliesAfterContextCancellation(t *testing.T) {
+	repository := NewMemoryRepository()
+	var applied atomic.Int64
+	for index := range 256 {
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		err := repository.WithinCreateKeyLock(ctx, "cancelled-owner", fmt.Sprintf("cancelled-%d", index), func(context.Context) error {
+			applied.Add(1)
+			return nil
+		})
+		if err != nil {
+			require.ErrorIs(t, err, context.Canceled)
+		}
+	}
+	assert.Zero(t, applied.Load(), "已取消请求不得进入任务创建临界区")
+	repository.createLocksMu.Lock()
+	defer repository.createLocksMu.Unlock()
+	assert.Empty(t, repository.createLocks, "取消后不得遗留键锁引用")
 }
 
 func TestCreateUsesExactPerTaskParameterSchemas(t *testing.T) {
@@ -589,6 +805,57 @@ func TestGormRepositoryUsesUniqueOwnerIdempotencyAndCASDispatchLease(t *testing.
 	assert.True(t, claimed, "an expired dispatch lease must be recoverable by a later idempotent request")
 }
 
+func TestPostgresCreateLockSerializesLiveValidationAcrossServiceInstances(t *testing.T) {
+	dsn := os.Getenv("AIG_TEST_DB_DSN")
+	require.NotEmpty(t, dsn)
+	db, err := gorm.Open(postgres.Open(dsn), &gorm.Config{DisableForeignKeyConstraintWhenMigrating: true})
+	require.NoError(t, err)
+	require.NoError(t, database.Migrate(db))
+	require.NoError(t, db.Exec("DELETE FROM platform_tasks").Error)
+	engine := &gatedReferenceEngine{
+		firstEntered: make(chan struct{}), releaseFirst: make(chan struct{}),
+		secondEntered: make(chan struct{}), secondErr: errors.New("reference registry unavailable"),
+	}
+	firstService := NewService(NewGormRepository(db), engine, audit.NewService(audit.NewMemoryRepository()))
+	secondService := NewService(NewGormRepository(db.Session(&gorm.Session{NewDB: true})), engine, audit.NewService(audit.NewMemoryRepository()))
+	subject := identity.Subject{UserID: "postgres-lock-owner", Username: "alice", Role: identity.RoleUser}
+	input := CreateInput{IdempotencyKey: "postgres-create-lock", TaskType: "mcp_scan", Content: "scan"}
+	firstDone := make(chan createResult, 1)
+	go func() {
+		view, createErr := firstService.Create(context.Background(), subject, input)
+		firstDone <- createResult{view: view, err: createErr}
+	}()
+	select {
+	case <-engine.firstEntered:
+	case <-time.After(2 * time.Second):
+		t.Fatal("first service did not enter reference validation")
+	}
+	secondStarted := make(chan struct{})
+	secondDone := make(chan createResult, 1)
+	go func() {
+		close(secondStarted)
+		view, createErr := secondService.Create(context.Background(), subject, input)
+		secondDone <- createResult{view: view, err: createErr}
+	}()
+	<-secondStarted
+	secondValidated := false
+	select {
+	case <-engine.secondEntered:
+		secondValidated = true
+	case <-time.After(100 * time.Millisecond):
+	}
+	close(engine.releaseFirst)
+	first := <-firstDone
+	second := <-secondDone
+
+	require.NoError(t, first.err)
+	require.NoError(t, second.err)
+	assert.False(t, secondValidated, "PostgreSQL 锁必须跨服务实例覆盖读取与实时校验")
+	assert.Equal(t, first.view.ID, second.view.ID)
+	assert.Equal(t, int64(1), engine.referenceCalls.Load())
+	assert.Equal(t, int64(1), engine.submits.Load())
+}
+
 func TestExpiredPostgresDispatchClaimCannotOverwriteCurrentClaim(t *testing.T) {
 	dsn := os.Getenv("AIG_TEST_DB_DSN")
 	require.NotEmpty(t, dsn)
@@ -800,6 +1067,47 @@ func TestAttachmentUploadIsPrivateBoundedAndResolvesOnlyForOwningTask(t *testing
 		IdempotencyKey: "forged-attachment", TaskType: "ai_infra_scan", Content: "scan", AttachmentIDs: []string{view.ID},
 	})
 	require.ErrorIs(t, err, ErrForbidden)
+}
+
+func TestIdempotentCreateComparesAttachmentRefsAndKeepsOwnersIsolated(t *testing.T) {
+	repository := NewMemoryRepository()
+	audits := audit.NewService(audit.NewMemoryRepository())
+	attachments, err := NewAttachmentService(repository, AttachmentConfig{
+		UploadDir: t.TempDir(), MaxFileBytes: 8, MaxChunkBytes: 4,
+	}, audits)
+	require.NoError(t, err)
+	owner := identity.Subject{UserID: "user-1", Username: "alice", Role: identity.RoleUser}
+	first, err := attachments.Upload(context.Background(), owner, "first.txt", strings.NewReader("first"))
+	require.NoError(t, err)
+	second, err := attachments.Upload(context.Background(), owner, "second.txt", strings.NewReader("second"))
+	require.NoError(t, err)
+	engine := &controlledReferenceEngine{}
+	service := NewService(repository, engine, audits)
+	service.SetAttachmentService(attachments)
+	input := CreateInput{
+		IdempotencyKey: "attachment-retry", TaskType: "ai_infra_scan", Content: "scan",
+		AttachmentIDs: []string{first.ID},
+	}
+
+	created, err := service.Create(context.Background(), owner, input)
+	require.NoError(t, err)
+	engine.referenceErr = ErrInvalid
+	retried, err := service.Create(context.Background(), owner, input)
+	require.NoError(t, err)
+	assert.Equal(t, created.ID, retried.ID)
+	assert.Equal(t, int64(1), engine.referenceCalls.Load())
+
+	changed := input
+	changed.AttachmentIDs = []string{second.ID}
+	_, err = service.Create(context.Background(), owner, changed)
+	require.ErrorIs(t, err, ErrInvalid)
+	assert.Equal(t, int64(1), engine.referenceCalls.Load(), "附件引用冲突不得进入实时引用校验")
+
+	otherOwner := identity.Subject{UserID: "user-2", Username: "bob", Role: identity.RoleUser}
+	_, err = service.Create(context.Background(), otherOwner, input)
+	require.ErrorIs(t, err, ErrInvalid)
+	assert.Equal(t, int64(2), engine.referenceCalls.Load(), "不同所有者不得复用原任务的幂等结果")
+	assert.Equal(t, int64(1), engine.submits.Load())
 }
 
 func TestRegularAttachmentUploadIsTraceableBeforeReadingRequestBytes(t *testing.T) {

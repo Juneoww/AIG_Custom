@@ -96,7 +96,7 @@ AIG Custom Platform 是基于 Tencent Zhuque Lab AI-Infra-Guard（https://github
 
 浏览器客户端使用安全 Cookie session 认证。匿名请求返回 `401`；已认证但无权限的 Subject 返回 `403`。身份和角色请求头绝不是认证回退。
 
-平台任务使用 `GET /api/v1/platform/tasks`、`POST /api/v1/platform/tasks`，以及按 owner 授权的详情、取消、结果和 opaque 附件操作。创建必须携带 `Idempotency-Key`；任务 owner 始终来自认证 Subject。普通用户只能看到本人任务，审计员全局只读，管理员可治理全部任务。网络 ACK 无法可信确认时进入 `dispatch_unknown`，且绝不自动再次提交。取消只有精确 `204` 才能直接视为成功；网络错误、服务端错误或非合同 2xx 都只允许执行一次 GET 状态确认，明确 4xx 直接返回，任何分支都不得自动再次 POST。
+平台任务使用 `GET /api/v1/platform/tasks`、`POST /api/v1/platform/tasks`，以及按 owner 授权的详情、取消、结果和 opaque 附件操作。创建必须携带 `Idempotency-Key`；任务 owner 始终来自认证 Subject。相同持久化请求载荷的重试直接返回既有任务，不再校验实时治理引用；同一 owner 复用该键但改变载荷时固定返回 `400 invalid task request`。普通用户只能看到本人任务，审计员全局只读，管理员可治理全部任务。网络 ACK 无法可信确认时进入 `dispatch_unknown`，且绝不自动再次提交。取消只有精确 `204` 才能直接视为成功；网络错误、服务端错误或非合同 2xx 都只允许执行一次 GET 状态确认，明确 4xx 直接返回，任何分支都不得自动再次 POST。
 
 独立受治理模型 API 是 `/api/v1/platform/models`。已弃用的 `/api/v1/app/models/{modelId}` facade 仅保留模型兼容：集合 DELETE 与嵌套请求体继续使用 `{status,message,data}` envelope 和 HTTP `200` 应用错误约定。响应凭据始终脱敏。YAML 模型 ID 不能遮蔽加密平台行；YAML 加载失败时，在数据库或审计变更前失败关闭。
 

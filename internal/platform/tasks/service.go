@@ -52,6 +52,7 @@ const (
 )
 
 type Repository interface {
+	WithinCreateKeyLock(context.Context, string, string, func(context.Context) error) error
 	CreateOrGet(context.Context, *Task) (*Task, bool, error)
 	ClaimDispatch(context.Context, string, time.Time, time.Time) (string, bool, error)
 	ReserveDispatchAttempt(context.Context, string, string, time.Time) (int, bool, error)
@@ -139,67 +140,21 @@ func (service *Service) Create(ctx context.Context, subject identity.Subject, in
 	if len(params) > MaxTaskParamsLength || !validTaskParams(input.TaskType, params) {
 		return View{}, ErrInvalid
 	}
-	if err := service.engine.ValidateTaskReferences(ctx, EngineTask{
-		OwnerUsername: subject.Username, TaskType: input.TaskType, Params: append(json.RawMessage(nil), params...),
-	}); err != nil {
-		if errors.Is(err, ErrInvalid) {
-			return View{}, ErrInvalid
-		}
-		return View{}, err
-	}
 	attachmentRefs, err := json.Marshal(input.AttachmentIDs)
 	if err != nil {
 		return View{}, ErrInvalid
 	}
 	taskID := uuid.NewSHA1(taskIDNamespace, []byte(subject.UserID+"\x00"+input.IdempotencyKey)).String()
-	if len(input.AttachmentIDs) > 0 {
-		if service.attachments == nil {
-			return View{}, ErrInvalid
-		}
-		existing, getErr := service.repository.Get(ctx, taskID)
-		if errors.Is(getErr, ErrNotFound) {
-			if _, resolveErr := service.attachments.ResolveReady(ctx, subject.UserID, input.AttachmentIDs); resolveErr != nil {
-				return View{}, resolveErr
-			}
-		} else if getErr != nil {
-			return View{}, getErr
-		} else if existing.OwnerUserID != subject.UserID {
-			return View{}, ErrForbidden
-		}
+	var persisted *Task
+	err = service.repository.WithinCreateKeyLock(ctx, subject.UserID, input.IdempotencyKey, func(lockContext context.Context) error {
+		var createErr error
+		persisted, createErr = service.createLocked(lockContext, subject, input, params, attachmentRefs, taskID)
+		return createErr
+	})
+	if err != nil {
+		return View{}, err
 	}
 	now := service.now()
-	candidate := &Task{
-		ID: taskID, OwnerUserID: subject.UserID, OwnerUsername: subject.Username,
-		IdempotencyKey: input.IdempotencyKey, EngineSessionID: taskID, TaskType: input.TaskType,
-		Content: input.Content, Params: append(json.RawMessage(nil), params...), AttachmentRefs: attachmentRefs,
-		CountryIsoCode: input.CountryIsoCode, Status: StatusPending, CreatedAt: now, UpdatedAt: now,
-	}
-
-	mutation, err := audit.BeginMutation(ctx, service.audits, subject, audit.EventInput{
-		Action: audit.Action("task.created"), ResourceType: "task", ResourceID: taskID,
-	})
-	if err != nil {
-		return View{}, err
-	}
-	var persisted *Task
-	var created bool
-	var repositoryErr error
-	err = mutation.Run(ctx, taskID, map[string]any{"task_type": input.TaskType}, func(transactionContext context.Context) error {
-		persisted, created, repositoryErr = service.repository.CreateOrGet(transactionContext, candidate)
-		if repositoryErr == nil && created && len(input.AttachmentIDs) > 0 {
-			repositoryErr = service.attachments.repository.BindReadyAttachments(
-				transactionContext, subject.UserID, input.AttachmentIDs, now,
-			)
-		}
-		return repositoryErr
-	})
-	if repositoryErr != nil {
-		return View{}, repositoryErr
-	}
-	if err != nil {
-		return View{}, err
-	}
-
 	claim, claimed, err := service.repository.ClaimDispatch(ctx, persisted.ID, now, now.Add(dispatchLeaseDuration))
 	if err != nil {
 		return viewOf(persisted), err
@@ -214,6 +169,117 @@ func (service *Service) Create(ctx context.Context, subject identity.Subject, in
 
 	current, err := service.dispatch(ctx, subject, persisted, claim)
 	return viewOf(current), err
+}
+
+func (service *Service) createLocked(
+	ctx context.Context,
+	subject identity.Subject,
+	input CreateInput,
+	params json.RawMessage,
+	attachmentRefs json.RawMessage,
+	taskID string,
+) (*Task, error) {
+	now := service.now()
+	candidate := &Task{
+		ID: taskID, OwnerUserID: subject.UserID, OwnerUsername: subject.Username,
+		IdempotencyKey: input.IdempotencyKey, EngineSessionID: taskID, TaskType: input.TaskType,
+		Content: input.Content, Params: append(json.RawMessage(nil), params...), AttachmentRefs: attachmentRefs,
+		CountryIsoCode: input.CountryIsoCode, Status: StatusPending, CreatedAt: now, UpdatedAt: now,
+	}
+	existing, getErr := service.repository.Get(ctx, taskID)
+	if getErr == nil {
+		if !sameCreateRequest(existing, candidate) {
+			return nil, ErrInvalid
+		}
+	} else if !errors.Is(getErr, ErrNotFound) {
+		return nil, getErr
+	} else {
+		if err := service.engine.ValidateTaskReferences(ctx, EngineTask{
+			OwnerUsername: subject.Username, TaskType: input.TaskType, Params: append(json.RawMessage(nil), params...),
+		}); err != nil {
+			if errors.Is(err, ErrInvalid) {
+				return nil, ErrInvalid
+			}
+			return nil, err
+		}
+		if len(input.AttachmentIDs) > 0 {
+			if service.attachments == nil {
+				return nil, ErrInvalid
+			}
+			if _, resolveErr := service.attachments.ResolveReady(ctx, subject.UserID, input.AttachmentIDs); resolveErr != nil {
+				return nil, resolveErr
+			}
+		}
+	}
+
+	mutation, err := audit.BeginMutation(ctx, service.audits, subject, audit.EventInput{
+		Action: audit.Action("task.created"), ResourceType: "task", ResourceID: taskID,
+	})
+	if err != nil {
+		return nil, err
+	}
+	var persisted *Task
+	var created bool
+	var repositoryErr error
+	err = mutation.Run(ctx, taskID, map[string]any{"task_type": input.TaskType}, func(transactionContext context.Context) error {
+		persisted, created, repositoryErr = service.repository.CreateOrGet(transactionContext, candidate)
+		if repositoryErr == nil && !sameCreateRequest(persisted, candidate) {
+			repositoryErr = ErrInvalid
+		}
+		if repositoryErr == nil && created && len(input.AttachmentIDs) > 0 {
+			repositoryErr = service.attachments.repository.BindReadyAttachments(
+				transactionContext, subject.UserID, input.AttachmentIDs, now,
+			)
+		}
+		return repositoryErr
+	})
+	if repositoryErr != nil {
+		return nil, repositoryErr
+	}
+	if err != nil {
+		return nil, err
+	}
+	return persisted, nil
+}
+
+func sameCreateRequest(persisted, candidate *Task) bool {
+	if persisted == nil || candidate == nil || persisted.OwnerUserID != candidate.OwnerUserID ||
+		persisted.IdempotencyKey != candidate.IdempotencyKey || persisted.TaskType != candidate.TaskType ||
+		persisted.Content != candidate.Content || persisted.CountryIsoCode != candidate.CountryIsoCode {
+		return false
+	}
+	persistedParams, persistedParamsOK := canonicalJSON(persisted.Params)
+	candidateParams, candidateParamsOK := canonicalJSON(candidate.Params)
+	return persistedParamsOK && candidateParamsOK && bytes.Equal(persistedParams, candidateParams) &&
+		sameAttachmentRefs(persisted.AttachmentRefs, candidate.AttachmentRefs)
+}
+
+func sameAttachmentRefs(persisted, candidate json.RawMessage) bool {
+	var persistedIDs, candidateIDs []string
+	if json.Unmarshal(persisted, &persistedIDs) != nil || json.Unmarshal(candidate, &candidateIDs) != nil ||
+		len(persistedIDs) != len(candidateIDs) {
+		return false
+	}
+	for index := range persistedIDs {
+		if persistedIDs[index] != candidateIDs[index] {
+			return false
+		}
+	}
+	return true
+}
+
+func canonicalJSON(raw json.RawMessage) ([]byte, bool) {
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder.UseNumber()
+	var value any
+	if decoder.Decode(&value) != nil {
+		return nil, false
+	}
+	if decoder.Decode(&struct{}{}) != io.EOF {
+		return nil, false
+	}
+	normalized, err := json.Marshal(value)
+	return normalized, err == nil
 }
 
 type mcpTaskParams struct {
@@ -915,10 +981,17 @@ func canWrite(subject identity.Subject, task *Task) bool {
 }
 
 type MemoryRepository struct {
-	mu          sync.Mutex
-	tasks       map[string]*Task
-	byOwner     map[string]string
-	attachments map[string]*Attachment
+	mu            sync.Mutex
+	tasks         map[string]*Task
+	byOwner       map[string]string
+	attachments   map[string]*Attachment
+	createLocksMu sync.Mutex
+	createLocks   map[string]*memoryCreateLock
+}
+
+type memoryCreateLock struct {
+	gate       chan struct{}
+	references int
 }
 
 type GormRepository struct{ db *gorm.DB }
@@ -1021,11 +1094,34 @@ func (repository *GormRepository) TransitionStatus(ctx context.Context, id strin
 	return result.RowsAffected == 1, result.Error
 }
 
-// WithinEngineEventLock serializes one trusted engine session across service
-// instances. All work uses one physical connection so the session lock does
-// not consume an extra pool slot; audit.Service still owns the business
-// transaction opened on that connection.
-func (repository *GormRepository) WithinEngineEventLock(ctx context.Context, engineSessionID string, apply func(context.Context) error) (resultErr error) {
+func (repository *GormRepository) WithinCreateKeyLock(
+	ctx context.Context,
+	ownerUserID string,
+	idempotencyKey string,
+	apply func(context.Context) error,
+) error {
+	if ownerUserID == "" || idempotencyKey == "" {
+		return ErrInvalid
+	}
+	lockDigest := uuid.NewSHA1(taskIDNamespace, []byte(ownerUserID+"\x00"+idempotencyKey)).String()
+	return repository.withinSessionLock(
+		ctx, "platform-task-create:"+lockDigest, "释放任务创建锁失败", apply,
+	)
+}
+
+// WithinEngineEventLock serializes one trusted engine session across service instances.
+func (repository *GormRepository) WithinEngineEventLock(ctx context.Context, engineSessionID string, apply func(context.Context) error) error {
+	return repository.withinSessionLock(ctx, "platform-task-engine-event:"+engineSessionID, "释放任务事件锁失败", apply)
+}
+
+// withinSessionLock keeps validation and its following audited transaction on
+// one physical connection, so PostgreSQL serializes the key across instances.
+func (repository *GormRepository) withinSessionLock(
+	ctx context.Context,
+	lockKey string,
+	releaseError string,
+	apply func(context.Context) error,
+) (resultErr error) {
 	if repository == nil || repository.db == nil || apply == nil {
 		return ErrInvalid
 	}
@@ -1038,7 +1134,6 @@ func (repository *GormRepository) WithinEngineEventLock(ctx context.Context, eng
 		return err
 	}
 	defer connection.Close()
-	lockKey := "platform-task-engine-event:" + engineSessionID
 	if _, err = connection.ExecContext(ctx, "SELECT pg_advisory_lock(hashtextextended($1, 0))", lockKey); err != nil {
 		return err
 	}
@@ -1056,7 +1151,7 @@ func (repository *GormRepository) WithinEngineEventLock(ctx context.Context, eng
 		// to the pool. database/sql discards it when Raw returns ErrBadConn.
 		_ = connection.Raw(func(any) error { return driver.ErrBadConn })
 		if resultErr == nil {
-			resultErr = errors.New("释放任务事件锁失败")
+			resultErr = errors.New(releaseError)
 		}
 	}()
 	lockedDB := repository.db.Session(&gorm.Session{Context: ctx, NewDB: true})
@@ -1905,7 +2000,10 @@ func attachmentView(attachment *Attachment) AttachmentView {
 }
 
 func NewMemoryRepository() *MemoryRepository {
-	return &MemoryRepository{tasks: map[string]*Task{}, byOwner: map[string]string{}, attachments: map[string]*Attachment{}}
+	return &MemoryRepository{
+		tasks: map[string]*Task{}, byOwner: map[string]string{}, attachments: map[string]*Attachment{},
+		createLocks: map[string]*memoryCreateLock{},
+	}
 }
 
 func cloneTask(task *Task) *Task {
@@ -1913,6 +2011,59 @@ func cloneTask(task *Task) *Task {
 	copy.Params = append(json.RawMessage(nil), task.Params...)
 	copy.AttachmentRefs = append(json.RawMessage(nil), task.AttachmentRefs...)
 	return &copy
+}
+
+func (repository *MemoryRepository) WithinCreateKeyLock(
+	ctx context.Context,
+	ownerUserID string,
+	idempotencyKey string,
+	apply func(context.Context) error,
+) error {
+	if repository == nil || ownerUserID == "" || idempotencyKey == "" || apply == nil {
+		return ErrInvalid
+	}
+	key := ownerUserID + "\x00" + idempotencyKey
+	repository.createLocksMu.Lock()
+	if repository.createLocks == nil {
+		repository.createLocks = map[string]*memoryCreateLock{}
+	}
+	lock := repository.createLocks[key]
+	if lock == nil {
+		lock = &memoryCreateLock{gate: make(chan struct{}, 1)}
+		lock.gate <- struct{}{}
+		repository.createLocks[key] = lock
+	}
+	lock.references++
+	repository.createLocksMu.Unlock()
+
+	acquired := false
+	select {
+	case <-ctx.Done():
+	case <-lock.gate:
+		acquired = true
+	}
+	if !acquired {
+		repository.releaseCreateKeyLock(key, lock, false)
+		return ctx.Err()
+	}
+	if err := ctx.Err(); err != nil {
+		repository.releaseCreateKeyLock(key, lock, true)
+		return err
+	}
+	defer repository.releaseCreateKeyLock(key, lock, true)
+	return apply(ctx)
+}
+
+func (repository *MemoryRepository) releaseCreateKeyLock(key string, lock *memoryCreateLock, acquired bool) {
+	if acquired {
+		lock.gate <- struct{}{}
+	}
+	repository.createLocksMu.Lock()
+	lock.references--
+	if lock.references == 0 {
+		delete(repository.createLocks, key)
+	}
+	repository.createLocksMu.Unlock()
 }
 
 func (repository *MemoryRepository) CreateOrGet(_ context.Context, task *Task) (*Task, bool, error) {

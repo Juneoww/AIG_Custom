@@ -86,7 +86,7 @@ func TestGeneratedSwaggerArtifactsStayInSync(t *testing.T) {
 			_ = swaggerValue(t, document, "paths", endpoint.path, endpoint.method)
 		}
 		createDescription := swaggerValue(t, document, "paths", "/api/v1/platform/tasks", "post", "description").(string)
-		for _, required := range []string{"Idempotency-Key", "Cookie", "raw model credentials", "opaque attachment IDs"} {
+		for _, required := range []string{"Idempotency-Key", "Cookie", "raw model credentials", "opaque attachment IDs", "same persisted request payload", "different payload"} {
 			if !strings.Contains(createDescription, required) {
 				t.Fatalf("platform task create documentation must contain %q", required)
 			}
@@ -763,7 +763,7 @@ func TestAPIGuidesDocumentLegacyModelAndMigrationBoundaries(t *testing.T) {
 				"HTTP `200`", "`401`", "`403`", "masked", "/api/v1/platform/models",
 				"cannot shadow", "fails closed",
 				"Only `aig migrate` may apply database DDL", "schema reaches v9", "empty legacy table",
-				"/api/v1/platform/tasks", "Idempotency-Key", "opaque attachment IDs", "410 Gone", "password-change and CSRF checks",
+				"/api/v1/platform/tasks", "Idempotency-Key", "same persisted request payload", "opaque attachment IDs", "410 Gone", "password-change and CSRF checks",
 				"/api/v1/platform/reports", "page_size", "safe summary", "immutable RenderModel", "30 fixed UTC day buckets",
 				"/api/v1/platform/reports/{reportID}/exports/pdf", "durable pending/completion audit outbox",
 				"/api/v1/platform/admin/reports/backfill", "/api/v1/platform/brand", "PNG or JPEG", "1 MiB", "4096",
@@ -777,7 +777,7 @@ func TestAPIGuidesDocumentLegacyModelAndMigrationBoundaries(t *testing.T) {
 				"HTTP `200`", "`401`", "`403`", "始终脱敏", "/api/v1/platform/models",
 				"不能遮蔽", "失败关闭",
 				"只有 `aig migrate` 可以执行数据库 DDL", "schema 到达 v9", "旧表为空",
-				"/api/v1/platform/tasks", "Idempotency-Key", "opaque 附件 ID", "410 Gone", "首次改密与 CSRF 校验",
+				"/api/v1/platform/tasks", "Idempotency-Key", "相同持久化请求载荷", "opaque 附件 ID", "410 Gone", "首次改密与 CSRF 校验",
 				"/api/v1/platform/reports", "page_size", "安全摘要", "不可变 RenderModel", "30 个固定 UTC 日桶",
 				"/api/v1/platform/reports/{reportID}/exports/pdf", "持久化 pending/completion 审计 outbox",
 				"/api/v1/platform/admin/reports/backfill", "/api/v1/platform/brand", "PNG 或 JPEG", "1 MiB", "4096",
