@@ -1,0 +1,23 @@
+name: aig-console-frontend-test
+
+services:
+  console-test:
+    image: node:22.18.0-alpine
+    working_dir: /workspace
+    entrypoint:
+      - /bin/sh
+      - -ec
+    command:
+      - corepack enable && pnpm install --frozen-lockfile && pnpm lint && pnpm typecheck && pnpm test:run && pnpm build
+    environment:
+      CI: "true"
+      PNPM_HOME: /pnpm
+      npm_config_store_dir: /pnpm/store
+    volumes:
+      - ../../web/console:/workspace
+      - console-node-modules:/workspace/node_modules
+      - console-pnpm-store:/pnpm/store
+
+volumes:
+  console-node-modules:
+  console-pnpm-store:
