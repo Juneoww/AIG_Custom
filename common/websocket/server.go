@@ -310,7 +310,7 @@ func registerPublicRoutes(group *gin.RouterGroup, brandService *platformbrand.Se
 		}
 		c.JSON(http.StatusOK, view)
 	})
-	group.GET("/version", HandleSafeVersion)
+	group.GET("/version", newSafeVersionHandler(linkerBuildInfo()))
 }
 
 func registerPlatformGovernanceRoutes(

@@ -65,6 +65,11 @@ type SafeVersionResponse struct {
 	BuildTime string `json:"build_time"`
 }
 
+type buildInfo struct {
+	Commit    string
+	BuildTime string
+}
+
 // BuildCommit and BuildTime are optionally populated by build-time ldflags.
 var (
 	BuildCommit string
@@ -80,19 +85,32 @@ type versionCache struct {
 
 var latestVersionCache = &versionCache{}
 
+var defaultSafeVersionHandler = newSafeVersionHandler(linkerBuildInfo())
+
 // ---------------------------------------------------------------------------
 // Handler
 // ---------------------------------------------------------------------------
 
 func HandleSafeVersion(c *gin.Context) {
-	c.JSON(http.StatusOK, safeVersionResponse())
+	defaultSafeVersionHandler(c)
 }
 
-func safeVersionResponse() SafeVersionResponse {
+func newSafeVersionHandler(info buildInfo) gin.HandlerFunc {
+	response := safeVersionResponse(info)
+	return func(c *gin.Context) {
+		c.JSON(http.StatusOK, response)
+	}
+}
+
+func linkerBuildInfo() buildInfo {
+	return buildInfo{Commit: BuildCommit, BuildTime: BuildTime}
+}
+
+func safeVersionResponse(info buildInfo) SafeVersionResponse {
 	return SafeVersionResponse{
 		Version:   version.GetVersion(),
-		Commit:    safeBuildValue(BuildCommit),
-		BuildTime: safeBuildValue(BuildTime),
+		Commit:    safeBuildValue(info.Commit),
+		BuildTime: safeBuildValue(info.BuildTime),
 	}
 }
 

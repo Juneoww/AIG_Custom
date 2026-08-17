@@ -16,10 +16,8 @@ package websocket
 
 import (
 	"encoding/json"
-	"errors"
 	"net/http"
 	"net/http/httptest"
-	"os"
 	"testing"
 
 	version "github.com/Juneoww/AIG_Custom/internal/options"
@@ -28,10 +26,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestSafeVersionUsesInjectedMetadataAndUnknownDefaults(t *testing.T) {
-	originalCommit, originalBuildTime := BuildCommit, BuildTime
-	t.Cleanup(func() { BuildCommit, BuildTime = originalCommit, originalBuildTime })
-
+func TestSafeVersionUsesExplicitMetadataAndUnknownDefaults(t *testing.T) {
 	for _, testCase := range []struct {
 		name                 string
 		commit, buildTime    string
@@ -41,8 +36,7 @@ func TestSafeVersionUsesInjectedMetadataAndUnknownDefaults(t *testing.T) {
 		{name: "injected", commit: "abc123", buildTime: "2026-08-14T10:00:00Z", wantCommit: "abc123", wantTime: "2026-08-14T10:00:00Z"},
 	} {
 		t.Run(testCase.name, func(t *testing.T) {
-			BuildCommit, BuildTime = testCase.commit, testCase.buildTime
-			response := safeVersionResponse()
+			response := safeVersionResponse(buildInfo{Commit: testCase.commit, BuildTime: testCase.buildTime})
 			assert.Equal(t, version.GetVersion(), response.Version)
 			assert.Equal(t, testCase.wantCommit, response.Commit)
 			assert.Equal(t, testCase.wantTime, response.BuildTime)
@@ -50,37 +44,22 @@ func TestSafeVersionUsesInjectedMetadataAndUnknownDefaults(t *testing.T) {
 	}
 }
 
-func TestSafeVersionHasNoFileOrNetworkDependency(t *testing.T) {
-	originalCommit, originalBuildTime := BuildCommit, BuildTime
-	originalTransport := http.DefaultTransport
-	originalWorkingDirectory, err := os.Getwd()
-	require.NoError(t, err)
-	t.Cleanup(func() {
-		BuildCommit, BuildTime = originalCommit, originalBuildTime
-		http.DefaultTransport = originalTransport
-		require.NoError(t, os.Chdir(originalWorkingDirectory))
-	})
-	BuildCommit, BuildTime = "", ""
-	http.DefaultTransport = failingRoundTripper{}
-	require.NoError(t, os.Chdir(t.TempDir()))
-
+func TestSafeVersionHandlerSnapshotsExplicitMetadata(t *testing.T) {
+	metadata := buildInfo{Commit: "route-commit", BuildTime: "route-time"}
+	handler := newSafeVersionHandler(metadata)
+	metadata.Commit = "changed-after-construction"
+	metadata.BuildTime = "changed-after-construction"
 	gin.SetMode(gin.TestMode)
 	response := httptest.NewRecorder()
 	context, _ := gin.CreateTestContext(response)
 	context.Request = httptest.NewRequest(http.MethodGet, "/api/v1/version", nil)
-	HandleSafeVersion(context)
+	handler(context)
 
 	require.Equal(t, http.StatusOK, response.Code)
 	var fields map[string]any
 	require.NoError(t, json.Unmarshal(response.Body.Bytes(), &fields))
-	assert.Equal(t, "unknown", fields["commit"])
-	assert.Equal(t, "unknown", fields["build_time"])
-}
-
-type failingRoundTripper struct{}
-
-func (failingRoundTripper) RoundTrip(*http.Request) (*http.Response, error) {
-	return nil, errors.New("network access is forbidden")
+	assert.Equal(t, "route-commit", fields["commit"])
+	assert.Equal(t, "route-time", fields["build_time"])
 }
 
 func TestParseVersion(t *testing.T) {
