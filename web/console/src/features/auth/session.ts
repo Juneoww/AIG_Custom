@@ -5,7 +5,7 @@
  * 输出：匿名、认证、强制改密、恢复中或安全恢复失败会话状态。
  * 依赖：React、TanStack Query、共享 API 客户端与身份 DTO；不使用浏览器持久化存储。
  */
-import { useQueryClient } from '@tanstack/react-query'
+import { useQueryClient, type QueryClient } from '@tanstack/react-query'
 import { createContext, createElement, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react'
 import type { ReactNode } from 'react'
 
@@ -24,6 +24,7 @@ import type {
   LoginResponse,
   PasswordResetConfirmRequest,
 } from '../../shared/api/types'
+import { isPublicBrandQueryKey } from '../../shared/brand/query'
 
 export type SessionState =
   | { status: 'restoring' }
@@ -48,6 +49,11 @@ export interface SessionProviderProps {
 
 const SessionContext = createContext<SessionContextValue | undefined>(undefined)
 const RESTORE_ERROR_MESSAGE = '无法验证登录状态，请重试。'
+
+function clearIdentityBoundCaches(queryClient: QueryClient): void {
+  queryClient.removeQueries({ predicate: ({ queryKey }) => !isPublicBrandQueryKey(queryKey) })
+  queryClient.getMutationCache().clear()
+}
 
 function stateForSubject(subject: CurrentSubject): SessionState {
   return subject.must_change_password
@@ -139,7 +145,7 @@ export function SessionProvider({
     (operation: SessionOperation, nextState: SessionState, clearQueries: boolean) => {
       if (!finishLatest(operation)) return false
       authorizationGeneration.advance()
-      if (clearQueries) queryClient.clear()
+      if (clearQueries) clearIdentityBoundCaches(queryClient)
       setState(nextState)
       return true
     },
@@ -273,7 +279,7 @@ export function SessionProvider({
         operationRef.current += 1
         if (!mountedRef.current) return
         authorizationGeneration.advance()
-        queryClient.clear()
+        clearIdentityBoundCaches(queryClient)
         setState({ status: 'anonymous' })
       }),
     [authorizationGeneration, queryClient],

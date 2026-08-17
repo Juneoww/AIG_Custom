@@ -75,6 +75,36 @@ afterEach(() => {
 })
 
 describe('SessionProvider', () => {
+  it('身份恢复仅保留公开品牌查询并清空私有查询与全部 mutation', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue(
+        jsonResponse({
+          id: 'user-1',
+          username: 'operator',
+          role: 'user',
+          must_change_password: false,
+        }),
+      ),
+    )
+    const queryClient = createAppQueryClient()
+    queryClient.setQueryData(['public-brand'], { product_name: '公开品牌' })
+    queryClient.setQueryData(['public-brand', 'private-variant'], { private: true })
+    queryClient.setQueryData(['previous-user'], { private: true })
+    queryClient.getMutationCache().build(queryClient, {
+      mutationKey: ['private-write'],
+      mutationFn: async () => undefined,
+    })
+
+    renderSession(undefined, queryClient)
+    await waitFor(() => expect(screen.getByLabelText('会话状态')).toHaveTextContent('authenticated'))
+
+    expect(queryClient.getQueryData(['public-brand'])).toEqual({ product_name: '公开品牌' })
+    expect(queryClient.getQueryData(['public-brand', 'private-variant'])).toBeUndefined()
+    expect(queryClient.getQueryData(['previous-user'])).toBeUndefined()
+    expect(queryClient.getMutationCache().getAll()).toHaveLength(0)
+  })
+
   it('从 /me 恢复普通已认证会话', async () => {
     vi.stubGlobal(
       'fetch',

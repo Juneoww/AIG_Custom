@@ -35,6 +35,84 @@ afterEach(() => {
 })
 
 describe('PublicBrandProvider', () => {
+  it.each([
+    ['null 响应', null],
+    ['空对象', {}],
+    [
+      '错误字段类型',
+      { product_name: 42, primary_color: ['#1677FF'], logo_data_url: { value: 'data:image/png;base64,AA==' } },
+    ],
+    [
+      '过长产品名',
+      { product_name: '产'.repeat(129), primary_color: '#1677FF', logo_data_url: '' },
+    ],
+  ])('对%s使用固定安全回退且不崩溃', async (_label, responseBody) => {
+    const fetchMock = vi.fn().mockResolvedValue(jsonResponse(responseBody))
+    const queryClient = createAppQueryClient()
+    vi.stubGlobal('fetch', fetchMock)
+
+    render(
+      <QueryClientProvider client={queryClient}>
+        <PublicBrandProvider>
+          <BrandProbe label="畸形品牌" />
+        </PublicBrandProvider>
+      </QueryClientProvider>,
+    )
+
+    await waitFor(() =>
+      expect(queryClient.getQueryState(['public-brand'])?.status).toBe('success'),
+    )
+    expect(screen.getByText('AI 安全治理平台')).toBeInTheDocument()
+    expect(screen.getByLabelText('畸形品牌 Logo')).toBeEmptyDOMElement()
+  })
+
+  it('拒绝超出后端 1MiB Logo 上限的 data URL', async () => {
+    const oversizedLogo = `data:image/png;base64,${'A'.repeat(1_398_104)}`
+    const queryClient = createAppQueryClient()
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue(
+        jsonResponse({ product_name: '安全平台', primary_color: '#1677FF', logo_data_url: oversizedLogo }),
+      ),
+    )
+
+    render(
+      <QueryClientProvider client={queryClient}>
+        <PublicBrandProvider>
+          <BrandProbe label="超限品牌" />
+        </PublicBrandProvider>
+      </QueryClientProvider>,
+    )
+
+    await waitFor(() =>
+      expect(queryClient.getQueryState(['public-brand'])?.status).toBe('success'),
+    )
+    expect(screen.getByText('安全平台')).toBeInTheDocument()
+    expect(screen.getByLabelText('超限品牌 Logo')).toBeEmptyDOMElement()
+  })
+
+  it('把 TanStack Query 的取消信号传给公开品牌请求', async () => {
+    let requestSignal: AbortSignal | undefined
+    const fetchMock = vi.fn((_input: RequestInfo | URL, init?: RequestInit) => {
+      requestSignal = init?.signal ?? undefined
+      return new Promise<Response>(() => undefined)
+    })
+    vi.stubGlobal('fetch', fetchMock)
+
+    const view = render(
+      <QueryClientProvider client={createAppQueryClient()}>
+        <PublicBrandProvider>
+          <BrandProbe label="取消品牌" />
+        </PublicBrandProvider>
+      </QueryClientProvider>,
+    )
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1))
+
+    expect(requestSignal).toBeInstanceOf(AbortSignal)
+    view.unmount()
+    expect(requestSignal?.aborted).toBe(true)
+  })
+
   it('为多个消费者只请求一次公开品牌并忽略主色字段', async () => {
     const fetchMock = vi.fn().mockResolvedValue(
       jsonResponse({

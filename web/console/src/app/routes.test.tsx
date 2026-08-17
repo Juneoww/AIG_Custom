@@ -41,6 +41,33 @@ function renderRoute(initialState: SessionState, path: string) {
 }
 
 describe('production routes', () => {
+  it('allows anonymous users to open password reset outside the shell', () => {
+    renderRoute({ status: 'anonymous' }, '/reset-password')
+
+    expect(screen.getByRole('heading', { name: '重置密码' })).toBeInTheDocument()
+    expect(screen.queryByRole('navigation', { name: '主导航' })).not.toBeInTheDocument()
+  })
+
+  it('redirects must-change sessions from password reset to required password change', () => {
+    renderRoute(
+      {
+        status: 'must-change',
+        subject: { id: 'user-1', username: 'first-login', role: 'user', must_change_password: true },
+      },
+      '/reset-password',
+    )
+
+    expect(screen.getByRole('heading', { name: '更新初始密码' })).toBeInTheDocument()
+    expect(screen.getByLabelText('当前位置')).toHaveTextContent('"path":"/change-password"')
+  })
+
+  it('redirects authenticated sessions away from password reset to overview', () => {
+    renderRoute(subjectState('admin'), '/reset-password')
+
+    expect(screen.getByRole('heading', { name: '治理总览' })).toBeInTheDocument()
+    expect(screen.getByLabelText('当前位置')).toHaveTextContent('"path":"/"')
+  })
+
   it.each([
     ['user', '/admin/users'],
     ['auditor', '/admin/brand'],

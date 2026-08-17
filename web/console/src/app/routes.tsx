@@ -146,7 +146,8 @@ export const identityRoutes: RouteObject[] = [
   },
   {
     path: '/reset-password',
-    element: <ResetPasswordPage />,
+    element: <RequireAnonymous />,
+    children: [{ index: true, element: <ResetPasswordPage /> }],
   },
 ]
 
