@@ -18,7 +18,7 @@ import {
 import type { Key, ReactNode } from 'react'
 
 export interface DataTableColumn<T> {
-  key: string
+  id: string
   header: string
   render: (row: T) => ReactNode
 }
@@ -37,7 +37,7 @@ const useStyles = makeStyles({
     borderRadius: tokens.borderRadiusMedium,
   },
   caption: {
-    paddingBottom: tokens.spacingVerticalM,
+    paddingBottom: tokens.spacingVerticalS,
     color: tokens.colorNeutralForeground2,
     fontWeight: tokens.fontWeightSemibold,
     textAlign: 'left',
@@ -50,6 +50,10 @@ const useStyles = makeStyles({
 
 export function DataTable<T>({ caption, columns, rows, getRowKey }: DataTableProps<T>) {
   const styles = useStyles()
+  const columnIds = new Set(columns.map((column) => column.id))
+  if (columnIds.size !== columns.length) {
+    throw new Error('表格列 id 必须唯一')
+  }
 
   return (
     <Table className={styles.table}>
@@ -57,7 +61,7 @@ export function DataTable<T>({ caption, columns, rows, getRowKey }: DataTablePro
       <TableHeader>
         <TableRow>
           {columns.map((column) => (
-            <TableHeaderCell className={styles.headerCell} key={column.key} scope="col">
+            <TableHeaderCell className={styles.headerCell} key={column.id} scope="col">
               {column.header}
             </TableHeaderCell>
           ))}
@@ -67,7 +71,7 @@ export function DataTable<T>({ caption, columns, rows, getRowKey }: DataTablePro
         {rows.map((row) => (
           <TableRow key={getRowKey(row)}>
             {columns.map((column) => (
-              <TableCell key={column.key}>{column.render(row)}</TableCell>
+              <TableCell key={column.id}>{column.render(row)}</TableCell>
             ))}
           </TableRow>
         ))}

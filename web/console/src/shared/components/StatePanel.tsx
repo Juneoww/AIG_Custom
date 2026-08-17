@@ -21,9 +21,14 @@ const useStyles = makeStyles({
   root: {
     alignItems: 'flex-start',
     padding: tokens.spacingVerticalXXL,
-    gap: tokens.spacingVerticalM,
     borderRadius: tokens.borderRadiusMedium,
     boxShadow: 'none',
+  },
+  content: {
+    display: 'flex',
+    flexDirection: 'column',
+    alignItems: 'flex-start',
+    gap: tokens.spacingVerticalS,
   },
   title: {
     fontWeight: tokens.fontWeightSemibold,
@@ -40,13 +45,15 @@ export function StatePanel({ state, title, description, actionLabel, onAction }:
 
   return (
     <Card className={styles.root} role={role} aria-live={state === 'error' ? 'assertive' : 'polite'}>
-      {isLoading ? <Spinner size="tiny" labelPosition="after" label={title} /> : <Text className={styles.title}>{title}</Text>}
-      {!isLoading && description ? <Text className={styles.description}>{description}</Text> : null}
-      {!isLoading && actionLabel && onAction ? (
-        <Button appearance="secondary" onClick={onAction}>
-          {actionLabel}
-        </Button>
-      ) : null}
+      <div className={styles.content}>
+        {isLoading ? <Spinner size="tiny" labelPosition="after" label={title} /> : <Text className={styles.title}>{title}</Text>}
+        {!isLoading && description ? <Text className={styles.description}>{description}</Text> : null}
+        {!isLoading && actionLabel && onAction ? (
+          <Button appearance="secondary" onClick={onAction}>
+            {actionLabel}
+          </Button>
+        ) : null}
+      </div>
     </Card>
   )
 }

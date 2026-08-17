@@ -2,6 +2,8 @@
 
 本目录只保存 IBM Plex Sans 的拉丁文字体。中文正文复用仓库已有的 Droid 字体，构建时复制到 ignored 的 `.generated/fonts/`，避免重复提交约 4 MiB 二进制。
 
+`prepare:fonts` 只发布固定白名单：三份字体进入 `.generated/fonts/`，IBM OFL、Droid 归属说明和完整 Apache-2.0 正文进入 `.generated/licenses/`。Vite 构建后对应文件位于 `dist/fonts/` 与 `dist/licenses/`；许可文本从现有仓库文件复制，不重复维护副本。
+
 ## IBM Plex Sans
 
 - 官方仓库：`https://github.com/IBM/plex`
@@ -32,3 +34,5 @@
 - 字节数：`4033576`
 - SHA-256：`2392015530438bafc48edfc4aee6d9de2387f627a6134d8ab3dfcc99d21c8240`
 - 许可：Apache License 2.0，归属见 `internal/platform/reports/assets/DROID_FONT_LICENSE.txt`
+- 发布归属：`.generated/licenses/DROID_FONT_LICENSE.txt`
+- 完整许可：仓库根 `LICENSE`，发布为 `.generated/licenses/APACHE-2.0.txt`

@@ -13,6 +13,8 @@ services:
       PNPM_HOME: /pnpm
       npm_config_store_dir: /pnpm/store
       AIG_DROID_FONT_SOURCE: /workspace/.font-sources/DroidSansFallbackFull.ttf
+      AIG_DROID_LICENSE_SOURCE: /workspace/.font-sources/DROID_FONT_LICENSE.txt
+      AIG_APACHE_LICENSE_SOURCE: /workspace/.font-sources/APACHE-2.0.txt
     volumes:
       - ../../web/console/package.json:/workspace/package.json:ro
       - ../../web/console/pnpm-lock.yaml:/workspace/pnpm-lock.yaml:ro
@@ -26,7 +28,8 @@ services:
       - ../../web/console/scripts:/workspace/scripts:ro
       - ../../web/console/assets:/workspace/assets:ro
       - ../../internal/platform/reports/assets/DroidSansFallbackFull.ttf:/workspace/.font-sources/DroidSansFallbackFull.ttf:ro
+      - ../../internal/platform/reports/assets/DROID_FONT_LICENSE.txt:/workspace/.font-sources/DROID_FONT_LICENSE.txt:ro
+      - ../../LICENSE:/workspace/.font-sources/APACHE-2.0.txt:ro
       - /workspace/node_modules
       - /workspace/dist
-      - /workspace/.generated
       - /pnpm/store

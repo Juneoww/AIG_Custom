@@ -6,11 +6,11 @@
  * 依赖：Vitest、Testing Library、React 与 Fluent UI v9。
  */
 import { act, fireEvent, render, screen } from '@testing-library/react'
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { ThemeProvider, useThemeMode } from './ThemeProvider'
 import { readThemeMode, THEME_STORAGE_KEY, writeThemeMode } from './theme-storage'
-import { ledgerColors, ledgerLayout } from './tokens'
+import { ledgerColors, ledgerDarkTheme, ledgerLayout } from './tokens'
 
 type MediaListener = (event: MediaQueryListEvent) => void
 
@@ -72,6 +72,11 @@ describe('ThemeProvider', () => {
   beforeEach(() => {
     localStorage.clear()
     vi.restoreAllMocks()
+  })
+
+  afterEach(() => {
+    vi.unstubAllGlobals()
+    document.documentElement.removeAttribute('data-theme')
   })
 
   it('defaults to light and does not persist unrelated business data', () => {
@@ -179,6 +184,73 @@ describe('ThemeProvider', () => {
     expect(readThemeMode(rejectingStorage)).toBe('light')
     expect(() => writeThemeMode(rejectingStorage, 'dark')).not.toThrow()
   })
+
+  it('falls back to light when matchMedia rejects access', () => {
+    vi.stubGlobal('matchMedia', vi.fn(() => {
+      throw new DOMException('blocked', 'SecurityError')
+    }))
+
+    expect(() =>
+      render(
+        <ThemeProvider initialMode="system">
+          <ThemeProbe />
+        </ThemeProvider>,
+      ),
+    ).not.toThrow()
+    expect(screen.getByLabelText('生效主题')).toHaveTextContent('light')
+  })
+
+  it('does not crash when media listener registration or removal fails', () => {
+    const rejectingAdd = {
+      matches: false,
+      media: '(prefers-color-scheme: dark)',
+      addEventListener() {
+        throw new DOMException('blocked', 'SecurityError')
+      },
+      removeEventListener: vi.fn(),
+    } as unknown as MediaQueryList
+    vi.stubGlobal('matchMedia', vi.fn(() => rejectingAdd))
+
+    expect(() =>
+      render(
+        <ThemeProvider initialMode="system">
+          <ThemeProbe />
+        </ThemeProvider>,
+      ),
+    ).not.toThrow()
+
+    vi.unstubAllGlobals()
+    const rejectingRemove = {
+      matches: false,
+      media: '(prefers-color-scheme: dark)',
+      addEventListener: vi.fn(),
+      removeEventListener() {
+        throw new DOMException('blocked', 'SecurityError')
+      },
+    } as unknown as MediaQueryList
+    vi.stubGlobal('matchMedia', vi.fn(() => rejectingRemove))
+    const mounted = render(
+      <ThemeProvider initialMode="system">
+        <ThemeProbe />
+      </ThemeProvider>,
+    )
+
+    expect(() => mounted.unmount()).not.toThrow()
+  })
+
+  it('restores the host page theme attribute when unmounted', () => {
+    document.documentElement.setAttribute('data-theme', 'host-theme')
+    installMatchMedia(false)
+    const mounted = render(
+      <ThemeProvider initialMode="dark">
+        <ThemeProbe />
+      </ThemeProvider>,
+    )
+
+    expect(document.documentElement).toHaveAttribute('data-theme', 'dark')
+    mounted.unmount()
+    expect(document.documentElement).toHaveAttribute('data-theme', 'host-theme')
+  })
 })
 
 function relativeLuminance(hex: string): number {
@@ -206,5 +278,20 @@ describe('regulatory ledger tokens', () => {
   it('uses a deep blue-gray dark canvas rather than pure black', () => {
     expect(ledgerColors.dark.canvas).not.toBe('#000000')
     expect(ledgerColors.dark.surface).not.toBe('#000000')
+  })
+
+  it('keeps every dark on-brand interaction state above WCAG AA', () => {
+    const onBrand = ledgerDarkTheme.colorNeutralForegroundOnBrand
+    const backgrounds = [
+      ledgerDarkTheme.colorBrandBackground,
+      ledgerDarkTheme.colorBrandBackgroundHover,
+      ledgerDarkTheme.colorBrandBackgroundPressed,
+      ledgerDarkTheme.colorBrandBackgroundSelected,
+    ]
+
+    expect(ledgerDarkTheme.colorBrandForeground1).toBe(ledgerColors.dark.accent)
+    backgrounds.forEach((background) => {
+      expect(contrastRatio(onBrand, background)).toBeGreaterThanOrEqual(4.5)
+    })
   })
 })

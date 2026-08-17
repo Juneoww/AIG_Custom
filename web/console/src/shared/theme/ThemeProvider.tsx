@@ -39,10 +39,20 @@ function browserStorage(): Storage | undefined {
   }
 }
 
+function systemMediaQuery(): MediaQueryList | undefined {
+  if (typeof window === 'undefined' || typeof window.matchMedia !== 'function') {
+    return undefined
+  }
+
+  try {
+    return window.matchMedia(systemDarkQuery)
+  } catch {
+    return undefined
+  }
+}
+
 function systemPrefersDark(): boolean {
-  return typeof window !== 'undefined' && typeof window.matchMedia === 'function'
-    ? window.matchMedia(systemDarkQuery).matches
-    : false
+  return systemMediaQuery()?.matches ?? false
 }
 
 export function ThemeProvider({ children, initialMode }: ThemeProviderProps) {
@@ -51,19 +61,49 @@ export function ThemeProvider({ children, initialMode }: ThemeProviderProps) {
   const resolvedTheme: ResolvedTheme = mode === 'system' ? (systemDark ? 'dark' : 'light') : mode
 
   useEffect(() => {
-    if (mode !== 'system' || typeof window.matchMedia !== 'function') {
+    if (mode !== 'system') {
       return undefined
     }
 
-    const media = window.matchMedia(systemDarkQuery)
+    const media = systemMediaQuery()
+    if (!media) {
+      return undefined
+    }
+
     const handleChange = (event: MediaQueryListEvent) => setSystemDark(event.matches)
-    setSystemDark(media.matches)
-    media.addEventListener('change', handleChange)
-    return () => media.removeEventListener('change', handleChange)
+    try {
+      setSystemDark(media.matches)
+      media.addEventListener('change', handleChange)
+    } catch {
+      try {
+        media.removeEventListener('change', handleChange)
+      } catch {
+        // 受限浏览器可能同时拒绝注册和移除监听；主题保持安全的当前解析结果。
+      }
+      return undefined
+    }
+
+    return () => {
+      try {
+        media.removeEventListener('change', handleChange)
+      } catch {
+        // 卸载阶段不得让媒体查询权限异常破坏宿主应用。
+      }
+    }
   }, [mode])
 
   useEffect(() => {
-    document.documentElement.dataset.theme = resolvedTheme
+    const root = document.documentElement
+    const previousTheme = root.getAttribute('data-theme')
+    root.setAttribute('data-theme', resolvedTheme)
+
+    return () => {
+      if (previousTheme === null) {
+        root.removeAttribute('data-theme')
+      } else {
+        root.setAttribute('data-theme', previousTheme)
+      }
+    }
   }, [resolvedTheme])
 
   const value = useMemo<ThemeContextValue>(

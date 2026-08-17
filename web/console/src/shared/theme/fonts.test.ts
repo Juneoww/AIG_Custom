@@ -5,9 +5,12 @@
  * 输出：字体供应链、无公网 URL、焦点和减少动效回归断言。
  * 依赖：Node.js 文件系统、crypto 与 Vitest。
  */
+import { execFile } from 'node:child_process'
 import { createHash } from 'node:crypto'
-import { readFile, stat } from 'node:fs/promises'
-import { resolve } from 'node:path'
+import { copyFile, mkdir, mkdtemp, readFile, readdir, rm, stat, symlink, writeFile } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join, resolve } from 'node:path'
+import { promisify } from 'node:util'
 
 import { describe, expect, it } from 'vitest'
 
@@ -15,6 +18,11 @@ const root = process.cwd()
 const droidSource =
   process.env.AIG_DROID_FONT_SOURCE ??
   resolve(root, '../../internal/platform/reports/assets/DroidSansFallbackFull.ttf')
+const droidLicenseSource =
+  process.env.AIG_DROID_LICENSE_SOURCE ??
+  resolve(root, '../../internal/platform/reports/assets/DROID_FONT_LICENSE.txt')
+const apacheLicenseSource = process.env.AIG_APACHE_LICENSE_SOURCE ?? resolve(root, '../../LICENSE')
+const runFile = promisify(execFile)
 
 const expectedAssets = [
   {
@@ -36,6 +44,39 @@ const expectedAssets = [
     sha256: 'f78048030eab62e860efa39a0df79e2e5581bf122eb95b9bc42c0b8a4988d205',
   },
 ] as const
+
+const expectedLicenses = [
+  {
+    name: 'IBM_PLEX_LICENSE.txt',
+    source: resolve(root, 'assets/fonts/IBM_PLEX_LICENSE.txt'),
+    bytes: 4_362,
+    sha256: 'd741e57d5f865e294df801f96b7b5161a88b211df65887e4358d271c9fc5fb4f',
+  },
+  {
+    name: 'DROID_FONT_LICENSE.txt',
+    source: droidLicenseSource,
+    bytes: 1_029,
+    sha256: '0c56af5bd38c399e388c0a342dc756cbeddf2d83db960aca2cb6857b2ec5dc04',
+  },
+  {
+    name: 'APACHE-2.0.txt',
+    source: apacheLicenseSource,
+    bytes: 11_564,
+    sha256: '848823f8eef2c36ab75e06cc15c1e7f424fb1c2144d2b21ae19eff9668c2c042',
+  },
+] as const
+
+async function runPrepare(cwd = root): Promise<void> {
+  await runFile(process.execPath, [resolve(cwd, 'scripts/prepare-fonts.mjs')], {
+    cwd,
+    env: {
+      ...process.env,
+      AIG_DROID_FONT_SOURCE: droidSource,
+      AIG_DROID_LICENSE_SOURCE: droidLicenseSource,
+      AIG_APACHE_LICENSE_SOURCE: apacheLicenseSource,
+    },
+  })
+}
 
 async function digest(path: string): Promise<string> {
   return createHash('sha256').update(await readFile(path)).digest('hex')
@@ -66,6 +107,75 @@ describe('offline font assets', () => {
     expect(license).toContain('SIL OPEN FONT LICENSE Version 1.1')
     expect(license).toContain('THE FONT SOFTWARE IS PROVIDED "AS IS"')
     expect(license).not.toMatch(/[ \t]+\r?$/m)
+  })
+
+  it.each(expectedLicenses)('pins the published $name bytes and SHA-256', async (license) => {
+    await expect(stat(license.source)).resolves.toMatchObject({ size: license.bytes })
+    await expect(digest(license.source)).resolves.toBe(license.sha256)
+    await expect(stat(resolve(root, '.generated/licenses', license.name))).resolves.toMatchObject({
+      size: license.bytes,
+    })
+    await expect(digest(resolve(root, '.generated/licenses', license.name))).resolves.toBe(
+      license.sha256,
+    )
+  })
+
+  it('publishes complete Droid attribution and Apache 2.0 text', async () => {
+    const droidLicense = await readFile(
+      resolve(root, '.generated/licenses/DROID_FONT_LICENSE.txt'),
+      'utf8',
+    )
+    const apacheLicense = await readFile(resolve(root, '.generated/licenses/APACHE-2.0.txt'), 'utf8')
+
+    expect(droidLicense).toContain('Copyright 2009 The Android Open Source Project')
+    expect(droidLicense).toContain('License: Apache License, Version 2.0')
+    expect(apacheLicense).toContain('Apache License')
+    expect(apacheLicense).toContain('END OF TERMS AND CONDITIONS')
+  })
+
+  it('replaces stale generated content with the fixed publication whitelist', async () => {
+    await mkdir(resolve(root, '.generated/stale/nested'), { recursive: true })
+    await writeFile(resolve(root, '.generated/stale/nested/sentinel.txt'), 'must disappear')
+
+    await runPrepare()
+
+    await expect(stat(resolve(root, '.generated/stale'))).rejects.toMatchObject({ code: 'ENOENT' })
+    expect((await readdir(resolve(root, '.generated'))).sort()).toEqual(['fonts', 'licenses'])
+    expect((await readdir(resolve(root, '.generated/fonts'))).sort()).toEqual(
+      expectedAssets.map((asset) => asset.name).sort(),
+    )
+    expect((await readdir(resolve(root, '.generated/licenses'))).sort()).toEqual(
+      expectedLicenses.map((license) => license.name).sort(),
+    )
+  })
+
+  it('rejects a linked default output without touching its external target', async () => {
+    const fixtureRoot = await mkdtemp(join(tmpdir(), 'aig-font-fixture-'))
+    const externalTarget = await mkdtemp(join(tmpdir(), 'aig-font-sentinel-'))
+    const sentinel = resolve(externalTarget, 'sentinel.txt')
+
+    try {
+      await mkdir(resolve(fixtureRoot, 'scripts'), { recursive: true })
+      await mkdir(resolve(fixtureRoot, 'assets/fonts'), { recursive: true })
+      await copyFile(resolve(root, 'scripts/prepare-fonts.mjs'), resolve(fixtureRoot, 'scripts/prepare-fonts.mjs'))
+      for (const asset of expectedAssets.filter((asset) => asset.name.startsWith('IBMPlex'))) {
+        await copyFile(asset.source, resolve(fixtureRoot, 'assets/fonts', asset.name))
+      }
+      await copyFile(
+        resolve(root, 'assets/fonts/IBM_PLEX_LICENSE.txt'),
+        resolve(fixtureRoot, 'assets/fonts/IBM_PLEX_LICENSE.txt'),
+      )
+      await writeFile(sentinel, 'outside must remain unchanged')
+      await symlink(externalTarget, resolve(fixtureRoot, '.generated'), 'dir')
+
+      await expect(runPrepare(fixtureRoot)).rejects.toThrow()
+      await expect(readFile(sentinel, 'utf8')).resolves.toBe('outside must remain unchanged')
+      await expect(readdir(externalTarget)).resolves.toEqual(['sentinel.txt'])
+    } finally {
+      await rm(fixtureRoot, { recursive: true, force: true })
+      await rm(externalTarget, { recursive: true, force: true })
+      await runPrepare()
+    }
   })
 })
 
