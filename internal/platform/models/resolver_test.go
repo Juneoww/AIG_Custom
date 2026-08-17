@@ -161,6 +161,39 @@ func TestScannerResolverDefaultChoosesNewestAuthorizedPlatformModel(t *testing.T
 	assert.ErrorIs(t, err, ErrNotFound, "no authorized platform model must leave the YAML fallback boundary open")
 }
 
+func TestGormModelPaginationUsesVisibilityCountStableOrderAndSafeProjection(t *testing.T) {
+	db := openScannerResolverTestDB(t)
+	repository := NewGormRepository(db)
+	createdAt := time.Date(2026, 8, 17, 9, 0, 0, 0, time.UTC)
+	for _, fixture := range []struct {
+		id, owner string
+		scope     Scope
+	}{
+		{id: "model-a", scope: ScopeGlobal},
+		{id: "model-b", owner: "alice", scope: ScopePrivate},
+		{id: "model-c", owner: "alice", scope: ScopePrivate},
+		{id: "model-z", owner: "bob", scope: ScopePrivate},
+	} {
+		require.NoError(t, repository.Create(context.Background(), &Model{
+			ID: fixture.id, OwnerUserID: fixture.owner, Scope: fixture.scope, Name: fixture.id,
+			ProviderModel: fixture.id, BaseURL: "https://models.invalid/v1",
+			EncryptedToken: []byte("encrypted-sentinel"), TokenNonce: []byte("nonce-sentinel"), KeyID: "key-sentinel",
+			CreatedAt: createdAt, UpdatedAt: createdAt,
+		}))
+	}
+
+	models, total, err := repository.ListPage(context.Background(), ModelListQuery{
+		Visibility: modelListGlobalAndOwner, OwnerUserID: "alice", Limit: 1, Offset: 1,
+	})
+	require.NoError(t, err)
+	assert.Equal(t, int64(3), total)
+	require.Len(t, models, 1)
+	assert.Equal(t, "model-b", models[0].ID)
+	assert.Empty(t, models[0].EncryptedToken)
+	assert.Empty(t, models[0].TokenNonce)
+	assert.Empty(t, models[0].KeyID)
+}
+
 func createResolverUser(t *testing.T, service *identity.Service, username string, role identity.Role) *identity.User {
 	t.Helper()
 	user, err := service.CreateUser(context.Background(), identity.CreateUserInput{Username: username, Password: "password", Role: role})

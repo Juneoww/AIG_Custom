@@ -84,6 +84,38 @@ func TestReconcileReadyCompletionIsNotStarvedByPreparedRows(t *testing.T) {
 	}
 }
 
+func TestGormAuditPaginationUsesFilterCountStableOrderAndSanitizedMetadata(t *testing.T) {
+	db := openReadyQueuePostgres(t)
+	repository := NewGormRepository(db)
+	base := time.Date(2026, 8, 17, 9, 0, 0, 0, time.UTC)
+	for _, fixture := range []struct {
+		id     string
+		action Action
+	}{
+		{id: "audit-a", action: ActionModelUpdated},
+		{id: "audit-b", action: ActionModelUpdated},
+		{id: "audit-c", action: ActionModelUpdated},
+		{id: "audit-z", action: ActionTaskChanged},
+	} {
+		require.NoError(t, repository.Append(context.Background(), &Event{
+			ID: fixture.id, OccurredAt: base, Action: fixture.action, Outcome: OutcomeSuccess,
+			Metadata: json.RawMessage(`{"nested":[[{"raw_result":"raw-sentinel","safe":"kept"}]]}`),
+		}))
+	}
+
+	events, total, err := NewService(repository).QueryPage(
+		context.Background(), identity.Subject{Role: identity.RoleAuditor}, Filter{Action: ActionModelUpdated}, 2, 1,
+	)
+	require.NoError(t, err)
+	assert.Equal(t, int64(3), total)
+	require.Len(t, events, 1)
+	assert.Equal(t, "audit-b", events[0].ID)
+	wire, err := json.Marshal(events)
+	require.NoError(t, err)
+	assert.NotContains(t, string(wire), "raw-sentinel")
+	assert.Contains(t, string(wire), "kept")
+}
+
 type auditCompletionTestRepository interface {
 	Repository
 	CompletionRepository

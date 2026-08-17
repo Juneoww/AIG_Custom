@@ -410,7 +410,11 @@ func (service *Service) QueryPage(ctx context.Context, subject identity.Subject,
 		if len(events[index].Metadata) != 0 && json.Unmarshal(events[index].Metadata, &metadata) != nil {
 			return nil, 0, errors.New("审计元数据无效")
 		}
-		events[index].Metadata, err = sanitizedMetadata(sanitizeBrowserMetadata(metadata))
+		browserMetadata, ok := sanitizeBrowserValue(metadata).(map[string]any)
+		if !ok {
+			return nil, 0, errors.New("审计元数据无效")
+		}
+		events[index].Metadata, err = sanitizedMetadata(browserMetadata)
 		if err != nil {
 			return nil, 0, errors.New("审计元数据无效")
 		}
@@ -418,32 +422,37 @@ func (service *Service) QueryPage(ctx context.Context, subject identity.Subject,
 	return events, total, nil
 }
 
-func sanitizeBrowserMetadata(input map[string]any) map[string]any {
-	out := make(map[string]any, len(input))
-	for key, value := range input {
-		normalized := strings.NewReplacer("-", "", "_", "", " ", "").Replace(strings.ToLower(key))
-		if strings.Contains(normalized, "error") || strings.Contains(normalized, "raw") || strings.Contains(normalized, "path") || strings.Contains(normalized, "stack") {
-			out[key] = RedactedValue
-			continue
-		}
-		switch typed := value.(type) {
-		case map[string]any:
-			out[key] = sanitizeBrowserMetadata(typed)
-		case []any:
-			values := make([]any, len(typed))
-			for index := range typed {
-				if nested, ok := typed[index].(map[string]any); ok {
-					values[index] = sanitizeBrowserMetadata(nested)
-				} else {
-					values[index] = typed[index]
+func sanitizeBrowserValue(value any) any {
+	switch typed := value.(type) {
+	case map[string]any:
+		out := make(map[string]any, len(typed))
+		for key, nested := range typed {
+			normalized := strings.NewReplacer("-", "", "_", "", " ", "").Replace(strings.ToLower(key))
+			sensitive := false
+			for _, fragment := range []string{
+				"raw", "error", "path", "stack", "token", "secret", "password", "credential", "header", "content",
+			} {
+				if strings.Contains(normalized, fragment) {
+					sensitive = true
+					break
 				}
 			}
-			out[key] = values
-		default:
-			out[key] = value
+			if sensitive {
+				out[key] = RedactedValue
+				continue
+			}
+			out[key] = sanitizeBrowserValue(nested)
 		}
+		return out
+	case []any:
+		out := make([]any, len(typed))
+		for index := range typed {
+			out[index] = sanitizeBrowserValue(typed[index])
+		}
+		return out
+	default:
+		return value
 	}
-	return out
 }
 
 func normalizedLimit(limit int) int {

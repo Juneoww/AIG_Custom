@@ -129,6 +129,46 @@ func TestGormRepositoryListAndTrendProjectOnlySafeRequiredColumns(t *testing.T) 
 	assert.NotContains(t, trendSQL, "brand_snapshot")
 }
 
+func TestGormReportPaginationUsesOwnerCountStableOrderAndSafeProjection(t *testing.T) {
+	db := openReportsTestDB(t)
+	require.NoError(t, database.Migrate(db))
+	repository := NewGormRepository(db)
+	for _, fixture := range []struct{ id, owner string }{
+		{id: "report-a", owner: "alice"}, {id: "report-b", owner: "alice"},
+		{id: "report-c", owner: "alice"}, {id: "report-z", owner: "bob"},
+	} {
+		snapshot := reportSnapshotFixture(fixture.id, "task-"+fixture.id)
+		snapshot.OwnerUserID = fixture.owner
+		snapshot.RawResult = json.RawMessage(`{"raw_result":"raw-sentinel"}`)
+		snapshot.RenderData = json.RawMessage(`{"content":"render-sentinel"}`)
+		snapshot.Brand.Logo = []byte("logo-sentinel")
+		require.NoError(t, repository.Create(context.Background(), snapshot))
+	}
+
+	capture := &queryCaptureLogger{Interface: logger.Default.LogMode(logger.Silent)}
+	db.Config.Logger = capture
+	items, total, err := repository.ListPage(context.Background(), ListQuery{OwnerUserID: "alice", Limit: 1, Offset: 1})
+	require.NoError(t, err)
+	assert.Equal(t, int64(3), total)
+	require.Len(t, items, 1)
+	assert.Equal(t, "report-b", items[0].ID)
+	assert.Empty(t, items[0].RawResult)
+	assert.Empty(t, items[0].RenderData)
+	assert.Empty(t, items[0].Brand.Logo)
+
+	require.GreaterOrEqual(t, len(capture.statements), 2)
+	countSQL := capture.statements[len(capture.statements)-2]
+	listSQL := capture.statements[len(capture.statements)-1]
+	assert.Contains(t, countSQL, "owner_user_id = 'alice'")
+	assert.Contains(t, listSQL, "owner_user_id = 'alice'")
+	assert.Contains(t, listSQL, "order by created_at desc, id desc")
+	assert.Contains(t, listSQL, "limit 1")
+	assert.Contains(t, listSQL, "offset 1")
+	assert.NotContains(t, listSQL, "raw_result")
+	assert.NotContains(t, listSQL, "render_data")
+	assert.NotContains(t, listSQL, "logo")
+}
+
 func reportSnapshotFixture(id, taskID string) *Snapshot {
 	completedAt := time.Date(2026, 8, 12, 12, 0, 0, 0, time.UTC)
 	return &Snapshot{

@@ -187,6 +187,48 @@ func TestAuditPaginationUsesFilteredCountAndSanitizesStoredMetadata(t *testing.T
 	assert.Contains(t, string(encoded), "kept")
 }
 
+func TestAuditPaginationSanitizesBrowserMetadataAtArbitraryArrayDepth(t *testing.T) {
+	repository := NewMemoryRepository()
+	metadata := map[string]any{
+		"safe": "kept",
+		"nested": []any{[]any{map[string]any{
+			"raw_result":  "raw-sentinel",
+			"config_path": "path-sentinel",
+			"safe_nested": []any{true, float64(42), nil, map[string]any{
+				"error":      "error-sentinel",
+				"token":      "token-sentinel",
+				"password":   "password-sentinel",
+				"credential": "credential-sentinel",
+				"header":     "header-sentinel",
+				"content":    "content-sentinel",
+				"label":      "deep-kept",
+			}},
+		}}},
+	}
+	encodedMetadata, err := json.Marshal(metadata)
+	require.NoError(t, err)
+	require.NoError(t, repository.Append(context.Background(), &Event{
+		ID: "nested-browser-metadata", OccurredAt: time.Now().UTC(), Action: ActionModelUpdated,
+		Outcome: OutcomeSuccess, Metadata: encodedMetadata,
+	}))
+
+	events, _, err := NewService(repository).QueryPage(
+		context.Background(), identity.Subject{Role: identity.RoleAuditor}, Filter{}, 1, 20,
+	)
+	require.NoError(t, err)
+	require.Len(t, events, 1)
+	wire, err := json.Marshal(events)
+	require.NoError(t, err)
+	for _, sentinel := range []string{
+		"raw-sentinel", "path-sentinel", "error-sentinel", "token-sentinel", "password-sentinel",
+		"credential-sentinel", "header-sentinel", "content-sentinel",
+	} {
+		assert.NotContains(t, string(wire), sentinel)
+	}
+	assert.Contains(t, string(wire), "kept")
+	assert.Contains(t, string(wire), "deep-kept")
+}
+
 func TestAuthenticationAttemptsHaveStableAuditBoundary(t *testing.T) {
 	service := NewService(NewMemoryRepository())
 	ctx := context.Background()
