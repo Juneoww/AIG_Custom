@@ -5,7 +5,7 @@
 
 AIG Custom Platform 是基于 Tencent Zhuque Lab AI-Infra-Guard（https://github.com/Tencent/AI-Infra-Guard）构建的独立定制平台，提供了一套完整的API接口，用于AI基础设施扫描、MCP安全扫描、大模型安全体检和模型配置管理。本文档详细介绍了各个API接口的使用方法、参数说明和示例代码。
 
-项目运行后，可访问 `http://localhost:8088/docs/index.html` 查看Swagger文档。
+项目通过可信本地 TLS 终止反向代理运行后，可使用受信任的本地 CA 访问 `https://localhost:8443/docs/index.html` 查看 Swagger 文档。
 
 ## 文档目录
 
@@ -29,7 +29,7 @@ AIG Custom Platform 是基于 Tencent Zhuque Lab AI-Infra-Guard（https://github
 
 ## 基础信息
 
-- **Base URL**: `http://localhost:8088` (根据实际部署调整)
+- **Base URL**: 本地示例使用 `https://localhost:8443`。生产部署必须由可信反向代理终止 TLS；认证 Cookie 带 `Secure` 属性，客户端必须校验部署 CA。
 - **Content-Type**: `application/json`
 - **认证方式**: 浏览器请求使用登录接口签发的 `aig_session` HttpOnly Cookie。`username` 请求头不是认证机制，不能用于建立身份。已认证的状态变更请求还必须携带与 `aig_csrf` Cookie 相同的 `X-CSRF-Token` 请求头。
 
@@ -70,6 +70,19 @@ AIG Custom Platform 是基于 Tencent Zhuque Lab AI-Infra-Guard（https://github
 | `GET /api/v1/platform/models` | `CatalogPage` | 普通用户看全局和本人私有 platform 行；审计员只读全局行；管理员看全部 platform 行。token 始终为 `********`，`source` 为 `platform` 或 `yaml`，并显式返回 `read_only`。只读 YAML 行与同 ID platform 行发生碰撞时仍分别保留；目录加载失败时失败关闭。 |
 
 `GET /api/v1/platform/tasks/{taskID}` 返回 `TaskDetail`，其 `input_summary` 仅含有界展示元数据。普通用户只看本人任务，审计员/管理员全局只读；任务不存在或对普通用户不可见时返回 `404`。`GET /api/v1/platform/tasks/{taskID}/result` 已退役：通过认证与首次改密门禁后恒定返回 `410 Gone`，且绝不读取引擎输出。
+
+### 任务创建响应的安全加固迁移
+
+**破坏性变更：** `POST /api/v1/platform/tasks` 不再返回旧的内部任务 `View`。成功的 `202` 现在返回 `TaskDetail`，精确包含 `id`、用于展示的安全 `owner`、规范化 `task_type`、`status`、`created_at`、`updated_at` 和有界 `input_summary`。此变更阻止持久化请求与引擎内部字段越过浏览器边界。
+
+| 旧 `View` 字段 | 新客户端行为 |
+|---|---|
+| `owner_user_id`、`owner_username` | 已删除；展示 `owner`，且不得用响应值做授权判断。 |
+| `content`、`params`、`attachment_ids` | 已删除；展示时只使用 `input_summary` 中获准的元数据；只有 UI 确有需要时才在本地保留已提交表单。 |
+| `country_iso_code` | 已删除；存在时使用规范化的 `input_summary.language`。 |
+| `engine_session_id`、`dispatch_error`、`dispatch_attempts` | 已删除；只展示公开 `status` 与泛化客户端提示。 |
+
+可信分发失败以 `503` 返回 `{ "error": "task dispatch unavailable", "task": { ...TaskDetail } }`，绝不返回分发诊断。客户端必须同时升级 `202` 解码与 `503` 错误路径，停止读取已删除字段，并把未知任务类型视为 `unknown` 和空 `input_summary`。
 
 附件变更请求要求 CSRF。普通用户只能创建/写入本人 opaque 附件，管理员可治理任意附件，审计员只读。下载时，owner 成功，其他普通用户得到 `404`，审计员得到 `403`，管理员可跨 owner 下载。管理员跨 owner 打开存储前，服务端必须先持久化脱敏的 `attachment.download_authorized` 授权事件；该事件证明授权而非后续流传输成功，响应也不返回存储位置。
 
@@ -124,32 +137,70 @@ AIG Custom Platform 是基于 Tencent Zhuque Lab AI-Infra-Guard（https://github
 
 ### 所有示例都必须先建立浏览器会话
 
-此兼容 API 不支持匿名访问。登录前先 GET `/api/v1/auth/csrf`；登录请求同时携带 `aig_csrf` Cookie 与 `X-CSRF-Token` 请求头，并在持久 Cookie jar 中保留登录后轮换的 `aig_session` 与 `aig_csrf` Cookie。`must_change_password=true` 的主体必须先改密，才能调用任何模型接口。以下每个变更请求都会把当前 `aig_csrf` Cookie 值再次放入 `X-CSRF-Token`。
+此兼容 API 不支持匿名访问，生产凭据路由强制 HTTPS。本地示例假设 8443 端口前有可信本地 TLS 终止反向代理、客户端信任其 CA bundle，且服务使用生产 `Secure` Cookie；绝不能关闭证书校验。登录前先 GET `/api/v1/auth/csrf`，在持久 Cookie jar 中保留所有轮换 Cookie，再读取 `/api/v1/auth/me`。`must_change_password=true` 时必须先调用改密接口；改密成功会清除 session，因此客户端随后重新登录。以下每个变更请求都会把当前 `aig_csrf` Cookie 值放入 `X-CSRF-Token`。
 
 ```python
 import requests
 
-base_url = "http://localhost:8088"
+BASE_URL = "https://localhost:8443"
+CA_BUNDLE = "<trusted-local-ca.pem>"
 session = requests.Session()  # 持久 Cookie jar
-bootstrap = session.get(f"{base_url}/api/v1/auth/csrf")
+session.verify = CA_BUNDLE
+bootstrap = session.get(f"{BASE_URL}/api/v1/auth/csrf")
 bootstrap.raise_for_status()
-login = session.post(
-    f"{base_url}/api/v1/auth/login",
-    json={"username": "<username>", "password": "<password>"},
-    headers={"X-CSRF-Token": bootstrap.json()["csrf_token"]},
-)
-login.raise_for_status()
+
+def login_with_password(password):
+    response = session.post(
+        f"{BASE_URL}/api/v1/auth/login",
+        json={"username": "<username>", "password": password},
+        headers={"X-CSRF-Token": session.cookies.get("aig_csrf")},
+    )
+    response.raise_for_status()
+    return response
+
+login_with_password("<current-password>")
+me_response = session.get(f"{BASE_URL}/api/v1/auth/me")
+me_response.raise_for_status()
+subject = me_response.json()
+if subject["must_change_password"]:
+    changed = session.post(
+        f"{BASE_URL}/api/v1/auth/change-password",
+        json={"old_password": "<current-password>", "new_password": "<new-password>"},
+        headers={"X-CSRF-Token": session.cookies.get("aig_csrf")},
+    )
+    changed.raise_for_status()  # 204；此时 aig_session 已清除
+    login_with_password("<new-password>")
+    me_response = session.get(f"{BASE_URL}/api/v1/auth/me")
+    me_response.raise_for_status()
+    subject = me_response.json()
 csrf_headers = {"X-CSRF-Token": session.cookies.get("aig_csrf")}
 ```
 
-cURL 示例需要在两次初始化请求间持久化 Cookie。只替换尖括号占位符；登录后从 `cookies.txt` 读取更新后的 `aig_csrf` 值，作为 `<session-csrf-token>`。
+下面的等价 cURL 流程使用 `jq` 与 `awk`，持久化每次 Cookie 更新，并校验可信本地 CA。只替换尖括号占位符。
 
 ```bash
-curl -sS -c cookies.txt http://localhost:8088/api/v1/auth/csrf
-curl -sS -b cookies.txt -c cookies.txt -X POST http://localhost:8088/api/v1/auth/login \
+BASE_URL="https://localhost:8443"
+CA_BUNDLE="<trusted-local-ca.pem>"
+COOKIE_JAR="cookies.txt"
+BOOTSTRAP_CSRF="$(curl -fsS --cacert "$CA_BUNDLE" -c "$COOKIE_JAR" "$BASE_URL/api/v1/auth/csrf" | jq -r '.csrf_token')"
+curl -fsS --cacert "$CA_BUNDLE" -b "$COOKIE_JAR" -c "$COOKIE_JAR" -X POST "$BASE_URL/api/v1/auth/login" \
   -H "Content-Type: application/json" \
-  -H "X-CSRF-Token: <bootstrap-csrf-token>" \
-  -d '{"username":"<username>","password":"<password>"}'
+  -H "X-CSRF-Token: $BOOTSTRAP_CSRF" \
+  -d '{"username":"<username>","password":"<current-password>"}'
+ME_JSON="$(curl -fsS --cacert "$CA_BUNDLE" -b "$COOKIE_JAR" "$BASE_URL/api/v1/auth/me")"
+if [ "$(printf '%s' "$ME_JSON" | jq -r '.must_change_password')" = "true" ]; then
+  SESSION_CSRF="$(awk '$6 == "aig_csrf" {value=$7} END {print value}' "$COOKIE_JAR")"
+  curl -fsS --cacert "$CA_BUNDLE" -b "$COOKIE_JAR" -c "$COOKIE_JAR" -X POST "$BASE_URL/api/v1/auth/change-password" \
+    -H "Content-Type: application/json" \
+    -H "X-CSRF-Token: $SESSION_CSRF" \
+    -d '{"old_password":"<current-password>","new_password":"<new-password>"}'
+  curl -fsS --cacert "$CA_BUNDLE" -b "$COOKIE_JAR" -c "$COOKIE_JAR" -X POST "$BASE_URL/api/v1/auth/login" \
+    -H "Content-Type: application/json" \
+    -H "X-CSRF-Token: $SESSION_CSRF" \
+    -d '{"username":"<username>","password":"<new-password>"}'
+  ME_JSON="$(curl -fsS --cacert "$CA_BUNDLE" -b "$COOKIE_JAR" "$BASE_URL/api/v1/auth/me")"
+fi
+SESSION_CSRF="$(awk '$6 == "aig_csrf" {value=$7} END {print value}' "$COOKIE_JAR")"
 ```
 
 ### 1. 获取模型列表
@@ -176,7 +227,7 @@ curl -sS -b cookies.txt -c cookies.txt -X POST http://localhost:8088/api/v1/auth
 import requests
 
 def get_model_list():
-    url = "http://localhost:8088/api/v1/app/models"
+    url = f"{BASE_URL}/api/v1/app/models"
     headers = {
         "Content-Type": "application/json"
     }
@@ -198,7 +249,7 @@ if result['status'] == 0:
 
 #### cURL 示例
 ```bash
-curl -b cookies.txt -X GET http://localhost:8088/api/v1/app/models \
+curl --cacert "$CA_BUNDLE" -b "$COOKIE_JAR" -X GET "$BASE_URL/api/v1/app/models" \
   -H "Content-Type: application/json"
 ```
 
@@ -261,7 +312,7 @@ curl -b cookies.txt -X GET http://localhost:8088/api/v1/app/models \
 #### Python 示例
 ```python
 def get_model_detail(model_id):
-    url = f"http://localhost:8088/api/v1/app/models/{model_id}"
+    url = f"{BASE_URL}/api/v1/app/models/{model_id}"
     headers = {
         "Content-Type": "application/json"
     }
@@ -281,7 +332,7 @@ if result['status'] == 0:
 
 #### cURL 示例
 ```bash
-curl -b cookies.txt -X GET http://localhost:8088/api/v1/app/models/gpt4-model \
+curl --cacert "$CA_BUNDLE" -b "$COOKIE_JAR" -X GET "$BASE_URL/api/v1/app/models/gpt4-model" \
   -H "Content-Type: application/json"
 ```
 
@@ -327,13 +378,13 @@ curl -b cookies.txt -X GET http://localhost:8088/api/v1/app/models/gpt4-model \
 #### Python 示例
 ```python
 def create_model():
-    url = "http://localhost:8088/api/v1/app/models"
+    url = f"{BASE_URL}/api/v1/app/models"
     headers = {**csrf_headers, "Content-Type": "application/json"}
     data = {
         "model_id": "my-gpt4-model",
         "model": {
             "model": "gpt-4",
-            "token": "sk-your-api-key-here",
+            "token": "<api-key>",
             "base_url": "https://api.openai.com/v1",
             "note": "我的GPT-4模型",
             "limit": 2000
@@ -353,14 +404,14 @@ else:
 
 #### cURL 示例
 ```bash
-curl -b cookies.txt -X POST http://localhost:8088/api/v1/app/models \
+curl --cacert "$CA_BUNDLE" -b "$COOKIE_JAR" -X POST "$BASE_URL/api/v1/app/models" \
   -H "Content-Type: application/json" \
-  -H "X-CSRF-Token: <session-csrf-token>" \
+  -H "X-CSRF-Token: $SESSION_CSRF" \
   -d '{
     "model_id": "my-gpt4-model",
     "model": {
       "model": "gpt-4",
-      "token": "sk-your-api-key-here",
+      "token": "<api-key>",
       "base_url": "https://api.openai.com/v1",
       "note": "我的GPT-4模型",
       "limit": 2000
@@ -402,7 +453,7 @@ curl -b cookies.txt -X POST http://localhost:8088/api/v1/app/models \
 #### Python 示例
 ```python
 def update_model(model_id):
-    url = f"http://localhost:8088/api/v1/app/models/{model_id}"
+    url = f"{BASE_URL}/api/v1/app/models/{model_id}"
     headers = {**csrf_headers, "Content-Type": "application/json"}
     # 只更新备注和限制，不修改token
     data = {
@@ -429,7 +480,7 @@ else:
 #### 更新token示例
 ```python
 def update_model_token(model_id, new_token):
-    url = f"http://localhost:8088/api/v1/app/models/{model_id}"
+    url = f"{BASE_URL}/api/v1/app/models/{model_id}"
     data = {
         "model": {
             "model": "gpt-4",
@@ -447,9 +498,9 @@ def update_model_token(model_id, new_token):
 #### cURL 示例
 ```bash
 # 只更新备注信息
-curl -b cookies.txt -X PUT http://localhost:8088/api/v1/app/models/my-gpt4-model \
+curl --cacert "$CA_BUNDLE" -b "$COOKIE_JAR" -X PUT "$BASE_URL/api/v1/app/models/my-gpt4-model" \
   -H "Content-Type: application/json" \
-  -H "X-CSRF-Token: <session-csrf-token>" \
+  -H "X-CSRF-Token: $SESSION_CSRF" \
   -d '{
     "model": {
       "model": "gpt-4-turbo",
@@ -461,9 +512,9 @@ curl -b cookies.txt -X PUT http://localhost:8088/api/v1/app/models/my-gpt4-model
   }'
 
 # 更新token
-curl -b cookies.txt -X PUT http://localhost:8088/api/v1/app/models/my-gpt4-model \
+curl --cacert "$CA_BUNDLE" -b "$COOKIE_JAR" -X PUT "$BASE_URL/api/v1/app/models/my-gpt4-model" \
   -H "Content-Type: application/json" \
-  -H "X-CSRF-Token: <session-csrf-token>" \
+  -H "X-CSRF-Token: $SESSION_CSRF" \
   -d '{
     "model": {
       "model": "gpt-4",
@@ -499,7 +550,7 @@ curl -b cookies.txt -X PUT http://localhost:8088/api/v1/app/models/my-gpt4-model
 #### Python 示例
 ```python
 def delete_models(model_ids):
-    url = "http://localhost:8088/api/v1/app/models"
+    url = f"{BASE_URL}/api/v1/app/models"
     headers = {**csrf_headers, "Content-Type": "application/json"}
     data = {
         "model_ids": model_ids
@@ -522,17 +573,17 @@ if result['status'] == 0:
 #### cURL 示例
 ```bash
 # 删除单个模型
-curl -b cookies.txt -X DELETE http://localhost:8088/api/v1/app/models \
+curl --cacert "$CA_BUNDLE" -b "$COOKIE_JAR" -X DELETE "$BASE_URL/api/v1/app/models" \
   -H "Content-Type: application/json" \
-  -H "X-CSRF-Token: <session-csrf-token>" \
+  -H "X-CSRF-Token: $SESSION_CSRF" \
   -d '{
     "model_ids": ["my-gpt4-model"]
   }'
 
 # 批量删除多个模型
-curl -b cookies.txt -X DELETE http://localhost:8088/api/v1/app/models \
+curl --cacert "$CA_BUNDLE" -b "$COOKIE_JAR" -X DELETE "$BASE_URL/api/v1/app/models" \
   -H "Content-Type: application/json" \
-  -H "X-CSRF-Token: <session-csrf-token>" \
+  -H "X-CSRF-Token: $SESSION_CSRF" \
   -d '{
     "model_ids": ["model1", "model2", "model3"]
   }'
@@ -558,7 +609,7 @@ curl -b cookies.txt -X DELETE http://localhost:8088/api/v1/app/models \
 ```yaml
 - model_id: system_default
   model_name: deepseek-chat
-  token: sk-your-api-key
+  token: <api-key>
   base_url: https://api.deepseek.com/v1
   note: 系统默认模型
   limit: 1000
@@ -568,7 +619,7 @@ curl -b cookies.txt -X DELETE http://localhost:8088/api/v1/app/models \
 
 - model_id: eval_model
   model_name: gpt-4
-  token: sk-your-eval-key
+  token: <evaluation-api-key>
   base_url: https://api.openai.com/v1
   note: 评估模型
   limit: 2000

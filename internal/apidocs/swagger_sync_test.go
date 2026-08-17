@@ -20,23 +20,26 @@ func TestGeneratedSwaggerArtifactsStayInSync(t *testing.T) {
 		t.Fatal(err)
 	}
 	jsonDocument := decodeSwaggerJSON(t, jsonData)
-	if !reflect.DeepEqual(embedded, jsonDocument) {
-		t.Fatalf("docs.go and swagger.json are not synchronized: %s", firstSwaggerDifference("$", embedded, jsonDocument))
+	if difference := swaggerDocumentsDifference(embedded, jsonDocument); difference != "" {
+		t.Fatalf("docs.go and swagger.json are not synchronized: %s", difference)
 	}
 
 	yamlData, err := os.ReadFile("swagger.yaml")
 	if err != nil {
 		t.Fatal(err)
 	}
-	var yamlDocument interface{}
-	if err := yaml.Unmarshal(yamlData, &yamlDocument); err != nil {
+	var rawYAMLDocument map[string]interface{}
+	if err := yaml.Unmarshal(yamlData, &rawYAMLDocument); err != nil {
 		t.Fatal(err)
 	}
-	normalizedYAML, err := json.Marshal(yamlDocument)
+	normalizedYAML, err := json.Marshal(rawYAMLDocument)
 	if err != nil {
 		t.Fatal(err)
 	}
-	yamlDocument = decodeSwaggerJSON(t, normalizedYAML)
+	yamlDocument := decodeSwaggerJSON(t, normalizedYAML)
+	if difference := swaggerDocumentsDifference(yamlDocument, jsonDocument); difference != "" {
+		t.Fatalf("swagger.yaml and swagger.json are not synchronized: %s", difference)
+	}
 	for _, path := range [][]string{
 		{"info", "title"},
 		{"info", "description"},
@@ -203,6 +206,25 @@ func TestGeneratedSwaggerArtifactsStayInSync(t *testing.T) {
 	}
 }
 
+func TestSwaggerFullDocumentGateRejectsInMemoryYAMLSchemaDrift(t *testing.T) {
+	documents := loadSwaggerDocuments(t)
+	encoded, err := json.Marshal(documents["yaml"])
+	if err != nil {
+		t.Fatal(err)
+	}
+	drifted := decodeSwaggerJSON(t, encoded)
+	status := swaggerValue(t, drifted, "definitions", "tasks.TaskDetail", "properties", "status").(map[string]interface{})
+	status["description"] = "in-memory fixture drift outside the old spot checks"
+
+	difference := swaggerDocumentsDifference(drifted, documents["json"])
+	if difference == "" {
+		t.Fatal("full-document gate accepted an in-memory YAML schema drift")
+	}
+	if !strings.Contains(difference, "tasks.TaskDetail") || !strings.Contains(difference, "status") {
+		t.Fatalf("full-document gate reported an unhelpful difference: %s", difference)
+	}
+}
+
 func TestSwaggerDocumentsImmutableReportAndBrandContracts(t *testing.T) {
 	embedded := decodeSwaggerJSON(t, []byte(SwaggerInfo.ReadDoc()))
 	jsonData, err := os.ReadFile("swagger.json")
@@ -214,15 +236,15 @@ func TestSwaggerDocumentsImmutableReportAndBrandContracts(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	var yamlDocument interface{}
-	if err := yaml.Unmarshal(yamlData, &yamlDocument); err != nil {
+	var rawYAMLDocument map[string]interface{}
+	if err := yaml.Unmarshal(yamlData, &rawYAMLDocument); err != nil {
 		t.Fatal(err)
 	}
-	normalizedYAML, err := json.Marshal(yamlDocument)
+	normalizedYAML, err := json.Marshal(rawYAMLDocument)
 	if err != nil {
 		t.Fatal(err)
 	}
-	yamlDocument = decodeSwaggerJSON(t, normalizedYAML)
+	yamlDocument := decodeSwaggerJSON(t, normalizedYAML)
 
 	for name, document := range map[string]interface{}{
 		"embedded": embedded,
@@ -534,9 +556,33 @@ func TestSwaggerDocumentsTaskCreateAndLegacySecurityCorrections(t *testing.T) {
 			if got := swaggerNestedRef(t, swaggerValue(t, document, "paths", createPath, "post", "responses", "503", "schema")); got != "#/definitions/tasks.TaskCreateErrorResponse" {
 				t.Errorf("task create 503 schema = %q, want safe TaskCreateErrorResponse", got)
 			}
+			if got := swaggerNestedRef(t, swaggerValue(t, document, "paths", createPath, "post", "responses", "400", "schema")); got != "#/definitions/tasks.TaskCreateBadRequestResponse" {
+				t.Errorf("task create 400 schema = %q, want safe TaskCreateBadRequestResponse", got)
+			}
 			assertExactProperties(t, document, "tasks.TaskCreateErrorResponse", "error", "task")
+			assertExactProperties(t, document, "tasks.TaskCreateBadRequestResponse", "error")
+			badRequestRequired := swaggerValue(t, document, "definitions", "tasks.TaskCreateBadRequestResponse", "required").([]interface{})
+			if !reflect.DeepEqual(badRequestRequired, []interface{}{"error"}) {
+				t.Errorf("task create 400 required fields = %v, want [error]", badRequestRequired)
+			}
 			if got := swaggerNestedRef(t, swaggerValue(t, document, "definitions", "tasks.TaskCreateErrorResponse", "properties", "task")); got != "#/definitions/tasks.TaskDetail" {
 				t.Errorf("task create error task schema = %q, want TaskDetail", got)
+			}
+			badRequestEnum := swaggerValue(t, document, "definitions", "tasks.TaskCreateBadRequestResponse", "properties", "error", "enum").([]interface{})
+			if !reflect.DeepEqual(badRequestEnum, []interface{}{"invalid task request", "attachment unavailable"}) {
+				t.Errorf("task create 400 error enum = %v", badRequestEnum)
+			}
+			createDescription := strings.ToLower(swaggerValue(t, document, "paths", createPath, "post", "description").(string))
+			for _, term := range []string{"breaking", "security hardening", "taskdetail", "input_summary"} {
+				if !strings.Contains(createDescription, term) {
+					t.Errorf("task create description lacks %q", term)
+				}
+			}
+			badRequestDescription := strings.ToLower(swaggerValue(t, document, "paths", createPath, "post", "responses", "400", "description").(string))
+			for _, term := range []string{"invalid task request", "attachment unavailable", "missing", "not ready"} {
+				if !strings.Contains(badRequestDescription, term) {
+					t.Errorf("task create 400 description lacks %q", term)
+				}
 			}
 
 			mergeResponses := swaggerValue(t, document, "paths", "/api/v1/platform/tasks/attachments/{attachmentID}/merge", "post", "responses").(map[string]interface{})
@@ -565,7 +611,54 @@ func TestSwaggerDocumentsTaskCreateAndLegacySecurityCorrections(t *testing.T) {
 					t.Errorf("legacy model mutation %s %s 403 description must include CSRF", operation.method, operation.path)
 				}
 			}
+
+			definitions := swaggerValue(t, document, "definitions").(map[string]interface{})
+			for _, obsolete := range []string{"websocket.APIResponse", "websocket.TaskCreateResponse", "websocket.TaskStatusResponse"} {
+				if _, exists := definitions[obsolete]; exists {
+					t.Errorf("unreferenced retired task schema %s must be removed", obsolete)
+				}
+			}
 		})
+	}
+}
+
+func TestAPIGuidesDocumentHTTPSBootstrapPasswordChangeAndTaskCreateMigration(t *testing.T) {
+	for _, guide := range []struct {
+		path     string
+		required []string
+	}{
+		{"../../docs/api/reference.en.md", []string{
+			"### Security-hardening task-create response migration", "Breaking change", "202", "TaskDetail", "owner_user_id", "input_summary", "503",
+			`"error": "task dispatch unavailable"`, "BASE_URL = \"https://localhost:8443\"", `CA_BUNDLE = "<trusted-local-ca.pem>"`,
+			`f"{BASE_URL}/api/v1/auth/me"`, `f"{BASE_URL}/api/v1/auth/change-password"`, `"old_password": "<current-password>"`,
+			`login_with_password("<new-password>")`, `--cacert "$CA_BUNDLE"`, "trusted local TLS-terminating reverse proxy", "production `Secure` cookies",
+			`ME_JSON="$(curl -fsS --cacert "$CA_BUNDLE" -b "$COOKIE_JAR" "$BASE_URL/api/v1/auth/me")"`,
+			`-d '{"username":"<username>","password":"<new-password>"}'`,
+		}},
+		{"../../docs/api/reference.md", []string{
+			"### 任务创建响应的安全加固迁移", "破坏性变更", "202", "TaskDetail", "owner_user_id", "input_summary", "503",
+			`"error": "task dispatch unavailable"`, "BASE_URL = \"https://localhost:8443\"", `CA_BUNDLE = "<trusted-local-ca.pem>"`,
+			`f"{BASE_URL}/api/v1/auth/me"`, `f"{BASE_URL}/api/v1/auth/change-password"`, `"old_password": "<current-password>"`,
+			`login_with_password("<new-password>")`, `--cacert "$CA_BUNDLE"`, "可信本地 TLS 终止反向代理", "生产 `Secure` Cookie",
+			`ME_JSON="$(curl -fsS --cacert "$CA_BUNDLE" -b "$COOKIE_JAR" "$BASE_URL/api/v1/auth/me")"`,
+			`-d '{"username":"<username>","password":"<new-password>"}'`,
+		}},
+	} {
+		contents, err := os.ReadFile(guide.path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		text := string(contents)
+		for _, required := range guide.required {
+			if !strings.Contains(text, required) {
+				t.Errorf("%s does not document %q", guide.path, required)
+			}
+		}
+		for _, forbidden := range []string{"curl -k", "--insecure", "http://localhost:8088", `base_url = "http://localhost:8088"`} {
+			if strings.Contains(text, forbidden) {
+				t.Errorf("%s retains insecure example %q", guide.path, forbidden)
+			}
+		}
 	}
 }
 
@@ -579,7 +672,7 @@ func TestAPIGuidesDocumentEnterpriseConsoleContracts(t *testing.T) {
 			"## Enterprise console collections", "/api/v1/platform/dashboard", "exactly 30 UTC", "security_score=null",
 			"TaskListResponse", "ReportListResponse", "UserListResponse", "AuditListResponse", "CatalogPage", "page=1..1000", "page_size=1..100",
 			"attachment.download_authorized", "other users receive `404`", "auditors receive `403`", "schema reaches v8",
-			"GET `/api/v1/auth/csrf` before login", "persistent cookie jar", "session.cookies.get(\"aig_csrf\")", "X-CSRF-Token", "-b cookies.txt",
+			"GET `/api/v1/auth/csrf` before login", "persistent cookie jar", "session.cookies.get(\"aig_csrf\")", "X-CSRF-Token", `-b "$COOKIE_JAR"`,
 			"idx_platform_tasks_updated_at", "idx_platform_tasks_owner_updated_at",
 		}},
 		{"../../docs/api/reference.md", []string{
@@ -587,7 +680,7 @@ func TestAPIGuidesDocumentEnterpriseConsoleContracts(t *testing.T) {
 			"## 企业控制台集合契约", "/api/v1/platform/dashboard", "恰好 30 个 UTC", "security_score=null",
 			"TaskListResponse", "ReportListResponse", "UserListResponse", "AuditListResponse", "CatalogPage", "page=1..1000", "page_size=1..100",
 			"attachment.download_authorized", "其他普通用户得到 `404`", "审计员得到 `403`", "schema 到达 v8",
-			"登录前先 GET `/api/v1/auth/csrf`", "持久 Cookie jar", "session.cookies.get(\"aig_csrf\")", "X-CSRF-Token", "-b cookies.txt",
+			"登录前先 GET `/api/v1/auth/csrf`", "持久 Cookie jar", "session.cookies.get(\"aig_csrf\")", "X-CSRF-Token", `-b "$COOKIE_JAR"`,
 			"idx_platform_tasks_updated_at", "idx_platform_tasks_owner_updated_at",
 		}},
 	} {
@@ -676,11 +769,11 @@ func loadSwaggerDocuments(t *testing.T) map[string]interface{} {
 	if err != nil {
 		t.Fatal(err)
 	}
-	var yamlDocument interface{}
-	if err := yaml.Unmarshal(yamlData, &yamlDocument); err != nil {
+	var rawYAMLDocument map[string]interface{}
+	if err := yaml.Unmarshal(yamlData, &rawYAMLDocument); err != nil {
 		t.Fatal(err)
 	}
-	normalizedYAML, err := json.Marshal(yamlDocument)
+	normalizedYAML, err := json.Marshal(rawYAMLDocument)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -840,6 +933,13 @@ func firstSwaggerDifference(path string, left, right interface{}) string {
 		}
 	}
 	return fmt.Sprintf("%s differs: %v != %v", path, left, right)
+}
+
+func swaggerDocumentsDifference(left, right interface{}) string {
+	if reflect.DeepEqual(left, right) {
+		return ""
+	}
+	return firstSwaggerDifference("$", left, right)
 }
 
 func decodeSwaggerJSON(t *testing.T, data []byte) interface{} {

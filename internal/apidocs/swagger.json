@@ -1,9 +1,9 @@
 {
     "swagger": "2.0",
     "info": {
+        "contact": {},
         "description": "API for managing AIG Custom Platform AI security scanning tasks. Based on Tencent Zhuque Lab AI-Infra-Guard (https://github.com/Tencent/AI-Infra-Guard).",
         "title": "AIG Custom Platform 任务API",
-        "contact": {},
         "version": "1.0"
     },
     "basePath": "/",
@@ -1156,7 +1156,7 @@
                 "consumes": [
                     "application/json"
                 ],
-                "description": "Creates an owner-scoped platform task from the authenticated Cookie Subject. Idempotency-Key is required and unique per owner; retries return the same task. Dispatch uses persisted claims and a global attempt budget. An uncertain network acknowledgement becomes dispatch_unknown and is never submitted automatically again; this is at-most-once dispatch, not exactly-once execution. raw model credentials are rejected: use governed model_id references. Attachments are supplied only as opaque attachment IDs. Requires CSRF protection.",
+                "description": "Breaking security hardening: create responses now use the browser-safe TaskDetail with bounded input_summary instead of the former internal task View; clients must migrate field access. Creates an owner-scoped platform task from the authenticated Cookie Subject. Idempotency-Key is required and unique per owner; retries return the same task. Dispatch uses persisted claims and a global attempt budget. An uncertain network acknowledgement becomes dispatch_unknown and is never submitted automatically again; this is at-most-once dispatch, not exactly-once execution. raw model credentials are rejected: use governed model_id references. Attachments are supplied only as opaque attachment IDs. Requires CSRF protection.",
                 "parameters": [
                     {
                         "in": "header",
@@ -1205,7 +1205,10 @@
                         }
                     },
                     "400": {
-                        "description": "Missing idempotency key, invalid input, raw credentials, or unavailable attachment."
+                        "description": "Fixed generalized body. Missing idempotency key, malformed input, or raw credentials return error=invalid task request; a missing or not ready attachment returns error=attachment unavailable. Identifiers, paths, states, content, and internal errors are never echoed.",
+                        "schema": {
+                            "$ref": "#/definitions/tasks.TaskCreateBadRequestResponse"
+                        }
                     },
                     "401": {
                         "description": "Unauthenticated."
@@ -3459,6 +3462,22 @@
             ],
             "type": "object"
         },
+        "tasks.TaskCreateBadRequestResponse": {
+            "description": "Fixed generalized bad-request body; it never echoes attachment identifiers, paths, states, request content, or internal errors.",
+            "properties": {
+                "error": {
+                    "enum": [
+                        "invalid task request",
+                        "attachment unavailable"
+                    ],
+                    "type": "string"
+                }
+            },
+            "required": [
+                "error"
+            ],
+            "type": "object"
+        },
         "tasks.TaskCreateErrorResponse": {
             "description": "Fixed dispatch-unavailable error with the same browser-safe task detail returned by a successful create.",
             "properties": {
@@ -3590,24 +3609,6 @@
                 "created_at",
                 "updated_at"
             ],
-            "type": "object"
-        },
-        "websocket.APIResponse": {
-            "properties": {
-                "data": {
-                    "description": "响应数据"
-                },
-                "message": {
-                    "description": "响应消息",
-                    "example": "操作成功",
-                    "type": "string"
-                },
-                "status": {
-                    "description": "状态码: 0=成功, 1=失败",
-                    "example": 0,
-                    "type": "integer"
-                }
-            },
             "type": "object"
         },
         "websocket.LegacyModelCreateRequest": {
@@ -3813,51 +3814,6 @@
                 "commit",
                 "build_time"
             ],
-            "type": "object"
-        },
-        "websocket.TaskCreateResponse": {
-            "properties": {
-                "session_id": {
-                    "description": "任务会话ID",
-                    "example": "550e8400-e29b-41d4-a716-446655440000",
-                    "type": "string"
-                }
-            },
-            "type": "object"
-        },
-        "websocket.TaskStatusResponse": {
-            "properties": {
-                "created_at": {
-                    "description": "创建时间戳(毫秒)",
-                    "example": 1640995200000,
-                    "type": "integer"
-                },
-                "log": {
-                    "description": "任务执行日志",
-                    "example": "任务执行日志...",
-                    "type": "string"
-                },
-                "session_id": {
-                    "description": "任务会话ID",
-                    "example": "550e8400-e29b-41d4-a716-446655440000",
-                    "type": "string"
-                },
-                "status": {
-                    "description": "任务状态: pending, running, completed, failed",
-                    "example": "running",
-                    "type": "string"
-                },
-                "title": {
-                    "description": "任务标题",
-                    "example": "MCP安全扫描任务",
-                    "type": "string"
-                },
-                "updated_at": {
-                    "description": "更新时间戳(毫秒)",
-                    "example": 1640995200000,
-                    "type": "integer"
-                }
-            },
             "type": "object"
         }
     }

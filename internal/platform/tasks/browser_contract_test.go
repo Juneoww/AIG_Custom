@@ -247,6 +247,29 @@ func TestTaskBrowserDetailUsesTaskTypeWhitelistAndDropsUnsafeFields(t *testing.T
 	}
 }
 
+func TestTaskAndViewDetailProjectionStayEquivalentAndSafe(t *testing.T) {
+	now := time.Date(2026, 8, 17, 10, 0, 0, 0, time.UTC)
+	task := &Task{
+		ID: "projection-task", OwnerUserID: "owner-id-sentinel", OwnerUsername: "alice",
+		EngineSessionID: "engine-session-sentinel", TaskType: "AI-Infra-Scan",
+		Content: "https://target.invalid\n\nhttps://second.invalid", Params: json.RawMessage(`{"timeout":45,"secret_label":"params-sentinel"}`),
+		AttachmentRefs: json.RawMessage(`["attachment-sentinel"]`), CountryIsoCode: "en", Status: StatusRunning,
+		DispatchError: "dispatch-error-sentinel", CreatedAt: now, UpdatedAt: now.Add(time.Minute),
+	}
+
+	fromTask := taskDetailOf(task)
+	fromView := taskDetailOfView(viewOf(task))
+	assert.Equal(t, fromTask, fromView)
+	encoded, err := json.Marshal(fromTask)
+	require.NoError(t, err)
+	var wire map[string]any
+	require.NoError(t, json.Unmarshal(encoded, &wire))
+	assert.ElementsMatch(t, []string{"id", "owner", "task_type", "status", "created_at", "updated_at", "input_summary"}, mapKeys(wire))
+	for _, forbidden := range []string{"owner-id-sentinel", "engine-session-sentinel", "target.invalid", "params-sentinel", "attachment-sentinel", "dispatch-error-sentinel"} {
+		assert.NotContains(t, string(encoded), forbidden)
+	}
+}
+
 func TestTaskBrowserGormRepositoryFiltersOwnerBeforePagingAndCountsFilteredTotal(t *testing.T) {
 	dsn := os.Getenv("AIG_TEST_DB_DSN")
 	require.NotEmpty(t, dsn)

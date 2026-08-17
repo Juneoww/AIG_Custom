@@ -5,7 +5,7 @@
 
 AIG Custom Platform is an independent custom platform based on Tencent Zhuque Lab AI-Infra-Guard (https://github.com/Tencent/AI-Infra-Guard). It provides a comprehensive set of API interfaces for Agent Scan, MCP Server Scan, Jailbreak Evaluation, AI Infra Scan, and Model Configuration Management. This documentation details the usage methods, parameter descriptions, and example code for each API interface.
 
-After the project is running, you can access `http://localhost:8088/docs/index.html` to view the Swagger documentation.
+After the project is running behind a trusted TLS-terminating reverse proxy, you can access `https://localhost:8443/docs/index.html` with the trusted local CA to view the Swagger documentation.
 
 ## Table of Contents
 
@@ -29,7 +29,7 @@ After the project is running, you can access `http://localhost:8088/docs/index.h
 
 ## Basic Information
 
-- **Base URL**: `http://localhost:8088` (adjust according to actual deployment)
+- **Base URL**: `https://localhost:8443` in the local examples. Production deployments must terminate TLS at a trusted reverse proxy; the authenticated cookies are `Secure`, and clients must verify the deployment CA.
 - **Content-Type**: `application/json`
 - **Authentication**: Browser requests use the `aig_session` HttpOnly cookie issued by the session login endpoint. Do not send a `username` header: it is not an authentication mechanism. State-changing authenticated requests must also send the `X-CSRF-Token` header matching the `aig_csrf` cookie.
 
@@ -70,6 +70,19 @@ The list endpoints use explicit envelopes with `items`, int64 `total`, `page`, a
 | `GET /api/v1/platform/models` | `CatalogPage` | Users see global plus own private platform rows; auditors see global rows read-only; admins see all platform rows. Tokens are always `********`; `source` is `platform` or `yaml`, and `read_only` is explicit. Read-only YAML rows remain distinct when an ID collides with a platform row and catalog loading fails closed. |
 
 `GET /api/v1/platform/tasks/{taskID}` returns `TaskDetail`, whose `input_summary` contains only bounded display metadata. A user sees only their own task; auditors/admins have global read access; absent or user-invisible tasks return `404`. `GET /api/v1/platform/tasks/{taskID}/result` is retired: after authentication and the password-change gate it always returns `410 Gone` and never reads engine output.
+
+### Security-hardening task-create response migration
+
+**Breaking change:** `POST /api/v1/platform/tasks` no longer returns the former internal task `View`. A successful `202` now returns `TaskDetail` with exactly `id`, display-safe `owner`, canonical `task_type`, `status`, `created_at`, `updated_at`, and bounded `input_summary`. This prevents stored request and engine internals from crossing the browser boundary.
+
+| Former `View` field | New client behavior |
+|---|---|
+| `owner_user_id`, `owner_username` | Removed; display `owner`. Do not use a response value for authorization. |
+| `content`, `params`, `attachment_ids` | Removed; use `input_summary` for approved display metadata and retain the submitted form locally only when the UI needs it. |
+| `country_iso_code` | Removed; use the normalized `input_summary.language` when present. |
+| `engine_session_id`, `dispatch_error`, `dispatch_attempts` | Removed; render the public `status` and a generic client message. |
+
+A trusted dispatch failure returns `503` as `{ "error": "task dispatch unavailable", "task": { ...TaskDetail } }`; it never returns dispatch diagnostics. Clients must update both the `202` decoder and the `503` error path, stop reading removed fields, and treat unknown task types as `unknown` with an empty `input_summary`.
 
 Attachment mutations require CSRF. Users create/write only their own opaque attachments; administrators may govern any attachment; auditors are read-only. For download, the owner succeeds, other users receive `404`, auditors receive `403`, and administrators may download across owners. Before a cross-owner administrator storage open, the server durably writes the sanitized `attachment.download_authorized` authorization event. That event proves authorization, not downstream stream delivery, and no storage location is returned.
 
@@ -124,32 +137,70 @@ The primary color must be `#RRGGBB`. A Logo must be a real PNG or JPEG whose dec
 
 ### Authenticated browser session required by every example
 
-This compatibility API is not anonymous. GET `/api/v1/auth/csrf` before login, submit that token in both the `aig_csrf` cookie and `X-CSRF-Token` header when logging in, and retain the rotated `aig_session` and `aig_csrf` cookies in a persistent cookie jar. A subject with `must_change_password=true` must change the password before any model request. Every mutation below sends the current `aig_csrf` cookie value again in `X-CSRF-Token`.
+This compatibility API is not anonymous and production credential routes require HTTPS. The local example assumes a trusted local TLS-terminating reverse proxy on port 8443, a trusted CA bundle, and production `Secure` cookies; never disable certificate verification. GET `/api/v1/auth/csrf` before login, retain the rotated cookies in a persistent jar, read `/api/v1/auth/me`, and complete the required password change before any model request. Because a successful password change clears the session, the client logs in again. Every mutation below sends the current `aig_csrf` cookie value in `X-CSRF-Token`.
 
 ```python
 import requests
 
-base_url = "http://localhost:8088"
+BASE_URL = "https://localhost:8443"
+CA_BUNDLE = "<trusted-local-ca.pem>"
 session = requests.Session()  # persistent cookie jar
-bootstrap = session.get(f"{base_url}/api/v1/auth/csrf")
+session.verify = CA_BUNDLE
+bootstrap = session.get(f"{BASE_URL}/api/v1/auth/csrf")
 bootstrap.raise_for_status()
-login = session.post(
-    f"{base_url}/api/v1/auth/login",
-    json={"username": "<username>", "password": "<password>"},
-    headers={"X-CSRF-Token": bootstrap.json()["csrf_token"]},
-)
-login.raise_for_status()
+
+def login_with_password(password):
+    response = session.post(
+        f"{BASE_URL}/api/v1/auth/login",
+        json={"username": "<username>", "password": password},
+        headers={"X-CSRF-Token": session.cookies.get("aig_csrf")},
+    )
+    response.raise_for_status()
+    return response
+
+login_with_password("<current-password>")
+me_response = session.get(f"{BASE_URL}/api/v1/auth/me")
+me_response.raise_for_status()
+subject = me_response.json()
+if subject["must_change_password"]:
+    changed = session.post(
+        f"{BASE_URL}/api/v1/auth/change-password",
+        json={"old_password": "<current-password>", "new_password": "<new-password>"},
+        headers={"X-CSRF-Token": session.cookies.get("aig_csrf")},
+    )
+    changed.raise_for_status()  # 204; aig_session is now cleared
+    login_with_password("<new-password>")
+    me_response = session.get(f"{BASE_URL}/api/v1/auth/me")
+    me_response.raise_for_status()
+    subject = me_response.json()
 csrf_headers = {"X-CSRF-Token": session.cookies.get("aig_csrf")}
 ```
 
-For cURL, persist cookies across both bootstrap calls. Replace only the angle-bracket placeholders; after login, read the refreshed `aig_csrf` value from `cookies.txt` as `<session-csrf-token>`.
+The equivalent cURL flow below uses `jq` and `awk`, persists every cookie update, and verifies the trusted local CA. Replace only angle-bracket placeholders.
 
 ```bash
-curl -sS -c cookies.txt http://localhost:8088/api/v1/auth/csrf
-curl -sS -b cookies.txt -c cookies.txt -X POST http://localhost:8088/api/v1/auth/login \
+BASE_URL="https://localhost:8443"
+CA_BUNDLE="<trusted-local-ca.pem>"
+COOKIE_JAR="cookies.txt"
+BOOTSTRAP_CSRF="$(curl -fsS --cacert "$CA_BUNDLE" -c "$COOKIE_JAR" "$BASE_URL/api/v1/auth/csrf" | jq -r '.csrf_token')"
+curl -fsS --cacert "$CA_BUNDLE" -b "$COOKIE_JAR" -c "$COOKIE_JAR" -X POST "$BASE_URL/api/v1/auth/login" \
   -H "Content-Type: application/json" \
-  -H "X-CSRF-Token: <bootstrap-csrf-token>" \
-  -d '{"username":"<username>","password":"<password>"}'
+  -H "X-CSRF-Token: $BOOTSTRAP_CSRF" \
+  -d '{"username":"<username>","password":"<current-password>"}'
+ME_JSON="$(curl -fsS --cacert "$CA_BUNDLE" -b "$COOKIE_JAR" "$BASE_URL/api/v1/auth/me")"
+if [ "$(printf '%s' "$ME_JSON" | jq -r '.must_change_password')" = "true" ]; then
+  SESSION_CSRF="$(awk '$6 == "aig_csrf" {value=$7} END {print value}' "$COOKIE_JAR")"
+  curl -fsS --cacert "$CA_BUNDLE" -b "$COOKIE_JAR" -c "$COOKIE_JAR" -X POST "$BASE_URL/api/v1/auth/change-password" \
+    -H "Content-Type: application/json" \
+    -H "X-CSRF-Token: $SESSION_CSRF" \
+    -d '{"old_password":"<current-password>","new_password":"<new-password>"}'
+  curl -fsS --cacert "$CA_BUNDLE" -b "$COOKIE_JAR" -c "$COOKIE_JAR" -X POST "$BASE_URL/api/v1/auth/login" \
+    -H "Content-Type: application/json" \
+    -H "X-CSRF-Token: $SESSION_CSRF" \
+    -d '{"username":"<username>","password":"<new-password>"}'
+  ME_JSON="$(curl -fsS --cacert "$CA_BUNDLE" -b "$COOKIE_JAR" "$BASE_URL/api/v1/auth/me")"
+fi
+SESSION_CSRF="$(awk '$6 == "aig_csrf" {value=$7} END {print value}' "$COOKIE_JAR")"
 ```
 
 ### 1. Get Model List
@@ -176,7 +227,7 @@ curl -sS -b cookies.txt -c cookies.txt -X POST http://localhost:8088/api/v1/auth
 import requests
 
 def get_model_list():
-    url = "http://localhost:8088/api/v1/app/models"
+    url = f"{BASE_URL}/api/v1/app/models"
     headers = {
         "Content-Type": "application/json"
     }
@@ -198,7 +249,7 @@ if result['status'] == 0:
 
 #### cURL Example
 ```bash
-curl -b cookies.txt -X GET http://localhost:8088/api/v1/app/models \
+curl --cacert "$CA_BUNDLE" -b "$COOKIE_JAR" -X GET "$BASE_URL/api/v1/app/models" \
   -H "Content-Type: application/json"
 ```
 
@@ -261,7 +312,7 @@ curl -b cookies.txt -X GET http://localhost:8088/api/v1/app/models \
 #### Python Example
 ```python
 def get_model_detail(model_id):
-    url = f"http://localhost:8088/api/v1/app/models/{model_id}"
+    url = f"{BASE_URL}/api/v1/app/models/{model_id}"
     headers = {
         "Content-Type": "application/json"
     }
@@ -281,7 +332,7 @@ if result['status'] == 0:
 
 #### cURL Example
 ```bash
-curl -b cookies.txt -X GET http://localhost:8088/api/v1/app/models/gpt4-model \
+curl --cacert "$CA_BUNDLE" -b "$COOKIE_JAR" -X GET "$BASE_URL/api/v1/app/models/gpt4-model" \
   -H "Content-Type: application/json"
 ```
 
@@ -327,13 +378,13 @@ curl -b cookies.txt -X GET http://localhost:8088/api/v1/app/models/gpt4-model \
 #### Python Example
 ```python
 def create_model():
-    url = "http://localhost:8088/api/v1/app/models"
+    url = f"{BASE_URL}/api/v1/app/models"
     headers = {**csrf_headers, "Content-Type": "application/json"}
     data = {
         "model_id": "my-gpt4-model",
         "model": {
             "model": "gpt-4",
-            "token": "sk-your-api-key-here",
+            "token": "<api-key>",
             "base_url": "https://api.openai.com/v1",
             "note": "My GPT-4 Model",
             "limit": 2000
@@ -353,14 +404,14 @@ else:
 
 #### cURL Example
 ```bash
-curl -b cookies.txt -X POST http://localhost:8088/api/v1/app/models \
+curl --cacert "$CA_BUNDLE" -b "$COOKIE_JAR" -X POST "$BASE_URL/api/v1/app/models" \
   -H "Content-Type: application/json" \
-  -H "X-CSRF-Token: <session-csrf-token>" \
+  -H "X-CSRF-Token: $SESSION_CSRF" \
   -d '{
     "model_id": "my-gpt4-model",
     "model": {
       "model": "gpt-4",
-      "token": "sk-your-api-key-here",
+      "token": "<api-key>",
       "base_url": "https://api.openai.com/v1",
       "note": "My GPT-4 Model",
       "limit": 2000
@@ -402,7 +453,7 @@ curl -b cookies.txt -X POST http://localhost:8088/api/v1/app/models \
 #### Python Example
 ```python
 def update_model(model_id):
-    url = f"http://localhost:8088/api/v1/app/models/{model_id}"
+    url = f"{BASE_URL}/api/v1/app/models/{model_id}"
     headers = {**csrf_headers, "Content-Type": "application/json"}
     # Only update note and limit, don't modify token
     data = {
@@ -429,7 +480,7 @@ else:
 #### Update Token Example
 ```python
 def update_model_token(model_id, new_token):
-    url = f"http://localhost:8088/api/v1/app/models/{model_id}"
+    url = f"{BASE_URL}/api/v1/app/models/{model_id}"
     data = {
         "model": {
             "model": "gpt-4",
@@ -447,9 +498,9 @@ def update_model_token(model_id, new_token):
 #### cURL Example
 ```bash
 # Only update note information
-curl -b cookies.txt -X PUT http://localhost:8088/api/v1/app/models/my-gpt4-model \
+curl --cacert "$CA_BUNDLE" -b "$COOKIE_JAR" -X PUT "$BASE_URL/api/v1/app/models/my-gpt4-model" \
   -H "Content-Type: application/json" \
-  -H "X-CSRF-Token: <session-csrf-token>" \
+  -H "X-CSRF-Token: $SESSION_CSRF" \
   -d '{
     "model": {
       "model": "gpt-4-turbo",
@@ -461,9 +512,9 @@ curl -b cookies.txt -X PUT http://localhost:8088/api/v1/app/models/my-gpt4-model
   }'
 
 # Update token
-curl -b cookies.txt -X PUT http://localhost:8088/api/v1/app/models/my-gpt4-model \
+curl --cacert "$CA_BUNDLE" -b "$COOKIE_JAR" -X PUT "$BASE_URL/api/v1/app/models/my-gpt4-model" \
   -H "Content-Type: application/json" \
-  -H "X-CSRF-Token: <session-csrf-token>" \
+  -H "X-CSRF-Token: $SESSION_CSRF" \
   -d '{
     "model": {
       "model": "gpt-4",
@@ -499,7 +550,7 @@ curl -b cookies.txt -X PUT http://localhost:8088/api/v1/app/models/my-gpt4-model
 #### Python Example
 ```python
 def delete_models(model_ids):
-    url = "http://localhost:8088/api/v1/app/models"
+    url = f"{BASE_URL}/api/v1/app/models"
     headers = {**csrf_headers, "Content-Type": "application/json"}
     data = {
         "model_ids": model_ids
@@ -522,17 +573,17 @@ if result['status'] == 0:
 #### cURL Example
 ```bash
 # Delete single model
-curl -b cookies.txt -X DELETE http://localhost:8088/api/v1/app/models \
+curl --cacert "$CA_BUNDLE" -b "$COOKIE_JAR" -X DELETE "$BASE_URL/api/v1/app/models" \
   -H "Content-Type: application/json" \
-  -H "X-CSRF-Token: <session-csrf-token>" \
+  -H "X-CSRF-Token: $SESSION_CSRF" \
   -d '{
     "model_ids": ["my-gpt4-model"]
   }'
 
 # Batch delete multiple models
-curl -b cookies.txt -X DELETE http://localhost:8088/api/v1/app/models \
+curl --cacert "$CA_BUNDLE" -b "$COOKIE_JAR" -X DELETE "$BASE_URL/api/v1/app/models" \
   -H "Content-Type: application/json" \
-  -H "X-CSRF-Token: <session-csrf-token>" \
+  -H "X-CSRF-Token: $SESSION_CSRF" \
   -d '{
     "model_ids": ["model1", "model2", "model3"]
   }'
@@ -558,7 +609,7 @@ In addition to database models created through the API, the system also supports
 ```yaml
 - model_id: system_default
   model_name: deepseek-chat
-  token: sk-your-api-key
+  token: <api-key>
   base_url: https://api.deepseek.com/v1
   note: System Default Model
   limit: 1000
@@ -568,7 +619,7 @@ In addition to database models created through the API, the system also supports
 
 - model_id: eval_model
   model_name: gpt-4
-  token: sk-your-eval-key
+  token: <evaluation-api-key>
   base_url: https://api.openai.com/v1
   note: Evaluation Model
   limit: 2000

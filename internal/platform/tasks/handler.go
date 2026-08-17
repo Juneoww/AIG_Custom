@@ -259,7 +259,9 @@ func (handler *Handler) create(c *gin.Context) {
 	detail := taskDetailOfView(view)
 	switch {
 	case errors.Is(err, ErrInvalid):
-		c.Status(http.StatusBadRequest)
+		c.JSON(http.StatusBadRequest, TaskCreateBadRequestResponse{Error: "invalid task request"})
+	case errors.Is(err, ErrNotFound), errors.Is(err, ErrAttachmentNotReady):
+		c.JSON(http.StatusBadRequest, TaskCreateBadRequestResponse{Error: "attachment unavailable"})
 	case errors.Is(err, ErrForbidden):
 		c.Status(http.StatusForbidden)
 	case errors.Is(err, ErrDispatchFailed):

@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"strings"
 	"testing"
 
 	"github.com/Juneoww/AIG_Custom/internal/platform/audit"
@@ -123,6 +124,32 @@ func TestTaskCreateDispatchFailureUsesFixedErrorAndSafeTaskWire(t *testing.T) {
 	assert.Zero(t, engine.statusReads.Load(), "rendering the response must not read the engine")
 }
 
+func TestTaskCreateMapsUnavailableAttachmentsToSafeBadRequest(t *testing.T) {
+	engine := &recordingEngine{}
+	router, tokens, attachments := newTaskHandlerFixtureWithAttachments(t, engine)
+	notReady, err := attachments.BeginChunked(context.Background(), identity.Subject{
+		UserID: "user-alice", Username: "alice", Role: identity.RoleUser,
+	}, "private-path-state-sentinel.txt", 7)
+	require.NoError(t, err)
+
+	for name, attachmentID := range map[string]string{
+		"missing":   "missing-attachment-sentinel",
+		"not ready": notReady.ID,
+	} {
+		t.Run(name, func(t *testing.T) {
+			response := performTaskJSON(t, router, tokens["alice"], http.MethodPost, "/tasks", "attachment-"+strings.ReplaceAll(name, " ", "-"), map[string]any{
+				"task_type": "mcp_scan", "content": "safe scan", "attachment_ids": []string{attachmentID},
+			})
+			require.Equal(t, http.StatusBadRequest, response.Code, response.Body.String())
+			assert.JSONEq(t, `{"error":"attachment unavailable"}`, response.Body.String())
+			for _, forbidden := range []string{attachmentID, "private-path-state-sentinel.txt", attachments.config.UploadDir, string(AttachmentStateUploading)} {
+				assert.NotContains(t, response.Body.String(), forbidden)
+			}
+		})
+	}
+	assert.Zero(t, engine.submits.Load(), "unavailable attachments must fail before engine submission")
+}
+
 func TestProtectedTaskListRejectsHeadersAndAppliesOwnerRBAC(t *testing.T) {
 	router, tokens, _ := newTaskHandlerFixture(t)
 	aliceCreated := performTaskJSON(t, router, tokens["alice"], http.MethodPost, "/tasks", "list-alice", map[string]any{"task_type": "mcp_scan", "content": "scan"})
@@ -153,6 +180,7 @@ func TestProtectedTaskHandlerRequiresIdempotencyKey(t *testing.T) {
 		"task_type": "mcp_scan", "content": "scan",
 	})
 	assert.Equal(t, http.StatusBadRequest, response.Code)
+	assert.JSONEq(t, `{"error":"invalid task request"}`, response.Body.String())
 }
 
 func TestAttachmentHandlerReturnsOnlyOpaqueMetadataAndEnforcesOwnerDownload(t *testing.T) {
@@ -263,6 +291,15 @@ func newTaskHandlerFixture(t *testing.T) (http.Handler, map[string]string, *reco
 }
 
 func newTaskHandlerFixtureWithEngine(t *testing.T, engine EngineAdapter) (http.Handler, map[string]string) {
+	router, tokens, _ := newTaskHandlerFixtureWithOptions(t, engine, false)
+	return router, tokens
+}
+
+func newTaskHandlerFixtureWithAttachments(t *testing.T, engine EngineAdapter) (http.Handler, map[string]string, *AttachmentService) {
+	return newTaskHandlerFixtureWithOptions(t, engine, true)
+}
+
+func newTaskHandlerFixtureWithOptions(t *testing.T, engine EngineAdapter, withAttachments bool) (http.Handler, map[string]string, *AttachmentService) {
 	t.Helper()
 	gin.SetMode(gin.TestMode)
 	ctx := context.Background()
@@ -281,11 +318,22 @@ func newTaskHandlerFixtureWithEngine(t *testing.T, engine EngineAdapter) (http.H
 		require.NoError(t, err)
 		tokens[input.Username] = login.Token
 	}
-	service := NewService(NewMemoryRepository(), engine, audit.NewService(audit.NewMemoryRepository()))
+	repository := NewMemoryRepository()
+	auditService := audit.NewService(audit.NewMemoryRepository())
+	service := NewService(repository, engine, auditService)
+	var attachments *AttachmentService
+	if withAttachments {
+		var err error
+		attachments, err = NewAttachmentService(repository, AttachmentConfig{
+			UploadDir: t.TempDir(), MaxFileBytes: 16, MaxChunkBytes: 8,
+		}, auditService)
+		require.NoError(t, err)
+		service.SetAttachmentService(attachments)
+	}
 	router := gin.New()
 	group := router.Group("/tasks", identity.Authenticate(identityService, identity.CookiePolicy{}))
-	NewHandler(service).Register(group)
-	return router, tokens
+	NewHandler(service, attachments).Register(group)
+	return router, tokens, attachments
 }
 
 func assertSafeTaskCreateDetail(t *testing.T, encoded []byte, expected map[string]any, sentinels ...string) {

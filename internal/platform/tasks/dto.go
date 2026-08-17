@@ -51,6 +51,18 @@ type TaskCreateErrorResponse struct {
 	Task  TaskDetail `json:"task"`
 }
 
+// TaskCreateBadRequestResponse is the bounded wire form for rejected create requests.
+type TaskCreateBadRequestResponse struct {
+	Error string `json:"error"`
+}
+
+type taskDetailFields struct {
+	ID, Owner, TaskType, Content, CountryIsoCode string
+	Status                                       Status
+	Params                                       json.RawMessage
+	CreatedAt, UpdatedAt                         time.Time
+}
+
 func taskSummaryOf(task *Task) TaskSummary {
 	return TaskSummary{
 		ID: task.ID, Owner: task.OwnerUsername, TaskType: canonicalTaskType(task.TaskType), Status: task.Status,
@@ -59,19 +71,27 @@ func taskSummaryOf(task *Task) TaskSummary {
 }
 
 func taskDetailOf(task *Task) TaskDetail {
-	summary := taskSummaryOf(task)
-	return TaskDetail{
-		ID: summary.ID, Owner: summary.Owner, TaskType: summary.TaskType, Status: summary.Status,
-		CreatedAt: summary.CreatedAt, UpdatedAt: summary.UpdatedAt, InputSummary: safeInputSummary(task),
-	}
+	return taskDetailFromFields(taskDetailFields{
+		ID: task.ID, Owner: task.OwnerUsername, TaskType: task.TaskType, Status: task.Status,
+		Content: task.Content, Params: task.Params, CountryIsoCode: task.CountryIsoCode,
+		CreatedAt: task.CreatedAt, UpdatedAt: task.UpdatedAt,
+	})
 }
 
 func taskDetailOfView(view View) TaskDetail {
-	return TaskDetail{
-		ID: view.ID, Owner: view.OwnerUsername, TaskType: canonicalTaskType(view.TaskType), Status: view.Status,
+	return taskDetailFromFields(taskDetailFields{
+		ID: view.ID, Owner: view.OwnerUsername, TaskType: view.TaskType, Status: view.Status,
+		Content: view.Content, Params: view.Params, CountryIsoCode: view.CountryIsoCode,
 		CreatedAt: view.CreatedAt, UpdatedAt: view.UpdatedAt,
+	})
+}
+
+func taskDetailFromFields(fields taskDetailFields) TaskDetail {
+	return TaskDetail{
+		ID: fields.ID, Owner: fields.Owner, TaskType: canonicalTaskType(fields.TaskType), Status: fields.Status,
+		CreatedAt: fields.CreatedAt, UpdatedAt: fields.UpdatedAt,
 		InputSummary: safeInputSummary(&Task{
-			TaskType: view.TaskType, Content: view.Content, Params: view.Params, CountryIsoCode: view.CountryIsoCode,
+			TaskType: fields.TaskType, Content: fields.Content, Params: fields.Params, CountryIsoCode: fields.CountryIsoCode,
 		}),
 	}
 }
