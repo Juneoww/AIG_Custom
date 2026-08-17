@@ -251,7 +251,7 @@ func (handler *Handler) create(c *gin.Context) {
 	}
 	var input CreateInput
 	if c.ShouldBindJSON(&input) != nil {
-		c.Status(http.StatusBadRequest)
+		c.JSON(http.StatusBadRequest, TaskCreateBadRequestResponse{Error: "invalid task request"})
 		return
 	}
 	input.IdempotencyKey = c.GetHeader("Idempotency-Key")

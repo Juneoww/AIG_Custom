@@ -183,6 +183,32 @@ func TestProtectedTaskHandlerRequiresIdempotencyKey(t *testing.T) {
 	assert.JSONEq(t, `{"error":"invalid task request"}`, response.Body.String())
 }
 
+func TestTaskCreateMalformedJSONReturnsSafeErrorWithoutSideEffects(t *testing.T) {
+	router, tokens, engine := newTaskHandlerFixture(t)
+	request := httptest.NewRequest(http.MethodPost, "/tasks", strings.NewReader(`{"task_type":"mcp_scan","content":"parse-sentinel"`))
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("Idempotency-Key", "malformed-json")
+	request.AddCookie(&http.Cookie{Name: "aig_session", Value: tokens["alice"]})
+	response := httptest.NewRecorder()
+	router.ServeHTTP(response, request)
+
+	require.Equal(t, http.StatusBadRequest, response.Code, response.Body.String())
+	assert.JSONEq(t, `{"error":"invalid task request"}`, response.Body.String())
+	for _, internal := range []string{"parse-sentinel", "unexpected", "EOF", "syntax", "offset"} {
+		assert.NotContains(t, response.Body.String(), internal)
+	}
+	assert.Zero(t, engine.submits.Load(), "malformed JSON must fail before engine submission")
+	assert.Zero(t, engine.statusReads.Load(), "malformed JSON must not read engine status")
+	assert.Zero(t, engine.resultReads.Load(), "malformed JSON must not read engine results")
+
+	listed := performTaskJSON(t, router, tokens["alice"], http.MethodGet, "/tasks", "", nil)
+	require.Equal(t, http.StatusOK, listed.Code, listed.Body.String())
+	var tasks TaskListResponse
+	require.NoError(t, json.Unmarshal(listed.Body.Bytes(), &tasks))
+	assert.Empty(t, tasks.Items)
+	assert.Zero(t, tasks.Total, "malformed JSON must not persist a task")
+}
+
 func TestAttachmentHandlerReturnsOnlyOpaqueMetadataAndEnforcesOwnerDownload(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	ctx := context.Background()
