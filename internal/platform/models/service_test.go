@@ -6,6 +6,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sync"
+	"sync/atomic"
 	"testing"
 
 	"github.com/Juneoww/AIG_Custom/internal/platform/audit"
@@ -149,6 +151,66 @@ func TestModelSafeCatalogPaginationPreservesReadOnlyYAMLCollision(t *testing.T) 
 	require.NoError(t, err)
 	require.Len(t, page.Items, 1)
 	assert.Equal(t, "yaml-only", page.Items[0].ID)
+}
+
+type legacyModelRepository struct{ delegate *MemoryRepository }
+
+func (repository *legacyModelRepository) Create(ctx context.Context, model *Model) error {
+	return repository.delegate.Create(ctx, model)
+}
+func (repository *legacyModelRepository) Get(ctx context.Context, id string) (*Model, error) {
+	return repository.delegate.Get(ctx, id)
+}
+func (repository *legacyModelRepository) List(ctx context.Context) ([]Model, error) {
+	return repository.delegate.List(ctx)
+}
+func (repository *legacyModelRepository) Update(ctx context.Context, model *Model) error {
+	return repository.delegate.Update(ctx, model)
+}
+func (repository *legacyModelRepository) Delete(ctx context.Context, id string) error {
+	return repository.delegate.Delete(ctx, id)
+}
+
+var _ Repository = (*legacyModelRepository)(nil)
+
+func TestModelSafeCatalogRejectsLegacyRepositoryWithoutPageCapability(t *testing.T) {
+	service := NewService(&legacyModelRepository{delegate: NewMemoryRepository()}, nil, nil)
+	_, err := service.SafeCatalog(context.Background(), identity.Subject{Role: identity.RoleAdmin}, 1, 20)
+	assert.EqualError(t, err, "模型分页仓库未配置")
+}
+
+func TestModelSafeCatalogCachesAndCopiesYAMLLoaderResult(t *testing.T) {
+	service := NewService(NewMemoryRepository(), nil, nil)
+	var loads atomic.Int32
+	service.SetCatalogLoader(func() ([]CatalogView, error) {
+		loads.Add(1)
+		return []CatalogView{{ID: "yaml-one", Name: "original", Token: "secret"}}, nil
+	})
+	admin := identity.Subject{Role: identity.RoleAdmin}
+
+	var wait sync.WaitGroup
+	errors := make(chan error, 12)
+	for index := 0; index < 12; index++ {
+		wait.Add(1)
+		go func() {
+			defer wait.Done()
+			_, err := service.SafeCatalog(context.Background(), admin, 1000, 100)
+			errors <- err
+		}()
+	}
+	wait.Wait()
+	close(errors)
+	for err := range errors {
+		require.NoError(t, err)
+	}
+	first, err := service.SafeCatalog(context.Background(), admin, 1, 20)
+	require.NoError(t, err)
+	require.Len(t, first.Items, 1)
+	first.Items[0].Name = "mutated"
+	second, err := service.SafeCatalog(context.Background(), admin, 1, 20)
+	require.NoError(t, err)
+	assert.Equal(t, "original", second.Items[0].Name)
+	assert.Equal(t, int32(1), loads.Load())
 }
 
 func TestTokenUsesAuthenticatedEncryptionAndSupportsKeyRotationBoundary(t *testing.T) {

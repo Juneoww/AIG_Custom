@@ -430,10 +430,10 @@ func TestGovernanceModelSafeCatalogListEnvelopePaginationPreservesYAMLCollision(
 		assert.JSONEq(t, `{"error":"invalid model request"}`, response.Body.String(), query)
 	}
 	yamlSource.loadErr = errors.New("C:/private/models.yaml: yaml-loader-token-sentinel")
+	loadsBeforeCachedRequest := yamlSource.loadCalls
 	response = governanceRequest(t, router, login.Token, http.MethodGet, "/api/v1/platform/models", nil)
-	assert.Equal(t, http.StatusInternalServerError, response.Code)
-	assert.JSONEq(t, `{"error":"model catalog request failed"}`, response.Body.String())
-	assert.NotContains(t, response.Body.String(), "models.yaml")
+	assert.Equal(t, http.StatusOK, response.Code)
+	assert.Equal(t, loadsBeforeCachedRequest, yamlSource.loadCalls, "catalog requests reuse the process-local YAML snapshot")
 	assert.NotContains(t, response.Body.String(), "yaml-loader-token-sentinel")
 }
 

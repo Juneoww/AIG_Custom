@@ -18,9 +18,10 @@ import (
 )
 
 var (
-	ErrForbidden = errors.New("无权访问模型配置")
-	ErrNotFound  = errors.New("模型配置不存在")
-	ErrInvalid   = errors.New("模型配置无效")
+	ErrForbidden             = errors.New("无权访问模型配置")
+	ErrNotFound              = errors.New("模型配置不存在")
+	ErrInvalid               = errors.New("模型配置无效")
+	ErrPaginationUnavailable = errors.New("模型分页仓库未配置")
 )
 
 const maxCompatibilityModelIDLength = 128
@@ -31,9 +32,12 @@ type Repository interface {
 	Create(context.Context, *Model) error
 	Get(context.Context, string) (*Model, error)
 	List(context.Context) ([]Model, error)
-	ListPage(context.Context, ModelListQuery) ([]Model, int64, error)
 	Update(context.Context, *Model) error
 	Delete(context.Context, string) error
+}
+
+type pageRepository interface {
+	ListPage(context.Context, ModelListQuery) ([]Model, int64, error)
 }
 
 type ModelListVisibility string
@@ -238,12 +242,15 @@ func (repository *MemoryRepository) Delete(_ context.Context, id string) error {
 }
 
 type Service struct {
-	repository Repository
-	keyring    *Keyring
-	audits     audit.Recorder
-	now        func() time.Time
-	catalogMu  sync.RWMutex
-	catalog    CatalogLoader
+	repository    Repository
+	keyring       *Keyring
+	audits        audit.Recorder
+	now           func() time.Time
+	catalogMu     sync.Mutex
+	catalog       CatalogLoader
+	catalogLoaded bool
+	catalogViews  []CatalogView
+	catalogErr    error
 }
 
 func NewService(repository Repository, keyring *Keyring, audits audit.Recorder) *Service {
@@ -254,6 +261,9 @@ func (service *Service) SetCatalogLoader(loader CatalogLoader) {
 	service.catalogMu.Lock()
 	defer service.catalogMu.Unlock()
 	service.catalog = loader
+	service.catalogLoaded = false
+	service.catalogViews = nil
+	service.catalogErr = nil
 }
 
 func (service *Service) Create(ctx context.Context, subject identity.Subject, input CreateInput) (View, error) {
@@ -357,15 +367,13 @@ func (service *Service) SafeCatalog(ctx context.Context, subject identity.Subjec
 	if err != nil {
 		return CatalogPage{}, err
 	}
-	service.catalogMu.RLock()
-	loader := service.catalog
-	service.catalogMu.RUnlock()
-	yamlViews := []CatalogView{}
-	if loader != nil {
-		yamlViews, err = loader()
-		if err != nil {
-			return CatalogPage{}, err
-		}
+	repository, ok := service.repository.(pageRepository)
+	if !ok {
+		return CatalogPage{}, ErrPaginationUnavailable
+	}
+	yamlViews, err := service.loadCatalog()
+	if err != nil {
+		return CatalogPage{}, err
 	}
 	for index := range yamlViews {
 		yamlViews[index].OwnerUserID = ""
@@ -383,7 +391,7 @@ func (service *Service) SafeCatalog(ctx context.Context, subject identity.Subjec
 	offset := (page - 1) * pageSize
 	query.Limit = pageSize
 	query.Offset = offset
-	databaseModels, databaseTotal, err := service.repository.ListPage(ctx, query)
+	databaseModels, databaseTotal, err := repository.ListPage(ctx, query)
 	if err != nil {
 		return CatalogPage{}, err
 	}
@@ -403,6 +411,26 @@ func (service *Service) SafeCatalog(ctx context.Context, subject identity.Subjec
 		items = append(items, remaining...)
 	}
 	return CatalogPage{Items: items, Total: databaseTotal + int64(len(yamlViews)), Page: page, PageSize: pageSize}, nil
+}
+
+func (service *Service) loadCatalog() ([]CatalogView, error) {
+	service.catalogMu.Lock()
+	defer service.catalogMu.Unlock()
+	if !service.catalogLoaded {
+		service.catalogLoaded = true
+		if service.catalog != nil {
+			service.catalogViews, service.catalogErr = service.catalog()
+		}
+		service.catalogViews = cloneCatalogViews(service.catalogViews)
+	}
+	return cloneCatalogViews(service.catalogViews), service.catalogErr
+}
+
+func cloneCatalogViews(views []CatalogView) []CatalogView {
+	if views == nil {
+		return []CatalogView{}
+	}
+	return append([]CatalogView(nil), views...)
 }
 
 func modelListQueryFor(subject identity.Subject) (ModelListQuery, error) {

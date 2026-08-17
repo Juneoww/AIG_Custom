@@ -50,7 +50,7 @@ func TestGormIdentityPaginationUsesCountStableOrderAndSafeProjection(t *testing.
 		}))
 	}
 
-	users, total, err := repository.ListUsers(context.Background(), UserListQuery{Limit: 1, Offset: 1})
+	users, total, err := repository.ListUsersPage(context.Background(), 2, 1)
 	require.NoError(t, err)
 	assert.Equal(t, int64(3), total)
 	require.Len(t, users, 1)

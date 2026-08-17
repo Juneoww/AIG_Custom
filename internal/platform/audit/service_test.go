@@ -190,7 +190,11 @@ func TestAuditPaginationUsesFilteredCountAndSanitizesStoredMetadata(t *testing.T
 func TestAuditPaginationSanitizesBrowserMetadataAtArbitraryArrayDepth(t *testing.T) {
 	repository := NewMemoryRepository()
 	metadata := map[string]any{
-		"safe": "kept",
+		"safe":             "kept",
+		"withdrawal_count": "withdrawal-kept",
+		"draw_calls":       "draw-kept",
+		"error_count":      "error-count-kept",
+		"contention_count": "contention-kept",
 		"nested": []any{[]any{map[string]any{
 			"raw_result":  "raw-sentinel",
 			"config_path": "path-sentinel",
@@ -227,6 +231,9 @@ func TestAuditPaginationSanitizesBrowserMetadataAtArbitraryArrayDepth(t *testing
 	}
 	assert.Contains(t, string(wire), "kept")
 	assert.Contains(t, string(wire), "deep-kept")
+	for _, safeValue := range []string{"withdrawal-kept", "draw-kept", "error-count-kept", "contention-kept"} {
+		assert.Contains(t, string(wire), safeValue)
+	}
 }
 
 func TestAuthenticationAttemptsHaveStableAuditBoundary(t *testing.T) {

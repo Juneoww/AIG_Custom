@@ -428,16 +428,7 @@ func sanitizeBrowserValue(value any) any {
 		out := make(map[string]any, len(typed))
 		for key, nested := range typed {
 			normalized := strings.NewReplacer("-", "", "_", "", " ", "").Replace(strings.ToLower(key))
-			sensitive := false
-			for _, fragment := range []string{
-				"raw", "error", "path", "stack", "token", "secret", "password", "credential", "header", "content",
-			} {
-				if strings.Contains(normalized, fragment) {
-					sensitive = true
-					break
-				}
-			}
-			if sensitive {
+			if sensitiveBrowserKey(normalized) {
 				out[key] = RedactedValue
 				continue
 			}
@@ -452,6 +443,21 @@ func sanitizeBrowserValue(value any) any {
 		return out
 	default:
 		return value
+	}
+}
+
+func sensitiveBrowserKey(normalized string) bool {
+	switch normalized {
+	case "raw", "rawresult", "rawdata", "rawpayload", "rawresponse",
+		"error", "internalerror", "errormessage", "errorstack",
+		"path", "configpath", "filepath", "stack", "stacktrace",
+		"token", "apitoken", "accesstoken", "refreshtoken", "secret", "clientsecret",
+		"password", "passwordhash", "credential", "credentials",
+		"header", "headers", "authorizationheader",
+		"content", "requestcontent", "responsecontent":
+		return true
+	default:
+		return false
 	}
 }
 

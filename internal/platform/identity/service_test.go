@@ -104,3 +104,15 @@ func TestListUsersPaginationUsesStableRepositoryPage(t *testing.T) {
 	_, _, err = service.ListUsers(ctx, 1001, 20)
 	assert.ErrorIs(t, err, ErrInvalidPagination)
 }
+
+type legacyIdentityRepository struct{ Repository }
+
+func (*legacyIdentityRepository) ListUsers(context.Context) ([]User, error) { return nil, nil }
+
+var _ Repository = (*legacyIdentityRepository)(nil)
+
+func TestListUsersPaginationRejectsLegacyRepositoryWithoutPageCapability(t *testing.T) {
+	service := NewService(&legacyIdentityRepository{Repository: NewMemoryRepository()})
+	_, _, err := service.ListUsers(context.Background(), 1, 20)
+	assert.EqualError(t, err, "用户分页仓库未配置")
+}
