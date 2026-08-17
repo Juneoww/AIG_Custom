@@ -16,6 +16,11 @@ type Handler struct {
 	attachments *AttachmentService
 }
 
+const (
+	defaultTaskPageSize = 20
+	maxTaskPageSize     = 100
+)
+
 func NewHandler(service *Service, attachments ...*AttachmentService) *Handler {
 	handler := &Handler{service: service}
 	if len(attachments) > 0 {
@@ -45,14 +50,54 @@ func (handler *Handler) list(c *gin.Context) {
 		c.Status(http.StatusUnauthorized)
 		return
 	}
-	views, err := handler.service.List(c.Request.Context(), subject)
+	page, pageSize, err := taskPage(c)
+	if err != nil {
+		respondTaskError(c, ErrInvalid)
+		return
+	}
+	response, err := handler.service.Browse(c.Request.Context(), subject, page, pageSize)
 	switch {
 	case errors.Is(err, ErrForbidden):
-		c.Status(http.StatusForbidden)
+		respondTaskError(c, err)
 	case err != nil:
-		c.Status(http.StatusInternalServerError)
+		respondTaskError(c, err)
 	default:
-		c.JSON(http.StatusOK, views)
+		c.JSON(http.StatusOK, response)
+	}
+}
+
+func taskPage(c *gin.Context) (int, int, error) {
+	page, pageSize := 1, defaultTaskPageSize
+	if raw := c.Query("page"); raw != "" {
+		value, err := strconv.Atoi(raw)
+		if err != nil || value < 1 {
+			return 0, 0, ErrInvalid
+		}
+		page = value
+	}
+	if raw := c.Query("page_size"); raw != "" {
+		value, err := strconv.Atoi(raw)
+		if err != nil || value < 1 {
+			return 0, 0, ErrInvalid
+		}
+		if value > maxTaskPageSize {
+			value = maxTaskPageSize
+		}
+		pageSize = value
+	}
+	return page, pageSize, nil
+}
+
+func respondTaskError(c *gin.Context, err error) {
+	switch {
+	case errors.Is(err, ErrForbidden):
+		c.JSON(http.StatusForbidden, gin.H{"error": "forbidden"})
+	case errors.Is(err, ErrNotFound):
+		c.JSON(http.StatusNotFound, gin.H{"error": "not found"})
+	case errors.Is(err, ErrInvalid):
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid task request"})
+	default:
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "task request failed"})
 	}
 }
 
@@ -189,24 +234,12 @@ func respondAttachmentError(c *gin.Context, err error) {
 }
 
 func (handler *Handler) result(c *gin.Context) {
-	subject, ok := identity.CurrentSubject(c)
+	_, ok := identity.CurrentSubject(c)
 	if !ok {
 		c.Status(http.StatusUnauthorized)
 		return
 	}
-	result, err := handler.service.Result(c.Request.Context(), subject, c.Param("taskID"))
-	switch {
-	case errors.Is(err, ErrForbidden):
-		c.Status(http.StatusForbidden)
-	case errors.Is(err, ErrNotFound):
-		c.Status(http.StatusNotFound)
-	case errors.Is(err, ErrResultNotReady):
-		c.Status(http.StatusConflict)
-	case err != nil:
-		c.Status(http.StatusInternalServerError)
-	default:
-		c.Data(http.StatusOK, "application/json", result)
-	}
+	c.JSON(http.StatusGone, gin.H{"error": "task result route retired"})
 }
 
 func (handler *Handler) create(c *gin.Context) {
@@ -242,16 +275,16 @@ func (handler *Handler) get(c *gin.Context) {
 		c.Status(http.StatusUnauthorized)
 		return
 	}
-	view, err := handler.service.Get(c.Request.Context(), subject, c.Param("taskID"))
+	detail, err := handler.service.BrowserGet(c.Request.Context(), subject, c.Param("taskID"))
 	switch {
 	case errors.Is(err, ErrForbidden):
-		c.Status(http.StatusForbidden)
+		respondTaskError(c, err)
 	case errors.Is(err, ErrNotFound):
-		c.Status(http.StatusNotFound)
+		respondTaskError(c, err)
 	case err != nil:
-		c.Status(http.StatusInternalServerError)
+		respondTaskError(c, err)
 	default:
-		c.JSON(http.StatusOK, view)
+		c.JSON(http.StatusOK, detail)
 	}
 }
 

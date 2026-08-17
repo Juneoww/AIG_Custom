@@ -71,9 +71,10 @@ func TestProtectedTaskListRejectsHeadersAndAppliesOwnerRBAC(t *testing.T) {
 	for actor, expected := range map[string]int{"alice": 1, "bob": 1, "auditor": 2, "admin": 2} {
 		response := performTaskJSON(t, router, tokens[actor], http.MethodGet, "/tasks", "", nil)
 		require.Equal(t, http.StatusOK, response.Code, actor+": "+response.Body.String())
-		var tasks []View
+		var tasks TaskListResponse
 		require.NoError(t, json.Unmarshal(response.Body.Bytes(), &tasks))
-		assert.Len(t, tasks, expected)
+		assert.Len(t, tasks.Items, expected)
+		assert.Equal(t, expected, tasks.Total)
 	}
 }
 

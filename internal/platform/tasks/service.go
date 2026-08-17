@@ -58,7 +58,14 @@ type Repository interface {
 	Get(context.Context, string) (*Task, error)
 	GetByEngineSessionID(context.Context, string) (*Task, error)
 	List(context.Context) ([]Task, error)
+	ListBrowser(context.Context, TaskListQuery) ([]Task, int, error)
 	ListRecoverable(context.Context, string, int) ([]Task, error)
+}
+
+type TaskListQuery struct {
+	OwnerUserID string
+	Limit       int
+	Offset      int
 }
 
 type Service struct {
@@ -316,21 +323,66 @@ func (service *Service) Get(ctx context.Context, subject identity.Subject, id st
 	return viewOf(task), nil
 }
 
-func (service *Service) List(ctx context.Context, subject identity.Subject) ([]View, error) {
-	if subject.Role != identity.RoleAdmin && subject.Role != identity.RoleAuditor && subject.Role != identity.RoleUser {
-		return nil, ErrForbidden
+func (service *Service) BrowserGet(ctx context.Context, subject identity.Subject, id string) (TaskDetail, error) {
+	task, err := service.repository.Get(ctx, id)
+	if err != nil {
+		return TaskDetail{}, err
 	}
-	tasks, err := service.repository.List(ctx)
+	if !canRead(subject, task) {
+		return TaskDetail{}, ErrForbidden
+	}
+	return taskDetailOf(task), nil
+}
+
+func (service *Service) Browse(ctx context.Context, subject identity.Subject, page, pageSize int) (TaskListResponse, error) {
+	query, err := taskListQueryFor(subject)
+	if err != nil {
+		return TaskListResponse{}, err
+	}
+	if page < 1 || pageSize < 1 || pageSize > maxTaskPageSize || page-1 > int(^uint(0)>>1)/pageSize {
+		return TaskListResponse{}, ErrInvalid
+	}
+	query.Limit = pageSize
+	query.Offset = (page - 1) * pageSize
+	tasks, total, err := service.repository.ListBrowser(ctx, query)
+	if err != nil {
+		return TaskListResponse{}, err
+	}
+	items := make([]TaskSummary, 0, len(tasks))
+	for index := range tasks {
+		items = append(items, taskSummaryOf(&tasks[index]))
+	}
+	return TaskListResponse{Items: items, Total: total, Page: page, PageSize: pageSize}, nil
+}
+
+func (service *Service) List(ctx context.Context, subject identity.Subject) ([]View, error) {
+	query, err := taskListQueryFor(subject)
+	if err != nil {
+		return nil, err
+	}
+	tasks, _, err := service.repository.ListBrowser(ctx, query)
 	if err != nil {
 		return nil, err
 	}
 	views := make([]View, 0, len(tasks))
 	for index := range tasks {
-		if canRead(subject, &tasks[index]) {
-			views = append(views, viewOf(&tasks[index]))
-		}
+		views = append(views, viewOf(&tasks[index]))
 	}
 	return views, nil
+}
+
+func taskListQueryFor(subject identity.Subject) (TaskListQuery, error) {
+	switch subject.Role {
+	case identity.RoleUser:
+		if subject.UserID == "" {
+			return TaskListQuery{}, ErrForbidden
+		}
+		return TaskListQuery{OwnerUserID: subject.UserID}, nil
+	case identity.RoleAuditor, identity.RoleAdmin:
+		return TaskListQuery{}, nil
+	default:
+		return TaskListQuery{}, ErrForbidden
+	}
 }
 
 func (service *Service) Result(ctx context.Context, subject identity.Subject, id string) (json.RawMessage, error) {
@@ -825,6 +877,29 @@ func (repository *GormRepository) List(ctx context.Context) ([]Task, error) {
 	var tasks []Task
 	err := txcontext.Gorm(ctx, repository.db).Order("created_at ASC, id ASC").Find(&tasks).Error
 	return tasks, err
+}
+
+func (repository *GormRepository) ListBrowser(ctx context.Context, query TaskListQuery) ([]Task, int, error) {
+	db := txcontext.Gorm(ctx, repository.db).Model(&Task{})
+	if query.OwnerUserID != "" {
+		db = db.Where("owner_user_id = ?", query.OwnerUserID)
+	}
+	var total int64
+	if err := db.Count(&total).Error; err != nil {
+		return nil, 0, err
+	}
+	db = db.Order("created_at DESC, id DESC")
+	if query.Offset > 0 {
+		db = db.Offset(query.Offset)
+	}
+	if query.Limit > 0 {
+		db = db.Limit(query.Limit)
+	}
+	var tasks []Task
+	if err := db.Find(&tasks).Error; err != nil {
+		return nil, 0, err
+	}
+	return tasks, int(total), nil
 }
 
 func (repository *GormRepository) ListRecoverable(ctx context.Context, afterID string, limit int) ([]Task, error) {
@@ -1472,6 +1547,34 @@ func (repository *MemoryRepository) List(_ context.Context) ([]Task, error) {
 		return tasks[left].CreatedAt.Before(tasks[right].CreatedAt)
 	})
 	return tasks, nil
+}
+
+func (repository *MemoryRepository) ListBrowser(_ context.Context, query TaskListQuery) ([]Task, int, error) {
+	repository.mu.Lock()
+	defer repository.mu.Unlock()
+	tasks := make([]Task, 0, len(repository.tasks))
+	for _, task := range repository.tasks {
+		if query.OwnerUserID == "" || task.OwnerUserID == query.OwnerUserID {
+			tasks = append(tasks, *cloneTask(task))
+		}
+	}
+	sort.Slice(tasks, func(left, right int) bool {
+		if tasks[left].CreatedAt.Equal(tasks[right].CreatedAt) {
+			return tasks[left].ID > tasks[right].ID
+		}
+		return tasks[left].CreatedAt.After(tasks[right].CreatedAt)
+	})
+	total := len(tasks)
+	if query.Offset >= total {
+		return []Task{}, total, nil
+	}
+	if query.Offset > 0 {
+		tasks = tasks[query.Offset:]
+	}
+	if query.Limit > 0 && len(tasks) > query.Limit {
+		tasks = tasks[:query.Limit]
+	}
+	return tasks, total, nil
 }
 
 func (repository *MemoryRepository) ListRecoverable(_ context.Context, afterID string, limit int) ([]Task, error) {

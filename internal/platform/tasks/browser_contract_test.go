@@ -1,0 +1,224 @@
+package tasks
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"net/http"
+	"os"
+	"testing"
+	"time"
+
+	"github.com/Juneoww/AIG_Custom/internal/platform/audit"
+	"github.com/Juneoww/AIG_Custom/internal/platform/identity"
+	"github.com/Juneoww/AIG_Custom/pkg/database"
+	"github.com/gin-gonic/gin"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+	"gorm.io/driver/postgres"
+	"gorm.io/gorm"
+)
+
+func TestTaskBrowserListReturnsSafePagedOwnerScopedContract(t *testing.T) {
+	router, tokens, repository, _ := newTaskBrowserFixture(t)
+	base := time.Date(2026, 8, 17, 8, 0, 0, 0, time.UTC)
+	for index := range 24 {
+		ownerID, ownerName := "user-alice", "alice"
+		if index%3 == 0 {
+			ownerID, ownerName = "user-bob", "bob"
+		}
+		putBrowserTask(t, repository, Task{
+			ID: fmt.Sprintf("task-%02d", index), OwnerUserID: ownerID, OwnerUsername: ownerName,
+			IdempotencyKey: fmt.Sprintf("key-%02d", index), EngineSessionID: "engine-secret",
+			TaskType: "mcp_scan", Content: "private-content", Params: json.RawMessage(`{"token":"params-secret"}`),
+			AttachmentRefs: json.RawMessage(`["attachment-secret"]`), Status: StatusRunning,
+			DispatchError: "dispatch-secret", DispatchClaimToken: "claim-secret",
+			CreatedAt: base.Add(time.Duration(index/2) * time.Minute), UpdatedAt: base.Add(time.Duration(index) * time.Minute),
+		})
+	}
+
+	response := performTaskJSON(t, router, tokens["alice"], http.MethodGet, "/tasks?page=1&page_size=5", "", nil)
+	require.Equal(t, http.StatusOK, response.Code, response.Body.String())
+	var listed TaskListResponse
+	require.NoError(t, json.Unmarshal(response.Body.Bytes(), &listed))
+	assert.Equal(t, 16, listed.Total)
+	assert.Equal(t, 1, listed.Page)
+	assert.Equal(t, 5, listed.PageSize)
+	require.Len(t, listed.Items, 5)
+	assert.Equal(t, []string{"task-23", "task-22", "task-20", "task-19", "task-17"}, taskSummaryIDs(listed.Items))
+
+	var wire map[string]any
+	require.NoError(t, json.Unmarshal(response.Body.Bytes(), &wire))
+	items := wire["items"].([]any)
+	require.NotEmpty(t, items)
+	assert.ElementsMatch(t, []string{"id", "owner", "task_type", "status", "created_at", "updated_at"}, mapKeys(items[0].(map[string]any)))
+	for _, secret := range []string{"user-alice", "engine-secret", "private-content", "params-secret", "attachment-secret", "dispatch-secret", "claim-secret"} {
+		assert.NotContains(t, response.Body.String(), secret)
+	}
+
+	global := performTaskJSON(t, router, tokens["auditor"], http.MethodGet, "/tasks?page=2&page_size=20", "", nil)
+	require.Equal(t, http.StatusOK, global.Code, global.Body.String())
+	require.NoError(t, json.Unmarshal(global.Body.Bytes(), &listed))
+	assert.Equal(t, 24, listed.Total)
+	assert.Equal(t, 2, listed.Page)
+	assert.Len(t, listed.Items, 4)
+}
+
+func TestTaskBrowserPaginationDefaultsCapsAndRejectsInvalidValues(t *testing.T) {
+	router, tokens, repository, _ := newTaskBrowserFixture(t)
+	now := time.Now().UTC()
+	for index := range 105 {
+		putBrowserTask(t, repository, Task{
+			ID: fmt.Sprintf("page-%03d", index), OwnerUserID: "user-alice", OwnerUsername: "alice",
+			IdempotencyKey: fmt.Sprintf("page-key-%03d", index), TaskType: "mcp_scan", Status: StatusPending,
+			Params: json.RawMessage(`{}`), AttachmentRefs: json.RawMessage(`[]`), CreatedAt: now, UpdatedAt: now,
+		})
+	}
+
+	response := performTaskJSON(t, router, tokens["alice"], http.MethodGet, "/tasks", "", nil)
+	require.Equal(t, http.StatusOK, response.Code, response.Body.String())
+	var listed TaskListResponse
+	require.NoError(t, json.Unmarshal(response.Body.Bytes(), &listed))
+	assert.Equal(t, 20, listed.PageSize)
+	assert.Len(t, listed.Items, 20)
+
+	response = performTaskJSON(t, router, tokens["alice"], http.MethodGet, "/tasks?page=1&page_size=1000", "", nil)
+	require.Equal(t, http.StatusOK, response.Code, response.Body.String())
+	require.NoError(t, json.Unmarshal(response.Body.Bytes(), &listed))
+	assert.Equal(t, 100, listed.PageSize)
+	assert.Len(t, listed.Items, 100)
+
+	for _, query := range []string{"?page=0", "?page=bad", "?page_size=0", "?page_size=bad"} {
+		response = performTaskJSON(t, router, tokens["alice"], http.MethodGet, "/tasks"+query, "", nil)
+		assert.Equal(t, http.StatusBadRequest, response.Code, query)
+		assert.JSONEq(t, `{"error":"invalid task request"}`, response.Body.String(), query)
+	}
+}
+
+func TestTaskBrowserDetailUsesTaskTypeWhitelistAndDropsUnsafeFields(t *testing.T) {
+	router, tokens, repository, _ := newTaskBrowserFixture(t)
+	now := time.Now().UTC()
+	putBrowserTask(t, repository, Task{
+		ID: "agent-detail", OwnerUserID: "user-alice", OwnerUsername: "alice", IdempotencyKey: "agent-detail",
+		EngineSessionID: "engine-detail-secret", TaskType: "agent_scan", Content: "prompt-secret",
+		Params:         json.RawMessage(`{"agent_id":"display-agent","agent_data":"yaml-secret","eval_model":{"token":"token-secret"},"unexpected":"drop-secret"}`),
+		AttachmentRefs: json.RawMessage(`["attachment-secret"]`), CountryIsoCode: "zh", Status: StatusRunning,
+		DispatchError: "dispatch-secret", DispatchClaimToken: "claim-secret", CreatedAt: now, UpdatedAt: now,
+	})
+	putBrowserTask(t, repository, Task{
+		ID: "unknown-detail", OwnerUserID: "user-alice", OwnerUsername: "alice", IdempotencyKey: "unknown-detail",
+		TaskType: "future_unsafe_task", Content: "unknown-content-secret", Params: json.RawMessage(`{"label":"unknown-param-secret"}`),
+		AttachmentRefs: json.RawMessage(`[]`), Status: StatusPending, CreatedAt: now, UpdatedAt: now,
+	})
+	putBrowserTask(t, repository, Task{
+		ID: "sensitive-display-value", OwnerUserID: "user-alice", OwnerUsername: "alice", IdempotencyKey: "sensitive-display-value",
+		TaskType: "agent_scan", Params: json.RawMessage(`{"agent_id":"sk-browser-sensitive-value"}`),
+		AttachmentRefs: json.RawMessage(`[]`), CountryIsoCode: "Bearer language-secret", Status: StatusPending,
+		CreatedAt: now, UpdatedAt: now,
+	})
+
+	response := performTaskJSON(t, router, tokens["alice"], http.MethodGet, "/tasks/agent-detail", "", nil)
+	require.Equal(t, http.StatusOK, response.Code, response.Body.String())
+	var detail TaskDetail
+	require.NoError(t, json.Unmarshal(response.Body.Bytes(), &detail))
+	assert.Equal(t, "display-agent", detail.InputSummary.AgentID)
+	assert.Equal(t, "zh", detail.InputSummary.Language)
+	for _, secret := range []string{"user-alice", "engine-detail-secret", "prompt-secret", "yaml-secret", "token-secret", "drop-secret", "attachment-secret", "dispatch-secret", "claim-secret"} {
+		assert.NotContains(t, response.Body.String(), secret)
+	}
+
+	response = performTaskJSON(t, router, tokens["alice"], http.MethodGet, "/tasks/unknown-detail", "", nil)
+	require.Equal(t, http.StatusOK, response.Code, response.Body.String())
+	assert.NotContains(t, response.Body.String(), "unknown-content-secret")
+	assert.NotContains(t, response.Body.String(), "unknown-param-secret")
+	var unknownWire map[string]any
+	require.NoError(t, json.Unmarshal(response.Body.Bytes(), &unknownWire))
+	assert.Empty(t, unknownWire["input_summary"].(map[string]any))
+
+	response = performTaskJSON(t, router, tokens["alice"], http.MethodGet, "/tasks/sensitive-display-value", "", nil)
+	require.Equal(t, http.StatusOK, response.Code, response.Body.String())
+	assert.NotContains(t, response.Body.String(), "sk-browser-sensitive-value")
+	assert.NotContains(t, response.Body.String(), "language-secret")
+}
+
+func TestTaskBrowserGormRepositoryFiltersOwnerBeforePagingAndCountsFilteredTotal(t *testing.T) {
+	dsn := os.Getenv("AIG_TEST_DB_DSN")
+	require.NotEmpty(t, dsn)
+	db, err := gorm.Open(postgres.Open(dsn), &gorm.Config{DisableForeignKeyConstraintWhenMigrating: true})
+	require.NoError(t, err)
+	require.NoError(t, database.Migrate(db))
+	require.NoError(t, db.Exec("DELETE FROM platform_tasks").Error)
+	repository := NewGormRepository(db)
+	base := time.Date(2026, 8, 17, 9, 0, 0, 0, time.UTC)
+	for index := range 20 {
+		putBrowserTask(t, repository, Task{
+			ID: fmt.Sprintf("bob-%02d", index), OwnerUserID: "user-bob", OwnerUsername: "bob", IdempotencyKey: fmt.Sprintf("bob-%02d", index),
+			EngineSessionID: fmt.Sprintf("engine-bob-%02d", index),
+			TaskType:        "mcp_scan", Status: StatusPending, Params: json.RawMessage(`{}`), AttachmentRefs: json.RawMessage(`[]`),
+			CreatedAt: base.Add(time.Duration(index+10) * time.Minute), UpdatedAt: base,
+		})
+	}
+	for index := range 2 {
+		putBrowserTask(t, repository, Task{
+			ID: fmt.Sprintf("alice-%02d", index), OwnerUserID: "user-alice", OwnerUsername: "alice", IdempotencyKey: fmt.Sprintf("alice-%02d", index),
+			EngineSessionID: fmt.Sprintf("engine-alice-%02d", index),
+			TaskType:        "mcp_scan", Status: StatusPending, Params: json.RawMessage(`{}`), AttachmentRefs: json.RawMessage(`[]`),
+			CreatedAt: base.Add(time.Duration(index) * time.Minute), UpdatedAt: base,
+		})
+	}
+
+	service := NewService(repository, &recordingEngine{}, audit.NewService(audit.NewMemoryRepository()))
+	listed, err := service.Browse(context.Background(), identity.Subject{UserID: "user-alice", Username: "alice", Role: identity.RoleUser}, 1, 1)
+	require.NoError(t, err)
+	assert.Equal(t, 2, listed.Total)
+	require.Len(t, listed.Items, 1)
+	assert.Equal(t, "alice-01", listed.Items[0].ID)
+}
+
+func newTaskBrowserFixture(t *testing.T) (http.Handler, map[string]string, *MemoryRepository, *recordingEngine) {
+	t.Helper()
+	gin.SetMode(gin.TestMode)
+	identityService := identity.NewService(identity.NewMemoryRepository())
+	tokens := map[string]string{}
+	for _, user := range []identity.CreateUserInput{
+		{ID: "user-alice", Username: "alice", Password: "secret", Role: identity.RoleUser},
+		{ID: "user-bob", Username: "bob", Password: "secret", Role: identity.RoleUser},
+		{ID: "user-auditor", Username: "auditor", Password: "secret", Role: identity.RoleAuditor},
+		{ID: "user-admin", Username: "admin", Password: "secret", Role: identity.RoleAdmin},
+	} {
+		_, err := identityService.CreateUser(context.Background(), user)
+		require.NoError(t, err)
+		login, err := identityService.Authenticate(context.Background(), user.Username, user.Password)
+		require.NoError(t, err)
+		tokens[user.Username] = login.Token
+	}
+	repository := NewMemoryRepository()
+	engine := &recordingEngine{}
+	service := NewService(repository, engine, audit.NewService(audit.NewMemoryRepository()))
+	router := gin.New()
+	NewHandler(service).Register(router.Group("/tasks", identity.Authenticate(identityService, identity.CookiePolicy{})))
+	return router, tokens, repository, engine
+}
+
+func putBrowserTask(t *testing.T, repository Repository, task Task) {
+	t.Helper()
+	_, created, err := repository.CreateOrGet(context.Background(), &task)
+	require.NoError(t, err)
+	require.True(t, created)
+}
+
+func taskSummaryIDs(items []TaskSummary) []string {
+	ids := make([]string, 0, len(items))
+	for _, item := range items {
+		ids = append(ids, item.ID)
+	}
+	return ids
+}
+
+func mapKeys(value map[string]any) []string {
+	keys := make([]string, 0, len(value))
+	for key := range value {
+		keys = append(keys, key)
+	}
+	return keys
+}
