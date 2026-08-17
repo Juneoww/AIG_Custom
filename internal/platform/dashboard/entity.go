@@ -27,11 +27,12 @@ type TrendPoint struct {
 }
 
 type AttentionItem struct {
-	ReportID    string              `json:"report_id"`
-	TaskID      string              `json:"task_id"`
-	TaskType    string              `json:"task_type"`
-	CompletedAt time.Time           `json:"completed_at"`
-	Score       int                 `json:"score"`
-	Risk        reports.RiskSummary `json:"risk"`
-	ProductName string              `json:"product_name"`
+	ReportID    string    `json:"report_id"`
+	TaskID      string    `json:"task_id"`
+	TaskType    string    `json:"task_type"`
+	CompletedAt time.Time `json:"completed_at"`
+	Score       int       `json:"score"`
+	High        int       `json:"high"`
+	Medium      int       `json:"medium"`
+	Low         int       `json:"low"`
 }

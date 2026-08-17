@@ -23,7 +23,7 @@ import (
 
 // LatestSchemaVersion is the schema version required by the running server.
 // Schema changes are applied only by the explicit `aig migrate` command.
-const LatestSchemaVersion int64 = 7
+const LatestSchemaVersion int64 = 8
 
 var requiredRuntimeTables = []string{
 	"users",
@@ -74,6 +74,8 @@ var requiredRuntimeIndexes = []runtimeIndexRequirement{
 	{model: &platformTaskMigration{}, name: "idx_platform_tasks_engine_session", table: "platform_tasks", unique: true},
 	{model: &platformTaskMigration{}, name: "idx_platform_tasks_owner_created"},
 	{model: &platformTaskMigration{}, name: "idx_platform_tasks_status"},
+	{model: &platformTaskMigration{}, name: "idx_platform_tasks_updated_at"},
+	{model: &platformTaskMigration{}, name: "idx_platform_tasks_owner_updated_at"},
 	{model: &platformAttachmentMigration{}, name: "idx_platform_attachments_owner_created"},
 	{model: &platformAttachmentMigration{}, name: "idx_platform_attachments_storage_name", table: "platform_attachments", unique: true},
 	{model: &reportSnapshotMigration{}, name: "ux_report_snapshots_task_id", table: "report_snapshots", unique: true},

@@ -118,8 +118,8 @@ func attentionItems(records []reports.DashboardAttention) []AttentionItem {
 	for _, record := range records {
 		items = append(items, AttentionItem{
 			ReportID: record.ReportID, TaskID: record.TaskID, TaskType: record.TaskType,
-			CompletedAt: record.CompletedAt.UTC(), Score: record.Score, ProductName: record.ProductName,
-			Risk: reports.RiskSummary{High: record.High, Medium: record.Medium, Low: record.Low, Score: record.Score},
+			CompletedAt: record.CompletedAt.UTC(), Score: record.Score,
+			High: record.High, Medium: record.Medium, Low: record.Low,
 		})
 	}
 	return items

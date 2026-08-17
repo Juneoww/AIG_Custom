@@ -45,6 +45,7 @@ var migrations = []migration{
 	{version: 5, apply: migratePlatformTaskSchema},
 	{version: 6, apply: migratePlatformTaskDispatchClaimSchema},
 	{version: 7, apply: migrateReportSchema},
+	{version: 8, apply: migratePlatformTaskDashboardIndexes},
 }
 
 const migrationAdvisoryLockKey int64 = 301237729
@@ -353,6 +354,18 @@ func migrateReportSchema(db *gorm.DB) error {
 	for _, statement := range []string{
 		`CREATE INDEX idx_report_snapshots_completed_at ON report_snapshots(completed_at DESC)`,
 		`CREATE INDEX idx_report_snapshots_owner_completed_at ON report_snapshots(owner_user_id, completed_at DESC)`,
+	} {
+		if err := db.Exec(statement).Error; err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func migratePlatformTaskDashboardIndexes(db *gorm.DB) error {
+	for _, statement := range []string{
+		`CREATE INDEX idx_platform_tasks_updated_at ON platform_tasks(updated_at DESC, id DESC)`,
+		`CREATE INDEX idx_platform_tasks_owner_updated_at ON platform_tasks(owner_user_id, updated_at DESC, id DESC)`,
 	} {
 		if err := db.Exec(statement).Error; err != nil {
 			return err

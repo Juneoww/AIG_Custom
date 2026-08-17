@@ -2,9 +2,11 @@ package reports
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"sort"
 	"strings"
 	"sync"
@@ -71,7 +73,6 @@ type DashboardAttention struct {
 	High        int
 	Medium      int
 	Low         int
-	ProductName string
 }
 
 // DashboardRepository is an optional bounded read model. Keeping it separate
@@ -259,13 +260,29 @@ func (repository *GormRepository) Dashboard(ctx context.Context, query Dashboard
 	if err := validateDashboardQuery(query); err != nil {
 		return DashboardProjection{}, err
 	}
-	base := repository.dashboardBase(ctx, query)
+	if transaction, ok := txcontext.FromGorm(ctx); ok {
+		return repository.dashboardWithDB(transaction.WithContext(ctx), query)
+	}
+	var projection DashboardProjection
+	err := repository.db.WithContext(ctx).Transaction(func(transaction *gorm.DB) error {
+		var err error
+		projection, err = repository.dashboardWithDB(transaction, query)
+		return err
+	}, &sql.TxOptions{Isolation: sql.LevelRepeatableRead, ReadOnly: true})
+	if err != nil {
+		return DashboardProjection{}, err
+	}
+	return projection, nil
+}
+
+func (repository *GormRepository) dashboardWithDB(db *gorm.DB, query DashboardQuery) (DashboardProjection, error) {
+	base := repository.dashboardBase(db, query)
 	type aggregateRecord struct {
-		SnapshotCount   int             `gorm:"column:snapshot_count"`
-		ScoreSum        int             `gorm:"column:score_sum"`
-		High            int             `gorm:"column:high"`
-		Medium          int             `gorm:"column:medium"`
-		Low             int             `gorm:"column:low"`
+		SnapshotCount   int64           `gorm:"column:snapshot_count"`
+		ScoreSum        int64           `gorm:"column:score_sum"`
+		High            int64           `gorm:"column:high"`
+		Medium          int64           `gorm:"column:medium"`
+		Low             int64           `gorm:"column:low"`
 		MappingVersions json.RawMessage `gorm:"column:mapping_versions"`
 	}
 	var aggregate aggregateRecord
@@ -279,16 +296,29 @@ func (repository *GormRepository) Dashboard(ctx context.Context, query Dashboard
 		Scan(&aggregate).Error; err != nil {
 		return DashboardProjection{}, err
 	}
+	aggregateValues, err := dashboardInts(aggregate.SnapshotCount, aggregate.ScoreSum, aggregate.High, aggregate.Medium, aggregate.Low)
+	if err != nil {
+		return DashboardProjection{}, err
+	}
 	projection := DashboardProjection{
-		SnapshotCount: aggregate.SnapshotCount,
-		ScoreSum:      aggregate.ScoreSum,
-		Risk:          RiskSummary{High: aggregate.High, Medium: aggregate.Medium, Low: aggregate.Low},
+		SnapshotCount: aggregateValues[0],
+		ScoreSum:      aggregateValues[1],
+		Risk:          RiskSummary{High: aggregateValues[2], Medium: aggregateValues[3], Low: aggregateValues[4]},
 	}
 	if len(aggregate.MappingVersions) > 0 && json.Unmarshal(aggregate.MappingVersions, &projection.MappingVersions) != nil {
 		return DashboardProjection{}, ErrInvalidSnapshot
 	}
 	sort.Strings(projection.MappingVersions)
 
+	type trendRecord struct {
+		Date      time.Time `gorm:"column:date"`
+		Completed int64     `gorm:"column:completed"`
+		ScoreSum  int64     `gorm:"column:score_sum"`
+		High      int64     `gorm:"column:high"`
+		Medium    int64     `gorm:"column:medium"`
+		Low       int64     `gorm:"column:low"`
+	}
+	var trendRecords []trendRecord
 	if err := base.Session(&gorm.Session{}).Select(`
 		date_trunc('day', reports.completed_at AT TIME ZONE 'UTC') AS date,
 		COUNT(*) AS completed,
@@ -297,8 +327,19 @@ func (repository *GormRepository) Dashboard(ctx context.Context, query Dashboard
 		COALESCE(SUM((reports.risk_summary ->> 'medium')::integer), 0) AS medium,
 		COALESCE(SUM((reports.risk_summary ->> 'low')::integer), 0) AS low`).
 		Group("date_trunc('day', reports.completed_at AT TIME ZONE 'UTC')").
-		Order("date ASC").Scan(&projection.Trend).Error; err != nil {
+		Order("date ASC").Scan(&trendRecords).Error; err != nil {
 		return DashboardProjection{}, err
+	}
+	projection.Trend = make([]DashboardTrendPoint, 0, len(trendRecords))
+	for _, record := range trendRecords {
+		values, err := dashboardInts(record.Completed, record.ScoreSum, record.High, record.Medium, record.Low)
+		if err != nil {
+			return DashboardProjection{}, err
+		}
+		projection.Trend = append(projection.Trend, DashboardTrendPoint{
+			Date: record.Date, Completed: values[0], ScoreSum: values[1],
+			High: values[2], Medium: values[3], Low: values[4],
+		})
 	}
 
 	attention := base.Session(&gorm.Session{}).
@@ -306,8 +347,7 @@ func (repository *GormRepository) Dashboard(ctx context.Context, query Dashboard
 			(reports.risk_summary ->> 'score')::integer AS score,
 			(reports.risk_summary ->> 'high')::integer AS high,
 			(reports.risk_summary ->> 'medium')::integer AS medium,
-			(reports.risk_summary ->> 'low')::integer AS low,
-			COALESCE(reports.brand_snapshot ->> 'product_name', '') AS product_name`).
+			(reports.risk_summary ->> 'low')::integer AS low`).
 		Where("((reports.risk_summary ->> 'high')::integer > 0 OR (reports.risk_summary ->> 'score')::integer < 60)").
 		Order("high DESC, score ASC, completed_at DESC, report_id DESC").
 		Limit(query.AttentionLimit)
@@ -317,8 +357,8 @@ func (repository *GormRepository) Dashboard(ctx context.Context, query Dashboard
 	return projection, nil
 }
 
-func (repository *GormRepository) dashboardBase(ctx context.Context, query DashboardQuery) *gorm.DB {
-	db := txcontext.Gorm(ctx, repository.db).Table("report_snapshots AS reports").
+func (repository *GormRepository) dashboardBase(db *gorm.DB, query DashboardQuery) *gorm.DB {
+	db = db.Table("report_snapshots AS reports").
 		Joins("JOIN platform_tasks AS tasks ON tasks.id = reports.task_id AND tasks.owner_user_id = reports.owner_user_id").
 		Where("tasks.status = ?", "succeeded").
 		Where("reports.completed_at >= ? AND reports.completed_at < ?", query.From.UTC(), query.To.UTC())
@@ -486,15 +526,15 @@ func (repository *MemoryRepository) Dashboard(ctx context.Context, query Dashboa
 	repository.mu.RLock()
 	verifier := repository.dashboardTaskSucceeded
 	type safeSnapshot struct {
-		ID, TaskID, OwnerUserID, TaskType, ProductName string
-		CompletedAt                                    time.Time
-		Risk                                           RiskSummary
+		ID, TaskID, OwnerUserID, TaskType string
+		CompletedAt                       time.Time
+		Risk                              RiskSummary
 	}
 	snapshots := make([]safeSnapshot, 0, len(repository.byID))
 	for _, snapshot := range repository.byID {
 		snapshots = append(snapshots, safeSnapshot{
 			ID: snapshot.ID, TaskID: snapshot.TaskID, OwnerUserID: snapshot.OwnerUserID, TaskType: snapshot.TaskType,
-			ProductName: snapshot.Brand.ProductName, CompletedAt: snapshot.CompletedAt, Risk: snapshot.Risk,
+			CompletedAt: snapshot.CompletedAt, Risk: snapshot.Risk,
 		})
 	}
 	repository.mu.RUnlock()
@@ -516,11 +556,21 @@ func (repository *MemoryRepository) Dashboard(ctx context.Context, query Dashboa
 		if !succeeded {
 			continue
 		}
-		projection.SnapshotCount++
-		projection.ScoreSum += snapshot.Risk.Score
-		projection.Risk.High += snapshot.Risk.High
-		projection.Risk.Medium += snapshot.Risk.Medium
-		projection.Risk.Low += snapshot.Risk.Low
+		if err := dashboardAccumulate(&projection.SnapshotCount, 1); err != nil {
+			return DashboardProjection{}, err
+		}
+		if err := dashboardAccumulate(&projection.ScoreSum, snapshot.Risk.Score); err != nil {
+			return DashboardProjection{}, err
+		}
+		if err := dashboardAccumulate(&projection.Risk.High, snapshot.Risk.High); err != nil {
+			return DashboardProjection{}, err
+		}
+		if err := dashboardAccumulate(&projection.Risk.Medium, snapshot.Risk.Medium); err != nil {
+			return DashboardProjection{}, err
+		}
+		if err := dashboardAccumulate(&projection.Risk.Low, snapshot.Risk.Low); err != nil {
+			return DashboardProjection{}, err
+		}
 		mappingVersion := strings.TrimSpace(snapshot.Risk.MappingVersion)
 		if mappingVersion != "" {
 			versions[mappingVersion] = struct{}{}
@@ -528,18 +578,27 @@ func (repository *MemoryRepository) Dashboard(ctx context.Context, query Dashboa
 		day := utcDay(snapshot.CompletedAt)
 		point := trend[day]
 		point.Date = day
-		point.Completed++
-		point.ScoreSum += snapshot.Risk.Score
-		point.High += snapshot.Risk.High
-		point.Medium += snapshot.Risk.Medium
-		point.Low += snapshot.Risk.Low
+		if err := dashboardAccumulate(&point.Completed, 1); err != nil {
+			return DashboardProjection{}, err
+		}
+		if err := dashboardAccumulate(&point.ScoreSum, snapshot.Risk.Score); err != nil {
+			return DashboardProjection{}, err
+		}
+		if err := dashboardAccumulate(&point.High, snapshot.Risk.High); err != nil {
+			return DashboardProjection{}, err
+		}
+		if err := dashboardAccumulate(&point.Medium, snapshot.Risk.Medium); err != nil {
+			return DashboardProjection{}, err
+		}
+		if err := dashboardAccumulate(&point.Low, snapshot.Risk.Low); err != nil {
+			return DashboardProjection{}, err
+		}
 		trend[day] = point
 		if snapshot.Risk.High > 0 || snapshot.Risk.Score < 60 {
 			projection.Attention = append(projection.Attention, DashboardAttention{
 				ReportID: snapshot.ID, TaskID: snapshot.TaskID, TaskType: snapshot.TaskType,
 				CompletedAt: snapshot.CompletedAt.UTC(), Score: snapshot.Risk.Score,
 				High: snapshot.Risk.High, Medium: snapshot.Risk.Medium, Low: snapshot.Risk.Low,
-				ProductName: snapshot.ProductName,
 			})
 		}
 	}
@@ -575,6 +634,40 @@ func validDashboardRisk(risk RiskSummary) bool {
 		risk.High >= 0 && risk.High <= dashboardMaxRiskCount &&
 		risk.Medium >= 0 && risk.Medium <= dashboardMaxRiskCount &&
 		risk.Low >= 0 && risk.Low <= dashboardMaxRiskCount
+}
+
+func dashboardCheckedAdd(left, right int64) (int64, bool) {
+	if right > 0 && left > math.MaxInt64-right || right < 0 && left < math.MinInt64-right {
+		return 0, false
+	}
+	return left + right, true
+}
+
+func dashboardInts(values ...int64) ([]int, error) {
+	converted := make([]int, len(values))
+	for index, value := range values {
+		if value < 0 || uint64(value) > uint64(^uint(0)>>1) {
+			return nil, ErrInvalidSnapshot
+		}
+		converted[index] = int(value)
+	}
+	return converted, nil
+}
+
+func dashboardAccumulate(target *int, value int) error {
+	if target == nil || value < 0 {
+		return ErrInvalidSnapshot
+	}
+	sum, ok := dashboardCheckedAdd(int64(*target), int64(value))
+	if !ok {
+		return ErrInvalidSnapshot
+	}
+	converted, err := dashboardInts(sum)
+	if err != nil {
+		return err
+	}
+	*target = converted[0]
+	return nil
 }
 
 func validateDashboardQuery(query DashboardQuery) error {

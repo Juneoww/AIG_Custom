@@ -75,7 +75,7 @@ func TestHandlerReturnsExplicitSafeDTOAndFixedDatabaseError(t *testing.T) {
 		SnapshotCount: 1, ScoreSum: 50, MappingVersions: []string{"risk-v2"},
 		Risk:      reports.RiskSummary{High: 1},
 		Trend:     []reports.DashboardTrendPoint{{Date: now, Completed: 1, ScoreSum: 50, High: 1}},
-		Attention: []reports.DashboardAttention{{ReportID: "report", TaskID: "task", TaskType: "mcp_scan", CompletedAt: now, Score: 50, High: 1, ProductName: "AIG"}},
+		Attention: []reports.DashboardAttention{{ReportID: "report", TaskID: "task", TaskType: "mcp_scan", CompletedAt: now, Score: 50, High: 1}},
 	}}
 	service := NewService(reportReader, &recordingTaskReader{})
 	service.now = func() time.Time { return now }
@@ -93,8 +93,11 @@ func TestHandlerReturnsExplicitSafeDTOAndFixedDatabaseError(t *testing.T) {
 	require.NoError(t, json.Unmarshal(response.Body.Bytes(), &wire))
 	assert.ElementsMatch(t, []string{"has_data", "security_score", "mapping_versions", "risk", "trend", "recent_tasks", "attention"}, mapKeys(wire))
 	attention := wire["attention"].([]any)[0].(map[string]any)
-	assert.ElementsMatch(t, []string{"report_id", "task_id", "task_type", "completed_at", "score", "risk", "product_name"}, mapKeys(attention))
-	for _, forbidden := range []string{"raw_result", "render_data", "logo", "owner_user_id", "engine_session_id", "dispatch_error", "attachment_refs"} {
+	assert.ElementsMatch(t, []string{"report_id", "task_id", "task_type", "completed_at", "score", "high", "medium", "low"}, mapKeys(attention))
+	for _, forbidden := range []string{"mapping_version", "risk", "product_name", "brand", "logo"} {
+		assert.NotContains(t, attention, forbidden)
+	}
+	for _, forbidden := range []string{"raw_result", "render_data", "logo", "owner_user_id", "engine_session_id", "dispatch_error", "attachment_refs", "product_name"} {
 		assert.NotContains(t, response.Body.String(), forbidden)
 	}
 

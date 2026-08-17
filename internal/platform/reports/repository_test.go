@@ -2,6 +2,7 @@ package reports
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -9,6 +10,7 @@ import (
 	"net/url"
 	"os"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -26,6 +28,28 @@ import (
 type queryCaptureLogger struct {
 	logger.Interface
 	statements []string
+}
+
+type dashboardBarrierLogger struct {
+	logger.Interface
+	firstAggregate chan struct{}
+	resume         chan struct{}
+	once           sync.Once
+}
+
+func (barrier *dashboardBarrierLogger) Trace(ctx context.Context, begin time.Time, fc func() (string, int64), err error) {
+	statement, rows := fc()
+	wait := false
+	if strings.Contains(strings.ToLower(statement), "as snapshot_count") {
+		barrier.once.Do(func() {
+			close(barrier.firstAggregate)
+			wait = true
+		})
+	}
+	if wait {
+		<-barrier.resume
+	}
+	barrier.Interface.Trace(ctx, begin, func() (string, int64) { return statement, rows }, err)
 }
 
 func (capture *queryCaptureLogger) Trace(ctx context.Context, begin time.Time, fc func() (string, int64), err error) {
@@ -179,7 +203,6 @@ func TestGormDashboardProjectionFiltersOwnerUTCWindowSucceededStatusAndUsesSafeB
 	require.Len(t, projection.Attention, 2)
 	assert.Equal(t, "report-alice-lower", projection.Attention[0].ReportID)
 	assert.Equal(t, "report-alice-upper-minus", projection.Attention[1].ReportID)
-	assert.Equal(t, "AIG", projection.Attention[0].ProductName)
 
 	require.GreaterOrEqual(t, len(capture.statements), 3)
 	for _, statement := range capture.statements {
@@ -190,6 +213,7 @@ func TestGormDashboardProjectionFiltersOwnerUTCWindowSucceededStatusAndUsesSafeB
 		assert.NotContains(t, statement, "raw_result")
 		assert.NotContains(t, statement, "render_data")
 		assert.NotContains(t, statement, "logo")
+		assert.NotContains(t, statement, "brand_snapshot")
 	}
 	attentionSQL := capture.statements[len(capture.statements)-1]
 	assert.Contains(t, attentionSQL, "order by")
@@ -202,6 +226,120 @@ func TestGormDashboardProjectionFiltersOwnerUTCWindowSucceededStatusAndUsesSafeB
 	global, err := repository.Dashboard(context.Background(), DashboardQuery{From: lower, To: upper, AttentionLimit: 5})
 	require.NoError(t, err)
 	assert.Equal(t, 3, global.SnapshotCount)
+}
+
+func TestGormDashboardUsesOneReadOnlyRepeatableReadSnapshot(t *testing.T) {
+	db := openReportsTestDB(t)
+	require.NoError(t, database.Migrate(db))
+	lower := time.Date(2026, 8, 1, 0, 0, 0, 0, time.UTC)
+	upper := lower.AddDate(0, 0, 1)
+	query := DashboardQuery{OwnerUserID: "alice", From: lower, To: upper, AttentionLimit: 5}
+
+	seedDashboardTask(t, db, "task-existing", "alice", "succeeded", lower.Add(time.Hour))
+	existing := reportSnapshotFixture("report-existing", "task-existing")
+	existing.CompletedAt = lower.Add(time.Hour)
+	existing.CreatedAt = existing.CompletedAt
+	existing.Risk = RiskSummary{MappingVersion: "risk-v2", Score: 80, High: 1}
+	require.NoError(t, NewGormRepository(db).Create(context.Background(), existing))
+
+	barrier := &dashboardBarrierLogger{
+		Interface: logger.Default.LogMode(logger.Silent), firstAggregate: make(chan struct{}), resume: make(chan struct{}),
+	}
+	defer func() {
+		select {
+		case <-barrier.resume:
+		default:
+			close(barrier.resume)
+		}
+	}()
+	readDB := db.Session(&gorm.Session{Logger: barrier})
+	var settings struct {
+		isolation string
+		readOnly  string
+		err       error
+	}
+	var settingsOnce sync.Once
+	captureSettings := func(queryDB *gorm.DB) {
+		settingsOnce.Do(func() {
+			settings.err = queryDB.Statement.ConnPool.QueryRowContext(queryDB.Statement.Context, "SHOW transaction_isolation").Scan(&settings.isolation)
+			if settings.err == nil {
+				settings.err = queryDB.Statement.ConnPool.QueryRowContext(queryDB.Statement.Context, "SHOW transaction_read_only").Scan(&settings.readOnly)
+			}
+		})
+	}
+	require.NoError(t, readDB.Callback().Query().Before("gorm:query").Register("test:dashboard_transaction_settings", captureSettings))
+	require.NoError(t, readDB.Callback().Row().Before("gorm:row").Register("test:dashboard_transaction_settings", captureSettings))
+
+	type dashboardResult struct {
+		projection DashboardProjection
+		err        error
+	}
+	result := make(chan dashboardResult, 1)
+	go func() {
+		projection, err := NewGormRepository(readDB).Dashboard(context.Background(), query)
+		result <- dashboardResult{projection: projection, err: err}
+	}()
+	select {
+	case <-barrier.firstAggregate:
+	case completed := <-result:
+		require.NoError(t, completed.err)
+		t.Fatal("dashboard completed before aggregate barrier")
+	}
+
+	writerDB := db.Session(&gorm.Session{Logger: logger.Default.LogMode(logger.Silent)})
+	seedDashboardTask(t, writerDB, "task-concurrent", "alice", "succeeded", lower.Add(2*time.Hour))
+	concurrent := reportSnapshotFixture("report-concurrent", "task-concurrent")
+	concurrent.CompletedAt = lower.Add(2 * time.Hour)
+	concurrent.CreatedAt = concurrent.CompletedAt
+	concurrent.Risk = RiskSummary{MappingVersion: "risk-v2", Score: 40, High: 5}
+	require.NoError(t, NewGormRepository(writerDB).Create(context.Background(), concurrent))
+	close(barrier.resume)
+
+	completed := <-result
+	require.NoError(t, completed.err)
+	require.NoError(t, settings.err)
+	assert.Equal(t, "repeatable read", settings.isolation)
+	assert.Equal(t, "on", settings.readOnly)
+	assert.Equal(t, 1, completed.projection.SnapshotCount)
+	assert.Equal(t, 80, completed.projection.ScoreSum)
+	require.Len(t, completed.projection.Trend, 1)
+	assert.Equal(t, 1, completed.projection.Trend[0].Completed)
+	require.Len(t, completed.projection.Attention, 1)
+	assert.Equal(t, "report-existing", completed.projection.Attention[0].ReportID)
+
+	next, err := NewGormRepository(writerDB).Dashboard(context.Background(), query)
+	require.NoError(t, err)
+	assert.Equal(t, 2, next.SnapshotCount)
+	assert.Equal(t, 120, next.ScoreSum)
+	require.Len(t, next.Trend, 1)
+	assert.Equal(t, 2, next.Trend[0].Completed)
+	require.Len(t, next.Attention, 2)
+}
+
+func TestGormDashboardReusesContextTransactionWithoutNesting(t *testing.T) {
+	db := openReportsTestDB(t)
+	require.NoError(t, database.Migrate(db))
+	lower := time.Date(2026, 8, 1, 0, 0, 0, 0, time.UTC)
+	seedDashboardTask(t, db, "task-existing-tx", "alice", "succeeded", lower.Add(time.Hour))
+	snapshot := reportSnapshotFixture("report-existing-tx", "task-existing-tx")
+	snapshot.CompletedAt = lower.Add(time.Hour)
+	snapshot.CreatedAt = snapshot.CompletedAt
+	require.NoError(t, NewGormRepository(db).Create(context.Background(), snapshot))
+
+	capture := &queryCaptureLogger{Interface: logger.Default.LogMode(logger.Silent)}
+	transactionDB := db.Session(&gorm.Session{Logger: capture})
+	require.NoError(t, transactionDB.Transaction(func(tx *gorm.DB) error {
+		ctx := txcontext.WithGorm(context.Background(), tx)
+		projection, err := NewGormRepository(transactionDB).Dashboard(ctx, DashboardQuery{
+			OwnerUserID: "alice", From: lower, To: lower.AddDate(0, 0, 1), AttentionLimit: 5,
+		})
+		require.NoError(t, err)
+		assert.Equal(t, 1, projection.SnapshotCount)
+		return nil
+	}, &sql.TxOptions{Isolation: sql.LevelSerializable}))
+	for _, statement := range capture.statements {
+		assert.NotContains(t, statement, "savepoint", "dashboard must reuse the caller's unit of work")
+	}
 }
 
 func TestDashboardRiskValidationMatchesMemoryAndPostgres(t *testing.T) {
@@ -278,6 +416,69 @@ func TestDashboardRiskValidationMatchesMemoryAndPostgres(t *testing.T) {
 			})
 		}
 	})
+}
+
+func TestDashboardAggregatesCountsAboveInt32InMemoryAndPostgres(t *testing.T) {
+	lower := time.Date(2026, 8, 1, 0, 0, 0, 0, time.UTC)
+	upper := lower.AddDate(0, 0, 1)
+	query := DashboardQuery{OwnerUserID: "owner-large", From: lower, To: upper, AttentionLimit: 5}
+	want := 3 * int(math.MaxInt32)
+	assertProjection := func(t *testing.T, projection DashboardProjection) {
+		t.Helper()
+		assert.Equal(t, 3, projection.SnapshotCount)
+		assert.Equal(t, 150, projection.ScoreSum)
+		assert.Equal(t, RiskSummary{High: want, Medium: want, Low: want}, projection.Risk)
+		require.Len(t, projection.Trend, 1)
+		assert.Equal(t, want, projection.Trend[0].High)
+		assert.Equal(t, want, projection.Trend[0].Medium)
+		assert.Equal(t, want, projection.Trend[0].Low)
+		require.Len(t, projection.Attention, 3)
+	}
+
+	t.Run("memory", func(t *testing.T) {
+		repository := NewMemoryRepository()
+		repository.SetDashboardTaskVerifier(func(context.Context, string, string) (bool, error) { return true, nil })
+		for index := range 3 {
+			id := fmt.Sprintf("memory-large-%d", index)
+			snapshot := reportSnapshotFixture("report-"+id, "task-"+id)
+			snapshot.OwnerUserID = query.OwnerUserID
+			snapshot.CompletedAt = lower.Add(time.Hour)
+			snapshot.CreatedAt = snapshot.CompletedAt
+			snapshot.Risk = RiskSummary{MappingVersion: "risk-v2", Score: 50, High: math.MaxInt32, Medium: math.MaxInt32, Low: math.MaxInt32}
+			require.NoError(t, repository.Create(context.Background(), snapshot))
+		}
+		projection, err := repository.Dashboard(context.Background(), query)
+		require.NoError(t, err)
+		assertProjection(t, projection)
+	})
+
+	t.Run("postgres", func(t *testing.T) {
+		db := openReportsTestDB(t)
+		require.NoError(t, database.Migrate(db))
+		repository := NewGormRepository(db)
+		for index := range 3 {
+			id := fmt.Sprintf("postgres-large-%d", index)
+			seedDashboardTask(t, db, "task-"+id, query.OwnerUserID, "succeeded", lower.Add(time.Hour))
+			snapshot := reportSnapshotFixture("report-"+id, "task-"+id)
+			snapshot.OwnerUserID = query.OwnerUserID
+			snapshot.CompletedAt = lower.Add(time.Hour)
+			snapshot.CreatedAt = snapshot.CompletedAt
+			snapshot.Risk = RiskSummary{MappingVersion: "risk-v2", Score: 50, High: math.MaxInt32, Medium: math.MaxInt32, Low: math.MaxInt32}
+			require.NoError(t, repository.Create(context.Background(), snapshot))
+		}
+		projection, err := repository.Dashboard(context.Background(), query)
+		require.NoError(t, err)
+		assertProjection(t, projection)
+	})
+}
+
+func TestDashboardCheckedAddRejectsInt64Overflow(t *testing.T) {
+	value, ok := dashboardCheckedAdd(math.MaxInt64-1, 1)
+	assert.True(t, ok)
+	assert.Equal(t, int64(math.MaxInt64), value)
+
+	_, ok = dashboardCheckedAdd(math.MaxInt64, 1)
+	assert.False(t, ok)
 }
 
 func seedDashboardTask(t *testing.T, db *gorm.DB, id, owner, status string, timestamp time.Time) {

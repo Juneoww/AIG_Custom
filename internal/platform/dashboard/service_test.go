@@ -101,8 +101,8 @@ func TestServiceAggregatesOnlyFrozenProjectionAndRoundsScores(t *testing.T) {
 			{Date: lastDay, Completed: 1, ScoreSum: 59, Medium: 2, Low: 4},
 		},
 		Attention: []reports.DashboardAttention{
-			{ReportID: "report-high", TaskID: "task-high", TaskType: "mcp_scan", CompletedAt: firstDay.Add(time.Hour), Score: 80, High: 2, Medium: 1, ProductName: "AIG"},
-			{ReportID: "report-low-score", TaskID: "task-low", TaskType: "agent_scan", CompletedAt: lastDay.Add(time.Hour), Score: 59, Medium: 2, Low: 4, ProductName: "AIG"},
+			{ReportID: "report-high", TaskID: "task-high", TaskType: "mcp_scan", CompletedAt: firstDay.Add(time.Hour), Score: 80, High: 2, Medium: 1},
+			{ReportID: "report-low-score", TaskID: "task-low", TaskType: "agent_scan", CompletedAt: lastDay.Add(time.Hour), Score: 59, Medium: 2, Low: 4},
 		},
 	}}
 	service := NewService(reportsReader, &recordingTaskReader{})
@@ -123,8 +123,9 @@ func TestServiceAggregatesOnlyFrozenProjectionAndRoundsScores(t *testing.T) {
 	assert.Equal(t, 59, *view.Trend[29].SecurityScore)
 	require.Len(t, view.Attention, 2)
 	assert.Equal(t, "report-high", view.Attention[0].ReportID)
-	assert.Equal(t, reports.RiskSummary{High: 2, Medium: 1, Score: 80}, view.Attention[0].Risk)
-	assert.Equal(t, "AIG", view.Attention[0].ProductName)
+	assert.Equal(t, 2, view.Attention[0].High)
+	assert.Equal(t, 1, view.Attention[0].Medium)
+	assert.Zero(t, view.Attention[0].Low)
 }
 
 func TestServiceRoundsExtremeProjectionWithoutOverflow(t *testing.T) {
