@@ -9,8 +9,13 @@ import { useQueryClient } from '@tanstack/react-query'
 import { createContext, createElement, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react'
 import type { ReactNode } from 'react'
 
-import { apiRequest, subscribeToUnauthorized } from '../../shared/api/client'
-import { ApiError } from '../../shared/api/errors'
+import {
+  apiRequest,
+  defaultAuthorizationGeneration,
+  subscribeToUnauthorized,
+  type AuthorizationGeneration,
+} from '../../shared/api/client'
+import { ApiError, NetworkError } from '../../shared/api/errors'
 import type {
   CSRFResponse,
   ChangePasswordRequest,
@@ -36,6 +41,7 @@ export interface SessionContextValue {
 }
 
 export interface SessionProviderProps {
+  authorizationGeneration?: AuthorizationGeneration
   children: ReactNode
   initialState?: SessionState
 }
@@ -57,95 +63,220 @@ function jsonRequest<T>(body: T): Pick<RequestInit, 'method' | 'headers' | 'body
   }
 }
 
-async function initializeAnonymousCSRF(): Promise<void> {
-  await apiRequest<CSRFResponse>('/api/v1/auth/csrf')
+function ensureNotAborted(signal?: AbortSignal): void {
+  if (signal?.aborted) throw new NetworkError()
 }
 
-async function fetchCurrentSubject(): Promise<CurrentSubject> {
-  return apiRequest<CurrentSubject>('/api/v1/auth/me')
+async function initializeAnonymousCSRF(
+  signal?: AbortSignal,
+  authorization: AuthorizationGeneration = defaultAuthorizationGeneration,
+): Promise<void> {
+  await apiRequest<CSRFResponse>('/api/v1/auth/csrf', { signal }, { authorization, unauthorized: 'suppress' })
 }
 
-export async function confirmPasswordReset(input: PasswordResetConfirmRequest): Promise<void> {
-  await initializeAnonymousCSRF()
-  await apiRequest<void>('/api/v1/auth/password-resets/confirm', jsonRequest(input), {
-    unauthorized: 'suppress',
-  })
+async function fetchCurrentSubject(
+  signal: AbortSignal,
+  authorization: AuthorizationGeneration,
+): Promise<CurrentSubject> {
+  return apiRequest<CurrentSubject>('/api/v1/auth/me', { signal }, { authorization, unauthorized: 'suppress' })
 }
 
-export function SessionProvider({ children, initialState }: SessionProviderProps) {
+export async function confirmPasswordReset(
+  input: PasswordResetConfirmRequest,
+  signal?: AbortSignal,
+): Promise<void> {
+  await initializeAnonymousCSRF(signal)
+  ensureNotAborted(signal)
+  await apiRequest<void>(
+    '/api/v1/auth/password-resets/confirm',
+    { ...jsonRequest(input), signal },
+    { unauthorized: 'suppress' },
+  )
+}
+
+interface SessionOperation {
+  controller: AbortController
+  id: number
+}
+
+export function SessionProvider({
+  authorizationGeneration = defaultAuthorizationGeneration,
+  children,
+  initialState,
+}: SessionProviderProps) {
   const queryClient = useQueryClient()
   const [state, setState] = useState<SessionState>(initialState ?? { status: 'restoring' })
   const mountedRef = useRef(false)
   const operationRef = useRef(0)
+  const controllerRef = useRef<AbortController | null>(null)
+
+  const beginOperation = useCallback((): SessionOperation => {
+    controllerRef.current?.abort()
+    const controller = new AbortController()
+    controllerRef.current = controller
+    return { controller, id: ++operationRef.current }
+  }, [])
+
+  const isLatest = useCallback(
+    (operation: SessionOperation) =>
+      mountedRef.current &&
+      operationRef.current === operation.id &&
+      controllerRef.current === operation.controller &&
+      !operation.controller.signal.aborted,
+    [],
+  )
+
+  const finishLatest = useCallback(
+    (operation: SessionOperation) => {
+      if (!isLatest(operation)) return false
+      controllerRef.current = null
+      return true
+    },
+    [isLatest],
+  )
 
   const commitLatest = useCallback(
-    (operation: number, nextState: SessionState, clearQueries: boolean) => {
-      if (!mountedRef.current || operationRef.current !== operation) return
+    (operation: SessionOperation, nextState: SessionState, clearQueries: boolean) => {
+      if (!finishLatest(operation)) return false
+      authorizationGeneration.advance()
       if (clearQueries) queryClient.clear()
       setState(nextState)
+      return true
     },
-    [queryClient],
+    [authorizationGeneration, finishLatest, queryClient],
   )
 
   const restore = useCallback(async () => {
-    const operation = ++operationRef.current
+    const operation = beginOperation()
     if (mountedRef.current) setState({ status: 'restoring' })
     try {
-      const subject = await fetchCurrentSubject()
+      const subject = await fetchCurrentSubject(operation.controller.signal, authorizationGeneration)
       commitLatest(operation, stateForSubject(subject), true)
     } catch (error) {
-      if (!mountedRef.current || operationRef.current !== operation) return
+      if (!isLatest(operation)) return
       if (error instanceof ApiError && error.kind === 'unauthenticated') {
         commitLatest(operation, { status: 'anonymous' }, true)
         return
       }
-      commitLatest(operation, { status: 'restore-error', message: RESTORE_ERROR_MESSAGE }, false)
+      commitLatest(operation, { status: 'restore-error', message: RESTORE_ERROR_MESSAGE }, true)
     }
-  }, [commitLatest])
+  }, [authorizationGeneration, beginOperation, commitLatest, isLatest])
 
   const login = useCallback(async (username: string, password: string) => {
-    const operation = ++operationRef.current
-    await initializeAnonymousCSRF()
+    const operation = beginOperation()
+    try {
+      await initializeAnonymousCSRF(operation.controller.signal, authorizationGeneration)
+    } catch (error) {
+      if (!finishLatest(operation)) return
+      throw error
+    }
+    if (!isLatest(operation)) return
+
     const input: LoginRequest = { username, password }
-    await apiRequest<LoginResponse>('/api/v1/auth/login', jsonRequest(input), {
-      unauthorized: 'suppress',
-    })
-    const subject = await fetchCurrentSubject()
-    commitLatest(operation, stateForSubject(subject), true)
-  }, [commitLatest])
+    try {
+      await apiRequest<LoginResponse>(
+        '/api/v1/auth/login',
+        { ...jsonRequest(input), signal: operation.controller.signal },
+        { authorization: authorizationGeneration, unauthorized: 'suppress' },
+      )
+    } catch (error) {
+      if (!finishLatest(operation)) return
+      throw error
+    }
+    if (!isLatest(operation)) return
+
+    try {
+      const subject = await fetchCurrentSubject(operation.controller.signal, authorizationGeneration)
+      commitLatest(operation, stateForSubject(subject), true)
+    } catch (error) {
+      if (!isLatest(operation)) return
+      if (error instanceof ApiError && error.kind === 'unauthenticated') {
+        commitLatest(operation, { status: 'anonymous' }, true)
+      } else {
+        finishLatest(operation)
+      }
+      throw error
+    }
+  }, [authorizationGeneration, beginOperation, commitLatest, finishLatest, isLatest])
 
   const changePassword = useCallback(async (oldPassword: string, newPassword: string) => {
-    const operation = ++operationRef.current
+    const operation = beginOperation()
     const input: ChangePasswordRequest = { old_password: oldPassword, new_password: newPassword }
-    await apiRequest<void>('/api/v1/auth/change-password', jsonRequest(input), {
-      unauthorized: 'suppress',
-    })
-    commitLatest(operation, { status: 'anonymous' }, true)
-  }, [commitLatest])
+    try {
+      await apiRequest<void>(
+        '/api/v1/auth/change-password',
+        { ...jsonRequest(input), signal: operation.controller.signal },
+        { authorization: authorizationGeneration, unauthorized: 'suppress' },
+      )
+      commitLatest(operation, { status: 'anonymous' }, true)
+      return
+    } catch (error) {
+      if (!isLatest(operation)) return
+      if (!(error instanceof ApiError) || error.kind !== 'unauthenticated') {
+        finishLatest(operation)
+        throw error
+      }
+    }
+
+    try {
+      await fetchCurrentSubject(operation.controller.signal, authorizationGeneration)
+    } catch (checkError) {
+      if (!isLatest(operation)) return
+      if (checkError instanceof ApiError && checkError.kind === 'unauthenticated') {
+        commitLatest(operation, { status: 'anonymous' }, true)
+      } else {
+        commitLatest(operation, { status: 'restore-error', message: RESTORE_ERROR_MESSAGE }, true)
+      }
+      throw checkError
+    }
+
+    if (!finishLatest(operation)) return
+    throw new ApiError('unauthenticated', 401)
+  }, [authorizationGeneration, beginOperation, commitLatest, finishLatest, isLatest])
 
   const logout = useCallback(async () => {
-    const operation = ++operationRef.current
-    await apiRequest<void>('/api/v1/auth/logout', { method: 'POST' })
+    const operation = beginOperation()
+    try {
+      await apiRequest<void>(
+        '/api/v1/auth/logout',
+        { method: 'POST', signal: operation.controller.signal },
+        { authorization: authorizationGeneration },
+      )
+    } catch (error) {
+      if (!finishLatest(operation)) return
+      throw error
+    }
     commitLatest(operation, { status: 'anonymous' }, true)
-  }, [commitLatest])
+  }, [authorizationGeneration, beginOperation, commitLatest, finishLatest])
 
   useEffect(() => {
     mountedRef.current = true
     return () => {
       mountedRef.current = false
       operationRef.current += 1
+      controllerRef.current?.abort()
+      controllerRef.current = null
     }
   }, [])
 
   useEffect(
     () =>
-      subscribeToUnauthorized(() => {
+      subscribeToUnauthorized((event) => {
+        if (
+          event.authorization !== authorizationGeneration ||
+          event.generation !== authorizationGeneration.current()
+        ) {
+          return
+        }
+        controllerRef.current?.abort()
+        controllerRef.current = null
         operationRef.current += 1
         if (!mountedRef.current) return
+        authorizationGeneration.advance()
         queryClient.clear()
         setState({ status: 'anonymous' })
       }),
-    [queryClient],
+    [authorizationGeneration, queryClient],
   )
 
   useEffect(() => {

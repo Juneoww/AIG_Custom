@@ -5,7 +5,7 @@
  * 输出：重置确认请求与固定中文状态提示。
  * 依赖：React、Fluent UI、共享错误类型与身份重置函数。
  */
-import { useRef, useState, type FormEvent } from 'react'
+import { useEffect, useRef, useState, type FormEvent } from 'react'
 import {
   Button,
   Field,
@@ -90,6 +90,17 @@ export function ResetPasswordPage() {
   const [successMessage, setSuccessMessage] = useState('')
   const [submitting, setSubmitting] = useState(false)
   const submittingRef = useRef(false)
+  const mountedRef = useRef(false)
+  const controllerRef = useRef<AbortController | null>(null)
+
+  useEffect(() => {
+    mountedRef.current = true
+    return () => {
+      mountedRef.current = false
+      controllerRef.current?.abort()
+      controllerRef.current = null
+    }
+  }, [])
 
   async function handleSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault()
@@ -104,21 +115,29 @@ export function ResetPasswordPage() {
     }
 
     submittingRef.current = true
+    controllerRef.current?.abort()
+    const controller = new AbortController()
+    controllerRef.current = controller
     setSubmitting(true)
     try {
-      await confirmPasswordReset({ token, temporary_password: temporaryPassword })
+      await confirmPasswordReset({ token, temporary_password: temporaryPassword }, controller.signal)
+      if (!mountedRef.current || controllerRef.current !== controller) return
       setToken('')
       setTemporaryPassword('')
       setConfirmation('')
       setSuccessMessage('密码已重置，请使用临时密码重新登录。')
     } catch (error) {
+      if (!mountedRef.current || controllerRef.current !== controller) return
       if (error instanceof ApiError && error.kind === 'unauthenticated') setToken('')
       setTemporaryPassword('')
       setConfirmation('')
       setErrorMessage(resetErrorMessage(error))
     } finally {
-      submittingRef.current = false
-      setSubmitting(false)
+      if (mountedRef.current && controllerRef.current === controller) {
+        controllerRef.current = null
+        submittingRef.current = false
+        setSubmitting(false)
+      }
     }
   }
 

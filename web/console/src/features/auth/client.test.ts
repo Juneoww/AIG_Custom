@@ -130,22 +130,41 @@ describe('apiRequest', () => {
   })
 
   it('拒绝非 JSON 成功响应', async () => {
-    vi.stubGlobal(
-      'fetch',
-      vi.fn().mockResolvedValue(new Response('{"ok":true}', { headers: { 'Content-Type': 'text/plain' } })),
-    )
+    let cancelled = false
+    const body = new ReadableStream({
+      start(controller) {
+        controller.enqueue(new TextEncoder().encode('{"ok":true}'))
+      },
+      cancel() {
+        cancelled = true
+      },
+    })
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(body, { headers: { 'Content-Type': 'text/plain' } })))
 
     await expect(apiRequest('/api/v1/auth/me')).rejects.toMatchObject({ kind: 'unexpected-response' })
+    expect(cancelled).toBe(true)
   })
 
-  it('在读取前拒绝声明超过 2MiB 的 JSON', async () => {
-    const response = jsonResponse({ ok: true })
-    response.headers.set('Content-Length', String(2 * 1024 * 1024 + 1))
-    const jsonSpy = vi.spyOn(response, 'json')
+  it('在读取前拒绝并取消声明超过 2MiB 的 JSON', async () => {
+    let cancelled = false
+    const body = new ReadableStream({
+      start(controller) {
+        controller.enqueue(new TextEncoder().encode('{"ok":true}'))
+      },
+      cancel() {
+        cancelled = true
+      },
+    })
+    const response = new Response(body, {
+      headers: {
+        'Content-Length': String(2 * 1024 * 1024 + 1),
+        'Content-Type': 'application/json',
+      },
+    })
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue(response))
 
     await expect(apiRequest('/api/v1/auth/me')).rejects.toMatchObject({ kind: 'unexpected-response' })
-    expect(jsonSpy).not.toHaveBeenCalled()
+    expect(cancelled).toBe(true)
   })
 
   it('取消累计超过 2MiB 的分块 JSON 响应', async () => {
@@ -186,17 +205,70 @@ describe('apiRequest', () => {
     await expect(apiRequest<{ kind: string }>('/api/v1/auth/me')).resolves.toEqual({ kind: 'ok' })
   })
 
-  it('错误响应不读取响应体，并在任何解析前通知受保护 401', async () => {
-    const response = jsonResponse({ error: 'private-detail' }, 401)
-    const jsonSpy = vi.spyOn(response, 'json')
+  it('读取器拒绝时取消并释放锁，且只返回固定错误', async () => {
+    const reader = {
+      cancel: vi.fn().mockResolvedValue(undefined),
+      read: vi.fn().mockRejectedValue(new Error('private stream failure')),
+      releaseLock: vi.fn(),
+    }
+    const response = jsonResponse({ ok: true })
+    Object.defineProperty(response, 'body', {
+      configurable: true,
+      value: { getReader: () => reader },
+    })
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(response))
+
+    const error = await apiRequest('/api/v1/auth/me').catch((caught: unknown) => caught)
+
+    expect(error).toMatchObject({ kind: 'unexpected-response' })
+    expect(String(error)).not.toContain('private stream failure')
+    expect(reader.cancel).toHaveBeenCalledTimes(1)
+    expect(reader.releaseLock).toHaveBeenCalledTimes(1)
+  })
+
+  it('大量单字节分块仍在固定上限缓冲区内完成 JSON 解码', async () => {
+    const encoded = new TextEncoder().encode(JSON.stringify({ value: 'x'.repeat(4096) }))
+    let offset = 0
+    const body = new ReadableStream<Uint8Array>({
+      pull(controller) {
+        if (offset >= encoded.byteLength) {
+          controller.close()
+          return
+        }
+        controller.enqueue(encoded.subarray(offset, offset + 1))
+        offset += 1
+      },
+    })
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue(new Response(body, { headers: { 'Content-Type': 'application/json' } })),
+    )
+
+    await expect(apiRequest<{ value: string }>('/api/v1/auth/me')).resolves.toEqual({ value: 'x'.repeat(4096) })
+  })
+
+  it('错误响应先通知受保护 401，再取消且不读取响应体', async () => {
+    const order: string[] = []
+    const body = new ReadableStream({
+      start(controller) {
+        controller.enqueue(new TextEncoder().encode('{"error":"private-detail"}'))
+      },
+      cancel() {
+        order.push('cancel')
+      },
+    })
+    const response = new Response(body, { status: 401, headers: { 'Content-Type': 'application/json' } })
     const onUnauthorized = vi.fn()
-    const unsubscribe = subscribeToUnauthorized(onUnauthorized)
+    const unsubscribe = subscribeToUnauthorized(() => {
+      order.push('notify')
+      onUnauthorized()
+    })
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue(response))
 
     await expect(apiRequest('/api/v1/platform/tasks')).rejects.toMatchObject({ kind: 'unauthenticated' })
 
     expect(onUnauthorized).toHaveBeenCalledTimes(1)
-    expect(jsonSpy).not.toHaveBeenCalled()
+    expect(order).toEqual(['notify', 'cancel'])
     unsubscribe()
   })
 })

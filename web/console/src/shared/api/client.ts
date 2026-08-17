@@ -11,9 +11,33 @@ const CSRF_COOKIE_NAME = 'aig_csrf'
 const CSRF_HEADER_NAME = 'X-CSRF-Token'
 const SAFE_METHODS = new Set(['GET', 'HEAD', 'OPTIONS'])
 const MAX_JSON_BYTES = 2 * 1024 * 1024
-const unauthorizedListeners = new Set<() => void>()
+const unauthorizedListeners = new Set<(event: UnauthorizedEvent) => void>()
+
+export interface AuthorizationGeneration {
+  advance: () => number
+  current: () => number
+}
+
+export interface UnauthorizedEvent {
+  authorization: AuthorizationGeneration
+  generation: number
+}
+
+export function createAuthorizationGeneration(): AuthorizationGeneration {
+  let generation = 0
+  return {
+    advance: () => {
+      generation += 1
+      return generation
+    },
+    current: () => generation,
+  }
+}
+
+export const defaultAuthorizationGeneration = createAuthorizationGeneration()
 
 export interface ApiRequestPolicy {
+  authorization?: AuthorizationGeneration
   unauthorized?: 'notify' | 'suppress'
 }
 
@@ -50,51 +74,73 @@ function declaredResponseTooLarge(value: string | null): boolean {
 
 async function readBoundedJSON(response: Response): Promise<unknown> {
   if (!isJSONContentType(response.headers.get('Content-Type'))) {
+    await cancelResponseBody(response)
     throw new ApiError('unexpected-response', response.status)
   }
   if (declaredResponseTooLarge(response.headers.get('Content-Length')) || !response.body) {
+    await cancelResponseBody(response)
     throw new ApiError('unexpected-response', response.status)
   }
 
-  const reader = response.body.getReader()
-  const chunks: Uint8Array[] = []
+  let reader: ReadableStreamDefaultReader<Uint8Array>
+  try {
+    reader = response.body.getReader()
+  } catch {
+    await cancelResponseBody(response)
+    throw new ApiError('unexpected-response', response.status)
+  }
+
+  const bytes = new Uint8Array(MAX_JSON_BYTES)
   let total = 0
 
-  for (;;) {
-    const { done, value } = await reader.read()
-    if (done) break
-    total += value.byteLength
-    if (total > MAX_JSON_BYTES) {
-      try {
-        await reader.cancel()
-      } catch {
-        // 取消失败不改变固定的响应错误，也不暴露底层流信息。
-      }
-      throw new ApiError('unexpected-response', response.status)
-    }
-    chunks.push(value)
-  }
-
-  const bytes = new Uint8Array(total)
-  let offset = 0
-  for (const chunk of chunks) {
-    bytes.set(chunk, offset)
-    offset += chunk.byteLength
-  }
-
   try {
-    const text = new TextDecoder('utf-8', { fatal: true }).decode(bytes)
+    for (;;) {
+      const { done, value } = await reader.read()
+      if (done) break
+      if (value.byteLength > MAX_JSON_BYTES - total) {
+        throw new ApiError('unexpected-response', response.status)
+      }
+      bytes.set(value, total)
+      total += value.byteLength
+    }
+
+    const text = new TextDecoder('utf-8', { fatal: true }).decode(bytes.subarray(0, total))
     return JSON.parse(text) as unknown
   } catch {
+    try {
+      await reader.cancel()
+    } catch {
+      // 取消失败不改变固定的响应错误，也不暴露底层流信息。
+    }
     throw new ApiError('unexpected-response', response.status)
+  } finally {
+    try {
+      reader.releaseLock()
+    } catch {
+      // 释放失败不改变调用方接收的固定结果。
+    }
   }
 }
 
-function notifyUnauthorized() {
-  for (const listener of unauthorizedListeners) listener()
+async function cancelResponseBody(response: Response): Promise<void> {
+  try {
+    await response.body?.cancel()
+  } catch {
+    // 取消失败不改变固定的响应错误，也不暴露底层流信息。
+  }
 }
 
-export function subscribeToUnauthorized(listener: () => void): () => void {
+function notifyUnauthorized(event: UnauthorizedEvent) {
+  for (const listener of unauthorizedListeners) {
+    try {
+      listener(event)
+    } catch {
+      // 单个订阅者失败不能阻止其他会话边界失效。
+    }
+  }
+}
+
+export function subscribeToUnauthorized(listener: (event: UnauthorizedEvent) => void): () => void {
   unauthorizedListeners.add(listener)
   return () => {
     unauthorizedListeners.delete(listener)
@@ -118,6 +164,8 @@ export async function apiRequest<T>(
 
   const method = (init.method ?? 'GET').toUpperCase()
   const headers = new Headers(init.headers)
+  const authorization = policy.authorization ?? defaultAuthorizationGeneration
+  const requestGeneration = authorization.current()
 
   if (!SAFE_METHODS.has(method)) {
     const csrfToken = readCookie(CSRF_COOKIE_NAME)
@@ -137,7 +185,10 @@ export async function apiRequest<T>(
   }
 
   if (!response.ok) {
-    if (response.status === 401 && policy.unauthorized !== 'suppress') notifyUnauthorized()
+    if (response.status === 401 && policy.unauthorized !== 'suppress') {
+      notifyUnauthorized({ authorization, generation: requestGeneration })
+    }
+    await cancelResponseBody(response)
     throw apiErrorFromStatus(response.status)
   }
 

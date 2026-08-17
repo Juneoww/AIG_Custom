@@ -230,4 +230,54 @@ describe('ResetPasswordPage', () => {
     expect(screen.getByLabelText(/^临时密码/)).toHaveValue('')
     expect(screen.getByLabelText(/^确认临时密码/)).toHaveValue('')
   })
+
+  it('卸载时取消正在进行的重置确认请求且不再提交页面状态', async () => {
+    const pendingReset = deferred<Response>()
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(jsonResponse({ csrf_token: 'reset-csrf' }))
+      .mockImplementationOnce((_input, init?: RequestInit) =>
+        new Promise<Response>((resolve, reject) => {
+          pendingReset.promise.then(resolve)
+          init?.signal?.addEventListener('abort', () => reject(new DOMException('aborted', 'AbortError')))
+        }),
+      )
+    vi.stubGlobal('fetch', fetchMock)
+    const view = renderPage(<ResetPasswordPage />)
+
+    fireEvent.change(screen.getByLabelText(/^重置凭据/), { target: { value: 'manually-pasted-token' } })
+    fireEvent.change(screen.getByLabelText(/^临时密码/), { target: { value: 'temporary-password' } })
+    fireEvent.change(screen.getByLabelText(/^确认临时密码/), { target: { value: 'temporary-password' } })
+    fireEvent.click(screen.getByRole('button', { name: '重置密码' }))
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2))
+
+    view.unmount()
+
+    expect((fetchMock.mock.calls[1]?.[1] as RequestInit).signal).toMatchObject({ aborted: true })
+  })
+
+  it('CSRF 阶段卸载后取消旧请求且不会启动重置 POST', async () => {
+    const pendingCSRF = deferred<Response>()
+    const fetchMock = vi.fn((_input, init?: RequestInit) =>
+      new Promise<Response>((resolve, reject) => {
+        pendingCSRF.promise.then(resolve)
+        init?.signal?.addEventListener('abort', () => reject(new DOMException('aborted', 'AbortError')))
+      }),
+    )
+    vi.stubGlobal('fetch', fetchMock)
+    const view = renderPage(<ResetPasswordPage />)
+
+    fireEvent.change(screen.getByLabelText(/^重置凭据/), { target: { value: 'manually-pasted-token' } })
+    fireEvent.change(screen.getByLabelText(/^临时密码/), { target: { value: 'temporary-password' } })
+    fireEvent.change(screen.getByLabelText(/^确认临时密码/), { target: { value: 'temporary-password' } })
+    fireEvent.click(screen.getByRole('button', { name: '重置密码' }))
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1))
+
+    view.unmount()
+    pendingCSRF.resolve(jsonResponse({ csrf_token: 'stale-token' }))
+    await Promise.resolve()
+
+    expect((fetchMock.mock.calls[0]?.[1] as RequestInit).signal).toMatchObject({ aborted: true })
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+  })
 })

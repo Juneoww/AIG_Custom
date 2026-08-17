@@ -7,11 +7,15 @@
  */
 import { QueryClientProvider } from '@tanstack/react-query'
 import { act, render, screen, waitFor } from '@testing-library/react'
-import { useEffect } from 'react'
+import { StrictMode, useEffect } from 'react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import { AppProviders, createAppQueryClient } from '../../app/providers/AppProviders'
-import { apiRequest } from '../../shared/api/client'
+import {
+  apiRequest,
+  createAuthorizationGeneration,
+  type AuthorizationGeneration,
+} from '../../shared/api/client'
 import {
   confirmPasswordReset,
   SessionProvider,
@@ -39,15 +43,19 @@ function jsonResponse(body: unknown, status = 200) {
   })
 }
 
-function renderSession(initialState?: SessionState, queryClient = createAppQueryClient()) {
+function renderSession(
+  initialState?: SessionState,
+  queryClient = createAppQueryClient(),
+  authorizationGeneration: AuthorizationGeneration = createAuthorizationGeneration(),
+) {
   const result = render(
     <QueryClientProvider client={queryClient}>
-      <SessionProvider initialState={initialState}>
+      <SessionProvider authorizationGeneration={authorizationGeneration} initialState={initialState}>
         <SessionProbe />
       </SessionProvider>
     </QueryClientProvider>,
   )
-  return { ...result, queryClient }
+  return { ...result, authorizationGeneration, queryClient }
 }
 
 function deferred<T>() {
@@ -238,7 +246,7 @@ describe('SessionProvider', () => {
 
     const queryClient = createAppQueryClient()
     queryClient.setQueryData(['current-user'], { private: true })
-    renderSession(
+    const { authorizationGeneration } = renderSession(
       {
         status: 'authenticated',
         subject: { id: 'admin-1', username: 'security-admin', role: 'admin', must_change_password: false },
@@ -247,7 +255,7 @@ describe('SessionProvider', () => {
     )
 
     await act(async () => {
-      await apiRequest('/api/v1/tasks').catch(() => undefined)
+      await apiRequest('/api/v1/tasks', {}, { authorization: authorizationGeneration }).catch(() => undefined)
     })
 
     expect(observedSession?.state).toEqual({ status: 'anonymous' })
@@ -256,7 +264,18 @@ describe('SessionProvider', () => {
 
   it('改密凭据错误不会把 must-change 会话误清理', async () => {
     document.cookie = 'aig_csrf=current-token; Path=/'
-    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(null, { status: 401 })))
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(new Response(null, { status: 401 }))
+      .mockResolvedValueOnce(
+        jsonResponse({
+          id: 'user-2',
+          username: 'new-operator',
+          role: 'user',
+          must_change_password: true,
+        }),
+      )
+    vi.stubGlobal('fetch', fetchMock)
     const initialState: SessionState = {
       status: 'must-change',
       subject: { id: 'user-2', username: 'new-operator', role: 'user', must_change_password: true },
@@ -270,6 +289,67 @@ describe('SessionProvider', () => {
     })
 
     expect(observedSession?.state).toEqual(initialState)
+    expect(fetchMock.mock.calls.map((call) => String(call[0]))).toEqual([
+      `${window.location.origin}/api/v1/auth/change-password`,
+      `${window.location.origin}/api/v1/auth/me`,
+    ])
+  })
+
+  it('改密 401 后复查 /me 也为 401 时明确清理 Subject 和缓存', async () => {
+    document.cookie = 'aig_csrf=current-token; Path=/'
+    vi.stubGlobal(
+      'fetch',
+      vi
+        .fn()
+        .mockResolvedValueOnce(new Response(null, { status: 401 }))
+        .mockResolvedValueOnce(new Response(null, { status: 401 })),
+    )
+    const queryClient = createAppQueryClient()
+    queryClient.setQueryData(['current-user'], { private: true })
+    renderSession(
+      {
+        status: 'must-change',
+        subject: { id: 'user-2', username: 'new-operator', role: 'user', must_change_password: true },
+      },
+      queryClient,
+    )
+
+    await act(async () => {
+      await observedSession?.changePassword('invalid-password', 'replacement-password').catch(() => undefined)
+    })
+
+    expect(observedSession?.state).toEqual({ status: 'anonymous' })
+    expect(queryClient.getQueryCache().getAll()).toHaveLength(0)
+  })
+
+  it('改密 401 后无法复查 /me 时进入恢复错误态并清理缓存', async () => {
+    document.cookie = 'aig_csrf=current-token; Path=/'
+    vi.stubGlobal(
+      'fetch',
+      vi
+        .fn()
+        .mockResolvedValueOnce(new Response(null, { status: 401 }))
+        .mockResolvedValueOnce(new Response(null, { status: 503 })),
+    )
+    const queryClient = createAppQueryClient()
+    queryClient.setQueryData(['current-user'], { private: true })
+    renderSession(
+      {
+        status: 'must-change',
+        subject: { id: 'user-2', username: 'new-operator', role: 'user', must_change_password: true },
+      },
+      queryClient,
+    )
+
+    await act(async () => {
+      await observedSession?.changePassword('invalid-password', 'replacement-password').catch(() => undefined)
+    })
+
+    expect(observedSession?.state).toEqual({
+      status: 'restore-error',
+      message: '无法验证登录状态，请重试。',
+    })
+    expect(queryClient.getQueryCache().getAll()).toHaveLength(0)
   })
 
   it('无效重置令牌不会清理页面背后的已有 Subject', async () => {
@@ -315,13 +395,16 @@ describe('SessionProvider', () => {
         }),
       )
     vi.stubGlobal('fetch', fetchMock)
-    renderSession()
+    const queryClient = createAppQueryClient()
+    queryClient.setQueryData(['previous-user'], { private: true })
+    renderSession(undefined, queryClient)
 
     await waitFor(() => expect(observedSession?.state.status).toBe('restore-error'))
     expect(observedSession?.state).toMatchObject({
       status: 'restore-error',
       message: '无法验证登录状态，请重试。',
     })
+    expect(queryClient.getQueryCache().getAll()).toHaveLength(0)
 
     await act(async () => {
       await observedSession?.restore()
@@ -360,11 +443,11 @@ describe('SessionProvider', () => {
       .mockReturnValueOnce(pendingRestore.promise)
       .mockResolvedValueOnce(new Response(null, { status: 401 }))
     vi.stubGlobal('fetch', fetchMock)
-    renderSession()
+    const { authorizationGeneration } = renderSession()
     await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1))
 
     await act(async () => {
-      await apiRequest('/api/v1/tasks').catch(() => undefined)
+      await apiRequest('/api/v1/tasks', {}, { authorization: authorizationGeneration }).catch(() => undefined)
     })
     pendingRestore.resolve(
       jsonResponse({ id: 'stale', username: 'stale-user', role: 'user', must_change_password: false }),
@@ -391,7 +474,7 @@ describe('SessionProvider', () => {
     vi.stubGlobal('fetch', fetchMock)
     const queryClient = createAppQueryClient()
     queryClient.setQueryData(['previous-user'], { private: true })
-    renderSession({ status: 'anonymous' }, queryClient)
+    const { authorizationGeneration } = renderSession({ status: 'anonymous' }, queryClient)
 
     let loginPromise!: Promise<void>
     act(() => {
@@ -399,7 +482,7 @@ describe('SessionProvider', () => {
     })
     await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(3))
     await act(async () => {
-      await apiRequest('/api/v1/tasks').catch(() => undefined)
+      await apiRequest('/api/v1/tasks', {}, { authorization: authorizationGeneration }).catch(() => undefined)
     })
     pendingSubject.resolve(
       jsonResponse({ id: 'stale', username: 'stale-user', role: 'user', must_change_password: false }),
@@ -410,14 +493,137 @@ describe('SessionProvider', () => {
     expect(queryClient.getQueryCache().getAll()).toHaveLength(0)
   })
 
+  it('新登录成功后旧受保护请求才返回 401 时不会清理新 Subject', async () => {
+    const pendingProtected = deferred<Response>()
+    const fetchMock = vi.fn((input: RequestInfo | URL) => {
+      const path = String(input)
+      if (path.endsWith('/tasks')) return pendingProtected.promise
+      if (path.endsWith('/csrf')) return Promise.resolve(jsonResponse({ csrf_token: 'bootstrap-token' }))
+      if (path.endsWith('/login')) return Promise.resolve(jsonResponse({ must_change_password: false }))
+      return Promise.resolve(
+        jsonResponse({ id: 'new-user', username: 'new-user', role: 'user', must_change_password: false }),
+      )
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    const { authorizationGeneration } = renderSession({ status: 'anonymous' })
+
+    const oldRequest = apiRequest('/api/v1/tasks', {}, { authorization: authorizationGeneration }).catch(
+      () => undefined,
+    )
+    await act(async () => {
+      await observedSession?.login('new-user', 'replacement-password')
+    })
+    pendingProtected.resolve(new Response(null, { status: 401 }))
+    await act(async () => oldRequest)
+
+    expect(observedSession?.state).toMatchObject({ status: 'authenticated', subject: { id: 'new-user' } })
+  })
+
+  it('新登录成功后旧恢复才返回 401 时不会清理新 Subject', async () => {
+    const pendingRestore = deferred<Response>()
+    let meRequests = 0
+    const fetchMock = vi.fn((input: RequestInfo | URL) => {
+      const path = String(input)
+      if (path.endsWith('/csrf')) return Promise.resolve(jsonResponse({ csrf_token: 'bootstrap-token' }))
+      if (path.endsWith('/login')) return Promise.resolve(jsonResponse({ must_change_password: false }))
+      meRequests += 1
+      if (meRequests === 1) return pendingRestore.promise
+      return Promise.resolve(
+        jsonResponse({ id: 'new-user', username: 'new-user', role: 'user', must_change_password: false }),
+      )
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    renderSession({ status: 'anonymous' })
+
+    let oldRestore!: Promise<void>
+    act(() => {
+      oldRestore = observedSession!.restore()
+    })
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1))
+    await act(async () => {
+      await observedSession?.login('new-user', 'replacement-password')
+    })
+    pendingRestore.resolve(new Response(null, { status: 401 }))
+    await act(async () => oldRestore)
+
+    expect(observedSession?.state).toMatchObject({ status: 'authenticated', subject: { id: 'new-user' } })
+  })
+
+  it('StrictMode 双恢复会取消第一次请求并仅提交最新 Subject', async () => {
+    const pendingFirst = deferred<Response>()
+    const fetchMock = vi
+      .fn()
+      .mockReturnValueOnce(pendingFirst.promise)
+      .mockResolvedValueOnce(
+        jsonResponse({ id: 'latest', username: 'latest-user', role: 'user', must_change_password: false }),
+      )
+    vi.stubGlobal('fetch', fetchMock)
+    const queryClient = createAppQueryClient()
+    const authorizationGeneration = createAuthorizationGeneration()
+
+    render(
+      <StrictMode>
+        <QueryClientProvider client={queryClient}>
+          <SessionProvider authorizationGeneration={authorizationGeneration}>
+            <SessionProbe />
+          </SessionProvider>
+        </QueryClientProvider>
+      </StrictMode>,
+    )
+
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2))
+    expect((fetchMock.mock.calls[0]?.[1] as RequestInit).signal).toMatchObject({ aborted: true })
+    await waitFor(() => expect(observedSession?.state).toMatchObject({ status: 'authenticated' }))
+  })
+
+  it('新操作会在旧登录的 CSRF 阶段取消 I/O，且旧流程不再发起 POST', async () => {
+    const pendingCSRF = deferred<Response>()
+    const requestedPaths: string[] = []
+    const fetchMock = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const path = String(input)
+      requestedPaths.push(path)
+      if (path.endsWith('/csrf')) {
+        return new Promise<Response>((resolve, reject) => {
+          pendingCSRF.promise.then(resolve, reject)
+          init?.signal?.addEventListener('abort', () => reject(new DOMException('aborted', 'AbortError')))
+        })
+      }
+      if (path.endsWith('/me')) {
+        return Promise.resolve(
+          jsonResponse({ id: 'restored', username: 'restored-user', role: 'user', must_change_password: false }),
+        )
+      }
+      return Promise.resolve(new Response(null, { status: 401 }))
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    renderSession({ status: 'anonymous' })
+
+    let oldLogin!: Promise<void>
+    act(() => {
+      oldLogin = observedSession!.login('old-user', 'temporary-password')
+    })
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1))
+    await act(async () => {
+      await observedSession?.restore()
+    })
+    pendingCSRF.resolve(jsonResponse({ csrf_token: 'stale-token' }))
+    await act(async () => oldLogin.catch(() => undefined))
+
+    expect(requestedPaths.some((path) => path.endsWith('/login'))).toBe(false)
+    expect(observedSession?.state).toMatchObject({ status: 'authenticated', subject: { id: 'restored' } })
+  })
+
   it('卸载后旧恢复结果不会提交状态或清理查询缓存', async () => {
     const pendingRestore = deferred<Response>()
-    vi.stubGlobal('fetch', vi.fn().mockReturnValue(pendingRestore.promise))
+    const fetchMock = vi.fn().mockReturnValue(pendingRestore.promise)
+    vi.stubGlobal('fetch', fetchMock)
     const queryClient = createAppQueryClient()
     queryClient.setQueryData(['current-user'], { private: true })
     const view = renderSession(undefined, queryClient)
     await waitFor(() => expect(fetch).toHaveBeenCalledTimes(1))
     view.unmount()
+
+    expect((fetchMock.mock.calls[0]?.[1] as RequestInit).signal).toMatchObject({ aborted: true })
 
     pendingRestore.resolve(
       jsonResponse({ id: 'stale', username: 'stale-user', role: 'user', must_change_password: false }),

@@ -113,7 +113,13 @@ describe('身份路由守卫', () => {
     expect(screen.getByLabelText('当前位置')).toHaveTextContent(`${from}|`)
   })
 
-  it.each(['https://outside.example/tasks', '//outside.example/tasks', 'javascript:alert(1)', '/login']) (
+  it.each([
+    'https://outside.example/tasks',
+    '//outside.example/tasks',
+    'javascript:alert(1)',
+    '/login',
+    '/%2e//evil.example',
+  ])(
     '拒绝恶意或循环来源 %s 并回到首页',
     (from) => {
       renderGuard(

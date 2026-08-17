@@ -47,6 +47,9 @@ function safeReturnTo(value: unknown): string {
   try {
     const target = new URL(value, window.location.origin)
     if (target.origin !== window.location.origin) return '/'
+    if (!target.pathname.startsWith('/') || target.pathname.startsWith('//') || target.pathname.includes('\\')) {
+      return '/'
+    }
     if (AUTH_PATHS.some((path) => target.pathname === path || target.pathname.startsWith(`${path}/`))) return '/'
     return `${target.pathname}${target.search}${target.hash}`
   } catch {
