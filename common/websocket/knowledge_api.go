@@ -20,6 +20,7 @@ package websocket
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"os"
@@ -29,8 +30,6 @@ import (
 	"strconv"
 	"strings"
 	"time"
-
-	"trpc.group/trpc-go/trpc-go/log"
 
 	"github.com/Juneoww/AIG_Custom/common/fingerprints/parser"
 	"github.com/Juneoww/AIG_Custom/internal/platform/identity"
@@ -95,18 +94,74 @@ type EvaluationDataset struct {
 	Data           []EvaluationDataItem `json:"data"`
 }
 
+func parseKnowledgePagination(c *gin.Context, defaultSize int) (int, int, bool) {
+	parse := func(key string, fallback int, maximum int) (int, bool) {
+		values, present := c.Request.URL.Query()[key]
+		if !present {
+			return fallback, true
+		}
+		if len(values) != 1 || values[0] == "" {
+			return 0, false
+		}
+		for _, character := range values[0] {
+			if character < '0' || character > '9' {
+				return 0, false
+			}
+		}
+		value, err := strconv.ParseUint(values[0], 10, 16)
+		if err != nil || value < 1 || value > uint64(maximum) {
+			return 0, false
+		}
+		return int(value), true
+	}
+	page, pageOK := parse("page", 1, 1_000)
+	size, sizeOK := parse("size", defaultSize, 100)
+	if !pageOK || !sizeOK {
+		c.JSON(http.StatusBadRequest, gin.H{"status": 1, "message": "分页参数无效"})
+		return 0, 0, false
+	}
+	return page, size, true
+}
+
+func validateKnowledgeFileContent(c *gin.Context, content string) bool {
+	if content == "" || len([]byte(content)) > int(maxKnowledgeRawBytes) {
+		c.JSON(http.StatusBadRequest, gin.H{"status": 1, "message": "规则内容为空或超过 1 MiB 上限"})
+		return false
+	}
+	return true
+}
+
+func writeKnowledgeFileAtomic(path string, content []byte) error {
+	temporary, err := os.CreateTemp(filepath.Dir(path), ".knowledge-write-*")
+	if err != nil {
+		return err
+	}
+	temporaryPath := temporary.Name()
+	defer os.Remove(temporaryPath)
+	if err := temporary.Chmod(0o644); err != nil {
+		temporary.Close()
+		return err
+	}
+	if _, err := temporary.Write(content); err != nil {
+		temporary.Close()
+		return err
+	}
+	if err := temporary.Sync(); err != nil {
+		temporary.Close()
+		return err
+	}
+	if err := temporary.Close(); err != nil {
+		return err
+	}
+	return os.Rename(temporaryPath, path)
+}
+
 // 获取指纹列表，支持分页和名字模糊
 func HandleListFingerprints(c *gin.Context) {
 	// 1. 解析分页参数
-	pageStr := c.DefaultQuery("page", "1")
-	sizeStr := c.DefaultQuery("size", "20")
-	page, _ := strconv.Atoi(pageStr)
-	size, _ := strconv.Atoi(sizeStr)
-	if page < 1 {
-		page = 1
-	}
-	if size < 1 {
-		size = 10
+	page, size, ok := parseKnowledgePagination(c, 20)
+	if !ok {
+		return
 	}
 
 	// 2. 获取查询参数
@@ -235,7 +290,7 @@ func HandleCreateFingerprint(c *gin.Context) {
 	// 2. 解析YAML为parser.FingerPrint结构体
 	var fp parser.FingerPrint
 	if err := yaml.Unmarshal([]byte(req.FileContent), &fp); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"status": 1, "message": "YAML解析失败: " + err.Error()})
+		c.JSON(http.StatusBadRequest, gin.H{"status": 1, "message": "YAML解析失败"})
 		return
 	}
 	if fp.Info.Name == "" {
@@ -244,7 +299,7 @@ func HandleCreateFingerprint(c *gin.Context) {
 	}
 
 	if _, err := parser.InitFingerPrintFromData([]byte(req.FileContent)); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"status": 1, "message": "指纹内容校验失败: " + err.Error()})
+		c.JSON(http.StatusBadRequest, gin.H{"status": 1, "message": "指纹内容校验失败"})
 		return
 	}
 
@@ -263,7 +318,7 @@ func HandleCreateFingerprint(c *gin.Context) {
 	}
 
 	if err := os.WriteFile(yamlPath, []byte(req.FileContent), 0644); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"status": 1, "message": "文件写入失败: " + err.Error()})
+		c.JSON(http.StatusInternalServerError, gin.H{"status": 1, "message": "文件写入失败"})
 		return
 	}
 
@@ -290,23 +345,28 @@ func HandleDeleteFingerprint(c *gin.Context) {
 	var invalid []string
 
 	for _, name := range req.Name {
-		// 使用已存在的合法性校验函数防止路径遍历攻击
-		if !isValidName(name) {
+		if !isValidKnowledgeOpaqueName(name) {
 			invalid = append(invalid, name)
 			continue
 		}
-		yamlPath, pathErr := safeJoinPath("data/fingerprints", name+".yaml")
-		if pathErr != nil {
-			invalid = append(invalid, name)
-			continue
-		}
-		if _, err := os.Stat(yamlPath); os.IsNotExist(err) {
+		yamlPath, pathErr := resolveFingerprintKnowledgeFile("data/fingerprints", name)
+		if errors.Is(pathErr, errKnowledgeRawNotFound) {
 			notFound = append(notFound, name)
 			continue
 		}
-		if err := os.Remove(yamlPath); err == nil {
-			deleted = append(deleted, name)
+		if errors.Is(pathErr, errKnowledgeRawInvalid) || errors.Is(pathErr, errKnowledgeRawAmbiguous) {
+			invalid = append(invalid, name)
+			continue
 		}
+		if pathErr != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"status": 1, "message": "删除指纹失败"})
+			return
+		}
+		if err := os.Remove(yamlPath); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"status": 1, "message": "删除指纹失败"})
+			return
+		}
+		deleted = append(deleted, name)
 	}
 
 	msg := "删除完成"
@@ -350,7 +410,7 @@ func HandleEditFingerprint(c *gin.Context) {
 	// 2. 解析YAML为parser.FingerPrint结构体
 	var fp parser.FingerPrint
 	if err := yaml.Unmarshal([]byte(req.FileContent), &fp); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"status": 1, "message": "YAML解析失败: " + err.Error()})
+		c.JSON(http.StatusBadRequest, gin.H{"status": 1, "message": "YAML解析失败"})
 		return
 	}
 	if fp.Info.Name == "" {
@@ -360,7 +420,7 @@ func HandleEditFingerprint(c *gin.Context) {
 
 	// 新增：用和读取时一致的解析逻辑做一次完整校验
 	if _, err := parser.InitFingerPrintFromData([]byte(req.FileContent)); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"status": 1, "message": "指纹内容校验失败: " + err.Error()})
+		c.JSON(http.StatusBadRequest, gin.H{"status": 1, "message": "指纹内容校验失败"})
 		return
 	}
 
@@ -369,38 +429,55 @@ func HandleEditFingerprint(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"status": 1, "message": "指纹名称非法"})
 		return
 	}
-	oldPath, err := safeJoinPath("data/fingerprints", oldName+".yaml")
-	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"status": 1, "message": "非法路径"})
-		return
-	}
-	if _, err := os.Stat(oldPath); os.IsNotExist(err) {
+	oldPath, err := resolveFingerprintKnowledgeFile("data/fingerprints", oldName)
+	if errors.Is(err, errKnowledgeRawNotFound) {
 		c.JSON(http.StatusNotFound, gin.H{"status": 1, "message": "原指纹不存在"})
 		return
 	}
-	newPath, err := safeJoinPath("data/fingerprints", fp.Info.Name+".yaml")
-	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"status": 1, "message": "非法路径"})
+	if errors.Is(err, errKnowledgeRawInvalid) || errors.Is(err, errKnowledgeRawAmbiguous) {
+		c.JSON(http.StatusBadRequest, gin.H{"status": 1, "message": "指纹内容无法安全定位"})
 		return
 	}
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"status": 1, "message": "暂时无法定位指纹内容"})
+		return
+	}
+	newPath := oldPath
 
-	// 4. 校验新文件名是否已存在（且不是原文件）
-	if newPath != oldPath {
-		if _, err := os.Stat(newPath); err == nil {
+	// 4. 更改 info.name 时在原目录内改名，并确保新标识在整个根目录中唯一。
+	if oldName != fp.Info.Name {
+		if existingPath, resolveErr := resolveFingerprintKnowledgeFile("data/fingerprints", fp.Info.Name); resolveErr == nil && existingPath != oldPath {
 			c.JSON(http.StatusConflict, gin.H{"status": 1, "message": "新指纹名称已存在"})
+			return
+		} else if resolveErr != nil && !errors.Is(resolveErr, errKnowledgeRawNotFound) {
+			if errors.Is(resolveErr, errKnowledgeRawInvalid) || errors.Is(resolveErr, errKnowledgeRawAmbiguous) {
+				c.JSON(http.StatusBadRequest, gin.H{"status": 1, "message": "新指纹名称无法安全定位"})
+			} else {
+				c.JSON(http.StatusInternalServerError, gin.H{"status": 1, "message": "暂时无法定位新指纹内容"})
+			}
+			return
+		}
+		newPath = filepath.Join(filepath.Dir(oldPath), fp.Info.Name+".yaml")
+		if _, statErr := os.Lstat(newPath); statErr == nil {
+			c.JSON(http.StatusConflict, gin.H{"status": 1, "message": "新指纹名称已存在"})
+			return
+		} else if !errors.Is(statErr, os.ErrNotExist) {
+			c.JSON(http.StatusInternalServerError, gin.H{"status": 1, "message": "暂时无法检查新指纹内容"})
 			return
 		}
 	}
 
-	// 5. 如果新旧文件名不同，删除原文件
-	if oldName != fp.Info.Name {
-		_ = os.Remove(oldPath) // 删除老文件
-	}
-
-	// 6. 写入新内容（新文件名）
-	if err := os.WriteFile(newPath, []byte(req.FileContent), 0644); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"status": 1, "message": "文件写入失败: " + err.Error()})
+	// 5. 先原子写入，再删除发生重命名的旧文件，避免写入失败造成规则丢失。
+	if err := writeKnowledgeFileAtomic(newPath, []byte(req.FileContent)); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"status": 1, "message": "文件写入失败"})
 		return
+	}
+	if newPath != oldPath {
+		if err := os.Remove(oldPath); err != nil {
+			_ = os.Remove(newPath)
+			c.JSON(http.StatusInternalServerError, gin.H{"status": 1, "message": "删除原文件失败"})
+			return
+		}
 	}
 
 	c.JSON(http.StatusOK, gin.H{"status": 0, "message": "修改指纹成功"})
@@ -410,16 +487,10 @@ func HandleEditFingerprint(c *gin.Context) {
 func HandleListVulnerabilities() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		// 1. 解析分页和查询参数
-		pageStr := c.DefaultQuery("page", "1")
-		sizeStr := c.DefaultQuery("size", "20")
 		query := strings.ToLower(c.DefaultQuery("q", ""))
-		page, _ := strconv.Atoi(pageStr)
-		size, _ := strconv.Atoi(sizeStr)
-		if page < 1 {
-			page = 1
-		}
-		if size < 1 {
-			size = 10
+		page, size, ok := parseKnowledgePagination(c, 20)
+		if !ok {
+			return
 		}
 
 		engine := vulstruct.NewAdvisoryEngine()
@@ -427,7 +498,7 @@ func HandleListVulnerabilities() gin.HandlerFunc {
 		dir := "data/vuln"
 		err := engine.LoadFromDirectory(dir)
 		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"status": 1, "message": "加载漏洞库失败: " + err.Error()})
+			c.JSON(http.StatusInternalServerError, gin.H{"status": 1, "message": "加载漏洞库失败"})
 			return
 		}
 		filteredVuls := make([]vulstruct.VersionVul, 0)
@@ -500,11 +571,14 @@ func HandleCreateVulnerability() gin.HandlerFunc {
 			c.JSON(http.StatusBadRequest, gin.H{"status": 1, "message": "参数解析失败"})
 			return
 		}
+		if !validateKnowledgeFileContent(c, req.FileContent) {
+			return
+		}
 
 		// 2. 反序列化为vulstruct.VersionVul，校验CVE编号等必填字段
 		var vul vulstruct.VersionVul
 		if err := yaml.Unmarshal([]byte(req.FileContent), &vul); err != nil {
-			c.JSON(http.StatusBadRequest, gin.H{"status": 1, "message": "YAML解析失败: " + err.Error()})
+			c.JSON(http.StatusBadRequest, gin.H{"status": 1, "message": "YAML解析失败"})
 			return
 		}
 		if vul.Info.CVEName == "" {
@@ -523,7 +597,7 @@ func HandleCreateVulnerability() gin.HandlerFunc {
 		// 4. 用vulstruct.NewAdvisoryEngine加载临时文件做完整业务校验
 		_, err := vulstruct.ReadVersionVul([]byte(req.FileContent))
 		if err != nil {
-			c.JSON(http.StatusBadRequest, gin.H{"status": 1, "message": "漏洞内容校验失败: " + err.Error()})
+			c.JSON(http.StatusBadRequest, gin.H{"status": 1, "message": "漏洞内容校验失败"})
 			return
 		}
 
@@ -538,7 +612,7 @@ func HandleCreateVulnerability() gin.HandlerFunc {
 			}
 		}
 		if err := os.MkdirAll(dir, 0755); err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"status": 1, "message": "创建目录失败: " + err.Error()})
+			c.JSON(http.StatusInternalServerError, gin.H{"status": 1, "message": "创建目录失败"})
 			return
 		}
 		fileName := strings.ToUpper(vul.Info.CVEName) + ".yaml"
@@ -551,13 +625,8 @@ func HandleCreateVulnerability() gin.HandlerFunc {
 			c.JSON(http.StatusConflict, gin.H{"status": 1, "message": "该CVE编号的漏洞已存在"})
 			return
 		}
-		data, err := yaml.Marshal(&vul)
-		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"status": 1, "message": "YAML序列化失败: " + err.Error()})
-			return
-		}
-		if err := os.WriteFile(filePath, data, 0644); err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"status": 1, "message": "文件写入失败: " + err.Error()})
+		if err := writeKnowledgeFileAtomic(filePath, []byte(req.FileContent)); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"status": 1, "message": "文件写入失败"})
 			return
 		}
 
@@ -590,10 +659,13 @@ func HandleEditVulnerability(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"status": 1, "message": "参数解析失败"})
 		return
 	}
+	if !validateKnowledgeFileContent(c, req.FileContent) {
+		return
+	}
 	// 2. 反序列化为vulstruct.VersionVul，校验CVE编号等必填字段
 	var vul vulstruct.VersionVul
 	if err := yaml.Unmarshal([]byte(req.FileContent), &vul); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"status": 1, "message": "YAML解析失败: " + err.Error()})
+		c.JSON(http.StatusBadRequest, gin.H{"status": 1, "message": "YAML解析失败"})
 		return
 	}
 	if vul.Info.CVEName == "" {
@@ -611,7 +683,7 @@ func HandleEditVulnerability(c *gin.Context) {
 	// 4. 用vulstruct.NewAdvisoryEngine加载临时文件做完整业务校验
 	_, err := vulstruct.ReadVersionVul([]byte(req.FileContent))
 	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"status": 1, "message": "漏洞内容校验失败: " + err.Error()})
+		c.JSON(http.StatusBadRequest, gin.H{"status": 1, "message": "漏洞内容校验失败"})
 		return
 	}
 
@@ -642,7 +714,7 @@ func HandleEditVulnerability(c *gin.Context) {
 		}
 	}
 	if err := os.MkdirAll(newDir, 0755); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"status": 1, "message": "创建目录失败: " + err.Error()})
+		c.JSON(http.StatusInternalServerError, gin.H{"status": 1, "message": "创建目录失败"})
 		return
 	}
 	newPath, err := safeJoinPath(newDir, strings.ToUpper(vul.Info.CVEName)+".yaml")
@@ -659,21 +731,17 @@ func HandleEditVulnerability(c *gin.Context) {
 		}
 	}
 
-	// 8. 删除原文件
-	if err := os.Remove(oldPath); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"status": 1, "message": "删除原文件失败: " + err.Error()})
+	// 8. 先原子写入新内容，再删除发生重命名的旧文件，避免失败时丢失原规则。
+	if err := writeKnowledgeFileAtomic(newPath, []byte(req.FileContent)); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"status": 1, "message": "文件写入失败"})
 		return
 	}
-
-	// 9. 写入新内容（新文件名/新目录）
-	data, err := yaml.Marshal(&vul)
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"status": 1, "message": "YAML序列化失败: " + err.Error()})
-		return
-	}
-	if err := os.WriteFile(newPath, data, 0644); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"status": 1, "message": "文件写入失败: " + err.Error()})
-		return
+	if newPath != oldPath {
+		if err := os.Remove(oldPath); err != nil {
+			_ = os.Remove(newPath)
+			c.JSON(http.StatusInternalServerError, gin.H{"status": 1, "message": "删除原文件失败"})
+			return
+		}
 	}
 
 	c.JSON(http.StatusOK, gin.H{"status": 0, "message": "修改漏洞成功"})
@@ -737,16 +805,10 @@ func HandleBatchDeleteVulnerabilities(c *gin.Context) {
 // 获取评测集列表，支持分页和名字模糊搜索
 func HandleListEvaluations(c *gin.Context) {
 	// 1. 解析分页参数
-	pageStr := c.DefaultQuery("page", "1")
-	sizeStr := c.DefaultQuery("size", "20")
 	detail := c.DefaultQuery("detail", "false")
-	page, _ := strconv.Atoi(pageStr)
-	size, _ := strconv.Atoi(sizeStr)
-	if page < 1 {
-		page = 1
-	}
-	if size < 1 {
-		size = 10
+	page, size, ok := parseKnowledgePagination(c, 20)
+	if !ok {
+		return
 	}
 
 	// 2. 获取查询参数
@@ -765,7 +827,6 @@ func HandleListEvaluations(c *gin.Context) {
 				var eval EvaluationDataset
 				err = json.Unmarshal(content, &eval)
 				if err != nil {
-					log.Error(path, err.Error())
 					return err
 				}
 				// 转换为摘要格式（不包含data字段）
@@ -903,11 +964,14 @@ func HandleCreateEvaluation(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"status": 1, "message": "参数解析失败"})
 		return
 	}
+	if !validateKnowledgeFileContent(c, req.FileContent) {
+		return
+	}
 
 	// 2. 解析JSON为EvaluationDataset结构体
 	var eval EvaluationDataset
 	if err := json.Unmarshal([]byte(req.FileContent), &eval); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"status": 1, "message": "JSON解析失败: " + err.Error()})
+		c.JSON(http.StatusBadRequest, gin.H{"status": 1, "message": "JSON解析失败"})
 		return
 	}
 	if eval.Name == "" {
@@ -921,8 +985,10 @@ func HandleCreateEvaluation(c *gin.Context) {
 		return
 	}
 
-	// 更新count字段为实际数据条数
-	eval.Count = len(eval.Data)
+	if eval.Count != len(eval.Data) {
+		c.JSON(http.StatusBadRequest, gin.H{"status": 1, "message": "评测集 count 与 data 数量不一致"})
+		return
+	}
 
 	// 验证数据项
 	for i, item := range eval.Data {
@@ -947,15 +1013,9 @@ func HandleCreateEvaluation(c *gin.Context) {
 		return
 	}
 
-	// 5. 序列化并写入JSON文件
-	updatedContent, err := json.MarshalIndent(eval, "", "  ")
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"status": 1, "message": "JSON序列化失败: " + err.Error()})
-		return
-	}
-
-	if err := os.WriteFile(jsonPath, updatedContent, 0644); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"status": 1, "message": "文件写入失败: " + err.Error()})
+	// 5. 完整校验后按 UTF-8 原字节原子持久化，不重排未知字段、缩进或换行。
+	if err := writeKnowledgeFileAtomic(jsonPath, []byte(req.FileContent)); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"status": 1, "message": "文件写入失败"})
 		return
 	}
 
@@ -983,11 +1043,14 @@ func HandleEditEvaluation(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"status": 1, "message": "参数解析失败"})
 		return
 	}
+	if !validateKnowledgeFileContent(c, req.FileContent) {
+		return
+	}
 
 	// 2. 解析JSON为EvaluationDataset结构体
 	var eval EvaluationDataset
 	if err := json.Unmarshal([]byte(req.FileContent), &eval); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"status": 1, "message": "JSON解析失败: " + err.Error()})
+		c.JSON(http.StatusBadRequest, gin.H{"status": 1, "message": "JSON解析失败"})
 		return
 	}
 	if eval.Name == "" {
@@ -1001,8 +1064,10 @@ func HandleEditEvaluation(c *gin.Context) {
 		return
 	}
 
-	// 更新count字段为实际数据条数
-	eval.Count = len(eval.Data)
+	if eval.Count != len(eval.Data) {
+		c.JSON(http.StatusBadRequest, gin.H{"status": 1, "message": "评测集 count 与 data 数量不一致"})
+		return
+	}
 
 	// 验证数据项
 	for i, item := range eval.Data {
@@ -1040,21 +1105,17 @@ func HandleEditEvaluation(c *gin.Context) {
 		}
 	}
 
-	// 5. 如果新旧文件名不同，删除原文件
-	if oldName != eval.Name {
-		_ = os.Remove(oldPath) // 删除老文件
-	}
-
-	// 6. 序列化并写入新内容（新文件名）
-	updatedContent, err := json.MarshalIndent(eval, "", "  ")
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"status": 1, "message": "JSON序列化失败: " + err.Error()})
+	// 5. 先原子写入新内容，再删除发生重命名的旧文件。
+	if err := writeKnowledgeFileAtomic(newPath, []byte(req.FileContent)); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"status": 1, "message": "文件写入失败"})
 		return
 	}
-
-	if err := os.WriteFile(newPath, updatedContent, 0644); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"status": 1, "message": "文件写入失败: " + err.Error()})
-		return
+	if newPath != oldPath {
+		if err := os.Remove(oldPath); err != nil {
+			_ = os.Remove(newPath)
+			c.JSON(http.StatusInternalServerError, gin.H{"status": 1, "message": "删除原文件失败"})
+			return
+		}
 	}
 
 	c.JSON(http.StatusOK, gin.H{"status": 0, "message": "修改评测集成功"})
@@ -1091,7 +1152,7 @@ func HandleDeleteEvaluation(c *gin.Context) {
 			return
 		}
 		if err := os.Remove(jsonPath); err != nil {
-			c.JSON(http.StatusBadRequest, gin.H{"status": 1, "message": "删除失败: " + err.Error()})
+			c.JSON(http.StatusBadRequest, gin.H{"status": 1, "message": "删除失败"})
 			return
 		}
 	}

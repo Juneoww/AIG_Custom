@@ -1,7 +1,8 @@
 {
     "swagger": "2.0",
     "info": {
-        "contact": {},
+        "contact": {
+        },
         "description": "API for managing AIG Custom Platform AI security scanning tasks. Based on Tencent Zhuque Lab AI-Infra-Guard (https://github.com/Tencent/AI-Infra-Guard).",
         "title": "AIG Custom Platform 任务API",
         "version": "1.0"
@@ -1636,7 +1637,25 @@
         },
         "/api/v1/knowledge/fingerprints": {
             "get": {
-                "description": "Reads existing fingerprint content for authenticated admin, user, or auditor roles.",
+                "description": "Reads existing fingerprint summaries for authenticated admin, user, or auditor roles. Exactly one decimal page=1..1000 and size=1..100 is accepted; empty, duplicate, non-decimal, overflowing, or out-of-range values return 400.",
+                "parameters": [
+                    {
+                        "in": "query",
+                        "name": "page",
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": 1000,
+                        "default": 1
+                    },
+                    {
+                        "in": "query",
+                        "name": "size",
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": 100,
+                        "default": 20
+                    }
+                ],
                 "tags": [
                     "knowledge"
                 ],
@@ -1667,6 +1686,429 @@
                         "description": "Administrator role required."
                     }
                 }
+            }
+        },
+        "/api/v1/knowledge/fingerprints/{name}/raw": {
+            "get": {
+                "description": "Returns exact UTF-8 YAML bytes by one unique recursive info.name match inside the fixed fingerprint root. Ambiguous matches, symlinks, paths outside the root, and files over 1 MiB fail closed.",
+                "parameters": [
+                    {
+                        "in": "path",
+                        "name": "name",
+                        "required": true,
+                        "type": "string"
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "Legacy envelope whose data contains only content."
+                    },
+                    "400": {
+                        "description": "Invalid opaque name or unsafe file resolution."
+                    },
+                    "401": {
+                        "description": "Unauthenticated."
+                    },
+                    "403": {
+                        "description": "Password change is incomplete or role is unsupported."
+                    },
+                    "404": {
+                        "description": "Rule content is absent."
+                    },
+                    "413": {
+                        "description": "Rule content exceeds 1 MiB."
+                    },
+                    "500": {
+                        "description": "Sanitized file-read failure; no path is returned."
+                    }
+                },
+                "summary": "Read exact fingerprint source",
+                "tags": [
+                    "knowledge"
+                ]
+            }
+        },
+        "/api/v1/knowledge/vulnerabilities": {
+            "get": {
+                "description": "Lists vulnerability summaries. Exactly one decimal page=1..1000 and size=1..100 is accepted; invalid or repeated values return 400.",
+                "parameters": [
+                    {
+                        "in": "query",
+                        "name": "page",
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": 1000,
+                        "default": 1
+                    },
+                    {
+                        "in": "query",
+                        "name": "size",
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": 100,
+                        "default": 20
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "Legacy envelope with a bounded page."
+                    },
+                    "400": {
+                        "description": "Fixed invalid-pagination response."
+                    }
+                },
+                "summary": "List vulnerabilities",
+                "tags": [
+                    "knowledge"
+                ]
+            },
+            "post": {
+                "description": "Administrator-only governed create. file_content is at most 1 MiB; validated YAML and business fields are persisted atomically as the exact submitted UTF-8 bytes.",
+                "responses": {
+                    "200": {
+                        "description": "Legacy success envelope."
+                    },
+                    "400": {
+                        "description": "Invalid YAML, business fields, size, or path identifier."
+                    },
+                    "403": {
+                        "description": "Administrator role and matching CSRF pair required."
+                    }
+                },
+                "summary": "Create vulnerability source",
+                "tags": [
+                    "knowledge"
+                ]
+            }
+        },
+        "/api/v1/knowledge/vulnerabilities/{id}": {
+            "put": {
+                "description": "Administrator-only governed update. The validated source is atomically replaced without reserialization; comments, anchors, unknown fields, whitespace, and order are preserved.",
+                "parameters": [
+                    {
+                        "in": "path",
+                        "name": "id",
+                        "required": true,
+                        "type": "string"
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "Legacy success envelope."
+                    },
+                    "400": {
+                        "description": "Invalid source or identifier."
+                    },
+                    "403": {
+                        "description": "Administrator role and matching CSRF pair required."
+                    },
+                    "404": {
+                        "description": "Existing source is absent."
+                    }
+                },
+                "summary": "Update vulnerability source",
+                "tags": [
+                    "knowledge"
+                ]
+            }
+        },
+        "/api/v1/knowledge/vulnerabilities/{id}/raw": {
+            "get": {
+                "description": "Returns the exact UTF-8 YAML bytes from the fixed Chinese vulnerability root without reserialization. Ambiguous matches, symlinks, paths outside the root, and files over 1 MiB fail closed.",
+                "parameters": [
+                    {
+                        "in": "path",
+                        "name": "id",
+                        "required": true,
+                        "type": "string"
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "Legacy envelope whose data contains only content."
+                    },
+                    "400": {
+                        "description": "Invalid opaque ID, ambiguous match, or unsafe file resolution."
+                    },
+                    "401": {
+                        "description": "Unauthenticated."
+                    },
+                    "403": {
+                        "description": "Password change is incomplete or role is unsupported."
+                    },
+                    "404": {
+                        "description": "Rule content is absent."
+                    },
+                    "413": {
+                        "description": "Rule content exceeds 1 MiB."
+                    },
+                    "500": {
+                        "description": "Sanitized file-read failure; no path is returned."
+                    }
+                },
+                "summary": "Read exact vulnerability source",
+                "tags": [
+                    "knowledge"
+                ]
+            }
+        },
+        "/api/v1/knowledge/evaluations": {
+            "get": {
+                "description": "Lists evaluation summaries. Exactly one decimal page=1..1000 and size=1..100 is accepted; invalid or repeated values return 400.",
+                "parameters": [
+                    {
+                        "in": "query",
+                        "name": "page",
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": 1000,
+                        "default": 1
+                    },
+                    {
+                        "in": "query",
+                        "name": "size",
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": 100,
+                        "default": 20
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "Legacy envelope with a bounded page."
+                    },
+                    "400": {
+                        "description": "Fixed invalid-pagination response."
+                    }
+                },
+                "summary": "List evaluation sets",
+                "tags": [
+                    "knowledge"
+                ]
+            },
+            "post": {
+                "description": "Administrator-only governed create. file_content is at most 1 MiB; count must equal data length, and validated JSON is atomically persisted as exact UTF-8 bytes.",
+                "responses": {
+                    "200": {
+                        "description": "Legacy success envelope."
+                    },
+                    "400": {
+                        "description": "Invalid JSON, schema, count, size, or identifier."
+                    },
+                    "403": {
+                        "description": "Administrator role and matching CSRF pair required."
+                    }
+                },
+                "summary": "Create evaluation source",
+                "tags": [
+                    "knowledge"
+                ]
+            }
+        },
+        "/api/v1/knowledge/evaluations/{name}": {
+            "put": {
+                "description": "Administrator-only governed update. Validated JSON is atomically replaced without reserialization, preserving unknown fields, whitespace, and order; count must equal data length.",
+                "parameters": [
+                    {
+                        "in": "path",
+                        "name": "name",
+                        "required": true,
+                        "type": "string"
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "Legacy success envelope."
+                    },
+                    "400": {
+                        "description": "Invalid source, count, or identifier."
+                    },
+                    "403": {
+                        "description": "Administrator role and matching CSRF pair required."
+                    },
+                    "404": {
+                        "description": "Existing source is absent."
+                    }
+                },
+                "summary": "Update evaluation source",
+                "tags": [
+                    "knowledge"
+                ]
+            }
+        },
+        "/api/v1/knowledge/evaluations/{name}/raw": {
+            "get": {
+                "description": "Returns the exact UTF-8 JSON bytes through the legacy envelope without reserialization. The requested regular file must stay below 1 MiB and inside the fixed evaluation root; symlinks are rejected.",
+                "parameters": [
+                    {
+                        "in": "path",
+                        "name": "name",
+                        "required": true,
+                        "type": "string"
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "Legacy envelope whose data contains only content."
+                    },
+                    "400": {
+                        "description": "Invalid opaque name or unsafe file resolution."
+                    },
+                    "401": {
+                        "description": "Unauthenticated."
+                    },
+                    "403": {
+                        "description": "Password change is incomplete or role is unsupported."
+                    },
+                    "404": {
+                        "description": "Evaluation content is absent."
+                    },
+                    "413": {
+                        "description": "Evaluation content exceeds 1 MiB."
+                    },
+                    "500": {
+                        "description": "Sanitized file-read failure; no path is returned."
+                    }
+                },
+                "summary": "Read exact evaluation source",
+                "tags": [
+                    "knowledge"
+                ]
+            }
+        },
+        "/api/v1/knowledge/agent/connect": {
+            "post": {
+                "consumes": [
+                    "application/json"
+                ],
+                "description": "Administrator-only Agent connectivity test. It requires the matching Cookie session, password-change gate, and CSRF cookie/header pair. Provider diagnostics, paths, and raw responses are never returned or logged.",
+                "parameters": [
+                    {
+                        "in": "body",
+                        "name": "request",
+                        "required": true,
+                        "schema": {
+                            "type": "object",
+                            "required": [
+                                "content"
+                            ],
+                            "properties": {
+                                "content": {
+                                    "type": "string"
+                                }
+                            }
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "Legacy envelope with a fixed safe connectivity outcome."
+                    },
+                    "400": {
+                        "description": "Fixed invalid-request response."
+                    },
+                    "401": {
+                        "description": "Unauthenticated."
+                    },
+                    "403": {
+                        "description": "Administrator role and matching CSRF pair required."
+                    },
+                    "500": {
+                        "description": "Fixed execution failure without provider diagnostics."
+                    }
+                },
+                "summary": "Test Agent connectivity safely",
+                "tags": [
+                    "knowledge"
+                ]
+            }
+        },
+        "/api/v1/knowledge/agent/prompt_test": {
+            "post": {
+                "consumes": [
+                    "application/json"
+                ],
+                "description": "Administrator-only governed Agent Prompt test. Success returns only an explicit provider_response.output bounded to 256 KiB, or a fixed success message when absent or oversized. Provider raw, message, paths, and diagnostics are never returned or logged.",
+                "parameters": [
+                    {
+                        "in": "body",
+                        "name": "request",
+                        "required": true,
+                        "schema": {
+                            "type": "object",
+                            "required": [
+                                "content",
+                                "prompt"
+                            ],
+                            "properties": {
+                                "content": {
+                                    "type": "string"
+                                },
+                                "prompt": {
+                                    "type": "string"
+                                }
+                            }
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "Legacy envelope with bounded explicit output or a fixed safe outcome."
+                    },
+                    "400": {
+                        "description": "Fixed invalid-request response."
+                    },
+                    "401": {
+                        "description": "Unauthenticated."
+                    },
+                    "403": {
+                        "description": "Administrator role and matching CSRF pair required."
+                    },
+                    "500": {
+                        "description": "Fixed execution failure without provider output or internal details."
+                    }
+                },
+                "summary": "Test an Agent Prompt safely",
+                "tags": [
+                    "knowledge"
+                ]
+            }
+        },
+        "/api/v1/knowledge/prompt_collections/{id}": {
+            "delete": {
+                "description": "Deletes one Prompt collection by opaque ID through the administrator-only governed facade. The mutation requires the matching CSRF cookie/header pair and is durably audited.",
+                "parameters": [
+                    {
+                        "in": "path",
+                        "name": "id",
+                        "required": true,
+                        "type": "string"
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "Legacy success envelope after the governed deletion completes."
+                    },
+                    "400": {
+                        "description": "Invalid or missing opaque ID."
+                    },
+                    "401": {
+                        "description": "Unauthenticated."
+                    },
+                    "403": {
+                        "description": "Administrator role and matching CSRF are required."
+                    },
+                    "404": {
+                        "description": "Prompt collection is absent."
+                    },
+                    "500": {
+                        "description": "Sanitized mutation or audit failure; no path is returned."
+                    }
+                },
+                "summary": "Delete governed Prompt collection",
+                "tags": [
+                    "knowledge"
+                ]
             }
         },
         "/api/v1/auth/login": {

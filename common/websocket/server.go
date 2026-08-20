@@ -170,6 +170,7 @@ func RunWebServer(options *version.Options) {
 			fingerprints := knowledge.Group("/fingerprints")
 			{
 				// 管理功能
+				fingerprints.GET("/:name/raw", identity.RequireRole(identity.RoleAdmin, identity.RoleUser, identity.RoleAuditor), HandleGetFingerprintRaw)
 				fingerprints.GET("", identity.RequireRole(identity.RoleAdmin, identity.RoleUser, identity.RoleAuditor), HandleListFingerprints)
 				fingerprints.POST("", knowledgeHandler.Govern(platformknowledge.KindFingerprint, platformknowledge.OperationCreate, HandleCreateFingerprint))
 				fingerprints.PUT("/:name", knowledgeHandler.Govern(platformknowledge.KindFingerprint, platformknowledge.OperationUpdate, HandleEditFingerprint))
@@ -179,6 +180,7 @@ func RunWebServer(options *version.Options) {
 			vulnerabilities := knowledge.Group("/vulnerabilities")
 			{
 				// 管理功能
+				vulnerabilities.GET("/:id/raw", identity.RequireRole(identity.RoleAdmin, identity.RoleUser, identity.RoleAuditor), HandleGetVulnerabilityRaw)
 				vulnerabilities.GET("", identity.RequireRole(identity.RoleAdmin, identity.RoleUser, identity.RoleAuditor), HandleListVulnerabilities())
 				vulnerabilities.POST("", knowledgeHandler.Govern(platformknowledge.KindVulnerability, platformknowledge.OperationCreate, HandleCreateVulnerability()))
 				vulnerabilities.PUT("/:cve", knowledgeHandler.Govern(platformknowledge.KindVulnerability, platformknowledge.OperationUpdate, HandleEditVulnerability))
@@ -188,6 +190,7 @@ func RunWebServer(options *version.Options) {
 			evaluations := knowledge.Group("/evaluations")
 			{
 				// 管理功能
+				evaluations.GET("/:name/raw", identity.RequireRole(identity.RoleAdmin, identity.RoleUser, identity.RoleAuditor), HandleGetEvaluationRaw)
 				evaluations.GET("/:name", identity.RequireRole(identity.RoleAdmin, identity.RoleUser, identity.RoleAuditor), HandleGetEvaluationDetail)
 				evaluations.GET("", identity.RequireRole(identity.RoleAdmin, identity.RoleUser, identity.RoleAuditor), HandleListEvaluations)
 				evaluations.POST("", knowledgeHandler.Govern(platformknowledge.KindEvaluation, platformknowledge.OperationCreate, HandleCreateEvaluation))
@@ -209,6 +212,7 @@ func RunWebServer(options *version.Options) {
 				collections.GET("", identity.RequireRole(identity.RoleAdmin, identity.RoleUser, identity.RoleAuditor), HandleList(PromptCollectionsRoot, promptCollectionLoadFile))
 				collections.POST("", knowledgeHandler.Govern(platformknowledge.KindPromptCollection, platformknowledge.OperationCreate, HandleCreate(promptCollectionReadAndSave)))
 				collections.PUT("/:id", knowledgeHandler.Govern(platformknowledge.KindPromptCollection, platformknowledge.OperationUpdate, HandleEdit(promptCollectionUpdateFunc)))
+				collections.DELETE("/:id", knowledgeHandler.Govern(platformknowledge.KindPromptCollection, platformknowledge.OperationDelete, HandleDelete(promptCollectionDeleteFunc)))
 				collections.DELETE("", knowledgeHandler.Govern(platformknowledge.KindPromptCollection, platformknowledge.OperationDelete, HandleDelete(promptCollectionDeleteFunc)))
 			}
 			agentConfigs := knowledge.Group("/agent")

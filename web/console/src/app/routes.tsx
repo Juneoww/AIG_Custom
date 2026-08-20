@@ -13,6 +13,13 @@ import { LoginPage } from '../features/auth/LoginPage'
 import { ResetPasswordPage } from '../features/auth/ResetPasswordPage'
 import { useSession } from '../features/auth/session'
 import { DashboardPage } from '../features/dashboard/DashboardPage'
+import { AgentConfigPage } from '../features/knowledge/AgentConfigPage'
+import { EvaluationPage } from '../features/knowledge/EvaluationPage'
+import { FingerprintPage } from '../features/knowledge/FingerprintPage'
+import { KnowledgeLayout } from '../features/knowledge/KnowledgeLayout'
+import { MCPPage } from '../features/knowledge/MCPPage'
+import { PromptCollectionPage } from '../features/knowledge/PromptCollectionPage'
+import { VulnerabilityPage } from '../features/knowledge/VulnerabilityPage'
 import { ModelListPage } from '../features/models/ModelListPage'
 import { ReportDetailPage } from '../features/reports/ReportDetailPage'
 import { ReportListPage } from '../features/reports/ReportListPage'
@@ -159,6 +166,22 @@ export const identityRoutes: RouteObject[] = [
 ]
 
 function routeForNavigation(item: NavigationItem): RouteObject {
+  if (item.id === 'knowledge') {
+    return {
+      path: 'knowledge',
+      element: <RequireRole allowedRoles={item.allowedRoles}><KnowledgeLayout /></RequireRole>,
+      children: [
+        { index: true, element: <Navigate replace to="fingerprints" /> },
+        { path: 'fingerprints', element: <FingerprintPage /> },
+        { path: 'vulnerabilities', element: <VulnerabilityPage /> },
+        { path: 'evaluations', element: <EvaluationPage /> },
+        { path: 'mcp', element: <MCPPage /> },
+        { path: 'prompts', element: <PromptCollectionPage /> },
+        { path: 'agents', element: <AgentConfigPage /> },
+        { path: 'prompts/manage', element: <RequireRole allowedRoles={['admin']}><PromptCollectionPage /></RequireRole> },
+      ],
+    }
+  }
   const featurePage = item.id === 'overview'
     ? <DashboardPage />
     : item.id === 'tasks'

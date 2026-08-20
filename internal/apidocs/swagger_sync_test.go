@@ -82,8 +82,48 @@ func TestGeneratedSwaggerArtifactsStayInSync(t *testing.T) {
 			{"/api/v1/platform/tasks/attachments/{attachmentID}/merge", "post"},
 			{"/api/v1/platform/tasks/attachments/{attachmentID}", "delete"},
 			{"/api/v1/platform/tasks/attachments/{attachmentID}/download", "get"},
+			{"/api/v1/knowledge/agent/connect", "post"},
+			{"/api/v1/knowledge/agent/prompt_test", "post"},
 		} {
 			_ = swaggerValue(t, document, "paths", endpoint.path, endpoint.method)
+		}
+		connectDescription := swaggerValue(t, document, "paths", "/api/v1/knowledge/agent/connect", "post", "description").(string)
+		for _, required := range []string{"Administrator", "CSRF", "Provider diagnostics"} {
+			if !strings.Contains(connectDescription, required) {
+				t.Fatalf("Agent connectivity documentation must contain %q", required)
+			}
+		}
+		promptDescription := swaggerValue(t, document, "paths", "/api/v1/knowledge/agent/prompt_test", "post", "description").(string)
+		for _, required := range []string{"256 KiB", "Provider raw", "diagnostics"} {
+			if !strings.Contains(promptDescription, required) {
+				t.Fatalf("Agent Prompt documentation must contain %q", required)
+			}
+		}
+		for _, endpoint := range []struct {
+			path     string
+			required []string
+		}{
+			{"/api/v1/knowledge/agent/connect", []string{"content"}},
+			{"/api/v1/knowledge/agent/prompt_test", []string{"content", "prompt"}},
+		} {
+			parameters := swaggerValue(t, document, "paths", endpoint.path, "post", "parameters").([]interface{})
+			if len(parameters) != 1 {
+				t.Fatalf("%s must document exactly one JSON request body", endpoint.path)
+			}
+			body := parameters[0].(map[string]interface{})
+			if body["in"] != "body" || body["required"] != true {
+				t.Fatalf("%s must require its JSON request body", endpoint.path)
+			}
+			required := swaggerValue(t, body, "schema", "required").([]interface{})
+			for _, field := range endpoint.required {
+				present := false
+				for _, documented := range required {
+					present = present || documented == field
+				}
+				if !present {
+					t.Fatalf("%s request body must require %q", endpoint.path, field)
+				}
+			}
 		}
 		createDescription := swaggerValue(t, document, "paths", "/api/v1/platform/tasks", "post", "description").(string)
 		for _, required := range []string{"Idempotency-Key", "Cookie", "raw model credentials", "opaque attachment IDs", "same persisted request payload", "different payload"} {

@@ -102,6 +102,26 @@ The independently governed model API is `/api/v1/platform/models`. `POST /api/v1
 
 Only `aig migrate` may apply database DDL. A fresh or upgraded PostgreSQL database schema reaches v9; runtime startup only validates it. Migration safely handles an empty legacy table and never relies on runtime AutoMigrate. Version 8 adds `idx_platform_tasks_updated_at` and `idx_platform_tasks_owner_updated_at` for stable recent-task ordering (`updated_at DESC, id DESC`) in global and owner scopes. Version 9 idempotently backfills ready attachments already referenced by historical tasks to attached while leaving unbound ready attachments eligible for cleanup.
 
+## Knowledge compatibility governance API
+
+`/api/v1/knowledge` retains the `{status,message,data}` compatibility envelope. Fingerprints, vulnerabilities, evaluation sets, MCP plugins, Prompt collections, and Agent configurations are readable by `user`, `auditor`, and `admin` Subjects that have completed the first-password-change gate. Only administrators may call the existing write routes; every persistent mutation requires the current `aig_csrf` Cookie to match `X-CSRF-Token` and passes through governed auditing. A frontend must map nonzero `status` to a fixed safe error and must not render the server `message`, a file path, or raw diagnostics.
+
+Fingerprint, vulnerability, and evaluation list routes accept exactly one decimal `page=1..1000` and `size=1..100` (defaults 1 and 20). Empty, duplicate, non-decimal, out-of-range, and overflowing values return fixed `400`. Vulnerability and evaluation `file_content` writes are limited to 1 MiB: the server validates YAML/JSON and the business schema, then atomically persists the original UTF-8 bytes without reordering comments, anchors, unknown fields, whitespace, or keys; an evaluation `count` must equal its `data` length. A successful Agent Prompt test exposes only an explicit `provider_response.output` of at most 256 KiB. A missing or oversized output receives a fixed success message and never falls back to Provider `raw`, `message`, paths, or diagnostics.
+
+`POST /api/v1/knowledge/agent/connect` is administrator-only and requires the current Cookie session, completed password change, and matching CSRF Cookie/Header pair; its request body contains only `content`. It returns a fixed connectivity outcome and never returns or logs Provider raw responses, paths, or diagnostics. `POST /api/v1/knowledge/agent/prompt_test` uses the same identity and CSRF boundary.
+
+To preserve comments, anchors, whitespace, and field order, source editing uses the following read-only endpoints instead of reserializing list DTOs:
+
+| Endpoint | Exact success data | Security boundary |
+|---|---|---|
+| `GET /api/v1/knowledge/fingerprints/{name}/raw` | `data: { "content": "<exact-yaml>" }` | One unique recursive YAML `info.name` match inside the fixed `data/fingerprints` root, at most 1 MiB. |
+| `GET /api/v1/knowledge/vulnerabilities/{id}/raw` | `data: { "content": "<exact-yaml>" }` | One unique match under the fixed Chinese vulnerability root, regular file, at most 1 MiB. |
+| `GET /api/v1/knowledge/evaluations/{name}/raw` | `data: { "content": "<exact-json>" }` | Fixed `data/eval` root, regular file, at most 1 MiB. |
+
+All three reject an empty identifier, `.`, `..`, slash, backslash, control characters, a symlinked root or file, a path outside the fixed root, and an ambiguous fingerprint or vulnerability match. Invalid or unsafe resolution returns fixed `400`, absence returns `404`, an oversized file returns `413`, and file-system failure returns a fixed path-free `500`.
+
+The canonical Prompt deletion route is `DELETE /api/v1/knowledge/prompt_collections/{id}`. It accepts only the opaque ID in the path. The old ID-less `DELETE /api/v1/knowledge/prompt_collections` remains solely for deployed-client compatibility and returns fixed `400`; it never infers or batch-deletes resources. Success retains the legacy `200` envelope and absence returns `404`.
+
 ## Immutable Reports and Brand API
 
 All endpoints below use the authenticated Cookie Subject and the completed-password-change gate. A user may read and export only their own reports. An auditor has global read/export access but cannot mutate data. An administrator has global read/export access and may govern branding or backfill a missing snapshot. Browser-provided identity headers and raw engine results are never trusted.

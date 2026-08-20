@@ -102,6 +102,26 @@ AIG Custom Platform 是基于 Tencent Zhuque Lab AI-Infra-Guard（https://github
 
 只有 `aig migrate` 可以执行数据库 DDL。全新或升级后的 PostgreSQL schema 到达 v9；runtime 启动只做校验。迁移可安全处理旧表为空的情况，且不依赖 runtime AutoMigrate。版本 8 新增 `idx_platform_tasks_updated_at` 与 `idx_platform_tasks_owner_updated_at`，分别支持全局和 owner 范围按 `updated_at DESC, id DESC` 稳定读取最近任务；版本 9 将已被历史任务引用的 ready 附件幂等回填为 attached，未绑定 ready 附件保持可回收。
 
+## 知识库兼容治理 API
+
+`/api/v1/knowledge` 保留 `{status,message,data}` 兼容 envelope。指纹、漏洞、评测集、MCP 插件、Prompt 集合和 Agent 配置均允许已完成首次改密的 `user`、`auditor`、`admin` 读取；只有管理员可调用现有写路由，且所有持久化写操作都要求当前 `aig_csrf` Cookie 与 `X-CSRF-Token` 匹配并经过受治理审计。前端必须把非零 `status` 映射为固定安全错误，不得显示服务端 `message`、文件路径或原始诊断。
+
+指纹、漏洞和评测集列表只接受唯一十进制 `page=1..1000` 与 `size=1..100`（默认分别为 1、20）；空值、重复值、非十进制、越界和溢出值固定返回 `400`。漏洞与评测集写入的 `file_content` 最大 1 MiB：服务端先执行 YAML/JSON 与业务校验，再原子保存原始 UTF-8 字节，不重排注释、锚点、未知字段、空白或字段顺序；评测集 `count` 必须与 `data` 长度一致。Agent Prompt 测试成功响应只允许返回最大 256 KiB 的显式 `provider_response.output`；缺失或超限时返回固定成功说明，绝不回退到 Provider `raw`、`message`、路径或错误诊断。
+
+`POST /api/v1/knowledge/agent/connect` 仅限管理员，要求当前 Cookie 会话、首次改密完成和匹配的 CSRF Cookie/Header；请求体只含 `content`。它返回固定的连通性结论，不返回或记录 Provider 原始响应、路径和诊断。`POST /api/v1/knowledge/agent/prompt_test` 使用同一身份与 CSRF 边界。
+
+为保持注释、锚点、空白和字段顺序，控制台原文编辑使用以下只读路由，而不是从列表 DTO 重新序列化：
+
+| 端点 | 精确成功数据 | 安全边界 |
+|---|---|---|
+| `GET /api/v1/knowledge/fingerprints/{name}/raw` | `data: { "content": "<exact-yaml>" }` | 在固定 `data/fingerprints` 根内按 YAML `info.name` 唯一递归匹配，规则文件最大 1 MiB。 |
+| `GET /api/v1/knowledge/vulnerabilities/{id}/raw` | `data: { "content": "<exact-yaml>" }` | 固定中文漏洞根中唯一匹配、规则文件、最大 1 MiB。 |
+| `GET /api/v1/knowledge/evaluations/{name}/raw` | `data: { "content": "<exact-json>" }` | 固定 `data/eval` 根、规则文件、最大 1 MiB。 |
+
+三个端点都拒绝空标识、`.`、`..`、斜杠、反斜杠、控制字符、根目录或文件符号链接、根外文件，以及不唯一的指纹或漏洞匹配。无效或不安全解析返回固定 `400`，不存在返回 `404`，超过上限返回 `413`，文件系统故障返回不含路径的固定 `500`。
+
+Prompt 删除的规范路由是 `DELETE /api/v1/knowledge/prompt_collections/{id}`。它仅接受路径中的 opaque ID；旧的无 ID `DELETE /api/v1/knowledge/prompt_collections` 只为兼容已部署调用方保留，并固定返回 `400`，不能推断或批量删除资源。成功仍返回 legacy `200` envelope，资源不存在返回 `404`。
+
 ## 不可变报告与品牌 API
 
 以下接口均使用 Cookie 中的认证 Subject，并经过首次改密门禁。普通用户只能读取和导出本人报告；审计员可以全局只读与导出，但不能变更；管理员可以全局读取/导出，并可治理品牌或补建缺失快照。浏览器提交的身份请求头和原始引擎结果一律不可信。
