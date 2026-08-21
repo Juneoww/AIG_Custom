@@ -13,6 +13,11 @@ import { LoginPage } from '../features/auth/LoginPage'
 import { ResetPasswordPage } from '../features/auth/ResetPasswordPage'
 import { useSession } from '../features/auth/session'
 import { DashboardPage } from '../features/dashboard/DashboardPage'
+import { AboutPage } from '../features/about/AboutPage'
+import { AuditListPage } from '../features/admin/audit/AuditListPage'
+import { BrandSettingsPage } from '../features/admin/brand/BrandSettingsPage'
+import { SystemPage } from '../features/admin/system/SystemPage'
+import { UserListPage } from '../features/admin/users/UserListPage'
 import { AgentConfigPage } from '../features/knowledge/AgentConfigPage'
 import { EvaluationPage } from '../features/knowledge/EvaluationPage'
 import { FingerprintPage } from '../features/knowledge/FingerprintPage'
@@ -21,6 +26,7 @@ import { MCPPage } from '../features/knowledge/MCPPage'
 import { PromptCollectionPage } from '../features/knowledge/PromptCollectionPage'
 import { VulnerabilityPage } from '../features/knowledge/VulnerabilityPage'
 import { ModelListPage } from '../features/models/ModelListPage'
+import { ProfilePage } from '../features/profile/ProfilePage'
 import { ReportDetailPage } from '../features/reports/ReportDetailPage'
 import { ReportListPage } from '../features/reports/ReportListPage'
 import { TaskCreatePage } from '../features/tasks/TaskCreatePage'
@@ -190,6 +196,14 @@ function routeForNavigation(item: NavigationItem): RouteObject {
         ? <ReportListPage />
         : item.id === 'models'
           ? <ModelListPage />
+          : item.id === 'users'
+            ? <UserListPage />
+            : item.id === 'audit'
+              ? <AuditListPage />
+              : item.id === 'brand'
+                ? <BrandSettingsPage />
+                : item.id === 'system'
+                  ? <SystemPage />
           : <PendingFeaturePage item={item} />
   const element = (
     <RequireRole allowedRoles={item.allowedRoles}>
@@ -232,6 +246,8 @@ export const appRoutes: RouteObject[] = [
               </RequireRole>
             ),
           },
+          { path: 'profile', element: <ProfilePage /> },
+          { path: 'about', element: <AboutPage /> },
           { path: '*', element: <NotFoundPage /> },
         ],
       },

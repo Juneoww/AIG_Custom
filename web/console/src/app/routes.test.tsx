@@ -133,11 +133,31 @@ describe('production routes', () => {
     )
   })
 
-  it('shows an honest placeholder for known routes and all routes to admin', () => {
+  it('renders the governed user-management page for administrators', () => {
+    vi.stubGlobal('fetch', vi.fn(() => new Promise<Response>(() => undefined)))
     renderRoute(subjectState('admin'), '/admin/users')
 
     expect(screen.getByRole('heading', { name: '用户管理' })).toBeInTheDocument()
-    expect(screen.getByText('用户管理尚未接入')).toBeInTheDocument()
+    expect(screen.getByRole('progressbar', { name: '正在加载用户台账' })).toBeInTheDocument()
+    expect(screen.queryByText('用户管理尚未接入')).not.toBeInTheDocument()
+  })
+
+  it.each(['auditor', 'admin'] as const)('让%s角色读取真实审计与系统路由', (role) => {
+    vi.stubGlobal('fetch', vi.fn(() => new Promise<Response>(() => undefined)))
+    const audit = renderRoute(subjectState(role), '/admin/audit')
+    expect(screen.getByRole('heading', { name: '审计事件' })).toBeInTheDocument()
+    expect(screen.getByRole('progressbar', { name: '正在加载审计事件' })).toBeInTheDocument()
+    audit.unmount()
+    renderRoute(subjectState(role), '/system')
+    expect(screen.getByRole('heading', { name: '系统信息' })).toBeInTheDocument()
+    expect(screen.getByRole('progressbar', { name: '正在加载同步状态' })).toBeInTheDocument()
+  })
+
+  it('offers profile and about pages to each authenticated role', () => {
+    renderRoute(subjectState('user'), '/profile')
+    expect(screen.getByRole('heading', { name: '个人资料' })).toBeInTheDocument()
+    renderRoute(subjectState('user'), '/about')
+    expect(screen.getByRole('heading', { name: '关于' })).toBeInTheDocument()
   })
 
   it('replaces overview and task placeholders with governed Task12 pages', () => {

@@ -132,13 +132,14 @@ export function Topbar() {
           <option value="system">跟随系统</option>
         </Select>
         <div className={styles.identity} aria-label="个人中心">
-          <span>个人中心</span>
+          <Link className={styles.actionLink} to="/profile">个人资料</Link>
           <span className={styles.username}>{state.subject.username}</span>
           <span>{roleLabels[state.subject.role]}</span>
         </div>
         <Link className={styles.actionLink} to="/change-password" state={{ from: currentLocation }}>
           修改密码
         </Link>
+        <Link className={styles.actionLink} to="/about">关于</Link>
         <Button appearance="subtle" disabled={loggingOut} onClick={() => void handleLogout()}>
           {loggingOut ? '正在退出' : '退出登录'}
         </Button>

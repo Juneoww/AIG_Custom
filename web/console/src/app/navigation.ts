@@ -25,10 +25,10 @@ export const navigationItems: readonly NavigationItem[] = [
   { id: 'reports', path: '/reports', label: '安全报告', description: '查看不可变报告快照并执行受审计 PDF 导出。', allowedRoles: ALL_ROLES },
   { id: 'models', path: '/models', label: '模型与凭据', description: '查看受治理模型，并按角色管理加密凭据。', allowedRoles: ALL_ROLES },
   { id: 'knowledge', path: '/knowledge', label: '规则与知识库', description: '浏览六类规则与知识资产，并按角色执行受审计治理。', allowedRoles: ALL_ROLES },
-  { id: 'users', path: '/admin/users', label: '用户管理', description: '用户管理将在后续任务接入。', allowedRoles: ADMIN_ONLY },
-  { id: 'audit', path: '/admin/audit', label: '审计日志', description: '审计日志将在后续任务接入。', allowedRoles: AUDIT_ROLES },
-  { id: 'brand', path: '/admin/brand', label: '品牌设置', description: '品牌设置将在后续任务接入。', allowedRoles: ADMIN_ONLY },
-  { id: 'system', path: '/system', label: '系统信息', description: '系统信息将在后续任务接入。', allowedRoles: AUDIT_ROLES },
+  { id: 'users', path: '/admin/users', label: '用户管理', description: '创建、启停、改角色或受控发起站外密码重置。', allowedRoles: ADMIN_ONLY },
+  { id: 'audit', path: '/admin/audit', label: '审计日志', description: '按权限读取服务端分页的治理审计摘要。', allowedRoles: AUDIT_ROLES },
+  { id: 'brand', path: '/admin/brand', label: '品牌设置', description: '维护经浏览器与服务端双重校验的企业品牌。', allowedRoles: ADMIN_ONLY },
+  { id: 'system', path: '/system', label: '系统信息', description: '读取同步状态；仅管理员可发起受控数据同步。', allowedRoles: AUDIT_ROLES },
 ]
 
 export function visibleNavigationFor(role: SubjectRole): readonly NavigationItem[] {

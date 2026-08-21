@@ -75,6 +75,8 @@ describe('Topbar', () => {
     expect(window.localStorage.getItem('aig-console-theme')).toBe('dark')
     expect(Object.keys(window.localStorage)).toEqual(['aig-console-theme'])
     expect(screen.getByRole('link', { name: '修改密码' })).toHaveAttribute('href', '/change-password')
+    expect(screen.getByRole('link', { name: '个人资料' })).toHaveAttribute('href', '/profile')
+    expect(screen.getByRole('link', { name: '关于' })).toHaveAttribute('href', '/about')
     expect(screen.queryByText('帮助中心')).not.toBeInTheDocument()
     expect(screen.queryByText('English')).not.toBeInTheDocument()
   })
