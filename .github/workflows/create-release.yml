@@ -60,6 +60,8 @@ jobs:
           mkdir -p release-package/licenses
           cp internal/platform/reports/assets/DROID_FONT_LICENSE.txt release-package/licenses/DROID_FONT_LICENSE.txt
           cp internal/platform/reports/assets/THIRD_PARTY_NOTICES.txt release-package/licenses/THIRD_PARTY_NOTICES.txt
+          cp web/console/assets/fonts/FONT_ASSETS.md release-package/licenses/FONT_ASSETS.md
+          cp web/console/assets/fonts/IBM_PLEX_LICENSE.txt release-package/licenses/IBM_PLEX_LICENSE.txt
           mkdir -p release-package/db
           mkdir -p release-package/log
           mkdir -p release-package/uploads

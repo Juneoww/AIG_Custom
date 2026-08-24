@@ -42,6 +42,14 @@ img/
 License.txt
 !README.md
 !CHANGELOG.md
+!internal/platform/reports/assets/DROID_FONT_LICENSE.txt
+!internal/platform/reports/assets/THIRD_PARTY_NOTICES.txt
+!web/console/assets/fonts/IBM_PLEX_LICENSE.txt
+!web/console/assets/fonts/FONT_ASSETS.md
+web/console/.generated/
+web/console/dist/
+web/console/node_modules/
+.pnpm-store/
 
 # GitHub Actions配置
 .github/

@@ -95,6 +95,17 @@ jobs:
           
           echo "🏗️  准备构建标签: $BUILD_TAG"
 
+      - name: 🧪 Verify committed enterprise console assets
+        shell: pwsh
+        run: |
+          ./scripts/build-console.ps1
+          git diff --exit-code -- common/websocket/static
+          $staticChanges = git status --porcelain --untracked-files=all -- common/websocket/static
+          if ($staticChanges) {
+            $staticChanges | Write-Output
+            throw "控制台构建产生了未提交的静态资源"
+          }
+
       - name: 🔧 Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
         with:

@@ -1,5 +1,23 @@
 # 多阶段构建Dockerfile
-# 第一阶段：构建Go应用
+# 第一阶段：在固定 Node 22 中构建并验证企业控制台资源。
+FROM node:22.18.0-alpine AS frontend-builder
+
+WORKDIR /workspace/web/console
+ENV CI=true
+
+# 先复制锁定依赖，保持依赖层缓存稳定。
+COPY web/console/package.json web/console/pnpm-lock.yaml ./
+RUN corepack enable && pnpm install --frozen-lockfile
+
+COPY web/console/ ./
+COPY internal/platform/reports/assets/DroidSansFallbackFull.ttf /workspace/internal/platform/reports/assets/DroidSansFallbackFull.ttf
+COPY internal/platform/reports/assets/DROID_FONT_LICENSE.txt /workspace/internal/platform/reports/assets/DROID_FONT_LICENSE.txt
+COPY LICENSE /workspace/LICENSE
+
+# 任一质量检查失败都会阻断 Go 二进制和生产镜像构建。
+RUN pnpm run prepare:fonts && pnpm run lint && pnpm run typecheck && pnpm run test:run && pnpm run build
+
+# 第二阶段：构建 Go 应用，并仅嵌入本阶段产出的控制台资源。
 FROM golang:1.23.2-alpine AS builder
 
 # 仅构建阶段使用，可通过 --build-arg 覆盖；避免依赖下载受默认代理瞬时故障影响。
@@ -11,6 +29,10 @@ WORKDIR /app
 
 # 复制源代码（包含go.mod和go.sum）
 COPY . .
+
+# 必须先清空仓库中提交的资源，避免旧版资产混入生产二进制。
+RUN rm -rf common/websocket/static
+COPY --from=frontend-builder /workspace/web/console/dist/ ./common/websocket/static/
 
 # 下载依赖
 RUN go mod download
@@ -47,6 +69,8 @@ COPY --from=builder /app/CHANGELOG.md .
 COPY --from=builder /app/LICENSE /app/licenses/LICENSE
 COPY --from=builder /app/internal/platform/reports/assets/DROID_FONT_LICENSE.txt /app/licenses/DROID_FONT_LICENSE.txt
 COPY --from=builder /app/internal/platform/reports/assets/THIRD_PARTY_NOTICES.txt /app/licenses/THIRD_PARTY_NOTICES.txt
+COPY --from=frontend-builder /workspace/web/console/assets/fonts/FONT_ASSETS.md /app/licenses/FONT_ASSETS.md
+COPY --from=frontend-builder /workspace/web/console/dist/licenses/IBM_PLEX_LICENSE.txt /app/licenses/IBM_PLEX_LICENSE.txt
 
 # 复制数据文件到容器中
 COPY --from=builder /app/data ./data

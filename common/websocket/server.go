@@ -27,7 +27,8 @@ import (
 	"embed"
 	"mime"
 	"net/http"
-	"path/filepath"
+	"path"
+	"strings"
 	"time"
 
 	"github.com/Juneoww/AIG_Custom/common/trpc"
@@ -52,6 +53,95 @@ import (
 
 //go:embed static/*
 var staticFS embed.FS
+
+const (
+	consoleIndexFile             = "static/index.html"
+	consoleDocumentCacheControl  = "no-cache"
+	consoleImmutableCacheControl = "public, max-age=31536000, immutable"
+)
+
+func registerEmbeddedStaticRoutes(router *gin.Engine) {
+	router.NoRoute(func(c *gin.Context) {
+		if c.Request.Method != http.MethodGet && c.Request.Method != http.MethodHead {
+			c.Status(http.StatusNotFound)
+			return
+		}
+
+		requestPath := c.Request.URL.Path
+		if isReservedConsoleRoute(requestPath) {
+			c.Status(http.StatusNotFound)
+			return
+		}
+
+		assetPath, validPath := embeddedConsoleAssetPath(requestPath)
+		if !validPath {
+			c.Status(http.StatusNotFound)
+			return
+		}
+
+		if assetData, err := staticFS.ReadFile(assetPath); err == nil {
+			serveEmbeddedConsoleAsset(c, assetPath, assetData)
+			return
+		}
+
+		if isStaticAssetRequest(requestPath) {
+			c.Status(http.StatusNotFound)
+			return
+		}
+
+		indexData, err := staticFS.ReadFile(consoleIndexFile)
+		if err != nil {
+			c.String(http.StatusInternalServerError, "Internal Server Error")
+			return
+		}
+		c.Header("Cache-Control", consoleDocumentCacheControl)
+		c.Data(http.StatusOK, "text/html; charset=utf-8", indexData)
+	})
+}
+
+func isReservedConsoleRoute(requestPath string) bool {
+	return requestPath == "/api" || strings.HasPrefix(requestPath, "/api/") || requestPath == "/legacy" || strings.HasPrefix(requestPath, "/legacy/")
+}
+
+func embeddedConsoleAssetPath(requestPath string) (string, bool) {
+	if requestPath == "/" {
+		return consoleIndexFile, true
+	}
+	if !strings.HasPrefix(requestPath, "/") || strings.Contains(requestPath, "..") {
+		return "", false
+	}
+
+	cleanedPath := path.Clean(requestPath)
+	if !strings.HasPrefix(cleanedPath, "/") {
+		return "", false
+	}
+	return "static" + cleanedPath, true
+}
+
+func isStaticAssetRequest(requestPath string) bool {
+	return strings.HasPrefix(requestPath, "/assets/") || strings.HasPrefix(requestPath, "/fonts/") || strings.HasPrefix(requestPath, "/licenses/") || path.Ext(requestPath) != ""
+}
+
+func serveEmbeddedConsoleAsset(c *gin.Context, assetPath string, assetData []byte) {
+	contentType := mime.TypeByExtension(path.Ext(assetPath))
+	if contentType == "" {
+		contentType = "application/octet-stream"
+	}
+	if isImmutableConsoleAsset(assetPath) {
+		c.Header("Cache-Control", consoleImmutableCacheControl)
+	} else {
+		c.Header("Cache-Control", consoleDocumentCacheControl)
+	}
+	c.Data(http.StatusOK, contentType, assetData)
+}
+
+func isImmutableConsoleAsset(assetPath string) bool {
+	extension := strings.ToLower(path.Ext(assetPath))
+	if strings.HasPrefix(assetPath, "static/fonts/") {
+		return extension == ".ttf" || extension == ".woff" || extension == ".woff2"
+	}
+	return strings.HasPrefix(assetPath, "static/assets/") && (extension == ".css" || extension == ".js")
+}
 
 func RunWebServer(options *version.Options) {
 	// 1. 初始化trpc-go
@@ -270,31 +360,7 @@ func RunWebServer(options *version.Options) {
 	})
 
 	// 静态文件处理
-	r.NoRoute(func(c *gin.Context) {
-		assetPath := "static" + c.Request.URL.Path
-		if c.Request.URL.Path == "/" {
-			assetPath = "static/index.html"
-		}
-
-		assetData, err := staticFS.ReadFile(assetPath)
-		if err != nil {
-			assetData, err = staticFS.ReadFile("static/index.html")
-			if err != nil {
-				c.String(500, "Internal Server Error")
-				return
-			}
-			c.Header("Content-Type", "text/html")
-			c.Data(200, "text/html", assetData)
-			return
-		}
-
-		mimeType := mime.TypeByExtension(filepath.Ext(assetPath))
-		if mimeType == "" {
-			mimeType = "text/plain"
-		}
-		c.Header("Content-Type", mimeType)
-		c.Data(200, mimeType, assetData)
-	})
+	registerEmbeddedStaticRoutes(r)
 
 	log.Infof("Starting WebServer: trace_id=system_startup, addr=%s", options.WebServerAddr)
 	if err := r.Run(options.WebServerAddr); err != nil {

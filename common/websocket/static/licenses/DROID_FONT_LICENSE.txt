@@ -1,0 +1,18 @@
+DroidSansFallbackFull.ttf
+
+Upstream (immutable): Android Open Source Project, tag android-11.0.0_r26
+Source path: frameworks/base/data/fonts/DroidSansFallbackFull.ttf
+Gitiles blob: https://android.googlesource.com/platform/frameworks/base/+/68641aad1d1b02922fc1ca61fdcd119cb051ef06
+Upstream blob object: 68641aad1d1b02922fc1ca61fdcd119cb051ef06
+Upstream NOTICE: https://android.googlesource.com/platform/frameworks/base/+/android-11.0.0_r26/data/fonts/NOTICE
+License marker: MODULE_LICENSE_APACHE2 / NOTICE attribution below
+License: Apache License, Version 2.0
+Bytes: 4033576
+SHA-256: 2392015530438bafc48edfc4aee6d9de2387f627a6134d8ab3dfcc99d21c8240
+
+Copyright 2009 The Android Open Source Project
+
+The complete Apache License, Version 2.0, governing this font is distributed
+at the repository root in LICENSE. That file is included verbatim with source
+and binary distributions of this project. The pinned upstream NOTICE URL above
+is retained as the authoritative attribution source for this exact AOSP tag.
