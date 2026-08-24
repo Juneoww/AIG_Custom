@@ -1,0 +1,10 @@
+# 功能：提供不依赖远程 Playwright 浏览器层的隔离 Chromium E2E 运行镜像。
+# 实现：基于项目已固定的 Node Alpine 镜像安装发行版 Chromium，浏览器二进制由 compose 显式传给 Playwright。
+# 输入：Node 22 Alpine、Alpine 官方 chromium 包。
+# 输出：可运行 web/console Playwright 规格的本地镜像。
+# 依赖：Docker BuildKit、Alpine 软件源与 @playwright/test。
+FROM node:22.18.0-alpine
+
+RUN apk add --no-cache chromium
+
+ENV PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1

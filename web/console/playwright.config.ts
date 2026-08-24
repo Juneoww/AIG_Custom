@@ -7,6 +7,9 @@
  */
 import { defineConfig, devices } from '@playwright/test'
 
+const baseURL = process.env.PLAYWRIGHT_BASE_URL ?? 'http://127.0.0.1:4173'
+const executablePath = process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH
+
 export default defineConfig({
   testDir: './e2e',
   fullyParallel: true,
@@ -14,7 +17,9 @@ export default defineConfig({
   retries: process.env.CI ? 2 : 0,
   reporter: 'list',
   use: {
-    baseURL: 'http://127.0.0.1:4173',
+    baseURL,
+    channel: process.env.PLAYWRIGHT_CHANNEL,
+    ...(executablePath ? { launchOptions: { executablePath } } : {}),
     trace: 'on-first-retry',
   },
   projects: [
@@ -23,9 +28,11 @@ export default defineConfig({
       use: { ...devices['Desktop Chrome'] },
     },
   ],
-  webServer: {
-    command: 'pnpm dev --host 127.0.0.1 --strictPort',
-    url: 'http://127.0.0.1:4173',
-    reuseExistingServer: !process.env.CI,
-  },
+  webServer: process.env.PLAYWRIGHT_BASE_URL
+    ? undefined
+    : {
+        command: 'pnpm dev --host 127.0.0.1 --strictPort',
+        url: baseURL,
+        reuseExistingServer: !process.env.CI,
+      },
 })

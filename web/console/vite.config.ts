@@ -12,8 +12,12 @@ export default defineConfig({
   plugins: [react()],
   publicDir: '.generated',
   server: {
-    host: '127.0.0.1',
+    host: process.env.AIG_E2E_API_TARGET ? '0.0.0.0' : '127.0.0.1',
+    allowedHosts: process.env.AIG_E2E_API_TARGET ? ['console-vite'] : undefined,
     port: 4173,
+    proxy: process.env.AIG_E2E_API_TARGET
+      ? { '/api': { target: process.env.AIG_E2E_API_TARGET, changeOrigin: true } }
+      : undefined,
   },
   preview: {
     host: '127.0.0.1',
