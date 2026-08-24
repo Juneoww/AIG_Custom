@@ -6,7 +6,7 @@
 
 平台把 AI 安全工作组织成一条可治理、可追溯的闭环：管理员先完成账号、角色、模型、品牌、规则和运行环境治理；用户在本人权限范围内选择扫描能力、提交目标和私有附件；受认证 Agent 获取任务并调用对应扫描组件；平台将事件与结果绑定到可信任务归属，在取消、断连、重试和恢复并发下收敛到唯一可信状态；可信成功结果随后固化为不可变报告快照，供在线详情、PDF、30 日趋势和审计追踪共同使用。
 
-本清单是后端、API、CLI、Agent、Python 扫描组件、规则数据与部署能力的库存，不表示独立、可维护的企业控制台前端已经重建。当前仓库仍保留旧嵌入式 Web 产物；企业控制台重构在 `OPS-04` 中明确列为待开发。
+本清单覆盖后端、API、CLI、Agent、Python 扫描组件、规则数据、部署能力以及已交付的独立企业控制台。默认根路径由 React/TypeScript/Vite 控制台的离线构建产物提供，Go 二进制嵌入并交付该产物；旧嵌入式浏览器资源不再作为当前入口。
 
 ## 角色能力总览
 
@@ -30,7 +30,7 @@
 
 交付状态与兼容属性分开记录：“原生能力”由当前平台直接提供，“兼容保留”只为旧接口、旧数据或旧工作流提供受控过渡，“退役边界”不再是当前入口。主矩阵中的证据编号固定为 `E-<能力编号>`；已实现项必须同时具备受支持入口与行为验证，未注册能力不会因仓库中存在常量、脚本或夹具而被视为已交付。
 
-交付入口中的 `Web/API` 表示受支持的服务端 HTTP 交付面，标注兼容属性时也包括相应兼容路径；它不证明独立、可维护的企业控制台已经重建。内部 Agent WebSocket、上传和下载路由单独标注为 `Agent` 或“内部 API”，不是浏览器 API，并继续要求独立内部认证。
+交付入口中的 `Web/API` 表示受支持的服务端 HTTP 交付面，标注兼容属性时也包括相应兼容路径；`OPS-04` 另行记录独立企业控制台的源码、嵌入构建与端到端证据。内部 Agent WebSocket、上传和下载路由单独标注为 `Agent` 或“内部 API”，不是浏览器 API，并继续要求独立内部认证。
 
 ## 功能矩阵
 
@@ -90,7 +90,7 @@
 | OPS-01 | 数据迁移、部署与运维 | 显式版本化迁移与运行时只读校验 | 结构升级只由迁移命令执行且可重复运行；业务服务启动时只读校验结构，缺失时拒绝启动，不自动创建、修复或变更数据库对象 | 系统管理员、运维交付人员 | CLI/服务启动 | 已实现 | 原生能力 | E-OPS-01 |
 | OPS-02 | 数据迁移、部署与运维 | PostgreSQL 全栈 Compose、Agent 内部凭据与附件限制 | 源码构建和预构建镜像 Compose 均交付 PostgreSQL、一次性迁移、Web 服务和 Agent；平台与 Agent 运行时共享独立内部 Token，缺失时失败关闭，浏览器仍使用会话与 CSRF；附件总量和分片上限可配置 | 系统管理员、运维交付人员 | 源码/镜像 Compose/CLI/Agent | 已实现 | 原生能力 | E-OPS-02 |
 | OPS-03 | 数据迁移、部署与运维 | 多架构镜像、版本发布工作流与 PDF 依赖许可随包 | 自动构建服务器和 Agent 多架构镜像及版本归档；主服务镜像和发布包携带内嵌 PDF 字体归属与许可，以及固定 PDF 渲染器依赖集合的完整许可文本 | 运维交付人员 | 镜像/发布工作流 | 已实现 | 原生能力 | E-OPS-03 |
-| OPS-04 | 数据迁移、部署与运维 | 企业控制台前端重构 | 已交付登录、三主题、角色壳、治理总览与任务/附件工作流；报告与其余治理工作台仍按计划实施 | 普通用户、安全审计员、系统管理员 | Web | 部分实现 | 原生能力 | E-OPS-04 |
+| OPS-04 | 数据迁移、部署与运维 | 企业控制台前端重构 | 默认简体中文的 React 控制台已交付登录、改密、三主题、角色壳、总览、任务与附件、报告、模型、知识库、用户、审计、品牌、系统和关于页；生产根路径嵌入离线构建产物 | 普通用户、安全审计员、系统管理员 | Web | 已实现 | 原生能力 | E-OPS-04 |
 | OPS-05 | 数据迁移、部署与运维 | 完整 OpenAPI 单一生成源 | 在继续同步当前 YAML、JSON 和 Go 内嵌 Swagger 三件套的同时，建立覆盖全部平台路由的唯一规格源与可复现生成流程 | 系统管理员、运维交付人员 | API 规格/生成流程 | 待开发 | 原生能力 | E-OPS-05 |
 | OPS-06 | 数据迁移、部署与运维 | 正式发布候选 | 完成全量端到端、安全回归、目标环境部署、容量基线和发行材料验收，形成可正式交付的发布候选 | 系统管理员、运维交付人员 | 发布包/部署验收 | 待开发 | 原生能力 | E-OPS-06 |
 
@@ -186,7 +186,7 @@
 - **E-OPS-01**：运行入口——数据库迁移 CLI 与主服务启动；验证来源——`pkg/database/migrate_cli_test.go`、`pkg/database/migrate_test.go` 和 `pkg/database/runtime_schema_test.go` 的版本化幂等迁移、并发串行及运行时只读拒绝测试。
 - **E-OPS-02**：运行入口——根目录源码构建与预构建镜像 Compose、迁移 CLI、Web 服务和 Agent；验证来源——`docker-compose.yml` 和 `docker-compose.images.yml` 的 PostgreSQL、一次性迁移、主服务和 Agent 全栈定义，以及 `common/websocket/agent_security_test.go` 和 `internal/platform/tasks/service_test.go` 的内部凭据与附件限额测试；适用边界——`deploy/compose/docker-compose.postgres.yml` 只是最小迁移基线，不作为全栈交付入口。
 - **E-OPS-03**：运行入口——主服务多架构镜像与版本发布工作流；验证来源——`.github/workflows/docker-publish.yml`、`.github/workflows/create-release.yml` 和 `internal/platform/reports/license_packaging_test.go` 的双架构、发布归档、字体许可和固定 PDF 渲染依赖 notices 随包合同测试；适用边界——许可随包范围是主服务镜像与发布包，不扩展为 Agent 镜像的 PDF 能力声明。
-- **E-OPS-04**：运行入口——无（尚未交付）；验证来源——`docs/project/status.md` 与 `docs/architecture/enterprise-console.md` 对“设计已完成、实施计划和实现待开发”的一致记录；现状限制——现有旧嵌入式产物不能证明企业控制台已重建。
+- **E-OPS-04**：运行入口——Go 默认根路径嵌入的 `common/websocket/static/` 企业控制台；验证来源——`web/console` 的 288 项单元测试、`deploy/compose/docker-compose.frontend-test.yml` 的 lint/类型/构建门禁、`deploy/compose/docker-compose.console-e2e.yml` 的 13 项三角色真实浏览器流程、`common/websocket/static_manifest_test.go` 与 `scripts/check-console-assets.ps1` 的静态资源和离线依赖合同；交付边界——旧静态资源不再作为根路径回退，`/api/**` 与 `/legacy/**` 请求不会被 SPA 掩盖。
 - **E-OPS-05**：运行入口——无（尚未交付）；验证来源——`docs/project/status.md` 的缺口记录与 `internal/apidocs/swagger_sync_test.go` 对现有 YAML、JSON、Go 内嵌三件套同步范围的合同检查；现状限制——当前尚无覆盖全部平台路由的单一权威生成源。
 - **E-OPS-06**：运行入口——无（尚未交付）；验证来源——`docs/project/status.md` 和 `docs/product/prd.md` 对端到端、安全回归、目标环境、容量和发行验收尚未完成的状态记录；现状限制——现有镜像与发布工作流不等同于正式发布候选签收。
 

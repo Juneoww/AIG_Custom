@@ -70,7 +70,7 @@ docker compose -f deploy/compose/docker-compose.console-e2e.yml up --build --abo
 - Modify: `internal/platform/identity/middleware_test.go`
 - Modify: `common/websocket/server.go`
 
-- [ ] **Step 1: 写匿名 CSRF 和当前主体 RED 测试**
+- [x] **Step 1: 写匿名 CSRF 和当前主体 RED 测试**
 
 测试锁定以下行为：
 
@@ -84,7 +84,7 @@ func TestBrowserBootstrapCSRFAndCurrentSubject(t *testing.T) {
 
 同时断言 `POST /auth/password-resets/confirm` 缺匿名 CSRF 时为 `403`，Token 不出现在响应和日志。
 
-- [ ] **Step 2: 运行测试确认 RED**
+- [x] **Step 2: 运行测试确认 RED**
 
 Run:
 
@@ -94,7 +94,7 @@ docker compose -f deploy/compose/docker-compose.postgres-test.yml run --rm datab
 
 Expected: FAIL，缺 `/csrf`、`/me` 或登录/重置确认未校验 CSRF。
 
-- [ ] **Step 3: 实现安全 DTO 和路由**
+- [x] **Step 3: 实现安全 DTO 和路由**
 
 核心 wire model：
 
@@ -113,13 +113,13 @@ type CSRFResponse struct {
 
 `/auth/me` 必须在改密守卫之前可访问，使前端能恢复 `must_change_password`；业务路由仍由 `RequirePasswordChangeCompleted` 拒绝。
 
-- [ ] **Step 4: 运行身份测试确认 GREEN**
+- [x] **Step 4: 运行身份测试确认 GREEN**
 
 Run: 同 Step 2。
 
 Expected: PASS。
 
-- [ ] **Step 5: 提交**
+- [x] **Step 5: 提交**
 
 ```powershell
 git add internal/platform/identity/browser.go internal/platform/identity/browser_test.go internal/platform/identity/middleware.go internal/platform/identity/middleware_test.go common/websocket/server.go
@@ -138,7 +138,7 @@ git commit -m "feat: add browser identity bootstrap contract"
 - Modify: `common/websocket/server.go`
 - Test: `common/websocket/public_api_test.go`
 
-- [ ] **Step 1: 写公共品牌和版本 RED 测试**
+- [x] **Step 1: 写公共品牌和版本 RED 测试**
 
 断言：
 
@@ -148,7 +148,7 @@ git commit -m "feat: add browser identity bootstrap contract"
 // GET /api/v1/version 只返回 version/commit/build_time，禁止文件读取和公网请求。
 ```
 
-- [ ] **Step 2: 运行测试确认 RED**
+- [x] **Step 2: 运行测试确认 RED**
 
 ```powershell
 docker compose -f deploy/compose/docker-compose.postgres-test.yml run --rm database-test sh -ec "go test ./internal/platform/brand ./common/websocket -run 'TestPublicBrand|TestSafeVersion' -count=1"
@@ -156,13 +156,13 @@ docker compose -f deploy/compose/docker-compose.postgres-test.yml run --rm datab
 
 Expected: FAIL，公共路由不存在或响应含额外字段。
 
-- [ ] **Step 3: 实现白名单响应**
+- [x] **Step 3: 实现白名单响应**
 
 `logo_data_url` 只允许由已验证的 PNG/JPEG 品牌数据生成；空 Logo 返回空字符串。版本值通过 `-ldflags` 注入，缺省使用固定 `unknown`，不读取 `.git` 或远端 tag。
 
 同时把 `brand.defaultConfig()` 的产品名从“企业安全平台”迁移为“AI 安全治理平台”，并更新默认值、空 repository 回退和持久化重启测试；数据库中已有管理员品牌配置不覆盖。
 
-- [ ] **Step 4: 运行范围测试并提交**
+- [x] **Step 4: 运行范围测试并提交**
 
 ```powershell
 git add internal/platform/brand/public.go internal/platform/brand/public_test.go internal/platform/brand/service.go internal/platform/brand/service_test.go common/websocket/version_api.go common/websocket/version_api_test.go common/websocket/public_api_test.go common/websocket/server.go
@@ -181,7 +181,7 @@ git commit -m "feat: expose safe public console metadata"
 - Modify: `internal/platform/tasks/handler_test.go`
 - Modify: `common/websocket/route_security_test.go`
 
-- [ ] **Step 1: 写任务列表/详情安全 DTO RED**
+- [x] **Step 1: 写任务列表/详情安全 DTO RED**
 
 目标 envelope：
 
@@ -196,21 +196,21 @@ type TaskListResponse struct {
 
 `TaskSummary` 只包含 ID、owner 显示字段、task type、status、created/updated；不得包含 `params`、content、engine session、dispatch claim/error、附件 ID。详情使用显式 `TaskDetail`，按任务类型输出安全字段，不直接序列化 `Task`。
 
-- [ ] **Step 2: 写结果退役 RED**
+- [x] **Step 2: 写结果退役 RED**
 
 匿名访问仍 `401`；未完成改密为 `403`；完成守卫后的 `GET /platform/tasks/:id/result` 固定 `410`，且不调用 EngineAdapter。
 
-- [ ] **Step 3: 运行测试确认 RED**
+- [x] **Step 3: 运行测试确认 RED**
 
 ```powershell
 docker compose -f deploy/compose/docker-compose.postgres-test.yml run --rm database-test sh -ec "go test ./internal/platform/tasks ./common/websocket -run 'TestTaskBrowser|TestRetiredPlatformTaskResult' -count=1"
 ```
 
-- [ ] **Step 4: 实现 owner 过滤、稳定分页和安全映射**
+- [x] **Step 4: 实现 owner 过滤、稳定分页和安全映射**
 
 普通用户 repository 查询必须在 SQL 层带 owner 条件；管理员/审计员全局查询。排序固定为 `created_at DESC, id DESC`，`page_size` 默认 20、最大 100。
 
-- [ ] **Step 5: 运行范围测试并提交**
+- [x] **Step 5: 运行范围测试并提交**
 
 ```powershell
 git add internal/platform/tasks common/websocket/route_security_test.go
@@ -226,25 +226,25 @@ git commit -m "feat: add safe paged browser task contract"
 - Modify: `internal/platform/tasks/handler_test.go`
 - Modify: `common/websocket/resource_authorization_integration_test.go`
 
-- [ ] **Step 1: 写附件权限 RED**
+- [x] **Step 1: 写附件权限 RED**
 
 覆盖：owner 下载成功；普通用户跨 owner 为 `404`；审计员一律拒绝且不读文件；管理员跨 owner 只有在持久化脱敏审计成功后才返回字节；审计失败时下载失败。
 
-- [ ] **Step 2: 写防泄漏断言**
+- [x] **Step 2: 写防泄漏断言**
 
 审计 metadata 只包含 attachment ID、owner ID、actor ID 和治理动作，不含原始文件名、storage name、路径、请求 Header 或文件内容。
 
-- [ ] **Step 3: 运行测试确认 RED**
+- [x] **Step 3: 运行测试确认 RED**
 
 ```powershell
 docker compose -f deploy/compose/docker-compose.postgres-test.yml run --rm database-test sh -ec "go test ./internal/platform/tasks ./common/websocket -run 'TestAttachment.*(Owner|Auditor|Admin|Audit)' -count=1"
 ```
 
-- [ ] **Step 4: 实现 `attachment.downloaded` 审计边界并 GREEN**
+- [x] **Step 4: 实现 `attachment.downloaded` 审计边界并 GREEN**
 
 管理员跨 owner 请求先完成 durable 审计写入再打开文件；任何 audit error fail closed。
 
-- [ ] **Step 5: 提交**
+- [x] **Step 5: 提交**
 
 ```powershell
 git add internal/platform/audit/entity.go internal/platform/tasks common/websocket/resource_authorization_integration_test.go
@@ -271,7 +271,7 @@ git commit -m "fix: enforce governed attachment downloads"
 - Modify: `common/websocket/model_api.go`
 - Modify: `common/websocket/legacy_model_compatibility_test.go`
 
-- [ ] **Step 1: 写统一分页 envelope RED**
+- [x] **Step 1: 写统一分页 envelope RED**
 
 所有列表返回：
 
@@ -281,17 +281,17 @@ git commit -m "fix: enforce governed attachment downloads"
 
 报告列表继续禁止 `raw_result`、内部 `render_data`、Logo 字节和 owner 内部字段；审计 metadata 经过服务端 sanitizer；模型目录始终掩码 Token，并输出 `source`、`read_only`。
 
-- [ ] **Step 2: 运行四领域 RED 测试**
+- [x] **Step 2: 运行四领域 RED 测试**
 
 ```powershell
 docker compose -f deploy/compose/docker-compose.postgres-test.yml run --rm database-test sh -ec "go test ./internal/platform/reports ./internal/platform/admin ./internal/platform/audit ./internal/platform/models ./common/websocket -run 'Test.*(Pagination|ListEnvelope|SafeCatalog)' -count=1"
 ```
 
-- [ ] **Step 3: 在 repository 层实现 count + page 查询**
+- [x] **Step 3: 在 repository 层实现 count + page 查询**
 
 禁止 handler 先全量读取再切片；普通用户 owner 限制必须进入 SQL。用户分页必须把 `page/pageSize` 从 `admin.Handler` 传到 `identity.Service` 和 `identity.Repository`，由 repository 同时执行稳定分页与 count，不能继续调用无参数 `ListUsers` 后切片。模型合并顺序为可写数据库模型优先，但 YAML 同 ID 冲突不得遮蔽或变为可写。
 
-- [ ] **Step 4: 运行领域全包并提交**
+- [x] **Step 4: 运行领域全包并提交**
 
 ```powershell
 git add internal/platform/reports internal/platform/admin internal/platform/audit internal/platform/identity internal/platform/models common/websocket/model_api.go common/websocket/legacy_model_compatibility_test.go
@@ -313,7 +313,7 @@ git commit -m "feat: standardize console list contracts"
 - Modify: `common/websocket/server.go`
 - Modify: `common/websocket/server_datastores.go`
 
-- [ ] **Step 1: 写 dashboard 服务 RED**
+- [x] **Step 1: 写 dashboard 服务 RED**
 
 响应只包含服务端聚合结果：
 
@@ -331,21 +331,21 @@ type View struct {
 
 普通用户只聚合本人；审计员和管理员按全局读取；窗口固定为含今天的 30 个 UTC 自然日。不得从 raw result 在请求时重算。空数据必须返回 `has_data=false`、`security_score=null`、风险计数全零、30 个补零桶和空 attention，不能显示为 100 分。
 
-- [ ] **Step 2: 运行测试确认 RED**
+- [x] **Step 2: 运行测试确认 RED**
 
 ```powershell
 docker compose -f deploy/compose/docker-compose.postgres-test.yml run --rm database-test sh -ec "go test ./internal/platform/dashboard -count=1"
 ```
 
-- [ ] **Step 3: 实现 bounded SQL/服务聚合**
+- [x] **Step 3: 实现 bounded SQL/服务聚合**
 
 在 `reports` repository 新增 SQL 聚合/投影查询并用真实 PostgreSQL 测试锁定 owner 过滤和窗口边界。`security_score` 是有效快照固化分数的四舍五入平均值，`mapping_versions` 去重稳定排序；趋势固定 30 个按日期升序的 UTC 桶。最近任务按 `updated_at DESC, id DESC` 最多 5 条且不受 30 日窗口限制。attention **只**来自窗口内 `high > 0` 或 `score < 60` 的有效报告快照，按 `high DESC, score ASC, completed_at DESC, report_id DESC` 最多 5 条；失败/取消/运行中任务不得进入评分、风险、趋势或 attention。严禁 `List()` 全量加载。
 
-- [ ] **Step 4: 注册 `/api/v1/platform/dashboard` 并做集成测试**
+- [x] **Step 4: 注册 `/api/v1/platform/dashboard` 并做集成测试**
 
 确保它复用 platform 身份、改密、CSRF（GET 不要求 Header）和角色中间件。
 
-- [ ] **Step 5: 运行测试并提交**
+- [x] **Step 5: 运行测试并提交**
 
 ```powershell
 git add internal/platform/dashboard internal/platform/tasks/service.go internal/platform/reports/snapshot.go internal/platform/reports/repository_test.go internal/platform/reports/service.go common/websocket/server.go common/websocket/server_datastores.go
@@ -362,21 +362,21 @@ git commit -m "feat: add governed dashboard aggregation"
 - Modify: `docs/api/reference.md`
 - Modify: `docs/api/reference.en.md`
 
-- [ ] **Step 1: 先写 Swagger 同步和禁字段 RED**
+- [x] **Step 1: 先写 Swagger 同步和禁字段 RED**
 
 锁定新增 `/auth/csrf`、`/auth/me`、`/public/brand`、`/platform/dashboard`、分页 envelope、任务 result 410 和附件角色边界。
 
-- [ ] **Step 2: 运行 RED**
+- [x] **Step 2: 运行 RED**
 
 ```powershell
 docker compose -f deploy/compose/docker-compose.postgres-test.yml run --rm database-test sh -ec "go test ./internal/apidocs -count=1"
 ```
 
-- [ ] **Step 3: 手工同步三件套**
+- [x] **Step 3: 手工同步三件套**
 
 不得运行默认 `swag init` 覆盖现有完整规范。YAML、JSON 和 `docs.go` 三件套必须内容等价。
 
-- [ ] **Step 4: 运行文档门禁并提交**
+- [x] **Step 4: 运行文档门禁并提交**
 
 ```powershell
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\check-docs-layout.ps1
@@ -401,7 +401,7 @@ git commit -m "docs: define enterprise console api contracts"
 - Create: `deploy/compose/docker-compose.frontend-test.yml`
 - Modify: `.gitignore`
 
-- [ ] **Step 1: 写最小应用 RED**
+- [x] **Step 1: 写最小应用 RED**
 
 ```tsx
 it('renders the configured Chinese product shell without old AIG branding', () => {
@@ -411,23 +411,23 @@ it('renders the configured Chinese product shell without old AIG branding', () =
 })
 ```
 
-- [ ] **Step 2: 创建 pnpm 工程并锁定依赖**
+- [x] **Step 2: 创建 pnpm 工程并锁定依赖**
 
 在固定 `node:22.18.0-alpine` 容器内使用 Corepack，`packageManager` 固定 pnpm 版本；所有 dependencies/devDependencies 使用 `--save-exact` 并提交 lockfile。安装 React、Vite、TypeScript、Fluent UI v9、React Router、TanStack Query、Vitest、Testing Library、Playwright、MSW 和 ESLint。
 
-- [ ] **Step 3: 运行测试确认 RED 后实现最小入口**
+- [x] **Step 3: 运行测试确认 RED 后实现最小入口**
 
 ```powershell
 docker compose -f deploy/compose/docker-compose.frontend-test.yml run --rm console-test "corepack enable && pnpm install --frozen-lockfile && pnpm vitest run src/app/App.test.tsx"
 ```
 
-- [ ] **Step 4: 运行 lint/typecheck/test/build**
+- [x] **Step 4: 运行 lint/typecheck/test/build**
 
 ```powershell
 docker compose -f deploy/compose/docker-compose.frontend-test.yml run --rm console-test "corepack enable && pnpm install --frozen-lockfile && pnpm lint && pnpm typecheck && pnpm test:run && pnpm build"
 ```
 
-- [ ] **Step 5: 提交**
+- [x] **Step 5: 提交**
 
 ```powershell
 git add web/console deploy/compose/docker-compose.frontend-test.yml .gitignore
@@ -448,11 +448,11 @@ git commit -m "feat: scaffold enterprise console frontend"
 - Create: `web/console/src/features/auth/ResetPasswordPage.tsx`
 - Test: `web/console/src/features/auth/*.test.tsx`
 
-- [ ] **Step 1: 写身份流程 RED**
+- [x] **Step 1: 写身份流程 RED**
 
 覆盖匿名 CSRF 初始化、登录后 Token 轮换、`/me` 恢复、强制改密、退出、401 回登录、403 保留上下文、网络错误不自动重发写请求。
 
-- [ ] **Step 2: 实现同源 fetch 客户端**
+- [x] **Step 2: 实现同源 fetch 客户端**
 
 ```ts
 export async function apiRequest<T>(path: string, init: RequestInit = {}): Promise<T> {
@@ -463,11 +463,11 @@ export async function apiRequest<T>(path: string, init: RequestInit = {}): Promi
 
 不得把 session、密码、reset token 或 CSRF token 写入 local/session storage。
 
-- [ ] **Step 3: 实现路由守卫和表单**
+- [x] **Step 3: 实现路由守卫和表单**
 
 Reset token 由用户从受控带外交付渠道取得后手工粘贴到密码重置表单，只放在 `POST /auth/password-resets/confirm` 请求体。前端不得从 URL、query、fragment、storage 或剪贴板后台读取 Token；测试必须断言带 `?token=` 或 `#token=` 的访问不会自动填充或提交。
 
-- [ ] **Step 4: 运行身份测试并提交**
+- [x] **Step 4: 运行身份测试并提交**
 
 ```powershell
 docker compose -f deploy/compose/docker-compose.frontend-test.yml run --rm console-test "corepack enable && pnpm vitest run src/features/auth"
@@ -494,25 +494,25 @@ git commit -m "feat: add secure console authentication flow"
 - Create: `web/console/src/shared/components/DataTable.tsx`
 - Create: `web/console/src/shared/components/MetricCard.tsx`
 
-- [ ] **Step 1: 写主题 RED**
+- [x] **Step 1: 写主题 RED**
 
 覆盖：默认 light；system 解析 `prefers-color-scheme`；系统变化实时响应；显式 light/dark 覆盖系统；刷新只恢复 `aig-console-theme`，不存其他业务数据。
 
-- [ ] **Step 2: 实现 Fluent v9 主题令牌**
+- [x] **Step 2: 实现 Fluent v9 主题令牌**
 
 浅色：浅侧栏、冷灰画布、白卡、钴蓝主色；深色：深蓝灰而非纯黑。两套布局同构，8px 网格，风险色只用于状态。
 
-- [ ] **Step 3: 固定并准备离线字体资产**
+- [x] **Step 3: 固定并准备离线字体资产**
 
 中文复用 `internal/platform/reports/assets/DroidSansFallbackFull.ttf` 及其已固定 AOSP 来源、SHA-256 和 Apache-2.0 归属；`prepare-fonts.mjs` 在开发/测试/构建前把它复制到 ignored 的 `web/console/.generated/fonts/`，不在仓库重复保存 4MiB 字体。IBM Plex Sans 的 Regular/SemiBold WOFF2 及完整 OFL 文本存放在 `web/console/assets/fonts/`；`FONT_ASSETS.md` 记录精确上游 release/commit、字节数和 SHA-256。Vite `publicDir` 指向 `.generated`，脚本同时复制 IBM 字体。
 
 `global.css` 仅使用本地 `@font-face`，中文字体为正文首选，IBM Plex Sans 仅用于数字和英文指标；禁止公网字体、CDN 和 `common/websocket/static/fonts/Tencentsans.ttf`。`fonts.test.ts` 校验源文件 hash、许可文件存在和 CSS 无 `http(s)` URL。
 
-- [ ] **Step 4: 做可访问性组件测试**
+- [x] **Step 4: 做可访问性组件测试**
 
 键盘焦点、语义 heading/table、对比度 token、`prefers-reduced-motion` 必须覆盖。
 
-- [ ] **Step 5: 运行测试并提交**
+- [x] **Step 5: 运行测试并提交**
 
 ```powershell
 docker compose -f deploy/compose/docker-compose.frontend-test.yml run --rm console-test "corepack enable && pnpm run prepare:fonts && pnpm vitest run src/shared/theme src/shared/components"
@@ -531,15 +531,15 @@ git commit -m "feat: add regulatory ledger design system"
 - Create: `web/console/src/app/NotFoundPage.tsx`
 - Test: `web/console/src/app/layout/*.test.tsx`
 
-- [ ] **Step 1: 写三角色导航 RED**
+- [x] **Step 1: 写三角色导航 RED**
 
 固定顺序：治理总览、扫描任务、安全报告、模型与凭据、规则与知识库、用户管理、审计日志、品牌设置、系统信息。无权限项不显示，直接路由仍显示新 403。
 
-- [ ] **Step 2: 实现 1280px 优先壳层**
+- [x] **Step 2: 实现 1280px 优先壳层**
 
 侧栏浅色且可折叠，顶栏包含产品名、主题、个人中心和退出；不出现旧 Logo、营销区、帮助中心或英文切换。
 
-- [ ] **Step 3: 运行测试并提交**
+- [x] **Step 3: 运行测试并提交**
 
 ```powershell
 docker compose -f deploy/compose/docker-compose.frontend-test.yml run --rm console-test "corepack enable && pnpm vitest run src/app"
@@ -561,25 +561,25 @@ git commit -m "feat: add role-aware console shell"
 - Test: `web/console/src/features/dashboard/*.test.tsx`
 - Test: `web/console/src/features/tasks/*.test.tsx`
 
-- [ ] **Step 1: 写总览四区 RED**
+- [x] **Step 1: 写总览四区 RED**
 
 同屏展示核心指标、30 日趋势、高风险待办和最近任务；加载、空、失败、权限不足均有独立状态。
 
-- [ ] **Step 2: 写任务主流程 RED**
+- [x] **Step 2: 写任务主流程 RED**
 
 覆盖服务端分页、筛选、详情短轮询、终态停止、取消、同一次逻辑提交复用 `Idempotency-Key`、失败不自动创建第二任务。
 
-- [ ] **Step 3: 写附件 RED**
+- [x] **Step 3: 写附件 RED**
 
 普通/分片上传、大小限制、opaque ID、下载权限；审计员无下载按钮，管理员只有 API 明确允许时显示治理下载。
 
-- [ ] **Step 4: 实现并运行测试**
+- [x] **Step 4: 实现并运行测试**
 
 ```powershell
 docker compose -f deploy/compose/docker-compose.frontend-test.yml run --rm console-test "corepack enable && pnpm vitest run src/features/dashboard src/features/tasks"
 ```
 
-- [ ] **Step 5: 提交**
+- [x] **Step 5: 提交**
 
 ```powershell
 git add web/console/src/features/dashboard web/console/src/features/tasks
@@ -596,19 +596,19 @@ git commit -m "feat: add dashboard and governed task workflows"
 - Create: `web/console/src/features/reports/components/TechnicalFindings.tsx`
 - Test: `web/console/src/features/reports/*.test.tsx`
 
-- [ ] **Step 1: 写安全 DTO RED**
+- [x] **Step 1: 写安全 DTO RED**
 
 测试响应即使意外含 `raw_result`、内部 `render_data`、Logo bytes、绝对路径或 Token sentinel，页面也不渲染、不记录。
 
-- [ ] **Step 2: 写列表/详情/趋势/PDF RED**
+- [x] **Step 2: 写列表/详情/趋势/PDF RED**
 
 PDF 使用 POST + CSRF，文件名固定安全；失败显示固定中文错误并允许用户显式重试。
 
-- [ ] **Step 3: 实现报告页面并 GREEN**
+- [x] **Step 3: 实现报告页面并 GREEN**
 
 在线详情与 PDF 只使用同一 immutable RenderModel；技术发现按高/中/低稳定排序并支持长中文折行。
 
-- [ ] **Step 4: 提交**
+- [x] **Step 4: 提交**
 
 ```powershell
 git add web/console/src/features/reports
@@ -624,15 +624,15 @@ git commit -m "feat: add immutable report experience"
 - Create: `web/console/src/features/models/RotateCredentialDialog.tsx`
 - Test: `web/console/src/features/models/*.test.tsx`
 
-- [ ] **Step 1: 写凭据防泄漏 RED**
+- [x] **Step 1: 写凭据防泄漏 RED**
 
 Token 永不回填；掩码不能作为更新值提交；错误、DOM、URL、storage 和测试日志都不含 sentinel。
 
-- [ ] **Step 2: 写角色和 YAML 模型 RED**
+- [x] **Step 2: 写角色和 YAML 模型 RED**
 
 用户只管理私有模型，管理员只管理全局模型，审计员只读；`read_only=true` 的 YAML 模型无编辑/删除按钮且同 ID 不遮蔽数据库模型。
 
-- [ ] **Step 3: 实现并提交**
+- [x] **Step 3: 实现并提交**
 
 ```powershell
 docker compose -f deploy/compose/docker-compose.frontend-test.yml run --rm console-test "corepack enable && pnpm vitest run src/features/models"
@@ -654,26 +654,26 @@ git commit -m "feat: add governed model credential management"
 - Create: `web/console/src/features/knowledge/components/StructuredEditor.tsx`
 - Test: `web/console/src/features/knowledge/*.test.tsx`
 
-- [ ] **Step 1: 写能力矩阵 RED**
+- [x] **Step 1: 写能力矩阵 RED**
 
 指纹、漏洞、评测、MCP、Prompt 集合、Agent 配置均为全角色可读、管理员按现有路由写；Prompt 管理员必须能创建/编辑/删除，普通用户和审计员只读。
 
-- [ ] **Step 2: 写兼容适配器 RED**
+- [x] **Step 2: 写兼容适配器 RED**
 
 只在 `knowledge/api.ts` 将 `{status,message,data}` 转为前端领域结果；页面组件不得判断兼容响应格式。
 
-- [ ] **Step 3: 实现结构化编辑器**
+- [x] **Step 3: 实现结构化编辑器**
 
 支持行号、YAML/JSON 高亮、格式校验、错误定位和文件导入；保存不改变 schema。覆盖二次确认、CSRF、审计失败、远端同步失败。
 
-- [ ] **Step 4: 运行测试和 yamlcheck**
+- [x] **Step 4: 运行测试和 yamlcheck**
 
 ```powershell
 docker compose -f deploy/compose/docker-compose.frontend-test.yml run --rm console-test "corepack enable && pnpm vitest run src/features/knowledge"
 docker compose -f deploy/compose/docker-compose.postgres-test.yml run --rm database-test sh -ec "go build -o /tmp/yamlcheck ./cmd/yamlcheck && /tmp/yamlcheck data/fingerprints data/vuln data/vuln_en"
 ```
 
-- [ ] **Step 5: 提交**
+- [x] **Step 5: 提交**
 
 ```powershell
 git add web/console/src/features/knowledge
@@ -692,19 +692,19 @@ git commit -m "feat: migrate governed knowledge editing"
 - Test: `web/console/src/features/admin/**/*.test.tsx`
 - Test: `web/console/src/features/about/*.test.tsx`
 
-- [ ] **Step 1: 写用户与审计 RED**
+- [x] **Step 1: 写用户与审计 RED**
 
 管理员创建/禁用/改角色/发起密码重置；HTTP 不显示 reset token。审计员只读；审计 metadata 不渲染敏感字段；完成/恢复动作仅管理员。
 
-- [ ] **Step 2: 写品牌 RED**
+- [x] **Step 2: 写品牌 RED**
 
 PNG/JPEG、1MiB、4096 像素和总像素限制在客户端给即时提示，但最终以服务端校验为准；预览不得使用 SVG 或任意 HTML。
 
-- [ ] **Step 3: 写系统/关于 RED**
+- [x] **Step 3: 写系统/关于 RED**
 
 管理员触发数据同步；管理员/审计员读状态；关于页只读安全版本 DTO、本地归属清单和配置产品名，不加载公网内容。
 
-- [ ] **Step 4: 实现并提交**
+- [x] **Step 4: 实现并提交**
 
 ```powershell
 docker compose -f deploy/compose/docker-compose.frontend-test.yml run --rm console-test "corepack enable && pnpm vitest run src/features/admin src/features/about src/features/profile"
@@ -725,19 +725,19 @@ git commit -m "feat: add enterprise governance pages"
 - Create: `deploy/compose/docker-compose.console-e2e.yml`
 - Create: `scripts/seed-console-e2e.ps1`
 
-- [ ] **Step 1: 写 E2E RED**
+- [x] **Step 1: 写 E2E RED**
 
 按设计文档第 11 节覆盖管理员、普通用户、审计员、强制改密、任务、报告、附件、知识编辑、审计、三主题、403/404 和旧路由。
 
-- [ ] **Step 2: 建立隔离 PostgreSQL/平台/Agent fixture**
+- [x] **Step 2: 建立隔离 PostgreSQL/平台/Agent fixture**
 
 测试数据只能由 seed 脚本写入 test compose；脚本拒绝非测试 DSN，使用固定测试凭据且不输出密码/Token。
 
-- [ ] **Step 3: 增加网络请求断言**
+- [x] **Step 3: 增加网络请求断言**
 
 浏览器请求中禁止 `/api/v1/app/`、`/legacy`、Agent WS、CDN、raw result 和绝对文件路径。
 
-- [ ] **Step 4: 运行 E2E 并提交**
+- [x] **Step 4: 运行 E2E 并提交**
 
 ```powershell
 docker compose -f deploy/compose/docker-compose.console-e2e.yml up --build --abort-on-container-exit --exit-code-from console-e2e
@@ -757,23 +757,23 @@ git commit -m "test: add enterprise console end-to-end coverage"
 - Modify: `.github/workflows/docker-publish.yml`
 - Modify: `.github/workflows/create-release.yml`
 
-- [ ] **Step 1: 写旧资产清退 RED**
+- [x] **Step 1: 写旧资产清退 RED**
 
 检查必须拒绝：`A.I.G`、旧 hashed bundle、`aigdocs`、TencentSans、旧 Logo、旧 marketing 图片、`/api/v1/app/` 和公网 CDN。
 
-- [ ] **Step 2: 增加 frontend-builder 阶段**
+- [x] **Step 2: 增加 frontend-builder 阶段**
 
 Docker 顺序：固定 Node 镜像安装 frozen lockfile → `prepare:fonts` 校验/复制离线字体 → test/typecheck/build → 将 dist 复制到 Go builder 的 `common/websocket/static` → Go build。任何前端或字体校验失败都阻止镜像生成。运行镜像 `/app/licenses/` 和 Release 压缩包必须同时包含现有 Droid/AOSP 归属、IBM Plex OFL 与前端 `FONT_ASSETS.md`；构建测试校验许可随二进制分发。
 
-- [ ] **Step 3: 原子替换静态资源**
+- [x] **Step 3: 原子替换静态资源**
 
 构建脚本先输出到临时目录并验证 manifest，再替换 `common/websocket/static`；不得把旧文件与新 dist 混合。提交新构建产物以保持宿主 `go build` 可用，CI 校验源码构建结果与已提交产物一致。
 
-- [ ] **Step 4: 加 SPA 与缓存测试**
+- [x] **Step 4: 加 SPA 与缓存测试**
 
 `index.html` 使用 no-cache；带 hash 的 JS/CSS/font immutable；未知 SPA 深链返回 index；真实不存在的 `/api/**` 不回退 HTML。静态 manifest 测试必须确认 Droid 和 IBM Plex 字体均存在、hash 与清单一致，CSS 无公网 font URL，旧 TencentSans 不存在。
 
-- [ ] **Step 5: 构建并扫描镜像**
+- [x] **Step 5: 构建并扫描镜像**
 
 ```powershell
 docker build --target migrate -t aig-console-migrate:test .
@@ -781,7 +781,7 @@ docker build -t aig-console-webserver:test .
 docker run --rm aig-console-webserver:test sh -ec "test -f /app/ai-infra-guard && ! grep -R -E 'A\.I\.G|aigdocs|TencentSans' /app"
 ```
 
-- [ ] **Step 6: 提交**
+- [x] **Step 6: 提交**
 
 ```powershell
 git add Dockerfile common/websocket/server.go common/websocket/static common/websocket/static_manifest_test.go scripts/build-console.ps1 scripts/check-console-assets.ps1 .github/workflows/docker-publish.yml .github/workflows/create-release.yml
@@ -798,7 +798,7 @@ git commit -m "feat: replace legacy ui with enterprise console"
 - Modify: `docs/README.md`
 - Modify: `README.md`
 
-- [ ] **Step 1: 运行后端 fresh 验证**
+- [x] **Step 1: 运行后端 fresh 验证**
 
 ```powershell
 docker compose -f deploy/compose/docker-compose.postgres-test.yml run --rm database-test sh -ec "go test ./internal/platform/... ./common/websocket ./internal/apidocs -count=1"
@@ -806,14 +806,14 @@ docker compose -f deploy/compose/docker-compose.postgres-test.yml run --rm datab
 
 Expected: 新增范围全部 PASS；若遇既有基线失败，必须用同一 Go/镜像在基线提交复现，不能直接标为无关。
 
-- [ ] **Step 2: 运行前端 fresh 验证**
+- [x] **Step 2: 运行前端 fresh 验证**
 
 ```powershell
 docker compose -f deploy/compose/docker-compose.frontend-test.yml run --rm console-test "corepack enable && pnpm install --frozen-lockfile && pnpm lint && pnpm typecheck && pnpm test:run && pnpm build"
 docker compose -f deploy/compose/docker-compose.console-e2e.yml up --build --abort-on-container-exit --exit-code-from console-e2e
 ```
 
-- [ ] **Step 3: 运行静态和安全门禁**
+- [x] **Step 3: 运行静态和安全门禁**
 
 ```powershell
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\check-console-assets.ps1
@@ -823,11 +823,11 @@ git diff --check
 
 扫描源码、构建产物和测试日志，禁止真实 API Key/Token、Cookie、私钥、绝对用户路径、raw result 和旧页面标识。
 
-- [ ] **Step 4: 更新文档状态**
+- [x] **Step 4: 更新文档状态**
 
-只有以上证据全部通过，才把 UI-01..UI-07、M6、M8 和 OPS-04 从待开发改为已实现；保留未完成项，不因页面存在而提升状态。
+只有以上证据全部通过，才把 UI-01..UI-07、M6..M8 和 OPS-04 从待开发改为已实现；保留未完成项，不因页面存在而提升状态。
 
-- [ ] **Step 5: 完成代码审查和提交**
+- [x] **Step 5: 完成代码审查和提交**
 
 使用 `@requesting-code-review` 做规格和质量双审，关闭 P0/P1/P2 后提交：
 
@@ -836,6 +836,6 @@ git add docs README.md
 git commit -m "docs: record enterprise console delivery"
 ```
 
-- [ ] **Step 6: 准备合并**
+- [x] **Step 6: 准备合并**
 
 使用 `@finishing-a-development-branch` 给出本地合并、推送 PR 或保留分支选项；未经用户明确选择不 push、不创建 PR。
