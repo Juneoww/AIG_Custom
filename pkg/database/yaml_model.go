@@ -19,6 +19,8 @@
 package database
 
 import (
+	"errors"
+	"io"
 	"os"
 
 	"github.com/Juneoww/AIG_Custom/internal/gologger"
@@ -27,21 +29,55 @@ import (
 
 const YamlModelPath = "db/model.yaml"
 
+const (
+	// Browser catalog loading is deliberately bounded because this legacy file
+	// is parsed as one document and merged into an in-memory response catalog.
+	maxYAMLModelBytes   int64 = 2 << 20
+	maxYAMLModelEntries       = 1000
+)
+
+var (
+	ErrYAMLModelsRead     = errors.New("YAML模型配置读取失败")
+	ErrYAMLModelsInvalid  = errors.New("YAML模型配置解析失败")
+	ErrYAMLModelsTooLarge = errors.New("YAML模型配置超出大小限制")
+	ErrYAMLModelsTooMany  = errors.New("YAML模型配置条目过多")
+)
+
 // LoadYamlModels 加载YAML模型配置
 func (s *ModelStore) LoadYamlModels() ([]*Model, error) {
-	data, err := os.ReadFile(YamlModelPath)
+	info, err := os.Stat(YamlModelPath)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil, nil
 		}
-		gologger.Errorf("读取模型配置文件失败: %v", err)
-		return nil, err
+		gologger.Errorf("读取模型配置文件失败")
+		return nil, ErrYAMLModelsRead
+	}
+	if info.Size() > maxYAMLModelBytes {
+		return nil, ErrYAMLModelsTooLarge
+	}
+	file, err := os.Open(YamlModelPath)
+	if err != nil {
+		gologger.Errorf("读取模型配置文件失败")
+		return nil, ErrYAMLModelsRead
+	}
+	defer file.Close()
+	data, err := io.ReadAll(io.LimitReader(file, maxYAMLModelBytes+1))
+	if err != nil {
+		gologger.Errorf("读取模型配置文件失败")
+		return nil, ErrYAMLModelsRead
+	}
+	if int64(len(data)) > maxYAMLModelBytes {
+		return nil, ErrYAMLModelsTooLarge
 	}
 
 	var models []*Model
 	if err := yaml.Unmarshal(data, &models); err != nil {
-		gologger.Errorf("解析模型配置文件失败: %v", err)
-		return nil, err
+		gologger.Errorf("解析模型配置文件失败")
+		return nil, ErrYAMLModelsInvalid
+	}
+	if len(models) > maxYAMLModelEntries {
+		return nil, ErrYAMLModelsTooMany
 	}
 
 	return models, nil

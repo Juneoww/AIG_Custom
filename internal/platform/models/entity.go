@@ -12,6 +12,17 @@ const (
 	ScopePrivate Scope = "private"
 	ScopeGlobal  Scope = "global"
 	MaskedToken        = "********"
+
+	DefaultCatalogPageSize = 20
+	MaxCatalogPageSize     = 100
+	MaxCatalogPage         = 1000
+)
+
+type CatalogSource string
+
+const (
+	CatalogSourcePlatform CatalogSource = "platform"
+	CatalogSourceYAML     CatalogSource = "yaml"
 )
 
 type Model struct {
@@ -109,11 +120,45 @@ type View struct {
 	UpdatedAt     time.Time `json:"updated_at"`
 }
 
+type CatalogView struct {
+	ID            string        `json:"id"`
+	OwnerUserID   string        `json:"owner_user_id,omitempty"`
+	Scope         Scope         `json:"scope"`
+	Name          string        `json:"name"`
+	ProviderModel string        `json:"provider_model"`
+	BaseURL       string        `json:"base_url"`
+	Note          string        `json:"note,omitempty"`
+	Limit         int           `json:"limit,omitempty"`
+	Disabled      bool          `json:"disabled"`
+	Token         string        `json:"token"`
+	Source        CatalogSource `json:"source"`
+	ReadOnly      bool          `json:"read_only"`
+	CreatedAt     time.Time     `json:"created_at,omitempty"`
+	UpdatedAt     time.Time     `json:"updated_at,omitempty"`
+}
+
+type CatalogPage struct {
+	Items    []CatalogView `json:"items"`
+	Total    int64         `json:"total"`
+	Page     int           `json:"page"`
+	PageSize int           `json:"page_size"`
+}
+
 func viewOf(model *Model) View {
 	return View{
 		ID: model.ID, OwnerUserID: model.OwnerUserID, Scope: model.Scope, Name: model.Name,
 		ProviderModel: model.ProviderModel, BaseURL: model.BaseURL, Note: model.Note,
 		Limit: model.Limit, Disabled: model.Disabled, Token: MaskedToken,
+		CreatedAt: model.CreatedAt, UpdatedAt: model.UpdatedAt,
+	}
+}
+
+func catalogViewOf(model *Model, readOnly bool) CatalogView {
+	return CatalogView{
+		ID: model.ID, OwnerUserID: model.OwnerUserID, Scope: model.Scope, Name: model.Name,
+		ProviderModel: model.ProviderModel, BaseURL: model.BaseURL, Note: model.Note,
+		Limit: model.Limit, Disabled: model.Disabled, Token: MaskedToken,
+		Source: CatalogSourcePlatform, ReadOnly: readOnly,
 		CreatedAt: model.CreatedAt, UpdatedAt: model.UpdatedAt,
 	}
 }

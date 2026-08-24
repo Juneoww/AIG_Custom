@@ -1,0 +1,35 @@
+services:
+  console-test:
+    image: node:22.18.0-alpine
+    network_mode: bridge
+    working_dir: /workspace
+    entrypoint:
+      - /bin/sh
+      - -ec
+    command:
+      - corepack enable && pnpm install --frozen-lockfile && pnpm lint && pnpm typecheck && pnpm test:run && pnpm build
+    environment:
+      CI: "true"
+      PNPM_HOME: /pnpm
+      npm_config_store_dir: /pnpm/store
+      AIG_DROID_FONT_SOURCE: /workspace/.font-sources/DroidSansFallbackFull.ttf
+      AIG_DROID_LICENSE_SOURCE: /workspace/.font-sources/DROID_FONT_LICENSE.txt
+      AIG_APACHE_LICENSE_SOURCE: /workspace/.font-sources/APACHE-2.0.txt
+    volumes:
+      - ../../web/console/package.json:/workspace/package.json:ro
+      - ../../web/console/pnpm-lock.yaml:/workspace/pnpm-lock.yaml:ro
+      - ../../web/console/tsconfig.json:/workspace/tsconfig.json:ro
+      - ../../web/console/tsconfig.app.json:/workspace/tsconfig.app.json:ro
+      - ../../web/console/vite.config.ts:/workspace/vite.config.ts:ro
+      - ../../web/console/vitest.setup.ts:/workspace/vitest.setup.ts:ro
+      - ../../web/console/playwright.config.ts:/workspace/playwright.config.ts:ro
+      - ../../web/console/index.html:/workspace/index.html:ro
+      - ../../web/console/src:/workspace/src:ro
+      - ../../web/console/scripts:/workspace/scripts:ro
+      - ../../web/console/assets:/workspace/assets:ro
+      - ../../internal/platform/reports/assets/DroidSansFallbackFull.ttf:/workspace/.font-sources/DroidSansFallbackFull.ttf:ro
+      - ../../internal/platform/reports/assets/DROID_FONT_LICENSE.txt:/workspace/.font-sources/DROID_FONT_LICENSE.txt:ro
+      - ../../LICENSE:/workspace/.font-sources/APACHE-2.0.txt:ro
+      - /workspace/node_modules
+      - /workspace/dist
+      - /pnpm/store

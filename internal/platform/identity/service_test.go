@@ -2,6 +2,7 @@ package identity
 
 import (
 	"context"
+	"fmt"
 	"testing"
 	"time"
 
@@ -81,4 +82,37 @@ func TestSessionsStoreOnlyTokenHashAndRotateAndRevoke(t *testing.T) {
 	require.NoError(t, service.RevokeSession(ctx, rotated))
 	_, err = service.SubjectForToken(ctx, rotated)
 	require.ErrorIs(t, err, ErrUnauthenticated)
+}
+
+func TestListUsersPaginationUsesStableRepositoryPage(t *testing.T) {
+	service, _ := newTestService(t)
+	service.now = func() time.Time { return time.Date(2026, 8, 17, 8, 0, 0, 0, time.UTC) }
+	ctx := context.Background()
+	for index := 0; index < 25; index++ {
+		_, err := service.CreateUser(ctx, CreateUserInput{
+			ID: fmt.Sprintf("user-%02d", index), Username: fmt.Sprintf("member-%02d", index), Password: "secret", Role: RoleUser,
+		})
+		require.NoError(t, err)
+	}
+
+	users, total, err := service.ListUsers(ctx, 2, 10)
+	require.NoError(t, err)
+	assert.Equal(t, int64(25), total)
+	require.Len(t, users, 10)
+	assert.Equal(t, "user-10", users[0].ID)
+	assert.Empty(t, users[0].PasswordHash)
+	_, _, err = service.ListUsers(ctx, 1001, 20)
+	assert.ErrorIs(t, err, ErrInvalidPagination)
+}
+
+type legacyIdentityRepository struct{ Repository }
+
+func (*legacyIdentityRepository) ListUsers(context.Context) ([]User, error) { return nil, nil }
+
+var _ Repository = (*legacyIdentityRepository)(nil)
+
+func TestListUsersPaginationRejectsLegacyRepositoryWithoutPageCapability(t *testing.T) {
+	service := NewService(&legacyIdentityRepository{Repository: NewMemoryRepository()})
+	_, _, err := service.ListUsers(context.Background(), 1, 20)
+	assert.EqualError(t, err, "用户分页仓库未配置")
 }

@@ -17,11 +17,15 @@ package websocket
 import (
 	"bytes"
 	"context"
+	"encoding/json"
+	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/Juneoww/AIG_Custom/common/agent"
 	"github.com/Juneoww/AIG_Custom/internal/platform/identity"
 	platformmodels "github.com/Juneoww/AIG_Custom/internal/platform/models"
+	platformtasks "github.com/Juneoww/AIG_Custom/internal/platform/tasks"
 	"github.com/Juneoww/AIG_Custom/pkg/database"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -70,6 +74,37 @@ func TestTaskModelResolverPreservesAuthorizedYAMLFallbackForDirectDefaultAndTitl
 
 	_, err = taskManager.resolveTaskModel(ctx, "missing-user", "yaml-safe")
 	assert.ErrorIs(t, err, platformmodels.ErrForbidden, "identity rejection must not fall through to YAML")
+
+	references, err := json.Marshal(map[string]any{"model_id": []string{"yaml-safe"}, "eval_model_id": "yaml-safe"})
+	require.NoError(t, err)
+	require.NoError(t, taskManager.ValidateTaskReferences(ctx, platformtasks.EngineTask{
+		OwnerUsername: user.Username, TaskType: "model_redteam_report", Params: references,
+	}))
+	unknown, err := json.Marshal(map[string]any{"model_id": []string{"yaml-safe", "sk-browser-sensitive-value"}, "eval_model_id": "yaml-safe"})
+	require.NoError(t, err)
+	require.ErrorIs(t, taskManager.ValidateTaskReferences(ctx, platformtasks.EngineTask{
+		OwnerUsername: user.Username, TaskType: "model_redteam_report", Params: unknown,
+	}), platformtasks.ErrInvalid)
+}
+
+func TestTaskReferenceValidationUsesGovernedAgentConfigRegistry(t *testing.T) {
+	workingDirectory, err := os.Getwd()
+	require.NoError(t, err)
+	temporary := t.TempDir()
+	require.NoError(t, os.Chdir(temporary))
+	t.Cleanup(func() { _ = os.Chdir(workingDirectory) })
+	require.NoError(t, os.MkdirAll(filepath.Join("data", "agents", PublicUser), 0o700))
+	require.NoError(t, os.WriteFile(filepath.Join("data", "agents", PublicUser, "safe-agent.yaml"), []byte("provider: safe\n"), 0o600))
+
+	taskManager := NewTaskManager(NewAgentManager(), nil, nil, nil, NewSSEManager())
+	require.NoError(t, taskManager.ValidateTaskReferences(context.Background(), platformtasks.EngineTask{
+		OwnerUsername: "alice", TaskType: "agent_scan",
+		Params: json.RawMessage(`{"agent_id":"safe-agent"}`),
+	}))
+	require.ErrorIs(t, taskManager.ValidateTaskReferences(context.Background(), platformtasks.EngineTask{
+		OwnerUsername: "alice", TaskType: "agent_scan",
+		Params: json.RawMessage(`{"agent_id":"../private"}`),
+	}), platformtasks.ErrInvalid)
 }
 
 type stubYAMLModelSource struct {

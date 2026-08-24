@@ -27,6 +27,9 @@ import (
 	"gorm.io/gorm"
 )
 
+var _ platformreports.DashboardRepository = (*platformreports.GormRepository)(nil)
+var _ platformtasks.RecentRepository = (*platformtasks.GormRepository)(nil)
+
 type runtimeDatastores struct {
 	identityRepository      *identity.GormRepository
 	auditRepository         *platformaudit.GormRepository

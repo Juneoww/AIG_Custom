@@ -17,6 +17,12 @@ type Handler struct {
 	audits *audit.Service
 }
 
+const (
+	defaultListPageSize = 20
+	maxListPageSize     = 100
+	maxListPage         = 1000
+)
+
 func NewHandler(users *identity.Service, audits *audit.Service) *Handler {
 	return &Handler{users: users, audits: audits}
 }
@@ -36,8 +42,17 @@ func (handler *Handler) listUsers(c *gin.Context) {
 	if _, ok := requireAdmin(c); !ok {
 		return
 	}
-	users, err := handler.users.ListUsers(c.Request.Context())
+	page, pageSize, err := listPage(c)
 	if err != nil {
+		respondListError(c)
+		return
+	}
+	users, total, err := handler.users.ListUsers(c.Request.Context(), page, pageSize)
+	if err != nil {
+		if errors.Is(err, identity.ErrInvalidPagination) {
+			respondListError(c)
+			return
+		}
 		c.Status(http.StatusInternalServerError)
 		return
 	}
@@ -45,7 +60,7 @@ func (handler *Handler) listUsers(c *gin.Context) {
 	for index := range users {
 		response = append(response, userResponse(&users[index]))
 	}
-	c.JSON(http.StatusOK, response)
+	c.JSON(http.StatusOK, UserListResponse{Items: response, Total: total, Page: page, PageSize: pageSize})
 }
 
 func (handler *Handler) createUser(c *gin.Context) {
@@ -193,11 +208,15 @@ func (handler *Handler) listAuditEvents(c *gin.Context) {
 		c.Status(http.StatusUnauthorized)
 		return
 	}
-	limit, _ := strconv.Atoi(c.Query("limit"))
-	events, err := handler.audits.Query(c.Request.Context(), subject, audit.Filter{
+	page, pageSize, err := listPage(c)
+	if err != nil {
+		respondListError(c)
+		return
+	}
+	events, total, err := handler.audits.QueryPage(c.Request.Context(), subject, audit.Filter{
 		Action: audit.Action(c.Query("action")), ActorUserID: c.Query("actor_user_id"),
-		ResourceType: c.Query("resource_type"), ResourceID: c.Query("resource_id"), Limit: limit,
-	})
+		ResourceType: c.Query("resource_type"), ResourceID: c.Query("resource_id"),
+	}, page, pageSize)
 	if errors.Is(err, audit.ErrForbidden) {
 		c.Status(http.StatusForbidden)
 		return
@@ -206,7 +225,33 @@ func (handler *Handler) listAuditEvents(c *gin.Context) {
 		c.Status(http.StatusInternalServerError)
 		return
 	}
-	c.JSON(http.StatusOK, events)
+	c.JSON(http.StatusOK, AuditListResponse{Items: events, Total: total, Page: page, PageSize: pageSize})
+}
+
+func listPage(c *gin.Context) (int, int, error) {
+	page, pageSize := 1, defaultListPageSize
+	if raw := c.Query("page"); raw != "" {
+		value, err := strconv.Atoi(raw)
+		if err != nil || value < 1 || value > maxListPage {
+			return 0, 0, identity.ErrInvalidPagination
+		}
+		page = value
+	}
+	if raw := c.Query("page_size"); raw != "" {
+		value, err := strconv.Atoi(raw)
+		if err != nil || value < 1 {
+			return 0, 0, identity.ErrInvalidPagination
+		}
+		if value > maxListPageSize {
+			value = maxListPageSize
+		}
+		pageSize = value
+	}
+	return page, pageSize, nil
+}
+
+func respondListError(c *gin.Context) {
+	c.JSON(http.StatusBadRequest, gin.H{"error": "invalid list request"})
 }
 
 func (handler *Handler) reconcileAuditEvents(c *gin.Context) {

@@ -33,6 +33,10 @@ type Repository interface {
 	UpdatePasswordReset(context.Context, *PasswordReset) error
 }
 
+type userPageRepository interface {
+	ListUsersPage(context.Context, int, int) ([]User, int64, error)
+}
+
 type GormRepository struct{ db *gorm.DB }
 
 func NewGormRepository(db *gorm.DB) *GormRepository { return &GormRepository{db: db} }
@@ -60,6 +64,18 @@ func (r *GormRepository) CreateUser(ctx context.Context, user *User) error {
 func (r *GormRepository) ListUsers(ctx context.Context) ([]User, error) {
 	var users []User
 	return users, txcontext.Gorm(ctx, r.db).Order("created_at ASC, id ASC").Find(&users).Error
+}
+
+func (r *GormRepository) ListUsersPage(ctx context.Context, page, pageSize int) ([]User, int64, error) {
+	db := txcontext.Gorm(ctx, r.db).Model(&User{})
+	var total int64
+	if err := db.Count(&total).Error; err != nil {
+		return nil, 0, err
+	}
+	var users []User
+	err := db.Select("id", "username", "role", "active", "must_change_password", "created_at", "updated_at").
+		Order("created_at ASC, id ASC").Limit(pageSize).Offset((page - 1) * pageSize).Find(&users).Error
+	return users, total, err
 }
 
 // CreateInitialAdministrator atomically creates the first administrator.
@@ -208,6 +224,36 @@ func (r *MemoryRepository) ListUsers(_ context.Context) ([]User, error) {
 		return users[i].CreatedAt.Before(users[j].CreatedAt)
 	})
 	return users, nil
+}
+
+func (r *MemoryRepository) ListUsersPage(_ context.Context, page, pageSize int) ([]User, int64, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	users := make([]User, 0, len(r.usersByID))
+	for _, user := range r.usersByID {
+		users = append(users, User{
+			ID: user.ID, Username: user.Username, Role: user.Role, Active: user.Active,
+			MustChangePassword: user.MustChangePassword, CreatedAt: user.CreatedAt, UpdatedAt: user.UpdatedAt,
+		})
+	}
+	sort.Slice(users, func(i, j int) bool {
+		if users[i].CreatedAt.Equal(users[j].CreatedAt) {
+			return users[i].ID < users[j].ID
+		}
+		return users[i].CreatedAt.Before(users[j].CreatedAt)
+	})
+	total := int64(len(users))
+	offset := (page - 1) * pageSize
+	if offset >= len(users) {
+		return []User{}, total, nil
+	}
+	if offset > 0 {
+		users = users[offset:]
+	}
+	if len(users) > pageSize {
+		users = users[:pageSize]
+	}
+	return users, total, nil
 }
 func (r *MemoryRepository) CreateInitialAdministrator(_ context.Context, v *User) (bool, error) {
 	r.mu.Lock()

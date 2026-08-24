@@ -35,6 +35,11 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
+var (
+	errKnowledgeMutationInvalid  = errors.New("invalid knowledge mutation")
+	errKnowledgeMutationNotFound = errors.New("knowledge mutation target not found")
+)
+
 func HandleList(root string, loadFile func(filePath string) (interface{}, error)) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		var allItems []interface{}
@@ -54,7 +59,7 @@ func HandleList(root string, loadFile func(filePath string) (interface{}, error)
 		if err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{
 				"status":  1,
-				"message": err.Error(),
+				"message": "failed to load knowledge data",
 			})
 			return
 		}
@@ -81,7 +86,7 @@ func HandleCreate(readAndSave func(content string) error) gin.HandlerFunc {
 			return
 		}
 		if err := readAndSave(request.Content); err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"status": 1, "message": "failed to save config: " + err.Error()})
+			c.JSON(http.StatusInternalServerError, gin.H{"status": 1, "message": "failed to save config"})
 			return
 		}
 		c.JSON(http.StatusOK, gin.H{"status": 0, "message": "created"})
@@ -109,7 +114,7 @@ func HandleEdit(updateFunc func(id string, content string) error) gin.HandlerFun
 		}
 
 		if err := updateFunc(c.Param("id"), request.Content); err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"status": 1, "message": "update failed: " + err.Error()})
+			c.JSON(http.StatusInternalServerError, gin.H{"status": 1, "message": "update failed"})
 			return
 		}
 
@@ -130,7 +135,15 @@ func HandleDelete(deleteFunc func(id string) error) gin.HandlerFunc {
 		}
 
 		if err := deleteFunc(name); err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"status": 1, "message": "delete failed: " + err.Error()})
+			if errors.Is(err, errKnowledgeMutationInvalid) {
+				c.JSON(http.StatusBadRequest, gin.H{"status": 1, "message": "invalid knowledge identifier"})
+				return
+			}
+			if errors.Is(err, errKnowledgeMutationNotFound) {
+				c.JSON(http.StatusNotFound, gin.H{"status": 1, "message": "knowledge resource not found"})
+				return
+			}
+			c.JSON(http.StatusInternalServerError, gin.H{"status": 1, "message": "delete failed"})
 			return
 		}
 
@@ -321,18 +334,21 @@ func promptCollectionUpdateFunc(id string, content string) error {
 
 func promptCollectionDeleteFunc(id string) error {
 	// Validate filename safety
-	if strings.Contains(id, "..") || strings.ContainsAny(id, "/\\<>:\"|?*") {
-		return errors.New("invalid filename")
+	if !isValidKnowledgeOpaqueName(id) {
+		return errKnowledgeMutationInvalid
 	}
 
 	filePath, err := safeJoinPath(PromptCollectionsRoot, id+".json")
 	if err != nil {
-		return err
+		return errKnowledgeMutationInvalid
 	}
 
 	// Check if file exists
-	if _, err := os.Stat(filePath); os.IsNotExist(err) {
-		return errors.New("file not found")
+	if _, err := os.Stat(filePath); err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return errKnowledgeMutationNotFound
+		}
+		return err
 	}
 
 	return os.Remove(filePath)
@@ -342,7 +358,7 @@ func GetJailBreak(c *gin.Context) {
 	if err != nil {
 		c.JSON(http.StatusOK, gin.H{
 			"status":  1,
-			"message": "Failed to resolve prompt security directory: " + err.Error(),
+			"message": "Failed to resolve prompt security directory",
 		})
 		return
 	}
@@ -351,7 +367,7 @@ func GetJailBreak(c *gin.Context) {
 	if err != nil {
 		c.JSON(http.StatusOK, gin.H{
 			"status":  1,
-			"message": "Failed to read strategy map: " + err.Error(),
+			"message": "Failed to read strategy map",
 		})
 		return
 	}
@@ -360,7 +376,7 @@ func GetJailBreak(c *gin.Context) {
 	if err != nil {
 		c.JSON(http.StatusOK, gin.H{
 			"status":  1,
-			"message": "Failed to parse strategy map: " + err.Error(),
+			"message": "Failed to parse strategy map",
 		})
 		return
 	}
@@ -407,7 +423,7 @@ func HandleListAgentNames(c *gin.Context) {
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{
 			"status":  1,
-			"message": "failed to retrieve: " + err.Error(),
+			"message": "failed to retrieve config",
 		})
 		return
 	}
@@ -444,7 +460,7 @@ func HandleGetAgentConfig(c *gin.Context) {
 		}
 		c.JSON(http.StatusInternalServerError, gin.H{
 			"status":  1,
-			"message": "failed to read config: " + err.Error(),
+			"message": "failed to read config",
 		})
 		return
 	}
@@ -495,10 +511,6 @@ func testAgentConnectivity(content string) (bool, string, error) {
 	if err != nil {
 		return false, "", fmt.Errorf("connectivity test execution failed: %v", err)
 	}
-	if lastLine != "" {
-		gologger.Infoln("test_agent_connect", lastLine)
-	}
-
 	// Parse the JSON output from Python script
 	var result ConnectResultUpdate
 	if err := json.Unmarshal([]byte(lastLine), &result); err != nil {
@@ -507,6 +519,8 @@ func testAgentConnectivity(content string) (bool, string, error) {
 
 	return result.Content.Success, result.Content.Message, nil
 }
+
+var agentConnectivityCheck = testAgentConnectivity
 
 func HandleSaveAgentConfig(c *gin.Context) {
 	if !requireGovernedKnowledgeMutation(c) {
@@ -548,18 +562,18 @@ func HandleSaveAgentConfig(c *gin.Context) {
 	// Validate Agent connectivity before saving the config (skip when ?verify=false).
 	skipVerify := strings.ToLower(strings.TrimSpace(c.Query("verify"))) == "false"
 	if !skipVerify {
-		success, message, err := testAgentConnectivity(content)
+		success, _, err := agentConnectivityCheck(content)
 		if err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{
 				"status":  1,
-				"message": "connectivity check failed: " + err.Error(),
+				"message": "connectivity check unavailable",
 			})
 			return
 		}
 		if !success {
 			c.JSON(http.StatusOK, gin.H{
 				"status":  1,
-				"message": "connectivity check failed: " + message,
+				"message": "connectivity check failed",
 			})
 			return
 		}
@@ -570,7 +584,7 @@ func HandleSaveAgentConfig(c *gin.Context) {
 	if err := os.MkdirAll(userDir, 0755); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{
 			"status":  1,
-			"message": "failed to create directory: " + err.Error(),
+			"message": "failed to create directory",
 		})
 		return
 	}
@@ -579,7 +593,7 @@ func HandleSaveAgentConfig(c *gin.Context) {
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{
 			"status":  1,
-			"message": "failed to save config: " + err.Error(),
+			"message": "failed to save config",
 		})
 		return
 	}
@@ -587,7 +601,7 @@ func HandleSaveAgentConfig(c *gin.Context) {
 	if err := os.WriteFile(targetPath, []byte(content), 0644); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{
 			"status":  1,
-			"message": "failed to save config: " + err.Error(),
+			"message": "failed to save config",
 		})
 		return
 	}
@@ -620,7 +634,7 @@ func HandleDeleteAgentConfig(c *gin.Context) {
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{
 			"status":  1,
-			"message": "delete failed: " + err.Error(),
+			"message": "delete failed",
 		})
 		return
 	}
@@ -835,12 +849,14 @@ type ConnectResultUpdate struct {
 	Content ConnectResultContent `json:"content"`
 }
 
+const maxAgentPromptOutputBytes = 256 * 1024
+
 func HandleAgentConnect(c *gin.Context) {
 	var req AgentConnectRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{
 			"status":  1,
-			"message": "Invalid request body: " + err.Error(),
+			"message": "Invalid request body",
 		})
 		return
 	}
@@ -854,11 +870,11 @@ func HandleAgentConnect(c *gin.Context) {
 	}
 
 	// Delegate to shared connectivity test helper
-	success, message, err := testAgentConnectivity(req.Content)
+	success, _, err := agentConnectivityCheck(req.Content)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{
 			"status":  1,
-			"message": "Failed to run connectivity test: " + err.Error(),
+			"message": "Connectivity test unavailable",
 		})
 		return
 	}
@@ -866,22 +882,64 @@ func HandleAgentConnect(c *gin.Context) {
 	if success {
 		c.JSON(http.StatusOK, gin.H{
 			"status":  0,
-			"message": message,
+			"message": "Connectivity test passed",
 		})
 	} else {
 		c.JSON(http.StatusOK, gin.H{
 			"status":  1,
-			"message": message,
+			"message": "Connectivity test failed",
 		})
 	}
 }
+
+func testAgentPrompt(content string, prompt string) (ConnectResultUpdate, error) {
+	tmpFile, err := os.CreateTemp("", "agent_prompt_test_*.yaml")
+	if err != nil {
+		return ConnectResultUpdate{}, fmt.Errorf("create prompt test file: %w", err)
+	}
+	defer os.Remove(tmpFile.Name())
+
+	if _, err := tmpFile.WriteString(content); err != nil {
+		tmpFile.Close()
+		return ConnectResultUpdate{}, fmt.Errorf("write prompt test file: %w", err)
+	}
+	if err := tmpFile.Close(); err != nil {
+		return ConnectResultUpdate{}, fmt.Errorf("close prompt test file: %w", err)
+	}
+
+	agentScanDir, err := utils.ResolveAgentScanDir()
+	if err != nil {
+		return ConnectResultUpdate{}, fmt.Errorf("resolve agent scan directory: %w", err)
+	}
+	uvBin, err := utils.ResolveUvBin()
+	if err != nil {
+		return ConnectResultUpdate{}, fmt.Errorf("resolve uv binary: %w", err)
+	}
+	var lastLine string
+	if err := utils.RunCmd(
+		agentScanDir,
+		uvBin,
+		[]string{"run", "test_client_connect.py", "--client_file", tmpFile.Name(), "--prompt", prompt},
+		func(line string) { lastLine += line },
+	); err != nil {
+		return ConnectResultUpdate{}, fmt.Errorf("run prompt test: %w", err)
+	}
+
+	var result ConnectResultUpdate
+	if err := json.Unmarshal([]byte(lastLine), &result); err != nil {
+		return ConnectResultUpdate{}, fmt.Errorf("parse prompt test result: %w", err)
+	}
+	return result, nil
+}
+
+var agentPromptTestCheck = testAgentPrompt
 
 func HandleAgentPromptTest(c *gin.Context) {
 	var req AgentPromptTestRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{
 			"status":  1,
-			"message": "Invalid request body: " + err.Error(),
+			"message": "Invalid request body",
 		})
 		return
 	}
@@ -902,70 +960,11 @@ func HandleAgentPromptTest(c *gin.Context) {
 		return
 	}
 
-	// Create temporary file for the YAML content
-	tmpFile, err := os.CreateTemp("", "agent_prompt_test_*.yaml")
+	result, err := agentPromptTestCheck(req.Content, req.Prompt)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{
 			"status":  1,
-			"message": "Failed to create temporary file: " + err.Error(),
-		})
-		return
-	}
-	defer os.Remove(tmpFile.Name())
-
-	// Write YAML content to temp file
-	if _, err := tmpFile.WriteString(req.Content); err != nil {
-		tmpFile.Close()
-		c.JSON(http.StatusInternalServerError, gin.H{
-			"status":  1,
-			"message": "Failed to write config file: " + err.Error(),
-		})
-		return
-	}
-	tmpFile.Close()
-
-	// Run Python prompt test script using uv
-	agentScanDir, err := utils.ResolveAgentScanDir()
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{
-			"status":  1,
-			"message": "Failed to resolve agent-scan directory: " + err.Error(),
-		})
-		return
-	}
-	uvBin, err := utils.ResolveUvBin()
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{
-			"status":  1,
-			"message": "Failed to resolve uv binary: " + err.Error(),
-		})
-		return
-	}
-	var lastLine string
-	err = utils.RunCmd(
-		agentScanDir,
-		uvBin,
-		[]string{"run", "test_client_connect.py", "--client_file", tmpFile.Name(), "--prompt", req.Prompt},
-		func(line string) {
-			lastLine += line
-		},
-	)
-
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{
-			"status":  1,
-			"message": "Failed to run prompt test: " + err.Error(),
-		})
-		return
-	}
-	gologger.Infof("prompt test result: %s", lastLine)
-
-	// Parse the JSON output from Python script
-	var result ConnectResultUpdate
-	if err := json.Unmarshal([]byte(lastLine), &result); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{
-			"status":  1,
-			"message": "Failed to parse result: " + err.Error(),
+			"message": "Prompt test unavailable",
 		})
 		return
 	}
@@ -975,16 +974,12 @@ func HandleAgentPromptTest(c *gin.Context) {
 		// Extract output from provider_response
 		var output string
 		if result.Content.ProviderResponse != nil {
-			if result.Content.ProviderResponse.Output != nil && *result.Content.ProviderResponse.Output != "" {
+			if result.Content.ProviderResponse.Output != nil && *result.Content.ProviderResponse.Output != "" && len(*result.Content.ProviderResponse.Output) <= maxAgentPromptOutputBytes {
 				output = *result.Content.ProviderResponse.Output
-			} else if result.Content.ProviderResponse.Raw != nil {
-				// Fallback to raw response
-				rawBytes, _ := json.Marshal(result.Content.ProviderResponse.Raw)
-				output = string(rawBytes)
 			}
 		}
 		if output == "" {
-			output = result.Content.Message
+			output = "Prompt test completed"
 		}
 		c.JSON(http.StatusOK, gin.H{
 			"status":  0,
@@ -993,7 +988,7 @@ func HandleAgentPromptTest(c *gin.Context) {
 	} else {
 		c.JSON(http.StatusOK, gin.H{
 			"status":  1,
-			"message": result.Content.Message,
+			"message": "Prompt test failed",
 		})
 	}
 }

@@ -15,6 +15,13 @@ var (
 	ErrUnauthenticated          = errors.New("未登录或会话已失效")
 	ErrInvalidPassword          = errors.New("密码不能为空")
 	ErrAdminAlreadyBootstrapped = errors.New("管理员已初始化")
+	ErrInvalidPagination        = errors.New("分页参数无效")
+	ErrPaginationUnavailable    = errors.New("用户分页仓库未配置")
+)
+
+const (
+	maxListPageSize = 100
+	maxListPage     = 1000
 )
 
 type CreateUserInput struct {
@@ -76,8 +83,15 @@ func (s *Service) SetActive(ctx context.Context, username string, active bool) e
 	return s.repo.UpdateUserActive(ctx, user.ID, active, s.now())
 }
 
-func (s *Service) ListUsers(ctx context.Context) ([]User, error) {
-	return s.repo.ListUsers(ctx)
+func (s *Service) ListUsers(ctx context.Context, page, pageSize int) ([]User, int64, error) {
+	if page < 1 || page > maxListPage || pageSize < 1 || pageSize > maxListPageSize {
+		return nil, 0, ErrInvalidPagination
+	}
+	repository, ok := s.repo.(userPageRepository)
+	if !ok {
+		return nil, 0, ErrPaginationUnavailable
+	}
+	return repository.ListUsersPage(ctx, page, pageSize)
 }
 
 func (s *Service) SetRole(ctx context.Context, userID string, role Role) error {

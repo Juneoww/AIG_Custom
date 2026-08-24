@@ -45,6 +45,8 @@ type AttachmentState string
 const (
 	AttachmentStateUploading AttachmentState = "uploading"
 	AttachmentStateReady     AttachmentState = "ready"
+	AttachmentStateAttached  AttachmentState = "attached"
+	AttachmentStateDeleting  AttachmentState = "deleting"
 )
 
 type Attachment struct {

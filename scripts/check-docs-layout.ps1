@@ -2,7 +2,7 @@
 #   校验 docs 目录只保留人读文档，并验证目标文档结构和旧路径引用已经完成迁移。
 # 实现:
 #   从脚本位置推导仓库根目录，以 Git 返回的已跟踪和未忽略文件为边界，检查 docs 文件
-#   类型、目标必需文件，以及代码、配置和 Markdown 实际链接目标中的旧路径。
+#   类型、目标必需文件、当前导航入口，以及代码、配置和 Markdown 实际链接目标中的旧路径。
 # 输入:
 #   Git 已跟踪或未忽略的未跟踪文件，以及仓库中的 docs 和 internal/apidocs 目标文件。
 # 输出:
@@ -34,6 +34,7 @@ foreach ($relativePath in ($repositoryFiles | Where-Object { $_.StartsWith('docs
 $requiredPaths = @(
     'docs/README.md',
     'docs/product/prd.md',
+    'docs/product/features.md',
     'docs/project/status.md',
     'docs/project/plans/documentation.md',
     'docs/architecture/evolution.md',
@@ -53,6 +54,170 @@ $requiredPaths = @(
 foreach ($relativePath in $requiredPaths) {
     if (-not (Test-Path -LiteralPath (Join-Path $repositoryRoot $relativePath) -PathType Leaf)) {
         $issues.Add("缺少目标文件: $relativePath")
+    }
+}
+
+# 判断字符前是否有奇数个反斜杠；奇数表示 Markdown 转义。
+function Test-IsEscapedMarkdownCharacter {
+    param(
+        [Parameter(Mandatory = $true)][AllowEmptyString()][string]$Line,
+        [Parameter(Mandatory = $true)][int]$Position
+    )
+
+    $backslashCount = 0
+    $positionBeforeCharacter = $Position - 1
+    while ($positionBeforeCharacter -ge 0 -and $Line[$positionBeforeCharacter] -eq '\') {
+        $backslashCount++
+        $positionBeforeCharacter--
+    }
+    return $backslashCount % 2 -eq 1
+}
+
+# 只有后续存在同长度、未转义的 closing delimiter 时，反引号才构成代码 span。
+function Test-HasClosingCodeSpanDelimiter {
+    param(
+        [Parameter(Mandatory = $true)][AllowEmptyString()][string[]]$Lines,
+        [Parameter(Mandatory = $true)][int]$StartLineIndex,
+        [Parameter(Mandatory = $true)][int]$StartCharacterIndex,
+        [Parameter(Mandatory = $true)][int]$DelimiterLength
+    )
+
+    for ($lineIndex = $StartLineIndex; $lineIndex -lt $Lines.Count; $lineIndex++) {
+        $currentLine = $Lines[$lineIndex]
+        if ($lineIndex -gt $StartLineIndex -and [string]::IsNullOrWhiteSpace($currentLine)) {
+            return $false
+        }
+        $position = if ($lineIndex -eq $StartLineIndex) { $StartCharacterIndex } else { 0 }
+        while ($position -lt $currentLine.Length) {
+            if ([int][char]$currentLine[$position] -ne 96) {
+                $position++
+                continue
+            }
+            $runStart = $position
+            while ($position -lt $currentLine.Length -and [int][char]$currentLine[$position] -eq 96) {
+                $position++
+            }
+            if ($position - $runStart -eq $DelimiterLength -and -not (Test-IsEscapedMarkdownCharacter $currentLine $runStart)) {
+                return $true
+            }
+        }
+    }
+    return $false
+}
+
+# 从单行中剔除跨行 HTML 注释和已确认的 backtick 代码 span，防止隐藏示例充当导航入口。
+function Get-VisibleMarkdownLine {
+    param(
+        [Parameter(Mandatory = $true)][AllowEmptyString()][string]$Line,
+        [Parameter(Mandatory = $true)][AllowEmptyString()][string[]]$AllLines,
+        [Parameter(Mandatory = $true)][int]$LineIndex,
+        [Parameter(Mandatory = $true)][ref]$InsideHtmlComment,
+        [Parameter(Mandatory = $true)][ref]$ActiveCodeSpanLength
+    )
+
+    $result = New-Object System.Text.StringBuilder
+    $position = 0
+    while ($position -lt $Line.Length) {
+        if ($ActiveCodeSpanLength.Value -gt 0) {
+            if ([int][char]$Line[$position] -ne 96) {
+                $position++
+                continue
+            }
+            $runStart = $position
+            while ($position -lt $Line.Length -and [int][char]$Line[$position] -eq 96) {
+                $position++
+            }
+            if ($position - $runStart -eq $ActiveCodeSpanLength.Value -and -not (Test-IsEscapedMarkdownCharacter $Line $runStart)) {
+                $ActiveCodeSpanLength.Value = 0
+            }
+            continue
+        }
+
+        if ($InsideHtmlComment.Value) {
+            if ($position + 2 -lt $Line.Length -and $Line.Substring($position, 3) -eq '-->') {
+                $InsideHtmlComment.Value = $false
+                $position += 3
+            }
+            else {
+                $position++
+            }
+            continue
+        }
+
+        if ($position + 3 -lt $Line.Length -and $Line.Substring($position, 4) -eq '<!--') {
+            $InsideHtmlComment.Value = $true
+            $position += 4
+            continue
+        }
+        if ([int][char]$Line[$position] -eq 96) {
+            $runStart = $position
+            while ($position -lt $Line.Length -and [int][char]$Line[$position] -eq 96) {
+                $position++
+            }
+            $delimiterLength = $position - $runStart
+            if (-not (Test-IsEscapedMarkdownCharacter $Line $runStart) -and (Test-HasClosingCodeSpanDelimiter $AllLines $LineIndex $position $delimiterLength)) {
+                $ActiveCodeSpanLength.Value = $delimiterLength
+                continue
+            }
+            [void]$result.Append($Line.Substring($runStart, $delimiterLength))
+            continue
+        }
+
+        [void]$result.Append($Line[$position])
+        $position++
+    }
+    return $result.ToString()
+}
+
+# 当前文档总入口必须以完整、可见的 Markdown 链接公开平台功能清单；代码块和图片不构成导航入口。
+function Test-FeatureCatalogNavigationLink {
+    param([Parameter(Mandatory = $true)][AllowEmptyString()][string[]]$Lines)
+
+    $activeFenceCharacter = $null
+    $activeFenceLength = 0
+    $insideHtmlComment = $false
+    $activeCodeSpanLength = 0
+    $catalogLinkPattern = '(?<![!\\])(?:\\\\)*\[(?<label>[^\]\r\n]*\S[^\]\r\n]*)\]\(\s*(?<target><[^>\r\n]+>|[^\s\)]+)(?:\s+(?:"[^"]*"|''[^'']*''|\([^\)]*\)))?\s*\)'
+
+    for ($lineIndex = 0; $lineIndex -lt $Lines.Count; $lineIndex++) {
+        $sourceLine = $Lines[$lineIndex]
+        if ($null -ne $activeFenceCharacter) {
+            $closingFencePattern = '^(?: {0,3})' + [regex]::Escape($activeFenceCharacter) + '{' + $activeFenceLength + ',}[ \t]*$'
+            if ($sourceLine -match $closingFencePattern) {
+                $activeFenceCharacter = $null
+                $activeFenceLength = 0
+            }
+            continue
+        }
+
+        $openingFence = [regex]::Match($sourceLine, '^(?: {0,3})(?<marker>`{3,}|~{3,}).*$')
+        if ($openingFence.Success) {
+            $marker = $openingFence.Groups['marker'].Value
+            $activeFenceCharacter = $marker.Substring(0, 1)
+            $activeFenceLength = $marker.Length
+            continue
+        }
+        if ($sourceLine -match '^(?: {4}|\t| {1,3}\t)') {
+            continue
+        }
+
+        $visibleLine = Get-VisibleMarkdownLine $sourceLine $Lines $lineIndex ([ref]$insideHtmlComment) ([ref]$activeCodeSpanLength)
+        $links = [regex]::Matches($visibleLine, $catalogLinkPattern)
+        foreach ($link in $links) {
+            $target = $link.Groups['target'].Value.Trim('<', '>')
+            if ($target -eq 'product/features.md') {
+                return $true
+            }
+        }
+    }
+    return $false
+}
+
+$docsReadmePath = Join-Path $repositoryRoot 'docs/README.md'
+if (Test-Path -LiteralPath $docsReadmePath -PathType Leaf) {
+    $docsReadmeLines = [System.IO.File]::ReadAllLines($docsReadmePath, [System.Text.Encoding]::UTF8)
+    if (-not (Test-FeatureCatalogNavigationLink $docsReadmeLines)) {
+        $issues.Add('docs/README.md 缺少平台功能清单入口')
     }
 }
 

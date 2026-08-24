@@ -57,7 +57,7 @@ func TestMigrationAppliesIdentitySchemaAsVersionTwo(t *testing.T) {
 
 	var versions []SchemaMigration
 	require.NoError(t, db.Order("version ASC").Find(&versions).Error)
-	require.Len(t, versions, 7)
+	require.Len(t, versions, 9)
 	assert.Equal(t, int64(1), versions[0].Version)
 	assert.Equal(t, int64(2), versions[1].Version)
 	assert.Equal(t, int64(3), versions[2].Version)
@@ -65,9 +65,11 @@ func TestMigrationAppliesIdentitySchemaAsVersionTwo(t *testing.T) {
 	assert.Equal(t, int64(5), versions[4].Version)
 	assert.Equal(t, int64(6), versions[5].Version)
 	assert.Equal(t, int64(7), versions[6].Version)
+	assert.Equal(t, int64(8), versions[7].Version)
+	assert.Equal(t, int64(9), versions[8].Version)
 }
 
-func TestMigrationAppliesGovernanceAndPlatformTaskSchemaThroughVersionSeven(t *testing.T) {
+func TestMigrationAppliesGovernanceAndPlatformTaskSchemaThroughVersionNine(t *testing.T) {
 	db := openPostgresTestDB(t)
 	resetPostgresTestDB(t, db)
 
@@ -80,15 +82,18 @@ func TestMigrationAppliesGovernanceAndPlatformTaskSchemaThroughVersionSeven(t *t
 	assert.True(t, db.Migrator().HasTable("report_snapshots"))
 	assert.True(t, db.Migrator().HasTable("report_brand_settings"))
 	assertReportTrendIndexDefinitions(t, db)
+	assertPlatformTaskDashboardIndexDefinitions(t, db)
 
 	var versions []SchemaMigration
 	require.NoError(t, db.Order("version ASC").Find(&versions).Error)
-	require.Len(t, versions, 7)
+	require.Len(t, versions, 9)
 	assert.Equal(t, int64(3), versions[2].Version)
 	assert.Equal(t, int64(4), versions[3].Version)
 	assert.Equal(t, int64(5), versions[4].Version)
 	assert.Equal(t, int64(6), versions[5].Version)
 	assert.Equal(t, int64(7), versions[6].Version)
+	assert.Equal(t, int64(8), versions[7].Version)
+	assert.Equal(t, int64(9), versions[8].Version)
 }
 
 func TestMigrationUpgradesExistingVersionThreeWithoutRewritingIt(t *testing.T) {
@@ -109,8 +114,8 @@ func TestMigrationUpgradesExistingVersionThreeWithoutRewritingIt(t *testing.T) {
 	require.True(t, db.Migrator().HasTable("audit_completion_outbox"))
 	var versions []SchemaMigration
 	require.NoError(t, db.Order("version ASC").Find(&versions).Error)
-	require.Len(t, versions, 7)
-	assert.Equal(t, []int64{1, 2, 3, 4, 5, 6, 7}, []int64{versions[0].Version, versions[1].Version, versions[2].Version, versions[3].Version, versions[4].Version, versions[5].Version, versions[6].Version})
+	require.Len(t, versions, 9)
+	assert.Equal(t, []int64{1, 2, 3, 4, 5, 6, 7, 8, 9}, []int64{versions[0].Version, versions[1].Version, versions[2].Version, versions[3].Version, versions[4].Version, versions[5].Version, versions[6].Version, versions[7].Version, versions[8].Version})
 }
 
 func TestMigrationVersionFourRepairsDuplicateLegacyCompletionOutboxRows(t *testing.T) {
@@ -223,7 +228,7 @@ func TestMigrationIsIdempotentAndRecordsVersion(t *testing.T) {
 
 	var versions []SchemaMigration
 	require.NoError(t, db.Order("version ASC").Find(&versions).Error)
-	require.Len(t, versions, 7)
+	require.Len(t, versions, 9)
 	assert.Equal(t, int64(1), versions[0].Version)
 	assert.Equal(t, int64(2), versions[1].Version)
 	assert.Equal(t, int64(3), versions[2].Version)
@@ -231,6 +236,8 @@ func TestMigrationIsIdempotentAndRecordsVersion(t *testing.T) {
 	assert.Equal(t, int64(5), versions[4].Version)
 	assert.Equal(t, int64(6), versions[5].Version)
 	assert.Equal(t, int64(7), versions[6].Version)
+	assert.Equal(t, int64(8), versions[7].Version)
+	assert.Equal(t, int64(9), versions[8].Version)
 	assert.NotZero(t, versions[0].AppliedAt)
 	assert.NotZero(t, versions[1].AppliedAt)
 	assert.NotZero(t, versions[2].AppliedAt)
@@ -263,7 +270,7 @@ func TestMigrationSerializesConcurrentPostgresCalls(t *testing.T) {
 
 	var versions []SchemaMigration
 	require.NoError(t, first.Order("version ASC").Find(&versions).Error)
-	require.Len(t, versions, 7)
+	require.Len(t, versions, 9)
 	assert.Equal(t, int64(1), versions[0].Version)
 	assert.Equal(t, int64(2), versions[1].Version)
 	assert.Equal(t, int64(3), versions[2].Version)
@@ -271,6 +278,8 @@ func TestMigrationSerializesConcurrentPostgresCalls(t *testing.T) {
 	assert.Equal(t, int64(5), versions[4].Version)
 	assert.Equal(t, int64(6), versions[5].Version)
 	assert.Equal(t, int64(7), versions[6].Version)
+	assert.Equal(t, int64(8), versions[7].Version)
+	assert.Equal(t, int64(9), versions[8].Version)
 	assert.True(t, first.Migrator().HasTable(&User{}))
 	assert.True(t, first.Migrator().HasTable(&Session{}))
 	assert.True(t, first.Migrator().HasTable(&TaskMessage{}))
@@ -337,7 +346,7 @@ func TestMigrationUpgradesReleasedVersionFiveWithDispatchClaimColumn(t *testing.
 	require.NoError(t, Migrate(db))
 	require.NoError(t, Migrate(db), "v6 upgrade must remain idempotent")
 	assert.True(t, db.Migrator().HasColumn("platform_tasks", "dispatch_claim_token"))
-	assert.Equal(t, []int64{1, 2, 3, 4, 5, 6, 7}, migrationVersions(t, db))
+	assert.Equal(t, []int64{1, 2, 3, 4, 5, 6, 7, 8, 9}, migrationVersions(t, db))
 }
 
 func TestMigrationUpgradesReleasedVersionSixWithReportTables(t *testing.T) {
@@ -357,11 +366,87 @@ func TestMigrationUpgradesReleasedVersionSixWithReportTables(t *testing.T) {
 	assert.False(t, db.Migrator().HasTable("report_brand_settings"))
 
 	require.NoError(t, Migrate(db))
-	require.NoError(t, Migrate(db), "v7 upgrade must remain idempotent")
+	require.NoError(t, Migrate(db), "v7 through v9 upgrades must remain idempotent")
 	assert.True(t, db.Migrator().HasTable("report_snapshots"))
 	assert.True(t, db.Migrator().HasTable("report_brand_settings"))
 	assertReportTrendIndexDefinitions(t, db)
-	assert.Equal(t, []int64{1, 2, 3, 4, 5, 6, 7}, migrationVersions(t, db))
+	assertPlatformTaskDashboardIndexDefinitions(t, db)
+	assert.Equal(t, []int64{1, 2, 3, 4, 5, 6, 7, 8, 9}, migrationVersions(t, db))
+}
+
+func TestMigrationUpgradesReleasedVersionSevenWithDashboardTaskIndexes(t *testing.T) {
+	db := openPostgresTestDB(t)
+	resetPostgresTestDB(t, db)
+	require.NoError(t, db.AutoMigrate(&SchemaMigration{}))
+	for _, apply := range []func(*gorm.DB) error{
+		migrateInitialSchema,
+		migrateIdentitySchema,
+		migrateGovernanceSchema,
+		migrateAuditCompletionSchema,
+		migratePlatformTaskSchema,
+		migratePlatformTaskDispatchClaimSchema,
+		migrateReportSchema,
+	} {
+		require.NoError(t, apply(db))
+	}
+	for version := int64(1); version <= 7; version++ {
+		require.NoError(t, db.Create(&SchemaMigration{Version: version}).Error)
+	}
+	for _, index := range []string{"idx_platform_tasks_updated_at", "idx_platform_tasks_owner_updated_at"} {
+		assert.False(t, db.Migrator().HasIndex(&platformTaskMigration{}, index))
+	}
+
+	require.NoError(t, Migrate(db))
+	require.NoError(t, Migrate(db), "v8 and v9 upgrades must remain idempotent")
+	assertPlatformTaskDashboardIndexDefinitions(t, db)
+	assert.Equal(t, []int64{1, 2, 3, 4, 5, 6, 7, 8, 9}, migrationVersions(t, db))
+}
+
+func TestMigrationVersionNineBindsOnlyReadyAttachmentsReferencedByTasks(t *testing.T) {
+	db := openPostgresTestDB(t)
+	resetPostgresTestDB(t, db)
+	require.NoError(t, db.AutoMigrate(&SchemaMigration{}))
+	for _, apply := range []func(*gorm.DB) error{
+		migrateInitialSchema,
+		migrateIdentitySchema,
+		migrateGovernanceSchema,
+		migrateAuditCompletionSchema,
+		migratePlatformTaskSchema,
+		migratePlatformTaskDispatchClaimSchema,
+		migrateReportSchema,
+		migratePlatformTaskDashboardIndexes,
+	} {
+		require.NoError(t, apply(db))
+	}
+	for version := int64(1); version <= 8; version++ {
+		require.NoError(t, db.Create(&SchemaMigration{Version: version}).Error)
+	}
+	now := time.Date(2026, 8, 18, 0, 0, 0, 0, time.UTC)
+	for _, attachment := range []map[string]any{
+		{"id": "referenced-ready", "owner_user_id": "owner", "original_name": "bound.txt", "storage_name": "bound", "size": 4, "chunk_bytes": 4, "state": "ready", "created_at": now, "updated_at": now},
+		{"id": "unbound-ready", "owner_user_id": "owner", "original_name": "unbound.txt", "storage_name": "unbound", "size": 4, "chunk_bytes": 4, "state": "ready", "created_at": now, "updated_at": now},
+	} {
+		require.NoError(t, db.Table("platform_attachments").Create(attachment).Error)
+	}
+	require.NoError(t, db.Table("platform_tasks").Create(map[string]any{
+		"id": "task-with-attachment", "owner_user_id": "owner", "owner_username": "owner", "idempotency_key": "migration-v9",
+		"engine_session_id": "engine-v9", "task_type": "ai_infra_scan", "content": "scan", "params": json.RawMessage(`{}`),
+		"attachment_refs": json.RawMessage(`["referenced-ready"]`), "status": "pending", "dispatch_error": "", "dispatch_attempts": 0,
+		"dispatch_claim_token": "", "created_at": now, "updated_at": now,
+	}).Error)
+
+	require.NoError(t, Migrate(db))
+	require.NoError(t, migratePlatformAttachmentLifecycle(db), "回填本身也必须可安全重跑")
+	var states []struct {
+		ID    string
+		State string
+	}
+	require.NoError(t, db.Table("platform_attachments").Order("id ASC").Find(&states).Error)
+	require.Equal(t, []struct {
+		ID    string
+		State string
+	}{{ID: "referenced-ready", State: "attached"}, {ID: "unbound-ready", State: "ready"}}, states)
+	assert.Equal(t, []int64{1, 2, 3, 4, 5, 6, 7, 8, 9}, migrationVersions(t, db))
 }
 
 func assertReportTrendIndexDefinitions(t *testing.T, db *gorm.DB) {
@@ -378,6 +463,25 @@ func assertReportTrendIndexDefinitions(t *testing.T, db *gorm.DB) {
 SELECT indexdef
 FROM pg_catalog.pg_indexes
 WHERE schemaname = current_schema() AND tablename = 'report_snapshots' AND indexname = ?`, requirement.name).Scan(&definition).Error)
+			assert.Contains(t, definition, requirement.columns)
+		})
+	}
+}
+
+func assertPlatformTaskDashboardIndexDefinitions(t *testing.T, db *gorm.DB) {
+	t.Helper()
+	for _, requirement := range []struct {
+		name, columns string
+	}{
+		{name: "idx_platform_tasks_updated_at", columns: "(updated_at DESC, id DESC)"},
+		{name: "idx_platform_tasks_owner_updated_at", columns: "(owner_user_id, updated_at DESC, id DESC)"},
+	} {
+		t.Run(requirement.name, func(t *testing.T) {
+			var definition string
+			require.NoError(t, db.Raw(`
+SELECT indexdef
+FROM pg_catalog.pg_indexes
+WHERE schemaname = current_schema() AND tablename = 'platform_tasks' AND indexname = ?`, requirement.name).Scan(&definition).Error)
 			assert.Contains(t, definition, requirement.columns)
 		})
 	}

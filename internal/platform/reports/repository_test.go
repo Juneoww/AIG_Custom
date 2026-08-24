@@ -2,12 +2,15 @@ package reports
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"net/url"
 	"os"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -25,6 +28,28 @@ import (
 type queryCaptureLogger struct {
 	logger.Interface
 	statements []string
+}
+
+type dashboardBarrierLogger struct {
+	logger.Interface
+	firstAggregate chan struct{}
+	resume         chan struct{}
+	once           sync.Once
+}
+
+func (barrier *dashboardBarrierLogger) Trace(ctx context.Context, begin time.Time, fc func() (string, int64), err error) {
+	statement, rows := fc()
+	wait := false
+	if strings.Contains(strings.ToLower(statement), "as snapshot_count") {
+		barrier.once.Do(func() {
+			close(barrier.firstAggregate)
+			wait = true
+		})
+	}
+	if wait {
+		<-barrier.resume
+	}
+	barrier.Interface.Trace(ctx, begin, func() (string, int64) { return statement, rows }, err)
 }
 
 func (capture *queryCaptureLogger) Trace(ctx context.Context, begin time.Time, fc func() (string, int64), err error) {
@@ -127,6 +152,382 @@ func TestGormRepositoryListAndTrendProjectOnlySafeRequiredColumns(t *testing.T) 
 	assert.NotContains(t, trendSQL, "raw_result")
 	assert.NotContains(t, trendSQL, "render_data")
 	assert.NotContains(t, trendSQL, "brand_snapshot")
+}
+
+func TestGormDashboardProjectionFiltersOwnerUTCWindowSucceededStatusAndUsesSafeBoundedSQL(t *testing.T) {
+	db := openReportsTestDB(t)
+	require.NoError(t, database.Migrate(db))
+	repository := NewGormRepository(db)
+	lower := time.Date(2026, 7, 19, 0, 0, 0, 0, time.UTC)
+	upper := time.Date(2026, 8, 18, 0, 0, 0, 0, time.UTC)
+	fixtures := []struct {
+		id, owner, status, mapping string
+		completed                  time.Time
+		score, high, medium, low   int
+	}{
+		{id: "alice-lower", owner: "alice", status: "succeeded", mapping: "risk-v2", completed: lower, score: 80, high: 2, medium: 1},
+		{id: "alice-upper-minus", owner: "alice", status: "succeeded", mapping: "risk-v1", completed: upper.Add(-time.Nanosecond), score: 59, medium: 2, low: 3},
+		{id: "alice-before", owner: "alice", status: "succeeded", mapping: "risk-v2", completed: lower.Add(-time.Nanosecond), score: 0, high: 10},
+		{id: "alice-upper", owner: "alice", status: "succeeded", mapping: "risk-v2", completed: upper, score: 0, high: 10},
+		{id: "bob", owner: "bob", status: "succeeded", mapping: "risk-v3", completed: lower.Add(time.Hour), score: 100, high: 5},
+		{id: "failed", owner: "alice", status: "failed", mapping: "risk-v2", completed: lower.Add(2 * time.Hour), score: 0, high: 20},
+		{id: "cancelled", owner: "alice", status: "cancelled", mapping: "risk-v2", completed: lower.Add(3 * time.Hour), score: 0, high: 20},
+		{id: "running", owner: "alice", status: "running", mapping: "risk-v2", completed: lower.Add(4 * time.Hour), score: 0, high: 20},
+		{id: "unknown", owner: "alice", status: "dispatch_unknown", mapping: "risk-v2", completed: lower.Add(5 * time.Hour), score: 0, high: 20},
+		{id: "invalid-risk", owner: "alice", status: "succeeded", mapping: "", completed: lower.Add(6 * time.Hour), score: 101, high: 20},
+	}
+	for _, fixture := range fixtures {
+		seedDashboardTask(t, db, "task-"+fixture.id, fixture.owner, fixture.status, fixture.completed)
+		snapshot := reportSnapshotFixture("report-"+fixture.id, "task-"+fixture.id)
+		snapshot.OwnerUserID = fixture.owner
+		snapshot.CompletedAt = fixture.completed
+		snapshot.CreatedAt = fixture.completed
+		snapshot.Risk = RiskSummary{MappingVersion: fixture.mapping, Score: fixture.score, High: fixture.high, Medium: fixture.medium, Low: fixture.low}
+		snapshot.RawResult = json.RawMessage(`{"raw_result":"raw-secret"}`)
+		snapshot.RenderData = json.RawMessage(`{"render_data":"render-secret"}`)
+		snapshot.Brand = brand.Config{ProductName: "AIG", Logo: []byte("logo-secret")}
+		require.NoError(t, repository.Create(context.Background(), snapshot))
+	}
+
+	capture := &queryCaptureLogger{Interface: logger.Default.LogMode(logger.Silent)}
+	db.Config.Logger = capture
+	projection, err := repository.Dashboard(context.Background(), DashboardQuery{OwnerUserID: "alice", From: lower, To: upper, AttentionLimit: 5})
+	require.NoError(t, err)
+	assert.Equal(t, 2, projection.SnapshotCount)
+	assert.Equal(t, 139, projection.ScoreSum)
+	assert.Equal(t, RiskSummary{High: 2, Medium: 3, Low: 3}, projection.Risk)
+	assert.Equal(t, []string{"risk-v1", "risk-v2"}, projection.MappingVersions)
+	require.Len(t, projection.Trend, 2)
+	assert.Equal(t, 80, projection.Trend[0].ScoreSum)
+	assert.Equal(t, 59, projection.Trend[1].ScoreSum)
+	require.Len(t, projection.Attention, 2)
+	assert.Equal(t, "report-alice-lower", projection.Attention[0].ReportID)
+	assert.Equal(t, "report-alice-upper-minus", projection.Attention[1].ReportID)
+
+	require.GreaterOrEqual(t, len(capture.statements), 3)
+	for _, statement := range capture.statements {
+		assert.Contains(t, statement, "owner_user_id = 'alice'")
+		assert.Contains(t, statement, "completed_at >= '2026-07-19 00:00:00'")
+		assert.Contains(t, statement, "completed_at < '2026-08-18 00:00:00'")
+		assert.Contains(t, statement, "status = 'succeeded'")
+		assert.NotContains(t, statement, "raw_result")
+		assert.NotContains(t, statement, "render_data")
+		assert.NotContains(t, statement, "logo")
+		assert.NotContains(t, statement, "brand_snapshot")
+	}
+	attentionSQL := capture.statements[len(capture.statements)-1]
+	assert.Contains(t, attentionSQL, "order by")
+	assert.Contains(t, attentionSQL, "high desc")
+	assert.Contains(t, attentionSQL, "score asc")
+	assert.Contains(t, attentionSQL, "completed_at desc")
+	assert.Contains(t, attentionSQL, "report_id desc")
+	assert.Contains(t, attentionSQL, "limit 5")
+
+	global, err := repository.Dashboard(context.Background(), DashboardQuery{From: lower, To: upper, AttentionLimit: 5})
+	require.NoError(t, err)
+	assert.Equal(t, 3, global.SnapshotCount)
+}
+
+func TestGormDashboardUsesOneReadOnlyRepeatableReadSnapshot(t *testing.T) {
+	db := openReportsTestDB(t)
+	require.NoError(t, database.Migrate(db))
+	lower := time.Date(2026, 8, 1, 0, 0, 0, 0, time.UTC)
+	upper := lower.AddDate(0, 0, 1)
+	query := DashboardQuery{OwnerUserID: "alice", From: lower, To: upper, AttentionLimit: 5}
+
+	seedDashboardTask(t, db, "task-existing", "alice", "succeeded", lower.Add(time.Hour))
+	existing := reportSnapshotFixture("report-existing", "task-existing")
+	existing.CompletedAt = lower.Add(time.Hour)
+	existing.CreatedAt = existing.CompletedAt
+	existing.Risk = RiskSummary{MappingVersion: "risk-v2", Score: 80, High: 1}
+	require.NoError(t, NewGormRepository(db).Create(context.Background(), existing))
+
+	barrier := &dashboardBarrierLogger{
+		Interface: logger.Default.LogMode(logger.Silent), firstAggregate: make(chan struct{}), resume: make(chan struct{}),
+	}
+	defer func() {
+		select {
+		case <-barrier.resume:
+		default:
+			close(barrier.resume)
+		}
+	}()
+	readDB := db.Session(&gorm.Session{Logger: barrier})
+	var settings struct {
+		isolation string
+		readOnly  string
+		err       error
+	}
+	var settingsOnce sync.Once
+	captureSettings := func(queryDB *gorm.DB) {
+		settingsOnce.Do(func() {
+			settings.err = queryDB.Statement.ConnPool.QueryRowContext(queryDB.Statement.Context, "SHOW transaction_isolation").Scan(&settings.isolation)
+			if settings.err == nil {
+				settings.err = queryDB.Statement.ConnPool.QueryRowContext(queryDB.Statement.Context, "SHOW transaction_read_only").Scan(&settings.readOnly)
+			}
+		})
+	}
+	require.NoError(t, readDB.Callback().Query().Before("gorm:query").Register("test:dashboard_transaction_settings", captureSettings))
+	require.NoError(t, readDB.Callback().Row().Before("gorm:row").Register("test:dashboard_transaction_settings", captureSettings))
+
+	type dashboardResult struct {
+		projection DashboardProjection
+		err        error
+	}
+	result := make(chan dashboardResult, 1)
+	go func() {
+		projection, err := NewGormRepository(readDB).Dashboard(context.Background(), query)
+		result <- dashboardResult{projection: projection, err: err}
+	}()
+	select {
+	case <-barrier.firstAggregate:
+	case completed := <-result:
+		require.NoError(t, completed.err)
+		t.Fatal("dashboard completed before aggregate barrier")
+	}
+
+	writerDB := db.Session(&gorm.Session{Logger: logger.Default.LogMode(logger.Silent)})
+	seedDashboardTask(t, writerDB, "task-concurrent", "alice", "succeeded", lower.Add(2*time.Hour))
+	concurrent := reportSnapshotFixture("report-concurrent", "task-concurrent")
+	concurrent.CompletedAt = lower.Add(2 * time.Hour)
+	concurrent.CreatedAt = concurrent.CompletedAt
+	concurrent.Risk = RiskSummary{MappingVersion: "risk-v2", Score: 40, High: 5}
+	require.NoError(t, NewGormRepository(writerDB).Create(context.Background(), concurrent))
+	close(barrier.resume)
+
+	completed := <-result
+	require.NoError(t, completed.err)
+	require.NoError(t, settings.err)
+	assert.Equal(t, "repeatable read", settings.isolation)
+	assert.Equal(t, "on", settings.readOnly)
+	assert.Equal(t, 1, completed.projection.SnapshotCount)
+	assert.Equal(t, 80, completed.projection.ScoreSum)
+	require.Len(t, completed.projection.Trend, 1)
+	assert.Equal(t, 1, completed.projection.Trend[0].Completed)
+	require.Len(t, completed.projection.Attention, 1)
+	assert.Equal(t, "report-existing", completed.projection.Attention[0].ReportID)
+
+	next, err := NewGormRepository(writerDB).Dashboard(context.Background(), query)
+	require.NoError(t, err)
+	assert.Equal(t, 2, next.SnapshotCount)
+	assert.Equal(t, 120, next.ScoreSum)
+	require.Len(t, next.Trend, 1)
+	assert.Equal(t, 2, next.Trend[0].Completed)
+	require.Len(t, next.Attention, 2)
+}
+
+func TestGormDashboardReusesContextTransactionWithoutNesting(t *testing.T) {
+	db := openReportsTestDB(t)
+	require.NoError(t, database.Migrate(db))
+	lower := time.Date(2026, 8, 1, 0, 0, 0, 0, time.UTC)
+	seedDashboardTask(t, db, "task-existing-tx", "alice", "succeeded", lower.Add(time.Hour))
+	snapshot := reportSnapshotFixture("report-existing-tx", "task-existing-tx")
+	snapshot.CompletedAt = lower.Add(time.Hour)
+	snapshot.CreatedAt = snapshot.CompletedAt
+	require.NoError(t, NewGormRepository(db).Create(context.Background(), snapshot))
+
+	capture := &queryCaptureLogger{Interface: logger.Default.LogMode(logger.Silent)}
+	transactionDB := db.Session(&gorm.Session{Logger: capture})
+	require.NoError(t, transactionDB.Transaction(func(tx *gorm.DB) error {
+		ctx := txcontext.WithGorm(context.Background(), tx)
+		projection, err := NewGormRepository(transactionDB).Dashboard(ctx, DashboardQuery{
+			OwnerUserID: "alice", From: lower, To: lower.AddDate(0, 0, 1), AttentionLimit: 5,
+		})
+		require.NoError(t, err)
+		assert.Equal(t, 1, projection.SnapshotCount)
+		return nil
+	}, &sql.TxOptions{Isolation: sql.LevelSerializable}))
+	for _, statement := range capture.statements {
+		assert.NotContains(t, statement, "savepoint", "dashboard must reuse the caller's unit of work")
+	}
+}
+
+func TestDashboardRiskValidationMatchesMemoryAndPostgres(t *testing.T) {
+	type riskCase struct {
+		name, mapping     string
+		high, medium, low int
+		valid             bool
+		expectedMapping   string
+	}
+	cases := []riskCase{
+		{name: "space mapping", mapping: " ", valid: false},
+		{name: "tab mapping", mapping: "\t", valid: false},
+		{name: "newline mapping", mapping: "\n", valid: false},
+		{name: "carriage return mapping", mapping: "\r", valid: false},
+		{name: "vertical tab mapping", mapping: "\v", valid: false},
+		{name: "form feed mapping", mapping: "\f", valid: false},
+		{name: "high overflow", mapping: "risk-v2", high: int(math.MaxInt32) + 1, valid: false},
+		{name: "medium overflow", mapping: "risk-v2", medium: int(math.MaxInt32) + 1, valid: false},
+		{name: "low overflow", mapping: "risk-v2", low: int(math.MaxInt32) + 1, valid: false},
+		{name: "max int32 and normalized mapping", mapping: " \trisk-v2\n", high: int(math.MaxInt32), valid: true, expectedMapping: "risk-v2"},
+	}
+	lower := time.Date(2026, 8, 1, 0, 0, 0, 0, time.UTC)
+	upper := lower.AddDate(0, 0, 1)
+	assertProjection := func(t *testing.T, fixture riskCase, projection DashboardProjection) {
+		t.Helper()
+		if !fixture.valid {
+			assert.Zero(t, projection.SnapshotCount)
+			assert.Empty(t, projection.MappingVersions)
+			assert.Empty(t, projection.Attention)
+			return
+		}
+		assert.Equal(t, 1, projection.SnapshotCount)
+		assert.Equal(t, []string{fixture.expectedMapping}, projection.MappingVersions)
+		require.Len(t, projection.Attention, 1)
+		assert.Equal(t, fixture.high, projection.Attention[0].High)
+	}
+
+	t.Run("memory", func(t *testing.T) {
+		repository := NewMemoryRepository()
+		repository.SetDashboardTaskVerifier(func(context.Context, string, string) (bool, error) { return true, nil })
+		for index, fixture := range cases {
+			t.Run(fixture.name, func(t *testing.T) {
+				id := fmt.Sprintf("memory-boundary-%d", index)
+				snapshot := reportSnapshotFixture("report-"+id, "task-"+id)
+				snapshot.OwnerUserID = id
+				snapshot.CompletedAt = lower.Add(time.Hour)
+				snapshot.CreatedAt = snapshot.CompletedAt
+				snapshot.Risk = RiskSummary{MappingVersion: fixture.mapping, Score: 50, High: fixture.high, Medium: fixture.medium, Low: fixture.low}
+				require.NoError(t, repository.Create(context.Background(), snapshot))
+				projection, err := repository.Dashboard(context.Background(), DashboardQuery{OwnerUserID: id, From: lower, To: upper, AttentionLimit: 5})
+				require.NoError(t, err)
+				assertProjection(t, fixture, projection)
+			})
+		}
+	})
+
+	t.Run("postgres", func(t *testing.T) {
+		db := openReportsTestDB(t)
+		require.NoError(t, database.Migrate(db))
+		repository := NewGormRepository(db)
+		for index, fixture := range cases {
+			t.Run(fixture.name, func(t *testing.T) {
+				id := fmt.Sprintf("postgres-boundary-%d", index)
+				seedDashboardTask(t, db, "task-"+id, id, "succeeded", lower.Add(time.Hour))
+				snapshot := reportSnapshotFixture("report-"+id, "task-"+id)
+				snapshot.OwnerUserID = id
+				snapshot.CompletedAt = lower.Add(time.Hour)
+				snapshot.CreatedAt = snapshot.CompletedAt
+				snapshot.Risk = RiskSummary{MappingVersion: fixture.mapping, Score: 50, High: fixture.high, Medium: fixture.medium, Low: fixture.low}
+				require.NoError(t, repository.Create(context.Background(), snapshot))
+				projection, err := repository.Dashboard(context.Background(), DashboardQuery{OwnerUserID: id, From: lower, To: upper, AttentionLimit: 5})
+				require.NoError(t, err)
+				assertProjection(t, fixture, projection)
+			})
+		}
+	})
+}
+
+func TestDashboardAggregatesCountsAboveInt32InMemoryAndPostgres(t *testing.T) {
+	lower := time.Date(2026, 8, 1, 0, 0, 0, 0, time.UTC)
+	upper := lower.AddDate(0, 0, 1)
+	query := DashboardQuery{OwnerUserID: "owner-large", From: lower, To: upper, AttentionLimit: 5}
+	want := 3 * int(math.MaxInt32)
+	assertProjection := func(t *testing.T, projection DashboardProjection) {
+		t.Helper()
+		assert.Equal(t, 3, projection.SnapshotCount)
+		assert.Equal(t, 150, projection.ScoreSum)
+		assert.Equal(t, RiskSummary{High: want, Medium: want, Low: want}, projection.Risk)
+		require.Len(t, projection.Trend, 1)
+		assert.Equal(t, want, projection.Trend[0].High)
+		assert.Equal(t, want, projection.Trend[0].Medium)
+		assert.Equal(t, want, projection.Trend[0].Low)
+		require.Len(t, projection.Attention, 3)
+	}
+
+	t.Run("memory", func(t *testing.T) {
+		repository := NewMemoryRepository()
+		repository.SetDashboardTaskVerifier(func(context.Context, string, string) (bool, error) { return true, nil })
+		for index := range 3 {
+			id := fmt.Sprintf("memory-large-%d", index)
+			snapshot := reportSnapshotFixture("report-"+id, "task-"+id)
+			snapshot.OwnerUserID = query.OwnerUserID
+			snapshot.CompletedAt = lower.Add(time.Hour)
+			snapshot.CreatedAt = snapshot.CompletedAt
+			snapshot.Risk = RiskSummary{MappingVersion: "risk-v2", Score: 50, High: math.MaxInt32, Medium: math.MaxInt32, Low: math.MaxInt32}
+			require.NoError(t, repository.Create(context.Background(), snapshot))
+		}
+		projection, err := repository.Dashboard(context.Background(), query)
+		require.NoError(t, err)
+		assertProjection(t, projection)
+	})
+
+	t.Run("postgres", func(t *testing.T) {
+		db := openReportsTestDB(t)
+		require.NoError(t, database.Migrate(db))
+		repository := NewGormRepository(db)
+		for index := range 3 {
+			id := fmt.Sprintf("postgres-large-%d", index)
+			seedDashboardTask(t, db, "task-"+id, query.OwnerUserID, "succeeded", lower.Add(time.Hour))
+			snapshot := reportSnapshotFixture("report-"+id, "task-"+id)
+			snapshot.OwnerUserID = query.OwnerUserID
+			snapshot.CompletedAt = lower.Add(time.Hour)
+			snapshot.CreatedAt = snapshot.CompletedAt
+			snapshot.Risk = RiskSummary{MappingVersion: "risk-v2", Score: 50, High: math.MaxInt32, Medium: math.MaxInt32, Low: math.MaxInt32}
+			require.NoError(t, repository.Create(context.Background(), snapshot))
+		}
+		projection, err := repository.Dashboard(context.Background(), query)
+		require.NoError(t, err)
+		assertProjection(t, projection)
+	})
+}
+
+func TestDashboardCheckedAddRejectsInt64Overflow(t *testing.T) {
+	value, ok := dashboardCheckedAdd(math.MaxInt64-1, 1)
+	assert.True(t, ok)
+	assert.Equal(t, int64(math.MaxInt64), value)
+
+	_, ok = dashboardCheckedAdd(math.MaxInt64, 1)
+	assert.False(t, ok)
+}
+
+func seedDashboardTask(t *testing.T, db *gorm.DB, id, owner, status string, timestamp time.Time) {
+	t.Helper()
+	require.NoError(t, db.Exec(`INSERT INTO platform_tasks
+		(id, owner_user_id, owner_username, idempotency_key, engine_session_id, task_type, content, params, attachment_refs,
+		 country_iso_code, status, dispatch_error, dispatch_attempts, dispatch_claim_token, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, 'mcp_scan', '', '{}'::jsonb, '[]'::jsonb, '', ?, '', 0, '', ?, ?)`,
+		id, owner, owner, "key-"+id, "engine-"+id, status, timestamp, timestamp).Error)
+}
+
+func TestGormReportPaginationUsesOwnerCountStableOrderAndSafeProjection(t *testing.T) {
+	db := openReportsTestDB(t)
+	require.NoError(t, database.Migrate(db))
+	repository := NewGormRepository(db)
+	for _, fixture := range []struct{ id, owner string }{
+		{id: "report-a", owner: "alice"}, {id: "report-b", owner: "alice"},
+		{id: "report-c", owner: "alice"}, {id: "report-z", owner: "bob"},
+	} {
+		snapshot := reportSnapshotFixture(fixture.id, "task-"+fixture.id)
+		snapshot.OwnerUserID = fixture.owner
+		snapshot.RawResult = json.RawMessage(`{"raw_result":"raw-sentinel"}`)
+		snapshot.RenderData = json.RawMessage(`{"content":"render-sentinel"}`)
+		snapshot.Brand.Logo = []byte("logo-sentinel")
+		require.NoError(t, repository.Create(context.Background(), snapshot))
+	}
+
+	capture := &queryCaptureLogger{Interface: logger.Default.LogMode(logger.Silent)}
+	db.Config.Logger = capture
+	items, total, err := repository.ListPage(context.Background(), ListQuery{OwnerUserID: "alice", Limit: 1, Offset: 1})
+	require.NoError(t, err)
+	assert.Equal(t, int64(3), total)
+	require.Len(t, items, 1)
+	assert.Equal(t, "report-b", items[0].ID)
+	assert.Empty(t, items[0].RawResult)
+	assert.Empty(t, items[0].RenderData)
+	assert.Empty(t, items[0].Brand.Logo)
+
+	require.GreaterOrEqual(t, len(capture.statements), 2)
+	countSQL := capture.statements[len(capture.statements)-2]
+	listSQL := capture.statements[len(capture.statements)-1]
+	assert.Contains(t, countSQL, "owner_user_id = 'alice'")
+	assert.Contains(t, listSQL, "owner_user_id = 'alice'")
+	assert.Contains(t, listSQL, "order by created_at desc, id desc")
+	assert.Contains(t, listSQL, "limit 1")
+	assert.Contains(t, listSQL, "offset 1")
+	assert.NotContains(t, listSQL, "raw_result")
+	assert.NotContains(t, listSQL, "render_data")
+	assert.NotContains(t, listSQL, "logo")
 }
 
 func reportSnapshotFixture(id, taskID string) *Snapshot {

@@ -4,7 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"testing"
+	"time"
 
 	"github.com/Juneoww/AIG_Custom/internal/platform/identity"
 	"github.com/stretchr/testify/assert"
@@ -154,6 +156,118 @@ func TestAuditQueryIsReadOnlyForAdminAndAuditor(t *testing.T) {
 	require.NoError(t, err)
 	_, err = service.Query(ctx, user, Filter{})
 	assert.ErrorIs(t, err, ErrForbidden)
+}
+
+func TestAuditPaginationUsesFilteredCountAndSanitizesStoredMetadata(t *testing.T) {
+	repository := NewMemoryRepository()
+	base := time.Date(2026, 8, 17, 8, 0, 0, 0, time.UTC)
+	for index := 0; index < 13; index++ {
+		action := ActionModelUpdated
+		if index%2 != 0 {
+			action = ActionTaskChanged
+		}
+		require.NoError(t, repository.Append(context.Background(), &Event{
+			ID: fmt.Sprintf("event-%02d", index), OccurredAt: base.Add(time.Duration(index) * time.Second),
+			Action: action, Outcome: OutcomeSuccess,
+			Metadata: json.RawMessage(`{"internal_error":"database-sentinel","token":"token-sentinel","safe":"kept"}`),
+		}))
+	}
+
+	events, total, err := NewService(repository).QueryPage(
+		context.Background(), identity.Subject{Role: identity.RoleAuditor}, Filter{Action: ActionModelUpdated}, 2, 3,
+	)
+	require.NoError(t, err)
+	assert.Equal(t, int64(7), total)
+	require.Len(t, events, 3)
+	encoded, err := json.Marshal(events)
+	require.NoError(t, err)
+	assert.NotContains(t, string(encoded), "database-sentinel")
+	assert.NotContains(t, string(encoded), "token-sentinel")
+	assert.Contains(t, string(encoded), RedactedValue)
+	assert.Contains(t, string(encoded), "kept")
+}
+
+func TestAuditPaginationSanitizesBrowserMetadataAtArbitraryArrayDepth(t *testing.T) {
+	repository := NewMemoryRepository()
+	metadata := map[string]any{
+		"safe":               "kept",
+		"withdrawal_count":   "withdrawal-kept",
+		"draw_calls":         "draw-kept",
+		"error_count":        "error-count-kept",
+		"contention_count":   "contention-kept",
+		"dispatch_error":     "dispatch-error-sentinel",
+		"raw_output":         "raw-output-sentinel",
+		"artifact_path":      "artifact-path-sentinel",
+		"request_headers":    "request-headers-sentinel",
+		"dispatchError":      "camel-error-sentinel",
+		"rawOutput":          "camel-raw-sentinel",
+		"artifactPath":       "camel-path-sentinel",
+		"requestHeaders":     "camel-headers-sentinel",
+		"api_key":            "api-key-sentinel",
+		"private-key":        "private-key-sentinel",
+		"prefix_error_count": "disguised-error-count-sentinel",
+		"nested": []any{[]any{map[string]any{
+			"raw_result":  "raw-sentinel",
+			"config_path": "path-sentinel",
+			"safe_nested": []any{true, float64(42), nil, map[string]any{
+				"error":      "error-sentinel",
+				"token":      "token-sentinel",
+				"password":   "password-sentinel",
+				"credential": "credential-sentinel",
+				"header":     "header-sentinel",
+				"content":    "content-sentinel",
+				"label":      "deep-kept",
+			}},
+		}}},
+	}
+	encodedMetadata, err := json.Marshal(metadata)
+	require.NoError(t, err)
+	require.NoError(t, repository.Append(context.Background(), &Event{
+		ID: "nested-browser-metadata", OccurredAt: time.Now().UTC(), Action: ActionModelUpdated,
+		Outcome: OutcomeSuccess, Metadata: encodedMetadata,
+	}))
+
+	events, _, err := NewService(repository).QueryPage(
+		context.Background(), identity.Subject{Role: identity.RoleAuditor}, Filter{}, 1, 20,
+	)
+	require.NoError(t, err)
+	require.Len(t, events, 1)
+	wire, err := json.Marshal(events)
+	require.NoError(t, err)
+	for _, sentinel := range []string{
+		"raw-sentinel", "path-sentinel", "error-sentinel", "token-sentinel", "password-sentinel",
+		"credential-sentinel", "header-sentinel", "content-sentinel",
+		"dispatch-error-sentinel", "raw-output-sentinel", "artifact-path-sentinel", "request-headers-sentinel",
+		"camel-error-sentinel", "camel-raw-sentinel", "camel-path-sentinel", "camel-headers-sentinel",
+		"api-key-sentinel", "private-key-sentinel", "disguised-error-count-sentinel",
+	} {
+		assert.NotContains(t, string(wire), sentinel)
+	}
+	assert.Contains(t, string(wire), "kept")
+	assert.Contains(t, string(wire), "deep-kept")
+	for _, safeValue := range []string{"withdrawal-kept", "draw-kept", "error-count-kept", "contention-kept"} {
+		assert.Contains(t, string(wire), safeValue)
+	}
+}
+
+func TestAuditBrowserSensitiveKeyTokensCoverPluralAndCompactForms(t *testing.T) {
+	for _, key := range []string{
+		"private_keys", "privateKeys", "PRIVATE_KEYS", "privatekeys",
+		"api_keys", "apiKeys", "API_KEYS", "apikeys",
+		"cookies", "tokens", "secrets", "passwords", "credentials", "headers", "paths", "errors", "contents",
+		"request_header", "request_headers", "requestHeader", "requestHeaders", "requestheader", "requestheaders",
+		"authorization_header", "authorization_headers", "authorizationHeader", "authorizationHeaders",
+		"authorizationheader", "authorizationheaders",
+	} {
+		t.Run(key, func(t *testing.T) {
+			assert.True(t, sensitiveBrowserKey(key))
+		})
+	}
+	for _, key := range []string{"withdrawal_count", "draw_calls", "error_count", "contention_count"} {
+		t.Run("safe_"+key, func(t *testing.T) {
+			assert.False(t, sensitiveBrowserKey(key))
+		})
+	}
 }
 
 func TestAuthenticationAttemptsHaveStableAuditBoundary(t *testing.T) {

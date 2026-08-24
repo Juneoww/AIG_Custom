@@ -45,6 +45,8 @@ var migrations = []migration{
 	{version: 5, apply: migratePlatformTaskSchema},
 	{version: 6, apply: migratePlatformTaskDispatchClaimSchema},
 	{version: 7, apply: migrateReportSchema},
+	{version: 8, apply: migratePlatformTaskDashboardIndexes},
+	{version: 9, apply: migratePlatformAttachmentLifecycle},
 }
 
 const migrationAdvisoryLockKey int64 = 301237729
@@ -359,4 +361,34 @@ func migrateReportSchema(db *gorm.DB) error {
 		}
 	}
 	return nil
+}
+
+func migratePlatformTaskDashboardIndexes(db *gorm.DB) error {
+	for _, statement := range []string{
+		`CREATE INDEX idx_platform_tasks_updated_at ON platform_tasks(updated_at DESC, id DESC)`,
+		`CREATE INDEX idx_platform_tasks_owner_updated_at ON platform_tasks(owner_user_id, updated_at DESC, id DESC)`,
+	} {
+		if err := db.Exec(statement).Error; err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func migratePlatformAttachmentLifecycle(db *gorm.DB) error {
+	return db.Exec(`
+UPDATE platform_attachments AS attachment
+SET state = 'attached'
+WHERE attachment.state = 'ready'
+  AND EXISTS (
+    SELECT 1
+    FROM platform_tasks AS task
+    CROSS JOIN LATERAL jsonb_array_elements_text(
+      CASE
+        WHEN jsonb_typeof(task.attachment_refs) = 'array' THEN task.attachment_refs
+        ELSE '[]'::jsonb
+      END
+    ) AS reference(value)
+    WHERE reference.value = attachment.id
+  )`).Error
 }

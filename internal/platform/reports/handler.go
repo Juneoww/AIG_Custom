@@ -42,7 +42,7 @@ func (handler *Handler) list(c *gin.Context) {
 		respondError(c, ErrInvalidSnapshot)
 		return
 	}
-	snapshots, err := handler.service.List(c.Request.Context(), subject, page, pageSize)
+	snapshots, total, err := handler.service.ListPage(c.Request.Context(), subject, page, pageSize)
 	if err != nil {
 		respondError(c, err)
 		return
@@ -51,7 +51,7 @@ func (handler *Handler) list(c *gin.Context) {
 	for _, snapshot := range snapshots {
 		responses = append(responses, summaryOf(&snapshot))
 	}
-	c.JSON(http.StatusOK, responses)
+	c.JSON(http.StatusOK, ReportListResponse{Items: responses, Total: total, Page: page, PageSize: pageSize})
 }
 
 func (handler *Handler) trend(c *gin.Context) {

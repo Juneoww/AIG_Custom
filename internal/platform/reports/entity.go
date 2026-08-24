@@ -32,6 +32,13 @@ type ReportSummary struct {
 	BrandProductName string      `json:"brand_product_name"`
 }
 
+type ReportListResponse struct {
+	Items    []ReportSummary `json:"items"`
+	Total    int64           `json:"total"`
+	Page     int             `json:"page"`
+	PageSize int             `json:"page_size"`
+}
+
 // ReportDetail is the online immutable presentation contract. Raw engine
 // results, stored render JSON and private brand fields are never wire values.
 type ReportDetail struct {

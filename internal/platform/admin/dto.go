@@ -36,6 +36,20 @@ type UserResponse struct {
 	UpdatedAt          time.Time     `json:"updated_at"`
 }
 
+type UserListResponse struct {
+	Items    []UserResponse `json:"items"`
+	Total    int64          `json:"total"`
+	Page     int            `json:"page"`
+	PageSize int            `json:"page_size"`
+}
+
+type AuditListResponse struct {
+	Items    []audit.Event `json:"items"`
+	Total    int64         `json:"total"`
+	Page     int           `json:"page"`
+	PageSize int           `json:"page_size"`
+}
+
 func userResponse(user *identity.User) UserResponse {
 	return UserResponse{
 		ID:                 user.ID,

@@ -23,6 +23,22 @@ func TestTaskManagerImplementsNarrowPlatformEngineAdapter(t *testing.T) {
 	var _ platformtasks.EngineAdapter = (*TaskManager)(nil)
 }
 
+func TestPlatformTaskTypesMapToExactLegacyEngineAliases(t *testing.T) {
+	expected := map[string]string{
+		"mcp_scan":             "Mcp-Scan",
+		"ai_infra_scan":        "AI-Infra-Scan",
+		"model_redteam_report": "Model-Redteam-Report",
+		"agent_scan":           "Agent-Scan",
+	}
+	for canonical, alias := range expected {
+		actual, ok := platformEngineTaskType(canonical)
+		require.True(t, ok, canonical)
+		assert.Equal(t, alias, actual)
+	}
+	_, ok := platformEngineTaskType("future_task")
+	assert.False(t, ok)
+}
+
 func TestTaskManagerPlatformSubmitPreservesLegacyEnginePayloadAndPrivateSession(t *testing.T) {
 	taskManager, cleanup := newTestTaskManager(t)
 	defer cleanup()
@@ -50,7 +66,7 @@ func TestTaskManagerPlatformSubmitPreservesLegacyEnginePayloadAndPrivateSession(
 	var content TaskContent
 	require.NoError(t, json.Unmarshal(payload, &content))
 	assert.Equal(t, request.PlatformTaskID, content.SessionID)
-	assert.Equal(t, request.TaskType, content.TaskType)
+	assert.Equal(t, "Mcp-Scan", content.TaskType)
 	assert.Equal(t, request.Content, content.Content)
 	assert.Equal(t, request.Attachments, content.Attachments)
 	assert.Equal(t, float64(4), content.Params["thread"])
@@ -59,6 +75,7 @@ func TestTaskManagerPlatformSubmitPreservesLegacyEnginePayloadAndPrivateSession(
 	session, err := taskManager.taskStore.GetSession(request.PlatformTaskID)
 	require.NoError(t, err)
 	assert.Equal(t, "alice", session.Username)
+	assert.Equal(t, "Mcp-Scan", session.TaskType)
 	assert.False(t, session.Share)
 }
 

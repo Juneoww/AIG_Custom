@@ -52,11 +52,29 @@ const (
 
 // VersionCheckResponse is the JSON payload returned by the version-check endpoint.
 type VersionCheckResponse struct {
-	CurrentVersion string `json:"current_version" example:"v4.1.10"` // Currently running version
-	LatestVersion  string `json:"latest_version" example:"v4.1.11"`  // Latest version from GitHub
-	UpdateRequired bool   `json:"update_required"`                   // True if latest > current
+	CurrentVersion string `json:"current_version" example:"v4.1.10"`            // Currently running version
+	LatestVersion  string `json:"latest_version" example:"v4.1.11"`             // Latest version from GitHub
+	UpdateRequired bool   `json:"update_required"`                              // True if latest > current
 	Message        string `json:"message" example:"A new version is available"` // Human-readable message
 }
+
+// SafeVersionResponse contains build metadata that is safe before login.
+type SafeVersionResponse struct {
+	Version   string `json:"version"`
+	Commit    string `json:"commit"`
+	BuildTime string `json:"build_time"`
+}
+
+type buildInfo struct {
+	Commit    string
+	BuildTime string
+}
+
+// BuildCommit and BuildTime are optionally populated by build-time ldflags.
+var (
+	BuildCommit string
+	BuildTime   string
+)
 
 // versionCache stores the last fetched latest version to avoid hammering GitHub.
 type versionCache struct {
@@ -67,9 +85,42 @@ type versionCache struct {
 
 var latestVersionCache = &versionCache{}
 
+var defaultSafeVersionHandler = newSafeVersionHandler(linkerBuildInfo())
+
 // ---------------------------------------------------------------------------
 // Handler
 // ---------------------------------------------------------------------------
+
+func HandleSafeVersion(c *gin.Context) {
+	defaultSafeVersionHandler(c)
+}
+
+func newSafeVersionHandler(info buildInfo) gin.HandlerFunc {
+	response := safeVersionResponse(info)
+	return func(c *gin.Context) {
+		c.JSON(http.StatusOK, response)
+	}
+}
+
+func linkerBuildInfo() buildInfo {
+	return buildInfo{Commit: BuildCommit, BuildTime: BuildTime}
+}
+
+func safeVersionResponse(info buildInfo) SafeVersionResponse {
+	return SafeVersionResponse{
+		Version:   version.GetVersion(),
+		Commit:    safeBuildValue(info.Commit),
+		BuildTime: safeBuildValue(info.BuildTime),
+	}
+}
+
+func safeBuildValue(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return "unknown"
+	}
+	return value
+}
 
 // HandleVersionCheck godoc
 //

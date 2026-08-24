@@ -22,6 +22,7 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"strconv"
 	"strings"
 
 	"github.com/Juneoww/AIG_Custom/common/utils/models"
@@ -36,6 +37,7 @@ import (
 // registerPlatformModelRoutes preserves the application model API contract
 // while routing every operation through encrypted platform storage.
 func registerPlatformModelRoutes(group *gin.RouterGroup, service *platformmodels.Service, yamlModels taskYAMLModelSource) {
+	configureSafeModelCatalog(service, yamlModels)
 	group.GET("", func(c *gin.Context) {
 		subject, ok := identity.CurrentSubject(c)
 		if !ok {
@@ -176,6 +178,34 @@ func registerPlatformModelRoutes(group *gin.RouterGroup, service *platformmodels
 	})
 }
 
+func configureSafeModelCatalog(service *platformmodels.Service, source taskYAMLModelSource) {
+	if service == nil {
+		return
+	}
+	if source == nil {
+		service.SetCatalogLoader(nil)
+		return
+	}
+	service.SetCatalogLoader(func() ([]platformmodels.CatalogView, error) {
+		configured, err := source.LoadYamlModels()
+		if err != nil {
+			return nil, err
+		}
+		views := make([]platformmodels.CatalogView, 0, len(configured))
+		for _, model := range configured {
+			if model == nil {
+				continue
+			}
+			views = append(views, platformmodels.CatalogView{
+				ID: model.ModelID, Scope: platformmodels.ScopeGlobal, Name: model.ModelID,
+				ProviderModel: model.ModelName, BaseURL: model.BaseURL, Note: model.Note, Limit: model.Limit,
+				Token: platformmodels.MaskedToken, Source: platformmodels.CatalogSourceYAML, ReadOnly: true,
+			})
+		}
+		return views, nil
+	})
+}
+
 // loadLegacyYAMLModel takes one immutable source snapshot so the collision
 // check cannot silently degrade to "not found" or race a second YAML load.
 func loadLegacyYAMLModel(source taskYAMLModelSource, modelID string) (*database.Model, error) {
@@ -245,9 +275,14 @@ func registerGovernanceModelRoutes(group *gin.RouterGroup, service *platformmode
 			c.Status(http.StatusUnauthorized)
 			return
 		}
-		views, err := service.List(c.Request.Context(), subject)
+		page, pageSize, err := modelPage(c)
 		if err != nil {
-			respondPlatformModelError(c, err)
+			respondSafeModelCatalogError(c, platformmodels.ErrInvalid)
+			return
+		}
+		views, err := service.SafeCatalog(c.Request.Context(), subject, page, pageSize)
+		if err != nil {
+			respondSafeModelCatalogError(c, err)
 			return
 		}
 		c.JSON(http.StatusOK, views)
@@ -325,6 +360,39 @@ func registerGovernanceModelRoutes(group *gin.RouterGroup, service *platformmode
 		}
 		c.Status(http.StatusNoContent)
 	})
+}
+
+func modelPage(c *gin.Context) (int, int, error) {
+	page, pageSize := 1, platformmodels.DefaultCatalogPageSize
+	if raw := c.Query("page"); raw != "" {
+		value, err := strconv.Atoi(raw)
+		if err != nil || value < 1 || value > platformmodels.MaxCatalogPage {
+			return 0, 0, platformmodels.ErrInvalid
+		}
+		page = value
+	}
+	if raw := c.Query("page_size"); raw != "" {
+		value, err := strconv.Atoi(raw)
+		if err != nil || value < 1 {
+			return 0, 0, platformmodels.ErrInvalid
+		}
+		if value > platformmodels.MaxCatalogPageSize {
+			value = platformmodels.MaxCatalogPageSize
+		}
+		pageSize = value
+	}
+	return page, pageSize, nil
+}
+
+func respondSafeModelCatalogError(c *gin.Context, err error) {
+	switch {
+	case errors.Is(err, platformmodels.ErrForbidden):
+		c.JSON(http.StatusForbidden, gin.H{"error": "forbidden"})
+	case errors.Is(err, platformmodels.ErrInvalid):
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid model request"})
+	default:
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "model catalog request failed"})
+	}
 }
 
 func respondPlatformModelError(c *gin.Context, err error) {

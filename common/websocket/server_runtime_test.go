@@ -80,7 +80,11 @@ func TestRuntimeDatastoreInitializerWorksWithoutDDLPrivileges(t *testing.T) {
 
 	var versions []int64
 	require.NoError(t, runtimeDB.Table("schema_migrations").Order("version ASC").Pluck("version", &versions).Error)
-	require.Equal(t, []int64{1, 2, 3, 4, 5, 6, 7}, versions)
+	expectedVersions := make([]int64, database.LatestSchemaVersion)
+	for index := range expectedVersions {
+		expectedVersions[index] = int64(index + 1)
+	}
+	require.Equal(t, expectedVersions, versions)
 }
 
 func TestRuntimeDatastoreInitializerRejectsLegacyPlaintextModels(t *testing.T) {

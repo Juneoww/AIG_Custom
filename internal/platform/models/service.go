@@ -18,9 +18,11 @@ import (
 )
 
 var (
-	ErrForbidden = errors.New("无权访问模型配置")
-	ErrNotFound  = errors.New("模型配置不存在")
-	ErrInvalid   = errors.New("模型配置无效")
+	ErrForbidden             = errors.New("无权访问模型配置")
+	ErrNotFound              = errors.New("模型配置不存在")
+	ErrInvalid               = errors.New("模型配置无效")
+	ErrPaginationUnavailable = errors.New("模型分页仓库未配置")
+	ErrCatalogUnavailable    = errors.New("模型目录暂不可用")
 )
 
 const maxCompatibilityModelIDLength = 128
@@ -34,6 +36,27 @@ type Repository interface {
 	Update(context.Context, *Model) error
 	Delete(context.Context, string) error
 }
+
+type pageRepository interface {
+	ListPage(context.Context, ModelListQuery) ([]Model, int64, error)
+}
+
+type ModelListVisibility string
+
+const (
+	modelListAll            ModelListVisibility = "all"
+	modelListGlobal         ModelListVisibility = "global"
+	modelListGlobalAndOwner ModelListVisibility = "global_and_owner"
+)
+
+type ModelListQuery struct {
+	Visibility  ModelListVisibility
+	OwnerUserID string
+	Limit       int
+	Offset      int
+}
+
+type CatalogLoader func() ([]CatalogView, error)
 
 type GormRepository struct{ db *gorm.DB }
 
@@ -67,6 +90,28 @@ func (repository *GormRepository) Get(ctx context.Context, id string) (*Model, e
 func (repository *GormRepository) List(ctx context.Context) ([]Model, error) {
 	var models []Model
 	return models, txcontext.Gorm(ctx, repository.db).Order("created_at ASC, id ASC").Find(&models).Error
+}
+
+func (repository *GormRepository) ListPage(ctx context.Context, filter ModelListQuery) ([]Model, int64, error) {
+	query := txcontext.Gorm(ctx, repository.db).Model(&Model{})
+	switch filter.Visibility {
+	case modelListAll:
+	case modelListGlobal:
+		query = query.Where("scope = ?", ScopeGlobal)
+	case modelListGlobalAndOwner:
+		query = query.Where("scope = ? OR (scope = ? AND owner_user_id = ?)", ScopeGlobal, ScopePrivate, filter.OwnerUserID)
+	default:
+		return nil, 0, ErrForbidden
+	}
+	var total int64
+	if err := query.Count(&total).Error; err != nil {
+		return nil, 0, err
+	}
+	var models []Model
+	err := query.Select(
+		"id", "owner_user_id", "scope", "name", "provider_model", "base_url", "note", "limit", "disabled", "created_at", "updated_at",
+	).Order("created_at ASC, id ASC").Limit(filter.Limit).Offset(filter.Offset).Find(&models).Error
+	return models, total, err
 }
 
 func (repository *GormRepository) Update(ctx context.Context, model *Model) error {
@@ -141,6 +186,42 @@ func (repository *MemoryRepository) List(_ context.Context) ([]Model, error) {
 	return models, nil
 }
 
+func (repository *MemoryRepository) ListPage(_ context.Context, filter ModelListQuery) ([]Model, int64, error) {
+	repository.mu.Lock()
+	defer repository.mu.Unlock()
+	models := make([]Model, 0, len(repository.models))
+	for _, model := range repository.models {
+		visible := filter.Visibility == modelListAll ||
+			filter.Visibility == modelListGlobal && model.Scope == ScopeGlobal ||
+			filter.Visibility == modelListGlobalAndOwner && (model.Scope == ScopeGlobal || model.Scope == ScopePrivate && model.OwnerUserID == filter.OwnerUserID)
+		if !visible {
+			continue
+		}
+		models = append(models, Model{
+			ID: model.ID, OwnerUserID: model.OwnerUserID, Scope: model.Scope, Name: model.Name,
+			ProviderModel: model.ProviderModel, BaseURL: model.BaseURL, Note: model.Note, Limit: model.Limit,
+			Disabled: model.Disabled, CreatedAt: model.CreatedAt, UpdatedAt: model.UpdatedAt,
+		})
+	}
+	sort.Slice(models, func(i, j int) bool {
+		if models[i].CreatedAt.Equal(models[j].CreatedAt) {
+			return models[i].ID < models[j].ID
+		}
+		return models[i].CreatedAt.Before(models[j].CreatedAt)
+	})
+	total := int64(len(models))
+	if filter.Offset >= len(models) {
+		return []Model{}, total, nil
+	}
+	if filter.Offset > 0 {
+		models = models[filter.Offset:]
+	}
+	if filter.Limit > 0 && len(models) > filter.Limit {
+		models = models[:filter.Limit]
+	}
+	return models, total, nil
+}
+
 func (repository *MemoryRepository) Update(_ context.Context, model *Model) error {
 	repository.mu.Lock()
 	defer repository.mu.Unlock()
@@ -162,14 +243,28 @@ func (repository *MemoryRepository) Delete(_ context.Context, id string) error {
 }
 
 type Service struct {
-	repository Repository
-	keyring    *Keyring
-	audits     audit.Recorder
-	now        func() time.Time
+	repository    Repository
+	keyring       *Keyring
+	audits        audit.Recorder
+	now           func() time.Time
+	catalogMu     sync.Mutex
+	catalog       CatalogLoader
+	catalogLoaded bool
+	catalogViews  []CatalogView
+	catalogErr    error
 }
 
 func NewService(repository Repository, keyring *Keyring, audits audit.Recorder) *Service {
 	return &Service{repository: repository, keyring: keyring, audits: audits, now: func() time.Time { return time.Now().UTC() }}
+}
+
+func (service *Service) SetCatalogLoader(loader CatalogLoader) {
+	service.catalogMu.Lock()
+	defer service.catalogMu.Unlock()
+	service.catalog = loader
+	service.catalogLoaded = false
+	service.catalogViews = nil
+	service.catalogErr = nil
 }
 
 func (service *Service) Create(ctx context.Context, subject identity.Subject, input CreateInput) (View, error) {
@@ -265,6 +360,100 @@ func (service *Service) List(ctx context.Context, subject identity.Subject) ([]V
 	return views, nil
 }
 
+func (service *Service) SafeCatalog(ctx context.Context, subject identity.Subject, page, pageSize int) (CatalogPage, error) {
+	if page < 1 || page > MaxCatalogPage || pageSize < 1 || pageSize > MaxCatalogPageSize {
+		return CatalogPage{}, ErrInvalid
+	}
+	query, err := modelListQueryFor(subject)
+	if err != nil {
+		return CatalogPage{}, err
+	}
+	repository, ok := service.repository.(pageRepository)
+	if !ok {
+		return CatalogPage{}, ErrPaginationUnavailable
+	}
+	yamlViews, err := service.loadCatalog()
+	if err != nil {
+		return CatalogPage{}, err
+	}
+	for index := range yamlViews {
+		yamlViews[index].OwnerUserID = ""
+		yamlViews[index].Token = MaskedToken
+		yamlViews[index].Source = CatalogSourceYAML
+		yamlViews[index].ReadOnly = true
+	}
+	sort.SliceStable(yamlViews, func(left, right int) bool {
+		if yamlViews[left].ID == yamlViews[right].ID {
+			return yamlViews[left].ProviderModel < yamlViews[right].ProviderModel
+		}
+		return yamlViews[left].ID < yamlViews[right].ID
+	})
+
+	offset := (page - 1) * pageSize
+	query.Limit = pageSize
+	query.Offset = offset
+	databaseModels, databaseTotal, err := repository.ListPage(ctx, query)
+	if err != nil {
+		return CatalogPage{}, err
+	}
+	items := make([]CatalogView, 0, pageSize)
+	for index := range databaseModels {
+		items = append(items, catalogViewOf(&databaseModels[index], !canWrite(subject, &databaseModels[index])))
+	}
+	yamlOffset := 0
+	if int64(offset) > databaseTotal {
+		yamlOffset = int(int64(offset) - databaseTotal)
+	}
+	if yamlOffset < len(yamlViews) && len(items) < pageSize {
+		remaining := yamlViews[yamlOffset:]
+		if len(remaining) > pageSize-len(items) {
+			remaining = remaining[:pageSize-len(items)]
+		}
+		items = append(items, remaining...)
+	}
+	return CatalogPage{Items: items, Total: databaseTotal + int64(len(yamlViews)), Page: page, PageSize: pageSize}, nil
+}
+
+func (service *Service) loadCatalog() ([]CatalogView, error) {
+	service.catalogMu.Lock()
+	defer service.catalogMu.Unlock()
+	if !service.catalogLoaded {
+		service.catalogLoaded = true
+		if service.catalog != nil {
+			service.catalogViews, service.catalogErr = service.catalog()
+			if service.catalogErr != nil {
+				service.catalogViews = nil
+				service.catalogErr = ErrCatalogUnavailable
+			}
+		}
+		service.catalogViews = cloneCatalogViews(service.catalogViews)
+	}
+	return cloneCatalogViews(service.catalogViews), service.catalogErr
+}
+
+func cloneCatalogViews(views []CatalogView) []CatalogView {
+	if views == nil {
+		return []CatalogView{}
+	}
+	return append([]CatalogView(nil), views...)
+}
+
+func modelListQueryFor(subject identity.Subject) (ModelListQuery, error) {
+	switch subject.Role {
+	case identity.RoleAdmin:
+		return ModelListQuery{Visibility: modelListAll}, nil
+	case identity.RoleAuditor:
+		return ModelListQuery{Visibility: modelListGlobal}, nil
+	case identity.RoleUser:
+		if subject.UserID == "" {
+			return ModelListQuery{}, ErrForbidden
+		}
+		return ModelListQuery{Visibility: modelListGlobalAndOwner, OwnerUserID: subject.UserID}, nil
+	default:
+		return ModelListQuery{}, ErrForbidden
+	}
+}
+
 func (service *Service) Update(ctx context.Context, subject identity.Subject, id string, input UpdateInput) (View, error) {
 	model, err := service.repository.Get(ctx, id)
 	if err != nil {
@@ -336,6 +525,9 @@ func (service *Service) RotateEncryption(ctx context.Context, subject identity.S
 	model, err := service.repository.Get(ctx, id)
 	if err != nil {
 		return err
+	}
+	if !canWrite(subject, model) {
+		return ErrForbidden
 	}
 	plaintext, err := service.keyring.OpenToken(model)
 	if err != nil {

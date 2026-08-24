@@ -28,6 +28,9 @@ func TestGormRepositoryPersistsGovernedBrandAndRequiresMigratedSchema(t *testing
 	require.NoError(t, database.Migrate(db))
 	require.NoError(t, repository.Init())
 	service := NewGovernedService(repository, audit.NewService(audit.NewGormRepository(db)))
+	fallback, err := service.Get(ctx)
+	require.NoError(t, err)
+	assert.Equal(t, "AI 安全治理平台", fallback.ProductName)
 	admin := identity.Subject{UserID: "admin", Role: identity.RoleAdmin}
 	logo := testPNG(t)
 	updated, err := service.Update(ctx, admin, Config{ProductName: "持久化品牌", PrimaryColor: "#1677FF", Logo: logo, LogoMIME: "image/png"})

@@ -23,6 +23,7 @@ const (
 	ActionAttachmentCreated          Action = "attachment.created"
 	ActionAttachmentChunkUploaded    Action = "attachment.chunk_uploaded"
 	ActionAttachmentMerged           Action = "attachment.merged"
+	ActionAttachmentDownloaded       Action = "attachment.downloaded"
 	ActionReportExported             Action = "report.exported"
 	ActionReportBackfilled           Action = "report.backfilled"
 	ActionBrandUpdated               Action = "brand.updated"
@@ -34,6 +35,8 @@ const (
 	ActionKnowledgeChangeRequested   Action = "knowledge.change_requested"
 	ActionKnowledgeChanged           Action = "knowledge.changed"
 )
+
+const ActionAttachmentDownloadAuthorized Action = "attachment.download_authorized"
 
 type Outcome string
 

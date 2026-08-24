@@ -162,6 +162,47 @@ func TestRuntimeSchemaRejectsMissingReportTrendIndexesWithoutDDL(t *testing.T) {
 	}
 }
 
+func TestRuntimeSchemaRejectsMissingDashboardTaskIndexesWithoutDDL(t *testing.T) {
+	db := openPostgresTestDB(t)
+	for _, index := range []string{"idx_platform_tasks_updated_at", "idx_platform_tasks_owner_updated_at"} {
+		t.Run(index, func(t *testing.T) {
+			resetPostgresTestDB(t, db)
+			require.NoError(t, Migrate(db))
+			require.NoError(t, db.Exec("DROP INDEX IF EXISTS "+index).Error)
+			beforeVersions := migrationVersions(t, db)
+			beforeCatalog := platformTaskRuntimeCatalogState(t, db)
+
+			err := ValidateRuntimeSchema(db)
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), index)
+			assert.Equal(t, beforeVersions, migrationVersions(t, db), "runtime validation must not update migration history")
+			assert.Equal(t, beforeCatalog, platformTaskRuntimeCatalogState(t, db), "runtime validation must not repair task catalog objects")
+			assert.False(t, db.Migrator().HasIndex(&platformTaskMigration{}, index))
+		})
+	}
+}
+
+func platformTaskRuntimeCatalogState(t *testing.T, db *gorm.DB) []string {
+	t.Helper()
+	var rows []struct {
+		Object string `gorm:"column:object"`
+	}
+	require.NoError(t, db.Raw(`
+SELECT 'column:' || table_name || '.' || column_name AS object
+FROM information_schema.columns
+WHERE table_schema = current_schema() AND table_name = 'platform_tasks'
+UNION ALL
+SELECT 'index:' || tablename || '.' || indexname AS object
+FROM pg_catalog.pg_indexes
+WHERE schemaname = current_schema() AND tablename = 'platform_tasks'
+ORDER BY object`).Scan(&rows).Error)
+	objects := make([]string, len(rows))
+	for index, row := range rows {
+		objects[index] = row.Object
+	}
+	return objects
+}
+
 func reportRuntimeCatalogState(t *testing.T, db *gorm.DB) []string {
 	t.Helper()
 	var rows []struct {

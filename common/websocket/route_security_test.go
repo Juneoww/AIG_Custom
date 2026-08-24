@@ -13,8 +13,10 @@ import (
 	"testing"
 	"time"
 
+	platformadmin "github.com/Juneoww/AIG_Custom/internal/platform/admin"
 	platformaudit "github.com/Juneoww/AIG_Custom/internal/platform/audit"
 	"github.com/Juneoww/AIG_Custom/internal/platform/identity"
+	platformmodels "github.com/Juneoww/AIG_Custom/internal/platform/models"
 	platformtasks "github.com/Juneoww/AIG_Custom/internal/platform/tasks"
 	"github.com/Juneoww/AIG_Custom/pkg/database"
 	"github.com/gin-gonic/gin"
@@ -83,6 +85,75 @@ func TestRetiredBrowserTaskRoutesUseProductionIdentityPasswordAndCSRFChain(t *te
 	router.ServeHTTP(response, request)
 	assert.Equal(t, http.StatusGone, response.Code)
 }
+
+func TestRetiredPlatformTaskResultUsesProductionIdentityPasswordChainAndNeverReadsEngine(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	identityService := identity.NewService(identity.NewMemoryRepository())
+	user, err := identityService.CreateUser(context.Background(), identity.CreateUserInput{
+		ID: "result-user-id", Username: "result-user", Password: "temporary-secret", Role: identity.RoleUser,
+		MustChangePassword: true,
+	})
+	require.NoError(t, err)
+	initialLogin, err := identityService.Authenticate(context.Background(), user.Username, "temporary-secret")
+	require.NoError(t, err)
+	policy := identity.CookiePolicy{SessionCookieName: "aig_session", CSRFCookieName: "aig_csrf"}
+	engine := &retiredResultEngine{}
+	auditService := platformaudit.NewService(platformaudit.NewMemoryRepository())
+	taskHandler := platformtasks.NewHandler(platformtasks.NewService(
+		platformtasks.NewMemoryRepository(), engine, auditService,
+	))
+	keyring, err := platformmodels.NewKeyring("route-security", bytes.Repeat([]byte{7}, 32), nil)
+	require.NoError(t, err)
+	modelService := platformmodels.NewService(platformmodels.NewMemoryRepository(), keyring, auditService)
+	router := gin.New()
+	group := router.Group("/api/v1/platform")
+	registerPlatformGovernanceRoutes(
+		group, identityService, policy, platformadmin.NewHandler(identityService, auditService), modelService, taskHandler,
+	)
+
+	request := httptest.NewRequest(http.MethodGet, "/api/v1/platform/tasks/browser-task/result", nil)
+	response := httptest.NewRecorder()
+	router.ServeHTTP(response, request)
+	assert.Equal(t, http.StatusUnauthorized, response.Code)
+
+	request = httptest.NewRequest(http.MethodGet, "/api/v1/platform/tasks/browser-task/result", nil)
+	request.AddCookie(&http.Cookie{Name: policy.SessionCookieName, Value: initialLogin.Token})
+	response = httptest.NewRecorder()
+	router.ServeHTTP(response, request)
+	assert.Equal(t, http.StatusForbidden, response.Code)
+
+	require.NoError(t, identityService.ChangePassword(context.Background(), user.ID, "temporary-secret", "ready-secret"))
+	readyLogin, err := identityService.Authenticate(context.Background(), user.Username, "ready-secret")
+	require.NoError(t, err)
+	request = httptest.NewRequest(http.MethodGet, "/api/v1/platform/tasks/browser-task/result", nil)
+	request.AddCookie(&http.Cookie{Name: policy.SessionCookieName, Value: readyLogin.Token})
+	response = httptest.NewRecorder()
+	router.ServeHTTP(response, request)
+	assert.Equal(t, http.StatusGone, response.Code)
+	assert.JSONEq(t, `{"error":"task result route retired"}`, response.Body.String())
+	assert.Equal(t, 0, engine.resultReads)
+}
+
+type retiredResultEngine struct{ resultReads int }
+
+func (*retiredResultEngine) ValidateTaskReferences(context.Context, platformtasks.EngineTask) error {
+	return nil
+}
+
+func (*retiredResultEngine) SubmitTask(context.Context, platformtasks.EngineTask) (string, error) {
+	return "", nil
+}
+
+func (*retiredResultEngine) GetTaskStatus(context.Context, string) (platformtasks.EngineStatus, error) {
+	return platformtasks.EngineStatus{}, nil
+}
+
+func (engine *retiredResultEngine) GetResult(context.Context, string) (json.RawMessage, error) {
+	engine.resultReads++
+	return json.RawMessage(`{"secret":true}`), nil
+}
+
+func (*retiredResultEngine) CancelTask(context.Context, string) error { return nil }
 
 func TestInternalAgentMiddlewareRejectsBrowserIdentityAndAcceptsOnlyToken(t *testing.T) {
 	manager := NewAgentManager(testInternalAgentToken)

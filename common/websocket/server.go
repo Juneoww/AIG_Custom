@@ -27,8 +27,8 @@ import (
 	"embed"
 	"mime"
 	"net/http"
-	"os"
-	"path/filepath"
+	"path"
+	"strings"
 	"time"
 
 	"github.com/Juneoww/AIG_Custom/common/trpc"
@@ -38,6 +38,7 @@ import (
 	platformadmin "github.com/Juneoww/AIG_Custom/internal/platform/admin"
 	platformaudit "github.com/Juneoww/AIG_Custom/internal/platform/audit"
 	platformbrand "github.com/Juneoww/AIG_Custom/internal/platform/brand"
+	platformdashboard "github.com/Juneoww/AIG_Custom/internal/platform/dashboard"
 	"github.com/Juneoww/AIG_Custom/internal/platform/identity"
 	platformknowledge "github.com/Juneoww/AIG_Custom/internal/platform/knowledge"
 	platformmodels "github.com/Juneoww/AIG_Custom/internal/platform/models"
@@ -52,6 +53,95 @@ import (
 
 //go:embed static/*
 var staticFS embed.FS
+
+const (
+	consoleIndexFile             = "static/index.html"
+	consoleDocumentCacheControl  = "no-cache"
+	consoleImmutableCacheControl = "public, max-age=31536000, immutable"
+)
+
+func registerEmbeddedStaticRoutes(router *gin.Engine) {
+	router.NoRoute(func(c *gin.Context) {
+		if c.Request.Method != http.MethodGet && c.Request.Method != http.MethodHead {
+			c.Status(http.StatusNotFound)
+			return
+		}
+
+		requestPath := c.Request.URL.Path
+		if isReservedConsoleRoute(requestPath) {
+			c.Status(http.StatusNotFound)
+			return
+		}
+
+		assetPath, validPath := embeddedConsoleAssetPath(requestPath)
+		if !validPath {
+			c.Status(http.StatusNotFound)
+			return
+		}
+
+		if assetData, err := staticFS.ReadFile(assetPath); err == nil {
+			serveEmbeddedConsoleAsset(c, assetPath, assetData)
+			return
+		}
+
+		if isStaticAssetRequest(requestPath) {
+			c.Status(http.StatusNotFound)
+			return
+		}
+
+		indexData, err := staticFS.ReadFile(consoleIndexFile)
+		if err != nil {
+			c.String(http.StatusInternalServerError, "Internal Server Error")
+			return
+		}
+		c.Header("Cache-Control", consoleDocumentCacheControl)
+		c.Data(http.StatusOK, "text/html; charset=utf-8", indexData)
+	})
+}
+
+func isReservedConsoleRoute(requestPath string) bool {
+	return requestPath == "/api" || strings.HasPrefix(requestPath, "/api/") || requestPath == "/legacy" || strings.HasPrefix(requestPath, "/legacy/")
+}
+
+func embeddedConsoleAssetPath(requestPath string) (string, bool) {
+	if requestPath == "/" {
+		return consoleIndexFile, true
+	}
+	if !strings.HasPrefix(requestPath, "/") || strings.Contains(requestPath, "..") {
+		return "", false
+	}
+
+	cleanedPath := path.Clean(requestPath)
+	if !strings.HasPrefix(cleanedPath, "/") {
+		return "", false
+	}
+	return "static" + cleanedPath, true
+}
+
+func isStaticAssetRequest(requestPath string) bool {
+	return strings.HasPrefix(requestPath, "/assets/") || strings.HasPrefix(requestPath, "/fonts/") || strings.HasPrefix(requestPath, "/licenses/") || path.Ext(requestPath) != ""
+}
+
+func serveEmbeddedConsoleAsset(c *gin.Context, assetPath string, assetData []byte) {
+	contentType := mime.TypeByExtension(path.Ext(assetPath))
+	if contentType == "" {
+		contentType = "application/octet-stream"
+	}
+	if isImmutableConsoleAsset(assetPath) {
+		c.Header("Cache-Control", consoleImmutableCacheControl)
+	} else {
+		c.Header("Cache-Control", consoleDocumentCacheControl)
+	}
+	c.Data(http.StatusOK, contentType, assetData)
+}
+
+func isImmutableConsoleAsset(assetPath string) bool {
+	extension := strings.ToLower(path.Ext(assetPath))
+	if strings.HasPrefix(assetPath, "static/fonts/") {
+		return extension == ".ttf" || extension == ".woff" || extension == ".woff2"
+	}
+	return strings.HasPrefix(assetPath, "static/assets/") && (extension == ".css" || extension == ".js")
+}
 
 func RunWebServer(options *version.Options) {
 	// 1. 初始化trpc-go
@@ -141,6 +231,7 @@ func RunWebServer(options *version.Options) {
 	taskManager.SetPlatformTaskEventSink(platformTaskService)
 	platformTaskHandler := platformtasks.NewHandler(platformTaskService, attachmentService)
 	reportHandler := platformreports.NewHandler(reportService)
+	dashboardHandler := platformdashboard.NewHandler(platformdashboard.NewService(reportService, platformTaskService))
 	brandHandler := platformbrand.NewHandler(brandService)
 	err = taskManager.taskStore.ResetRunningTasks()
 	if err != nil {
@@ -154,9 +245,12 @@ func RunWebServer(options *version.Options) {
 	// API 版本分组
 	v1 := r.Group("/api/v1")
 	{
-		identity.RegisterRoutesWithObserver(v1.Group("/auth"), identityService, identityPolicy, auditService)
+		registerPublicRoutes(v1, brandService)
+		auth := v1.Group("/auth")
+		identity.RegisterRoutesWithObserver(auth, identityService, identityPolicy, auditService)
 		platformGroup := v1.Group("/platform")
 		registerPlatformGovernanceRoutes(platformGroup, identityService, identityPolicy, adminHandler, platformModelService, platformTaskHandler)
+		registerPlatformDashboardRoutes(platformGroup, dashboardHandler)
 		registerPlatformReportRoutes(platformGroup, reportHandler, brandHandler)
 		// 1. 知识库模块
 		knowledge := v1.Group("/knowledge")
@@ -166,6 +260,7 @@ func RunWebServer(options *version.Options) {
 			fingerprints := knowledge.Group("/fingerprints")
 			{
 				// 管理功能
+				fingerprints.GET("/:name/raw", identity.RequireRole(identity.RoleAdmin, identity.RoleUser, identity.RoleAuditor), HandleGetFingerprintRaw)
 				fingerprints.GET("", identity.RequireRole(identity.RoleAdmin, identity.RoleUser, identity.RoleAuditor), HandleListFingerprints)
 				fingerprints.POST("", knowledgeHandler.Govern(platformknowledge.KindFingerprint, platformknowledge.OperationCreate, HandleCreateFingerprint))
 				fingerprints.PUT("/:name", knowledgeHandler.Govern(platformknowledge.KindFingerprint, platformknowledge.OperationUpdate, HandleEditFingerprint))
@@ -175,6 +270,7 @@ func RunWebServer(options *version.Options) {
 			vulnerabilities := knowledge.Group("/vulnerabilities")
 			{
 				// 管理功能
+				vulnerabilities.GET("/:id/raw", identity.RequireRole(identity.RoleAdmin, identity.RoleUser, identity.RoleAuditor), HandleGetVulnerabilityRaw)
 				vulnerabilities.GET("", identity.RequireRole(identity.RoleAdmin, identity.RoleUser, identity.RoleAuditor), HandleListVulnerabilities())
 				vulnerabilities.POST("", knowledgeHandler.Govern(platformknowledge.KindVulnerability, platformknowledge.OperationCreate, HandleCreateVulnerability()))
 				vulnerabilities.PUT("/:cve", knowledgeHandler.Govern(platformknowledge.KindVulnerability, platformknowledge.OperationUpdate, HandleEditVulnerability))
@@ -184,6 +280,7 @@ func RunWebServer(options *version.Options) {
 			evaluations := knowledge.Group("/evaluations")
 			{
 				// 管理功能
+				evaluations.GET("/:name/raw", identity.RequireRole(identity.RoleAdmin, identity.RoleUser, identity.RoleAuditor), HandleGetEvaluationRaw)
 				evaluations.GET("/:name", identity.RequireRole(identity.RoleAdmin, identity.RoleUser, identity.RoleAuditor), HandleGetEvaluationDetail)
 				evaluations.GET("", identity.RequireRole(identity.RoleAdmin, identity.RoleUser, identity.RoleAuditor), HandleListEvaluations)
 				evaluations.POST("", knowledgeHandler.Govern(platformknowledge.KindEvaluation, platformknowledge.OperationCreate, HandleCreateEvaluation))
@@ -205,6 +302,7 @@ func RunWebServer(options *version.Options) {
 				collections.GET("", identity.RequireRole(identity.RoleAdmin, identity.RoleUser, identity.RoleAuditor), HandleList(PromptCollectionsRoot, promptCollectionLoadFile))
 				collections.POST("", knowledgeHandler.Govern(platformknowledge.KindPromptCollection, platformknowledge.OperationCreate, HandleCreate(promptCollectionReadAndSave)))
 				collections.PUT("/:id", knowledgeHandler.Govern(platformknowledge.KindPromptCollection, platformknowledge.OperationUpdate, HandleEdit(promptCollectionUpdateFunc)))
+				collections.DELETE("/:id", knowledgeHandler.Govern(platformknowledge.KindPromptCollection, platformknowledge.OperationDelete, HandleDelete(promptCollectionDeleteFunc)))
 				collections.DELETE("", knowledgeHandler.Govern(platformknowledge.KindPromptCollection, platformknowledge.OperationDelete, HandleDelete(promptCollectionDeleteFunc)))
 			}
 			agentConfigs := knowledge.Group("/agent")
@@ -242,19 +340,6 @@ func RunWebServer(options *version.Options) {
 			// 只需要WebSocket入口
 			agents.GET("/ws", agentManager.HandleAgentWebSocket())
 		}
-		// version
-		v1.GET("/version", func(c *gin.Context) {
-			filename := "CHANGELOG.md"
-			data, err := os.ReadFile(filename)
-			if err != nil {
-				data = []byte("")
-			}
-			c.JSON(http.StatusOK, gin.H{
-				"version":   version.GetVersion(),
-				"changelog": string(data),
-			})
-		})
-
 		// system — data directory auto-sync & version check
 		system := v1.Group("/system")
 		system.Use(setupIdentityMiddleware(identityService, identityPolicy), identity.RequirePasswordChangeCompleted(), identity.RequireCSRF(identityPolicy))
@@ -275,31 +360,7 @@ func RunWebServer(options *version.Options) {
 	})
 
 	// 静态文件处理
-	r.NoRoute(func(c *gin.Context) {
-		assetPath := "static" + c.Request.URL.Path
-		if c.Request.URL.Path == "/" {
-			assetPath = "static/index.html"
-		}
-
-		assetData, err := staticFS.ReadFile(assetPath)
-		if err != nil {
-			assetData, err = staticFS.ReadFile("static/index.html")
-			if err != nil {
-				c.String(500, "Internal Server Error")
-				return
-			}
-			c.Header("Content-Type", "text/html")
-			c.Data(200, "text/html", assetData)
-			return
-		}
-
-		mimeType := mime.TypeByExtension(filepath.Ext(assetPath))
-		if mimeType == "" {
-			mimeType = "text/plain"
-		}
-		c.Header("Content-Type", mimeType)
-		c.Data(200, mimeType, assetData)
-	})
+	registerEmbeddedStaticRoutes(r)
 
 	log.Infof("Starting WebServer: trace_id=system_startup, addr=%s", options.WebServerAddr)
 	if err := r.Run(options.WebServerAddr); err != nil {
@@ -310,6 +371,19 @@ func RunWebServer(options *version.Options) {
 // 配置身份认证中间件
 func setupIdentityMiddleware(service *identity.Service, policy identity.CookiePolicy) gin.HandlerFunc {
 	return identity.Authenticate(service, policy)
+}
+
+func registerPublicRoutes(group *gin.RouterGroup, brandService *platformbrand.Service) {
+	public := group.Group("/public")
+	public.GET("/brand", func(c *gin.Context) {
+		view, err := brandService.GetPublic(c.Request.Context())
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "brand request failed"})
+			return
+		}
+		c.JSON(http.StatusOK, view)
+	})
+	group.GET("/version", newSafeVersionHandler(linkerBuildInfo()))
 }
 
 func registerPlatformGovernanceRoutes(
@@ -329,6 +403,12 @@ func registerPlatformGovernanceRoutes(
 	registerGovernanceModelRoutes(group.Group("/models"), modelService)
 	if len(taskHandlers) > 0 && taskHandlers[0] != nil {
 		taskHandlers[0].Register(group.Group("/tasks"))
+	}
+}
+
+func registerPlatformDashboardRoutes(group *gin.RouterGroup, handler *platformdashboard.Handler) {
+	if handler != nil {
+		handler.Register(group)
 	}
 }
 

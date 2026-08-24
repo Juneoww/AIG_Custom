@@ -164,7 +164,8 @@ func RegisterRoutes(group *gin.RouterGroup, service *Service, policy CookiePolic
 func RegisterRoutesWithObserver(group *gin.RouterGroup, service *Service, policy CookiePolicy, observer GovernanceObserver) {
 	policy = policy.normalized()
 	group.Use(RequireHTTPS(policy))
-	group.POST("/login", func(c *gin.Context) {
+	registerBrowserRoutes(group, service, policy)
+	group.POST("/login", RequireCSRF(policy), func(c *gin.Context) {
 		var input struct {
 			Username string `json:"username"`
 			Password string `json:"password"`
@@ -268,7 +269,7 @@ func RegisterRoutesWithObserver(group *gin.RouterGroup, service *Service, policy
 		// 令牌仅交给已配置的带外交付渠道，绝不写入 HTTP 响应或日志。
 		c.Status(http.StatusNoContent)
 	})
-	group.POST("/password-resets/confirm", func(c *gin.Context) {
+	group.POST("/password-resets/confirm", RequireCSRF(policy), func(c *gin.Context) {
 		var input struct {
 			Token             string `json:"token"`
 			TemporaryPassword string `json:"temporary_password"`

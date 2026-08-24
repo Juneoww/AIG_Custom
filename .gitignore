@@ -15,5 +15,16 @@ venv
 tests
 .worktrees/
 
+# Enterprise console dependencies and generated test/build artifacts.
+web/console/node_modules/
+web/console/.pnpm-store/
+web/console/dist/
+web/console/coverage/
+web/console/playwright-report/
+web/console/test-results/
+web/console/.generated/
+web/console/.generated.tmp-*/
+web/console/.generated.backup-*/
+
 # OpenClaw internal workspace file
 openclaw.md

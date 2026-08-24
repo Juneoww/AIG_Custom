@@ -66,12 +66,19 @@ func TestAuthRoutesNotifyGovernanceObserverForSuccessfulAndFailedLogin(t *testin
 	observer := &recordingGovernanceObserver{}
 	router := gin.New()
 	RegisterRoutesWithObserver(router.Group("/auth"), service, policy, observer)
+	csrfCookie := initializeCSRF(t, router, "/auth/csrf", policy.CSRFCookieName, nil)
 
 	for _, password := range []string{"secret", "wrong"} {
 		body, marshalErr := json.Marshal(map[string]string{"username": "alice", "password": password})
 		require.NoError(t, marshalErr)
+		request := httptest.NewRequest(http.MethodPost, "/auth/login", bytes.NewReader(body))
+		request.AddCookie(csrfCookie)
+		request.Header.Set("X-CSRF-Token", csrfCookie.Value)
 		response := httptest.NewRecorder()
-		router.ServeHTTP(response, httptest.NewRequest(http.MethodPost, "/auth/login", bytes.NewReader(body)))
+		router.ServeHTTP(response, request)
+		if rotated, ok := responseCookie(response, policy.CSRFCookieName); ok {
+			csrfCookie = rotated
+		}
 	}
 
 	require.Len(t, observer.authentication, 2)
@@ -137,6 +144,12 @@ func TestAuthRoutesRequireHTTPSExceptExplicitTestCookieMode(t *testing.T) {
 	trusted := httptest.NewRequest(http.MethodPost, "/auth/login", bytes.NewReader(body))
 	trusted.RemoteAddr = "10.2.3.4:443"
 	trusted.Header.Set("X-Forwarded-Proto", "https")
+	trustedCSRF := initializeCSRF(t, r, "/auth/csrf", policy.CSRFCookieName, func(request *http.Request) {
+		request.RemoteAddr = "10.2.3.4:443"
+		request.Header.Set("X-Forwarded-Proto", "https")
+	})
+	trusted.AddCookie(trustedCSRF)
+	trusted.Header.Set("X-CSRF-Token", trustedCSRF.Value)
 	w := httptest.NewRecorder()
 	r.ServeHTTP(w, trusted)
 	assert.Equal(t, http.StatusOK, w.Code)
@@ -145,8 +158,12 @@ func TestAuthRoutesRequireHTTPSExceptExplicitTestCookieMode(t *testing.T) {
 	require.NoError(t, err)
 	testRouter := gin.New()
 	RegisterRoutes(testRouter.Group("/auth"), service, testPolicy)
+	testCSRF := initializeCSRF(t, testRouter, "/auth/csrf", testPolicy.CSRFCookieName, nil)
+	testLogin := httptest.NewRequest(http.MethodPost, "/auth/login", bytes.NewReader(body))
+	testLogin.AddCookie(testCSRF)
+	testLogin.Header.Set("X-CSRF-Token", testCSRF.Value)
 	w = httptest.NewRecorder()
-	testRouter.ServeHTTP(w, httptest.NewRequest(http.MethodPost, "/auth/login", bytes.NewReader(body)))
+	testRouter.ServeHTTP(w, testLogin)
 	assert.Equal(t, http.StatusOK, w.Code)
 }
 
@@ -208,9 +225,28 @@ func TestAuthLifecycleRoutesRotateAndResetWithoutLeakingTokensToUsers(t *testing
 	assert.Equal(t, http.StatusUpgradeRequired, w.Code)
 	secureConfirm := httptest.NewRequest(http.MethodPost, "/auth/password-resets/confirm", bytes.NewReader(confirmBody))
 	secureConfirm.TLS = &tls.ConnectionState{}
+	resetCSRF := initializeCSRF(t, r, "/auth/csrf", policy.CSRFCookieName, func(request *http.Request) {
+		request.TLS = &tls.ConnectionState{}
+	})
+	secureConfirm.AddCookie(resetCSRF)
+	secureConfirm.Header.Set("X-CSRF-Token", resetCSRF.Value)
 	w = httptest.NewRecorder()
 	r.ServeHTTP(w, secureConfirm)
 	assert.Equal(t, http.StatusNoContent, w.Code)
+}
+
+func initializeCSRF(t *testing.T, router http.Handler, path, cookieName string, configure func(*http.Request)) *http.Cookie {
+	t.Helper()
+	request := httptest.NewRequest(http.MethodGet, path, nil)
+	if configure != nil {
+		configure(request)
+	}
+	response := httptest.NewRecorder()
+	router.ServeHTTP(response, request)
+	require.Equal(t, http.StatusOK, response.Code)
+	cookie, ok := responseCookie(response, cookieName)
+	require.True(t, ok)
+	return cookie
 }
 
 func TestRequireRoleGuardsRepresentativeReadAndWriteRoutes(t *testing.T) {

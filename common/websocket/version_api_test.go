@@ -15,8 +15,52 @@
 package websocket
 
 import (
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"testing"
+
+	version "github.com/Juneoww/AIG_Custom/internal/options"
+	"github.com/gin-gonic/gin"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
+
+func TestSafeVersionUsesExplicitMetadataAndUnknownDefaults(t *testing.T) {
+	for _, testCase := range []struct {
+		name                 string
+		commit, buildTime    string
+		wantCommit, wantTime string
+	}{
+		{name: "unknown", wantCommit: "unknown", wantTime: "unknown"},
+		{name: "injected", commit: "abc123", buildTime: "2026-08-14T10:00:00Z", wantCommit: "abc123", wantTime: "2026-08-14T10:00:00Z"},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			response := safeVersionResponse(buildInfo{Commit: testCase.commit, BuildTime: testCase.buildTime})
+			assert.Equal(t, version.GetVersion(), response.Version)
+			assert.Equal(t, testCase.wantCommit, response.Commit)
+			assert.Equal(t, testCase.wantTime, response.BuildTime)
+		})
+	}
+}
+
+func TestSafeVersionHandlerSnapshotsExplicitMetadata(t *testing.T) {
+	metadata := buildInfo{Commit: "route-commit", BuildTime: "route-time"}
+	handler := newSafeVersionHandler(metadata)
+	metadata.Commit = "changed-after-construction"
+	metadata.BuildTime = "changed-after-construction"
+	gin.SetMode(gin.TestMode)
+	response := httptest.NewRecorder()
+	context, _ := gin.CreateTestContext(response)
+	context.Request = httptest.NewRequest(http.MethodGet, "/api/v1/version", nil)
+	handler(context)
+
+	require.Equal(t, http.StatusOK, response.Code)
+	var fields map[string]any
+	require.NoError(t, json.Unmarshal(response.Body.Bytes(), &fields))
+	assert.Equal(t, "route-commit", fields["commit"])
+	assert.Equal(t, "route-time", fields["build_time"])
+}
 
 func TestParseVersion(t *testing.T) {
 	tests := []struct {

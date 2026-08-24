@@ -45,7 +45,7 @@
     <h2 align="center">🚀 AIG Custom Platform</h2>
 </p>
 
-<b>AIG Custom Platform</b> is an independent custom platform based on AI-Infra-Guard. It integrates capabilities such as ClawScan(OpenClaw Security Scan), Agent Scan，AI infra vulnerability scan, MCP Server & Agent Skills scan, and Jailbreak Evaluation, aiming to provide users with the most comprehensive, intelligent, and user-friendly solution for AI security risk self-examination.
+<b>AIG Custom Platform</b> is an independent custom platform based on AI-Infra-Guard. It integrates capabilities such as ClawScan(OpenClaw Security Scan), Agent Scan，AI infra vulnerability scan, MCP Server & Agent Skills scan, and Jailbreak Evaluation, aiming to provide users with the most comprehensive, intelligent, and user-friendly solution for AI security risk self-examination. Its default root path now serves an authenticated, role-aware enterprise console; see the [project documentation](./docs/README.md) for delivery status and operating boundaries.
 
 ## Upstream Attribution
 
@@ -147,7 +147,7 @@ cd AI-Infra-Guard
 docker-compose up -d
 ```
 
-Note: The AI-Infra-Guard project is positioned as an AI red teaming platform for internal use by enterprises or individuals. It currently lacks an authentication mechanism and should not be deployed on public networks.
+Note: The custom platform enterprise console uses server-side sessions, CSRF protection and role-based authorization. It is still intended for trusted internal networks; do not expose it directly to the public Internet before completing deployment hardening and release-candidate acceptance.
 
 For more information, see: [https://tencent.github.io/AI-Infra-Guard/?menu=getting-started](https://tencent.github.io/AI-Infra-Guard/?menu=getting-started)
 

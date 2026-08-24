@@ -3,11 +3,15 @@ package audit
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"sort"
+	"strings"
 	"sync"
+	"unicode"
 
+	"github.com/Juneoww/AIG_Custom/internal/platform/identity"
 	"github.com/Juneoww/AIG_Custom/internal/platform/txcontext"
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
@@ -16,6 +20,15 @@ import (
 type Repository interface {
 	Append(context.Context, *Event) error
 	List(context.Context, Filter) ([]Event, error)
+}
+
+type PageFilter struct {
+	Filter
+	Offset int
+}
+
+type pageRepository interface {
+	ListPage(context.Context, PageFilter) ([]Event, int64, error)
 }
 
 type CompletionRepository interface {
@@ -32,6 +45,7 @@ var (
 	ErrCompletionConflict = errors.New("审计完成投递状态冲突")
 	ErrCompletionNotReady = errors.New("审计完成投递尚未就绪")
 	ErrEventAlreadyExists = errors.New("审计事件已存在")
+	ErrInvalidPagination  = errors.New("审计分页参数无效")
 )
 
 type GormRepository struct{ db *gorm.DB }
@@ -60,7 +74,27 @@ func (repository *GormRepository) Append(ctx context.Context, event *Event) erro
 }
 
 func (repository *GormRepository) List(ctx context.Context, filter Filter) ([]Event, error) {
-	query := txcontext.Gorm(ctx, repository.db).Model(&Event{}).Order("occurred_at ASC, id ASC")
+	query := applyEventFilter(txcontext.Gorm(ctx, repository.db).Model(&Event{}), filter).Order("occurred_at ASC, id ASC")
+	query = query.Limit(normalizedLimit(filter.Limit))
+	var events []Event
+	return events, query.Find(&events).Error
+}
+
+func (repository *GormRepository) ListPage(ctx context.Context, filter PageFilter) ([]Event, int64, error) {
+	query := applyEventFilter(txcontext.Gorm(ctx, repository.db).Model(&Event{}), filter.Filter)
+	var total int64
+	if err := query.Count(&total).Error; err != nil {
+		return nil, 0, err
+	}
+	var events []Event
+	err := query.Select(
+		"id", "occurred_at", "actor_user_id", "actor_username", "actor_role", "action", "resource_type", "resource_id",
+		"outcome", "client_ip", "request_id", "metadata",
+	).Order("occurred_at DESC, id DESC").Limit(filter.Limit).Offset(filter.Offset).Find(&events).Error
+	return events, total, err
+}
+
+func applyEventFilter(query *gorm.DB, filter Filter) *gorm.DB {
 	if filter.Action != "" {
 		query = query.Where("action = ?", filter.Action)
 	}
@@ -73,9 +107,7 @@ func (repository *GormRepository) List(ctx context.Context, filter Filter) ([]Ev
 	if filter.ResourceID != "" {
 		query = query.Where("resource_id = ?", filter.ResourceID)
 	}
-	query = query.Limit(normalizedLimit(filter.Limit))
-	var events []Event
-	return events, query.Find(&events).Error
+	return query
 }
 
 func (repository *GormRepository) EnqueueCompletion(ctx context.Context, completion *CompletionOutbox) error {
@@ -322,6 +354,152 @@ func (repository *MemoryRepository) List(_ context.Context, filter Filter) ([]Ev
 		}
 	}
 	return events, nil
+}
+
+func (repository *MemoryRepository) ListPage(_ context.Context, filter PageFilter) ([]Event, int64, error) {
+	repository.mu.Lock()
+	defer repository.mu.Unlock()
+	events := make([]Event, 0, len(repository.events))
+	for _, event := range repository.events {
+		if filter.Action != "" && event.Action != filter.Action ||
+			filter.ActorUserID != "" && event.ActorUserID != filter.ActorUserID ||
+			filter.ResourceType != "" && event.ResourceType != filter.ResourceType ||
+			filter.ResourceID != "" && event.ResourceID != filter.ResourceID {
+			continue
+		}
+		copy := event
+		copy.Metadata = append([]byte(nil), event.Metadata...)
+		events = append(events, copy)
+	}
+	sort.Slice(events, func(left, right int) bool {
+		if events[left].OccurredAt.Equal(events[right].OccurredAt) {
+			return events[left].ID > events[right].ID
+		}
+		return events[left].OccurredAt.After(events[right].OccurredAt)
+	})
+	total := int64(len(events))
+	if filter.Offset >= len(events) {
+		return []Event{}, total, nil
+	}
+	if filter.Offset > 0 {
+		events = events[filter.Offset:]
+	}
+	if filter.Limit > 0 && len(events) > filter.Limit {
+		events = events[:filter.Limit]
+	}
+	return events, total, nil
+}
+
+func (service *Service) QueryPage(ctx context.Context, subject identity.Subject, filter Filter, page, pageSize int) ([]Event, int64, error) {
+	if !identity.HasAnyRole(subject, identity.RoleAdmin, identity.RoleAuditor) {
+		return nil, 0, ErrForbidden
+	}
+	if page < 1 || page > 1000 || pageSize < 1 || pageSize > 100 {
+		return nil, 0, ErrInvalidPagination
+	}
+	repository, ok := service.repository.(pageRepository)
+	if !ok {
+		return nil, 0, errors.New("审计仓库不支持分页查询")
+	}
+	filter.Limit = pageSize
+	events, total, err := repository.ListPage(ctx, PageFilter{Filter: filter, Offset: (page - 1) * pageSize})
+	if err != nil {
+		return nil, 0, err
+	}
+	for index := range events {
+		metadata := map[string]any{}
+		if len(events[index].Metadata) != 0 && json.Unmarshal(events[index].Metadata, &metadata) != nil {
+			return nil, 0, errors.New("审计元数据无效")
+		}
+		browserMetadata, ok := sanitizeBrowserValue(metadata).(map[string]any)
+		if !ok {
+			return nil, 0, errors.New("审计元数据无效")
+		}
+		events[index].Metadata, err = sanitizedMetadata(browserMetadata)
+		if err != nil {
+			return nil, 0, errors.New("审计元数据无效")
+		}
+	}
+	return events, total, nil
+}
+
+func sanitizeBrowserValue(value any) any {
+	switch typed := value.(type) {
+	case map[string]any:
+		out := make(map[string]any, len(typed))
+		for key, nested := range typed {
+			if sensitiveBrowserKey(key) {
+				out[key] = RedactedValue
+				continue
+			}
+			out[key] = sanitizeBrowserValue(nested)
+		}
+		return out
+	case []any:
+		out := make([]any, len(typed))
+		for index := range typed {
+			out[index] = sanitizeBrowserValue(typed[index])
+		}
+		return out
+	default:
+		return value
+	}
+}
+
+func sensitiveBrowserKey(key string) bool {
+	tokens := browserKeyTokens(key)
+	if strings.Join(tokens, "") == "errorcount" {
+		return false
+	}
+	hasAPI, hasPrivate, hasKey := false, false, false
+	for _, token := range tokens {
+		switch token {
+		case "raw", "rawresult", "rawdata", "rawpayload", "rawresponse",
+			"error", "errors", "internalerror", "errormessage", "errorstack",
+			"path", "paths", "configpath", "filepath", "stack", "stacktrace",
+			"token", "tokens", "apitoken", "accesstoken", "refreshtoken", "secret", "secrets", "clientsecret",
+			"password", "passwords", "passwordhash", "credential", "credentials",
+			"header", "headers", "authorization", "authorizationheader", "authorizationheaders", "cookie", "cookies",
+			"content", "contents", "requestcontent", "responsecontent",
+			"apikey", "apikeys", "privatekey", "privatekeys", "requestheader", "requestheaders":
+			return true
+		case "api":
+			hasAPI = true
+		case "private":
+			hasPrivate = true
+		case "key", "keys":
+			hasKey = true
+		}
+	}
+	return hasKey && (hasAPI || hasPrivate)
+}
+
+func browserKeyTokens(key string) []string {
+	runes := []rune(key)
+	tokens := make([]string, 0, 4)
+	current := make([]rune, 0, len(runes))
+	flush := func() {
+		if len(current) != 0 {
+			tokens = append(tokens, string(current))
+			current = current[:0]
+		}
+	}
+	for index, char := range runes {
+		if !unicode.IsLetter(char) && !unicode.IsDigit(char) {
+			flush()
+			continue
+		}
+		if unicode.IsUpper(char) && len(current) != 0 {
+			previous := runes[index-1]
+			nextIsLower := index+1 < len(runes) && unicode.IsLower(runes[index+1])
+			if unicode.IsLower(previous) || unicode.IsDigit(previous) || unicode.IsUpper(previous) && nextIsLower {
+				flush()
+			}
+		}
+		current = append(current, unicode.ToLower(char))
+	}
+	flush()
+	return tokens
 }
 
 func normalizedLimit(limit int) int {

@@ -1,0 +1,147 @@
+name: aig-console-e2e
+
+services:
+  postgres-e2e:
+    image: postgres:16.4-alpine
+    environment:
+      POSTGRES_DB: aig_e2e
+      POSTGRES_USER: aig_e2e
+      POSTGRES_PASSWORD: aig_e2e
+    tmpfs: [/var/lib/postgresql/data]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U aig_e2e -d aig_e2e"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  setup-e2e:
+    image: aig-console-e2e-platform
+    build: { context: ../.., dockerfile: Dockerfile, target: migrate }
+    entrypoint: ["/bin/sh", "-c"]
+    command: ["/app/ai-infra-guard migrate && /app/ai-infra-guard bootstrap-admin && touch /tmp/e2e-platform-ready && exec tail -f /dev/null"]
+    environment: &platform_environment
+      APP_ENV: test
+      ALLOW_INSECURE_TEST_COOKIE: "true"
+      DB_DRIVER: postgres
+      DB_DSN: postgres://aig_e2e:aig_e2e@postgres-e2e:5432/aig_e2e?sslmode=disable
+      MODEL_MASTER_KEY_ID: e2e
+      MODEL_MASTER_KEY: MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=
+      UPLOAD_DIR: /tmp/uploads
+      AIG_AGENT_TOKEN: e2e-agent-token
+      AIG_BOOTSTRAP_ADMIN_USERNAME: e2e-admin
+      AIG_BOOTSTRAP_ADMIN_PASSWORD: e2e-admin-bootstrap
+    depends_on:
+      postgres-e2e: { condition: service_healthy }
+    healthcheck:
+      test: ["CMD-SHELL", "test -f /tmp/e2e-platform-ready"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  platform-e2e:
+    image: aig-console-e2e-platform
+    command: ["webserver", "--server", "0.0.0.0:8088"]
+    environment: *platform_environment
+    depends_on:
+      setup-e2e: { condition: service_healthy }
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8088/api/v1/auth/csrf >/dev/null"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  seed-e2e:
+    image: mcr.microsoft.com/powershell:7.5-ubuntu-22.04
+    volumes:
+      - ../../scripts/seed-console-e2e.ps1:/seed/seed-console-e2e.ps1:ro
+    environment:
+      AIG_E2E_DSN: postgres://aig_e2e:aig_e2e@postgres-e2e:5432/aig_e2e?sslmode=disable
+      AIG_E2E_PLATFORM_URL: http://platform-e2e:8088
+    command: ["pwsh", "-NoProfile", "-Command", "& /seed/seed-console-e2e.ps1; New-Item -ItemType File -Path /tmp/e2e-accounts-ready -Force | Out-Null; while ($$true) { Start-Sleep -Seconds 3600 }"]
+    depends_on:
+      platform-e2e: { condition: service_healthy }
+    healthcheck:
+      test: ["CMD-SHELL", "test -f /tmp/e2e-accounts-ready"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  fixture-e2e:
+    image: postgres:16.4-alpine
+    volumes:
+      - ../../scripts/seed-console-e2e.sql:/seed/seed-console-e2e.sql:ro
+    environment:
+      PGPASSWORD: aig_e2e
+    entrypoint: ["/bin/sh", "-c"]
+    command: ["psql -v ON_ERROR_STOP=1 -h postgres-e2e -U aig_e2e -d aig_e2e -f /seed/seed-console-e2e.sql && touch /tmp/e2e-fixture-ready && exec tail -f /dev/null"]
+    depends_on:
+      seed-e2e: { condition: service_healthy }
+    healthcheck:
+      test: ["CMD-SHELL", "test -f /tmp/e2e-fixture-ready"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  console-vite:
+    image: node:22.18.0-alpine
+    working_dir: /workspace
+    environment:
+      CI: "true"
+      AIG_E2E_API_TARGET: http://platform-e2e:8088
+      PNPM_HOME: /pnpm
+      npm_config_store_dir: /pnpm/store
+      AIG_DROID_FONT_SOURCE: /workspace/.font-sources/DroidSansFallbackFull.ttf
+      AIG_DROID_LICENSE_SOURCE: /workspace/.font-sources/DROID_FONT_LICENSE.txt
+      AIG_APACHE_LICENSE_SOURCE: /workspace/.font-sources/APACHE-2.0.txt
+    volumes:
+      - ../../web/console/package.json:/workspace/package.json:ro
+      - ../../web/console/pnpm-lock.yaml:/workspace/pnpm-lock.yaml:ro
+      - ../../web/console/tsconfig.json:/workspace/tsconfig.json:ro
+      - ../../web/console/tsconfig.app.json:/workspace/tsconfig.app.json:ro
+      - ../../web/console/vite.config.ts:/workspace/vite.config.ts:ro
+      - ../../web/console/vitest.setup.ts:/workspace/vitest.setup.ts:ro
+      - ../../web/console/playwright.config.ts:/workspace/playwright.config.ts:ro
+      - ../../web/console/index.html:/workspace/index.html:ro
+      - ../../web/console/src:/workspace/src:ro
+      - ../../web/console/scripts:/workspace/scripts:ro
+      - ../../web/console/assets:/workspace/assets:ro
+      - ../../internal/platform/reports/assets/DroidSansFallbackFull.ttf:/workspace/.font-sources/DroidSansFallbackFull.ttf:ro
+      - ../../internal/platform/reports/assets/DROID_FONT_LICENSE.txt:/workspace/.font-sources/DROID_FONT_LICENSE.txt:ro
+      - ../../LICENSE:/workspace/.font-sources/APACHE-2.0.txt:ro
+      - /workspace/node_modules
+      - /pnpm/store
+    command: ["/bin/sh", "-ec", "corepack enable && pnpm install --frozen-lockfile && pnpm dev --host 0.0.0.0 --strictPort"]
+    depends_on:
+      fixture-e2e: { condition: service_healthy }
+    healthcheck:
+      test: ["CMD-SHELL", "node -e \"fetch('http://127.0.0.1:4173').then(r => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))\""]
+      start_period: 90s
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  console-e2e:
+    image: aig-console-e2e-browser
+    build: { context: ../.., dockerfile: deploy/compose/Dockerfile.console-e2e }
+    working_dir: /workspace
+    environment:
+      CI: "true"
+      PLAYWRIGHT_BASE_URL: http://console-vite:4173
+      PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH: /usr/bin/chromium-browser
+      PNPM_HOME: /pnpm
+      npm_config_store_dir: /pnpm/store
+    volumes:
+      - ../../web/console/package.json:/workspace/package.json:ro
+      - ../../web/console/pnpm-lock.yaml:/workspace/pnpm-lock.yaml:ro
+      - ../../web/console/tsconfig.json:/workspace/tsconfig.json:ro
+      - ../../web/console/tsconfig.app.json:/workspace/tsconfig.app.json:ro
+      - ../../web/console/vite.config.ts:/workspace/vite.config.ts:ro
+      - ../../web/console/playwright.config.ts:/workspace/playwright.config.ts:ro
+      - ../../web/console/index.html:/workspace/index.html:ro
+      - ../../web/console/src:/workspace/src:ro
+      - ../../web/console/e2e:/workspace/e2e:ro
+      - /workspace/node_modules
+      - /pnpm/store
+    command: ["/bin/sh", "-ec", "corepack enable && pnpm install --frozen-lockfile && pnpm exec playwright test --workers=1"]
+    depends_on:
+      console-vite: { condition: service_healthy }

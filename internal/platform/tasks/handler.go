@@ -16,6 +16,12 @@ type Handler struct {
 	attachments *AttachmentService
 }
 
+const (
+	defaultTaskPageSize = 20
+	maxTaskPageSize     = 100
+	maxTaskPage         = 1000
+)
+
 func NewHandler(service *Service, attachments ...*AttachmentService) *Handler {
 	handler := &Handler{service: service}
 	if len(attachments) > 0 {
@@ -30,6 +36,7 @@ func (handler *Handler) Register(group *gin.RouterGroup) {
 		group.POST("/attachments/chunked", handler.beginChunkedAttachment)
 		group.POST("/attachments/:attachmentID/chunks", handler.uploadAttachmentChunk)
 		group.POST("/attachments/:attachmentID/merge", handler.mergeAttachment)
+		group.DELETE("/attachments/:attachmentID", handler.abortAttachment)
 		group.GET("/attachments/:attachmentID/download", handler.downloadAttachment)
 	}
 	group.POST("", handler.create)
@@ -45,14 +52,76 @@ func (handler *Handler) list(c *gin.Context) {
 		c.Status(http.StatusUnauthorized)
 		return
 	}
-	views, err := handler.service.List(c.Request.Context(), subject)
+	page, pageSize, err := taskPage(c)
+	if err != nil {
+		respondTaskError(c, ErrInvalid)
+		return
+	}
+	filters, err := taskFilters(c)
+	if err != nil {
+		respondTaskError(c, ErrInvalid)
+		return
+	}
+	response, err := handler.service.Browse(c.Request.Context(), subject, page, pageSize, filters)
 	switch {
 	case errors.Is(err, ErrForbidden):
-		c.Status(http.StatusForbidden)
+		respondTaskError(c, err)
 	case err != nil:
-		c.Status(http.StatusInternalServerError)
+		respondTaskError(c, err)
 	default:
-		c.JSON(http.StatusOK, views)
+		c.JSON(http.StatusOK, response)
+	}
+}
+
+func taskFilters(c *gin.Context) (TaskListFilters, error) {
+	filters := TaskListFilters{}
+	if values, exists := c.GetQueryArray("status"); exists {
+		if len(values) != 1 || !isBrowserTaskStatus(Status(values[0])) {
+			return TaskListFilters{}, ErrInvalid
+		}
+		filters.Status = Status(values[0])
+	}
+	if values, exists := c.GetQueryArray("task_type"); exists {
+		if len(values) != 1 || !isBrowserTaskType(values[0]) {
+			return TaskListFilters{}, ErrInvalid
+		}
+		filters.TaskType = values[0]
+	}
+	return filters, nil
+}
+
+func taskPage(c *gin.Context) (int, int, error) {
+	page, pageSize := 1, defaultTaskPageSize
+	if raw := c.Query("page"); raw != "" {
+		value, err := strconv.Atoi(raw)
+		if err != nil || value < 1 || value > maxTaskPage {
+			return 0, 0, ErrInvalid
+		}
+		page = value
+	}
+	if raw := c.Query("page_size"); raw != "" {
+		value, err := strconv.Atoi(raw)
+		if err != nil || value < 1 {
+			return 0, 0, ErrInvalid
+		}
+		if value > maxTaskPageSize {
+			value = maxTaskPageSize
+		}
+		pageSize = value
+	}
+	return page, pageSize, nil
+}
+
+func respondTaskError(c *gin.Context, err error) {
+	switch {
+	case errors.Is(err, ErrForbidden):
+		c.JSON(http.StatusForbidden, gin.H{"error": "forbidden"})
+	case errors.Is(err, ErrNotFound):
+		c.JSON(http.StatusNotFound, gin.H{"error": "not found"})
+	case errors.Is(err, ErrInvalid):
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid task request"})
+	default:
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "task request failed"})
 	}
 }
 
@@ -156,6 +225,19 @@ func (handler *Handler) mergeAttachment(c *gin.Context) {
 	c.JSON(http.StatusOK, view)
 }
 
+func (handler *Handler) abortAttachment(c *gin.Context) {
+	subject, ok := identity.CurrentSubject(c)
+	if !ok {
+		c.Status(http.StatusUnauthorized)
+		return
+	}
+	if err := handler.attachments.Abort(c.Request.Context(), subject, c.Param("attachmentID")); err != nil {
+		respondAttachmentError(c, err)
+		return
+	}
+	c.Status(http.StatusNoContent)
+}
+
 func (handler *Handler) downloadAttachment(c *gin.Context) {
 	subject, ok := identity.CurrentSubject(c)
 	if !ok {
@@ -189,24 +271,12 @@ func respondAttachmentError(c *gin.Context, err error) {
 }
 
 func (handler *Handler) result(c *gin.Context) {
-	subject, ok := identity.CurrentSubject(c)
+	_, ok := identity.CurrentSubject(c)
 	if !ok {
 		c.Status(http.StatusUnauthorized)
 		return
 	}
-	result, err := handler.service.Result(c.Request.Context(), subject, c.Param("taskID"))
-	switch {
-	case errors.Is(err, ErrForbidden):
-		c.Status(http.StatusForbidden)
-	case errors.Is(err, ErrNotFound):
-		c.Status(http.StatusNotFound)
-	case errors.Is(err, ErrResultNotReady):
-		c.Status(http.StatusConflict)
-	case err != nil:
-		c.Status(http.StatusInternalServerError)
-	default:
-		c.Data(http.StatusOK, "application/json", result)
-	}
+	c.JSON(http.StatusGone, gin.H{"error": "task result route retired"})
 }
 
 func (handler *Handler) create(c *gin.Context) {
@@ -215,24 +285,28 @@ func (handler *Handler) create(c *gin.Context) {
 		c.Status(http.StatusUnauthorized)
 		return
 	}
+	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, 256<<10)
 	var input CreateInput
 	if c.ShouldBindJSON(&input) != nil {
-		c.Status(http.StatusBadRequest)
+		c.JSON(http.StatusBadRequest, TaskCreateBadRequestResponse{Error: "invalid task request"})
 		return
 	}
 	input.IdempotencyKey = c.GetHeader("Idempotency-Key")
 	view, err := handler.service.Create(c.Request.Context(), subject, input)
+	detail := taskDetailOfView(view)
 	switch {
 	case errors.Is(err, ErrInvalid):
-		c.Status(http.StatusBadRequest)
+		c.JSON(http.StatusBadRequest, TaskCreateBadRequestResponse{Error: "invalid task request"})
+	case errors.Is(err, ErrNotFound), errors.Is(err, ErrAttachmentNotReady):
+		c.JSON(http.StatusBadRequest, TaskCreateBadRequestResponse{Error: "attachment unavailable"})
 	case errors.Is(err, ErrForbidden):
 		c.Status(http.StatusForbidden)
 	case errors.Is(err, ErrDispatchFailed):
-		c.JSON(http.StatusServiceUnavailable, view)
+		c.JSON(http.StatusServiceUnavailable, TaskCreateErrorResponse{Error: "task dispatch unavailable", Task: detail})
 	case err != nil:
 		c.Status(http.StatusInternalServerError)
 	default:
-		c.JSON(http.StatusAccepted, view)
+		c.JSON(http.StatusAccepted, detail)
 	}
 }
 
@@ -242,16 +316,16 @@ func (handler *Handler) get(c *gin.Context) {
 		c.Status(http.StatusUnauthorized)
 		return
 	}
-	view, err := handler.service.Get(c.Request.Context(), subject, c.Param("taskID"))
+	detail, err := handler.service.BrowserGet(c.Request.Context(), subject, c.Param("taskID"))
 	switch {
 	case errors.Is(err, ErrForbidden):
-		c.Status(http.StatusForbidden)
+		respondTaskError(c, err)
 	case errors.Is(err, ErrNotFound):
-		c.Status(http.StatusNotFound)
+		respondTaskError(c, err)
 	case err != nil:
-		c.Status(http.StatusInternalServerError)
+		respondTaskError(c, err)
 	default:
-		c.JSON(http.StatusOK, view)
+		c.JSON(http.StatusOK, detail)
 	}
 }
 
