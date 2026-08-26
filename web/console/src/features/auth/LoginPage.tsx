@@ -15,6 +15,7 @@ import {
   MessageBarTitle,
   Text,
   makeStyles,
+  mergeClasses,
 } from '@fluentui/react-components'
 
 import { ApiError, NetworkError } from '../../shared/api/errors'
@@ -160,7 +161,7 @@ const useStyles = makeStyles({
   kicker: {
     display: 'block',
     marginBottom: '22px',
-    color: '#657B69',
+    color: '#526757',
     fontSize: '11px',
     lineHeight: '16px',
     fontWeight: 700,
@@ -222,7 +223,7 @@ const useStyles = makeStyles({
   pillarCopy: {
     display: 'block',
     marginTop: '8px',
-    color: '#72797A',
+    color: '#536061',
     fontSize: '12px',
     lineHeight: 1.55,
   },
@@ -303,7 +304,7 @@ const useStyles = makeStyles({
     gap: '3px',
   },
   authEyebrow: {
-    color: '#8B7656',
+    color: '#705A3D',
     fontSize: '10px',
     lineHeight: '14px',
     fontWeight: 700,
@@ -354,6 +355,14 @@ const useStyles = makeStyles({
     borderRadius: '8px',
     backgroundColor: '#FEFDFB',
   },
+  fieldInputDisabled: {
+    borderTopColor: '#C7CEC5',
+    borderRightColor: '#C7CEC5',
+    borderBottomColor: '#C7CEC5',
+    borderLeftColor: '#C7CEC5',
+    backgroundColor: '#ECEFEA',
+    color: '#59655F',
+  },
   actions: {
     display: 'grid',
     rowGap: '10px',
@@ -367,6 +376,14 @@ const useStyles = makeStyles({
     fontWeight: 650,
     ':hover': {
       backgroundColor: '#22354E',
+    },
+    ':disabled': {
+      backgroundColor: '#D8DDD5',
+      color: '#4F5C54',
+    },
+    ':disabled:hover': {
+      backgroundColor: '#D8DDD5',
+      color: '#4F5C54',
     },
   },
   resetLink: {
@@ -391,7 +408,7 @@ const useStyles = makeStyles({
     alignItems: 'center',
     gap: '9px',
     borderTop: '1px solid rgba(69, 80, 82, 0.12)',
-    color: '#777D7A',
+    color: '#596663',
     fontSize: '11px',
     lineHeight: 1.5,
   },
@@ -461,7 +478,7 @@ export function LoginPage() {
           <section aria-label="平台治理能力" className={styles.story}>
             <div className={styles.storyContent}>
               <Text className={styles.kicker}>TRUSTWORTHY AI OPERATIONS</Text>
-              <Text as="h2" className={styles.storyHeading}>
+              <Text as="p" className={styles.storyHeading}>
                 让每一次 AI 决策，都处于清晰的治理之中。
               </Text>
               <Text className={styles.storyCopy}>
@@ -530,7 +547,7 @@ export function LoginPage() {
               <Field label="用户名" required>
                 <Input
                   autoComplete="username"
-                  className={styles.fieldInput}
+                  className={mergeClasses(styles.fieldInput, submitting && styles.fieldInputDisabled)}
                   disabled={submitting}
                   name="username"
                   value={username}
@@ -540,7 +557,7 @@ export function LoginPage() {
               <Field label="密码" required>
                 <Input
                   autoComplete="current-password"
-                  className={styles.fieldInput}
+                  className={mergeClasses(styles.fieldInput, submitting && styles.fieldInputDisabled)}
                   disabled={submitting}
                   name="password"
                   type="password"
