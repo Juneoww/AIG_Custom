@@ -119,7 +119,7 @@ describe('App production tree', () => {
     vi.stubGlobal('fetch', fetchMock)
     renderApp({ status: 'anonymous' }, '/login')
 
-    expect((await screen.findAllByLabelText('华北区域 AI 安全监管平台')).length).toBeGreaterThanOrEqual(2)
+    expect(await screen.findAllByLabelText('华北区域 AI 安全监管平台')).toHaveLength(2)
     expect(fetchMock).toHaveBeenCalledTimes(1)
     expect(screen.queryByText(/^A\.I\.G$/)).not.toBeInTheDocument()
   })
@@ -143,7 +143,7 @@ describe('App production tree', () => {
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(null, { status: 500 })))
     renderApp({ status: 'anonymous' }, '/login')
 
-    expect((await screen.findAllByLabelText('AI 安全治理平台')).length).toBeGreaterThanOrEqual(2)
+    expect(await screen.findAllByLabelText('AI 安全治理平台')).toHaveLength(2)
   })
 
   it('按真实生产顺序提供主题、查询、会话与浏览器路由上下文', () => {
