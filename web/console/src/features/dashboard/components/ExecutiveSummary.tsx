@@ -43,15 +43,15 @@ interface ExecutiveSummaryProps {
 const useStyles = makeStyles({
   summary: {
     padding: tokens.spacingVerticalXL,
-    border: '1px solid #ddd6cd',
+    border: `1px solid ${tokens.colorNeutralStroke1}`,
     borderRadius: tokens.borderRadiusLarge,
-    backgroundColor: '#fffcf8',
-    boxShadow: '0 2px 8px rgba(22, 44, 68, 0.08)',
+    backgroundColor: tokens.colorNeutralBackground1,
+    boxShadow: tokens.shadow4,
   },
   title: {
     display: 'block',
     marginBottom: tokens.spacingVerticalL,
-    color: '#162c44',
+    color: tokens.colorNeutralForeground1,
     fontSize: tokens.fontSizeBase500,
     lineHeight: tokens.lineHeightBase500,
     fontWeight: tokens.fontWeightSemibold,
@@ -69,7 +69,7 @@ const useStyles = makeStyles({
   },
   axisTitle: {
     margin: `0 0 ${tokens.spacingVerticalM} 0`,
-    color: '#162c44',
+    color: tokens.colorNeutralForeground1,
     fontSize: tokens.fontSizeBase400,
     lineHeight: tokens.lineHeightBase400,
     fontWeight: tokens.fontWeightSemibold,
@@ -85,7 +85,7 @@ const useStyles = makeStyles({
     justifyContent: 'space-between',
     gap: tokens.spacingHorizontalM,
     paddingTop: tokens.spacingVerticalXS,
-    borderTop: '1px solid #ebe5dd',
+    borderTop: `1px solid ${tokens.colorNeutralStroke2}`,
   },
   label: {
     color: tokens.colorNeutralForeground2,
@@ -93,17 +93,17 @@ const useStyles = makeStyles({
   },
   value: {
     margin: 0,
-    color: '#162c44',
+    color: tokens.colorNeutralForeground1,
     fontSize: tokens.fontSizeBase500,
     lineHeight: tokens.lineHeightBase500,
     fontWeight: tokens.fontWeightSemibold,
     fontVariantNumeric: 'tabular-nums',
   },
   highRisk: {
-    color: '#966444',
+    color: tokens.colorPaletteDarkOrangeForeground1,
   },
   completedScansValue: {
-    color: '#4f6b5a',
+    color: tokens.colorPaletteGreenForeground1,
   },
   notice: {
     display: 'block',
