@@ -28,10 +28,10 @@ import (
 	"strings"
 )
 
-const maxTargetExpressions = 4096
+const maxTargetExpressions = 65536
 
 // ErrTooManyTargets indicates that expansion would exceed the batch limit.
-var ErrTooManyTargets = errors.New("target expansion exceeds 4096 targets")
+var ErrTooManyTargets = errors.New("target expansion exceeds 65536 targets")
 
 // ParseTargets trims, expands, and deduplicates a batch of target expressions.
 // IPv4 CIDRs, complete IPv4 ranges, and trailing IPv4 wildcards are expanded.
@@ -51,7 +51,7 @@ func ParseTargets(expressions []string) ([]string, error) {
 		switch {
 		case isCIDRExpression(target):
 			expanded, err = expandCIDR(target)
-		case strings.Contains(target, "-"):
+		case isRangeExpression(target):
 			expanded, err = expandRange(target)
 		case strings.Contains(target, "*"):
 			expanded, err = expandWildcard(target)
@@ -76,6 +76,23 @@ func ParseTargets(expressions []string) ([]string, error) {
 		}
 	}
 	return result, nil
+}
+
+func isRangeExpression(target string) bool {
+	parts := strings.Split(target, "-")
+	if len(parts) != 2 || !strings.Contains(target, ".") {
+		return false
+	}
+	return containsDigit(parts[0]) && containsDigit(parts[1])
+}
+
+func containsDigit(value string) bool {
+	for _, char := range value {
+		if char >= '0' && char <= '9' {
+			return true
+		}
+	}
+	return false
 }
 
 func isCIDRExpression(target string) bool {
@@ -192,10 +209,6 @@ func Targets(target string) chan string {
 	go func() {
 		defer close(results)
 
-		// Preserve the legacy API's best-effort rejection of wildcard/range input.
-		if strings.ContainsAny(target, "*-") {
-			return
-		}
 		// Legacy best-effort API: parsing errors produce an empty channel.
 		parsed, err := ParseTargets([]string{target})
 		if err != nil {

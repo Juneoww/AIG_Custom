@@ -66,8 +66,8 @@ func TestParseTargets_RejectsInvalidExpressions(t *testing.T) {
 	}
 }
 
-func TestParseTargets_RejectsBatchOver4096(t *testing.T) {
-	_, err := ParseTargets([]string{"10.0.0.0/16"})
+func TestParseTargets_RejectsBatchOver65536(t *testing.T) {
+	_, err := ParseTargets([]string{"10.0.0.0/15"})
 	assert.Error(t, err)
 }
 
@@ -88,12 +88,11 @@ func TestTargets_WithSpace(t *testing.T) {
 	assert.Empty(t, result, "包含空格的目标应返回空结果")
 }
 
-// TestTargets_WithStar 测试包含星号的目标返回空 channel
+// TestTargets_WithStar 测试尾部通配符展开
 func TestTargets_WithStar(t *testing.T) {
 	ch := Targets("192.168.1.*")
 	result := collectTargets(ch)
-	// 包含 * 时应返回空
-	assert.Empty(t, result, "包含 * 的目标应返回空结果")
+	assert.Len(t, result, 256, "尾部通配符应展开为 256 个结果")
 }
 
 // TestTargets_SingleIP 测试单个 IP 直接返回该 IP
@@ -112,6 +111,11 @@ func TestTargets_Hostname(t *testing.T) {
 	// 非 CIDR、无特殊字符时应直接返回
 	require.Len(t, result, 1, "主机名应返回一个结果")
 	assert.Equal(t, "example.com", result[0], "返回的主机名应与输入一致")
+}
+
+func TestTargets_HyphenatedHostname(t *testing.T) {
+	result := collectTargets(Targets("api-prod.example.com"))
+	require.Equal(t, []string{"api-prod.example.com"}, result)
 }
 
 // TestTargets_CIDR_Small 测试 /30 CIDR 展开 4 个 IP
