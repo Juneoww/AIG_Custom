@@ -91,7 +91,9 @@ type ScanRequest struct {
 }
 
 type AIInfraScanAgent struct {
-	Server string
+	Server       string
+	downloadFile func(server, sessionID, uri, destination string) error
+	nmapScan     func(target, ports string) (*utils.NmapRun, error)
 }
 
 func logAgentAttachmentTransfer(action, sessionID, taskType string) {
@@ -265,45 +267,55 @@ func initTexts(language string) scanTexts {
 func (t *AIInfraScanAgent) prepareTargets(request TaskRequest, reqScan ScanRequest, texts scanTexts) ([]string, error) {
 	targets := strings.Split(strings.TrimSpace(request.Content), "\n")
 
-	if len(request.Attachments) == 0 {
-		return targets, nil
-	}
-
-	tempDir := "temp_uploads"
-	if err := os.MkdirAll(tempDir, 0755); err != nil {
-		gologger.Errorf("%s: %v", texts.createTempDir, err)
-		return nil, err
-	}
-
-	for _, file := range request.Attachments {
-		logAgentAttachmentTransfer("download_started", request.SessionId, TaskTypeAIInfraScan)
-		fileName := filepath.Join(tempDir, fmt.Sprintf("tmp-%d%s", time.Now().UnixMicro(), filepath.Ext(file)))
-		// Verify the path is within tempDir to prevent path traversal
-		absTempDir, _ := filepath.Abs(tempDir)
-		absFileName, _ := filepath.Abs(fileName)
-		if !strings.HasPrefix(absFileName, absTempDir+string(os.PathSeparator)) {
-			logAgentAttachmentFailure("download_rejected", request.SessionId, TaskTypeAIInfraScan, nil)
-			return nil, fmt.Errorf("非法文件路径")
-		}
-		if err := utils.DownloadFile(t.Server, request.SessionId, file, fileName); err != nil {
-			logAgentAttachmentFailure("download_failed", request.SessionId, TaskTypeAIInfraScan, err)
+	if len(request.Attachments) > 0 {
+		tempDir := "temp_uploads"
+		if err := os.MkdirAll(tempDir, 0755); err != nil {
+			gologger.Errorf("%s: %v", texts.createTempDir, err)
 			return nil, err
 		}
-		lines, err := os.ReadFile(fileName)
-		if err != nil {
-			logAgentAttachmentFailure("read_failed", request.SessionId, TaskTypeAIInfraScan, err)
-			return nil, err
+		downloadFile := t.downloadFile
+		if downloadFile == nil {
+			downloadFile = utils.DownloadFile
 		}
-		targets = append(targets, strings.Split(string(lines), "\n")...)
+
+		for _, file := range request.Attachments {
+			logAgentAttachmentTransfer("download_started", request.SessionId, TaskTypeAIInfraScan)
+			fileName := filepath.Join(tempDir, fmt.Sprintf("tmp-%d%s", time.Now().UnixMicro(), filepath.Ext(file)))
+			// Verify the path is within tempDir to prevent path traversal
+			absTempDir, _ := filepath.Abs(tempDir)
+			absFileName, _ := filepath.Abs(fileName)
+			if !strings.HasPrefix(absFileName, absTempDir+string(os.PathSeparator)) {
+				logAgentAttachmentFailure("download_rejected", request.SessionId, TaskTypeAIInfraScan, nil)
+				return nil, fmt.Errorf("非法文件路径")
+			}
+			if err := downloadFile(t.Server, request.SessionId, file, fileName); err != nil {
+				logAgentAttachmentFailure("download_failed", request.SessionId, TaskTypeAIInfraScan, err)
+				return nil, err
+			}
+			lines, err := os.ReadFile(fileName)
+			if err != nil {
+				logAgentAttachmentFailure("read_failed", request.SessionId, TaskTypeAIInfraScan, err)
+				return nil, err
+			}
+			targets = append(targets, strings.Split(string(lines), "\n")...)
+		}
 	}
 
-	return targets, nil
+	expanded, err := runner.ParseTargets(targets)
+	if err != nil {
+		return nil, fmt.Errorf("invalid infrastructure scan target expressions")
+	}
+	return expanded, nil
 }
 
 // scanPortsAndPrepareTargets 扫描端口并准备最终目标列表
 func (t *AIInfraScanAgent) scanPortsAndPrepareTargets(targets []string, step01 string, texts scanTexts, callbacks TaskCallbacks) ([]string, error) {
 	finalTargets := []string{}
 	var hosts []string
+	nmapScan := t.nmapScan
+	if nmapScan == nil {
+		nmapScan = utils.NmapScan
+	}
 
 	for _, target := range targets {
 		if iputil.IsIP(target) {
@@ -320,7 +332,7 @@ func (t *AIInfraScanAgent) scanPortsAndPrepareTargets(targets []string, step01 s
 			CreateTool(toolId, texts.nmapTool, SubTaskStatusDoing, texts.portScan, texts.nmapTool, "-T4 -p 11434,1337,7000-9000,18789", ""),
 		})
 
-		portScanResult, err := utils.NmapScan(host, "11434,1337,7000-9000,18789")
+		portScanResult, err := nmapScan(host, "11434,1337,7000-9000,18789")
 		if err != nil {
 			return nil, err
 		}

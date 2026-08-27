@@ -283,6 +283,113 @@ func TestCompletedResultRecoveryProcessesAtMostOneKeysetBatchPerPass(t *testing.
 
 func (engine *recordingEngine) CancelTask(context.Context, string) error { return nil }
 
+func TestCreateAIInfraTargetRangeSucceeds(t *testing.T) {
+	repository := NewMemoryRepository()
+	engine := &recordingEngine{}
+	service := NewService(repository, engine, audit.NewService(audit.NewMemoryRepository()))
+	owner := identity.Subject{UserID: "target-range-owner", Username: "alice", Role: identity.RoleUser}
+
+	created, err := service.Create(context.Background(), owner, CreateInput{
+		IdempotencyKey: "target-range", TaskType: "ai_infra_scan", Content: "192.168.10.2-192.168.10.10",
+	})
+	require.NoError(t, err)
+	assert.Equal(t, "192.168.10.2-192.168.10.10", created.Content)
+	assert.Equal(t, int64(1), engine.submits.Load())
+}
+
+func TestCreateAIInfraTargetValidationRejectsInvalidWildcardAndExpansionLimit(t *testing.T) {
+	tests := []struct {
+		name    string
+		content string
+	}{
+		{name: "partial wildcard", content: "22.*.10.*"},
+		{name: "too many expanded targets", content: "22.2.*.*\n1.1.1.1"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			repository := NewMemoryRepository()
+			engine := &recordingEngine{}
+			service := NewService(repository, engine, audit.NewService(audit.NewMemoryRepository()))
+			owner := identity.Subject{UserID: "target-reject-owner", Username: "alice", Role: identity.RoleUser}
+
+			_, err := service.Create(context.Background(), owner, CreateInput{
+				IdempotencyKey: "target-reject-" + strings.ReplaceAll(test.name, " ", "-"),
+				TaskType:       "ai_infra_scan",
+				Content:        test.content,
+			})
+			require.ErrorIs(t, err, ErrInvalid)
+			stored, listErr := repository.List(context.Background())
+			require.NoError(t, listErr)
+			assert.Empty(t, stored)
+			assert.Zero(t, engine.submits.Load())
+		})
+	}
+}
+
+func TestCreateAIInfraTargetAttachmentExpressionsCombineWithBody(t *testing.T) {
+	repository := NewMemoryRepository()
+	audits := audit.NewService(audit.NewMemoryRepository())
+	attachments, err := NewAttachmentService(repository, AttachmentConfig{
+		UploadDir: t.TempDir(), MaxFileBytes: 2 << 20, MaxChunkBytes: 1 << 20,
+	}, audits)
+	require.NoError(t, err)
+	owner := identity.Subject{UserID: "target-attachment-owner", Username: "alice", Role: identity.RoleUser}
+	attachment, err := attachments.Upload(context.Background(), owner, "targets.txt", strings.NewReader("192.168.10.4-192.168.10.5\n"))
+	require.NoError(t, err)
+	engine := &recordingEngine{}
+	service := NewService(repository, engine, audits)
+	service.SetAttachmentService(attachments)
+
+	created, err := service.Create(context.Background(), owner, CreateInput{
+		IdempotencyKey: "target-attachment", TaskType: "ai_infra_scan", Content: "192.168.10.2-192.168.10.3",
+		AttachmentIDs: []string{attachment.ID},
+	})
+	require.NoError(t, err)
+	assert.Equal(t, "192.168.10.2-192.168.10.3", created.Content, "audit and persisted content retain the raw user expression")
+	assert.Equal(t, int64(1), engine.submits.Load())
+}
+
+func TestCreateAIInfraTargetAttachmentValidationRejectsUnsafeLists(t *testing.T) {
+	tests := []struct {
+		name       string
+		content    string
+		attachment string
+	}{
+		{name: "invalid wildcard", content: "192.168.10.1", attachment: "22.*.10.*"},
+		{name: "combined expansion limit", content: "22.2.*.*", attachment: "1.1.1.1"},
+		{name: "oversized text list", content: "192.168.10.1", attachment: strings.Repeat("x", (1<<20)+1)},
+		{name: "non utf8 text list", content: "192.168.10.1", attachment: string([]byte{0xff, 0xfe})},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			repository := NewMemoryRepository()
+			audits := audit.NewService(audit.NewMemoryRepository())
+			attachments, err := NewAttachmentService(repository, AttachmentConfig{
+				UploadDir: t.TempDir(), MaxFileBytes: 2 << 20, MaxChunkBytes: 1 << 20,
+			}, audits)
+			require.NoError(t, err)
+			owner := identity.Subject{UserID: "target-unsafe-owner", Username: "alice", Role: identity.RoleUser}
+			attachment, err := attachments.Upload(context.Background(), owner, "targets.txt", strings.NewReader(test.attachment))
+			require.NoError(t, err)
+			engine := &recordingEngine{}
+			service := NewService(repository, engine, audits)
+			service.SetAttachmentService(attachments)
+
+			_, err = service.Create(context.Background(), owner, CreateInput{
+				IdempotencyKey: "target-unsafe-" + strings.ReplaceAll(test.name, " ", "-"),
+				TaskType:       "ai_infra_scan",
+				Content:        test.content,
+				AttachmentIDs:  []string{attachment.ID},
+			})
+			require.ErrorIs(t, err, ErrInvalid)
+			stored, listErr := repository.List(context.Background())
+			require.NoError(t, listErr)
+			assert.Empty(t, stored)
+			assert.Zero(t, engine.submits.Load())
+		})
+	}
+}
+
 func TestCancelCannotOverwriteConcurrentTerminalEngineState(t *testing.T) {
 	repository := NewMemoryRepository()
 	engine := &blockingCancelEngine{cancelEntered: make(chan struct{}), releaseCancel: make(chan struct{})}

@@ -22,9 +22,12 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
 	"testing"
 
+	"github.com/Juneoww/AIG_Custom/common/utils"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // 创建一个mock回调结构来验证agent执行流程
@@ -76,6 +79,51 @@ func (mc *MockCallbacks) GetCallbacks() TaskCallbacks {
 		StepStatusUpdateCallback: mc.StepStatusUpdateCallbackFunc,
 		PlanUpdateCallback:       mc.PlanUpdateCallbackFunc,
 	}
+}
+
+func TestAIInfraScanAgentPrepareTargetsExpandsBodyAndAttachmentRangesBeforePortDiscovery(t *testing.T) {
+	originalWorkingDirectory, err := os.Getwd()
+	require.NoError(t, err)
+	require.NoError(t, os.Chdir(t.TempDir()))
+	t.Cleanup(func() {
+		require.NoError(t, os.Chdir(originalWorkingDirectory))
+	})
+	var discovered []string
+	agent := &AIInfraScanAgent{
+		downloadFile: func(_, _, _, destination string) error {
+			return os.WriteFile(destination, []byte("192.168.10.3-192.168.10.4\n"), 0600)
+		},
+		nmapScan: func(host, _ string) (*utils.NmapRun, error) {
+			discovered = append(discovered, host)
+			return &utils.NmapRun{}, nil
+		},
+	}
+	request := TaskRequest{
+		SessionId: "target-expression-test",
+		Content:   "192.168.10.2-192.168.10.3\n192.168.10.5",
+		Attachments: []string{
+			"targets.txt",
+		},
+	}
+
+	targets, err := agent.prepareTargets(request, ScanRequest{}, initTexts("zh"))
+	require.NoError(t, err)
+	assert.Equal(t, []string{"192.168.10.2", "192.168.10.3", "192.168.10.5", "192.168.10.4"}, targets)
+
+	callbacks := TaskCallbacks{
+		StepStatusUpdateCallback: func(string, string, string, string, string) {},
+		ToolUsedCallback:         func(string, string, string, []Tool) {},
+	}
+	finalTargets, err := agent.scanPortsAndPrepareTargets(targets, "step-1", initTexts("zh"), callbacks)
+	require.NoError(t, err)
+	assert.Equal(t, targets, finalTargets)
+	assert.Equal(t, targets, discovered)
+}
+
+func TestAIInfraScanAgentPrepareTargetsRejectsInvalidWildcard(t *testing.T) {
+	agent := &AIInfraScanAgent{}
+	_, err := agent.prepareTargets(TaskRequest{Content: "22.*.10.*"}, ScanRequest{}, initTexts("zh"))
+	assert.Error(t, err)
 }
 
 // TestDemoAgent测试用例

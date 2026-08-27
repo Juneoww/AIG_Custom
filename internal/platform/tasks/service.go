@@ -15,7 +15,9 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
+	"github.com/Juneoww/AIG_Custom/common/runner"
 	"github.com/Juneoww/AIG_Custom/internal/platform/audit"
 	"github.com/Juneoww/AIG_Custom/internal/platform/identity"
 	"github.com/Juneoww/AIG_Custom/internal/platform/reports"
@@ -26,13 +28,14 @@ import (
 )
 
 const (
-	MaxIdempotencyKeyLength = 128
-	MaxDispatchAttempts     = 3
-	MaxTaskContentLength    = 32 << 10
-	MaxTaskParamsLength     = 64 << 10
-	MaxTaskAttachmentCount  = 10
-	MaxTaskReferenceLength  = 128
-	dispatchLeaseDuration   = 30 * time.Second
+	MaxIdempotencyKeyLength                      = 128
+	MaxDispatchAttempts                          = 3
+	MaxTaskContentLength                         = 32 << 10
+	MaxTaskParamsLength                          = 64 << 10
+	MaxTaskAttachmentCount                       = 10
+	MaxTaskReferenceLength                       = 128
+	maxInfrastructureTargetAttachmentBytes int64 = 1 << 20
+	dispatchLeaseDuration                        = 30 * time.Second
 )
 
 var (
@@ -211,6 +214,11 @@ func (service *Service) createLocked(
 				return nil, resolveErr
 			}
 		}
+		if input.TaskType == "ai_infra_scan" {
+			if validateErr := service.validateInfrastructureTargets(ctx, subject.UserID, input.Content, input.AttachmentIDs); validateErr != nil {
+				return nil, validateErr
+			}
+		}
 	}
 
 	mutation, err := audit.BeginMutation(ctx, service.audits, subject, audit.EventInput{
@@ -241,6 +249,24 @@ func (service *Service) createLocked(
 		return nil, err
 	}
 	return persisted, nil
+}
+
+func (service *Service) validateInfrastructureTargets(ctx context.Context, ownerUserID, content string, attachmentIDs []string) error {
+	expressions := strings.Split(content, "\n")
+	if len(attachmentIDs) > 0 {
+		if service.attachments == nil {
+			return ErrInvalid
+		}
+		attachmentExpressions, err := service.attachments.ReadReadyTargetExpressions(ctx, ownerUserID, attachmentIDs)
+		if err != nil {
+			return ErrInvalid
+		}
+		expressions = append(expressions, attachmentExpressions...)
+	}
+	if _, err := runner.ParseTargets(expressions); err != nil {
+		return ErrInvalid
+	}
+	return nil
 }
 
 func sameCreateRequest(persisted, candidate *Task) bool {
@@ -1917,6 +1943,68 @@ func (service *AttachmentService) ResolveReady(ctx context.Context, ownerUserID 
 
 func (service *AttachmentService) ResolveAttached(ctx context.Context, ownerUserID string, ids []string) ([]string, error) {
 	return service.resolveWithState(ctx, ownerUserID, ids, AttachmentStateAttached)
+}
+
+// ReadReadyTargetExpressions reads ready, owner-scoped target-list attachments without exposing storage paths.
+func (service *AttachmentService) ReadReadyTargetExpressions(ctx context.Context, ownerUserID string, ids []string) ([]string, error) {
+	if _, err := service.ResolveReady(ctx, ownerUserID, ids); err != nil {
+		return nil, err
+	}
+	expressions := make([]string, 0)
+	for _, id := range ids {
+		attachment, err := service.repository.GetAttachment(ctx, id)
+		if err != nil {
+			return nil, err
+		}
+		if attachment.OwnerUserID != ownerUserID {
+			return nil, ErrForbidden
+		}
+		if attachment.State != AttachmentStateReady {
+			return nil, ErrAttachmentNotReady
+		}
+		if attachment.Size > maxInfrastructureTargetAttachmentBytes {
+			return nil, ErrAttachmentTooLarge
+		}
+		path, err := service.storagePath(attachment.StorageName)
+		if err != nil {
+			return nil, err
+		}
+		preOpenInfo, err := os.Stat(path)
+		if err != nil {
+			return nil, classifyAttachmentStorageError(err)
+		}
+		if !preOpenInfo.Mode().IsRegular() {
+			return nil, ErrAttachmentStorage
+		}
+		file, err := service.openFile(path)
+		if err != nil {
+			return nil, classifyAttachmentStorageError(err)
+		}
+		postOpenInfo, statErr := file.Stat()
+		if statErr != nil || !postOpenInfo.Mode().IsRegular() || !os.SameFile(preOpenInfo, postOpenInfo) {
+			_ = file.Close()
+			if statErr != nil {
+				return nil, classifyAttachmentStorageError(statErr)
+			}
+			return nil, ErrAttachmentStorage
+		}
+		contents, readErr := io.ReadAll(io.LimitReader(file, maxInfrastructureTargetAttachmentBytes+1))
+		closeErr := file.Close()
+		if readErr != nil || closeErr != nil {
+			return nil, ErrAttachmentStorage
+		}
+		if int64(len(contents)) > maxInfrastructureTargetAttachmentBytes {
+			return nil, ErrAttachmentTooLarge
+		}
+		if int64(len(contents)) != attachment.Size {
+			return nil, ErrAttachmentStorage
+		}
+		if !utf8.Valid(contents) {
+			return nil, ErrInvalid
+		}
+		expressions = append(expressions, strings.Split(string(contents), "\n")...)
+	}
+	return expressions, nil
 }
 
 func (service *AttachmentService) resolveWithState(ctx context.Context, ownerUserID string, ids []string, state AttachmentState) ([]string, error) {
