@@ -2,7 +2,7 @@
  * 功能：验证治理总览只消费安全聚合 DTO，并完整呈现台账四区与独立状态。
  * 实现：在真实 QueryClient、主题和内存路由中驱动网络响应及重试交互。
  * 输入：成功、空数据、403、网络失败和含额外敏感字段的总览响应。
- * 输出：指标、30 日趋势、待关注、最近任务与安全状态断言。
+ * 输出：管理者摘要、管理者信号、30 日趋势、待关注、最近任务与安全状态断言。
  * 依赖：Vitest、Testing Library、React Router 与应用 Provider。
  */
 import { fireEvent, render, screen, waitFor, within } from '@testing-library/react'
@@ -85,7 +85,7 @@ function renderDashboard() {
 afterEach(() => vi.unstubAllGlobals())
 
 describe('DashboardPage', () => {
-  it('在单屏语义区域展示管理者摘要、30 日趋势、高风险待办和最近任务', async () => {
+  it('在单屏语义区域展示管理者摘要、管理者信号、30 日趋势、高风险待办和最近任务', async () => {
     let requestSignal: AbortSignal | undefined
     const fetchMock = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
       requestSignal = init?.signal ?? undefined
@@ -113,6 +113,16 @@ describe('DashboardPage', () => {
     expect(summary).toHaveTextContent('执行中任务1')
     expect(summary).toHaveTextContent('待调度任务0')
     const trendRegion = screen.getByRole('region', { name: '最近 30 日趋势' })
+    const signals = screen.getByRole('region', { name: '管理者信号' })
+    expect(summary.compareDocumentPosition(trendRegion) & Node.DOCUMENT_POSITION_FOLLOWING).toBe(
+      Node.DOCUMENT_POSITION_FOLLOWING,
+    )
+    expect(signals).toHaveTextContent('高风险3')
+    expect(signals).toHaveTextContent('执行中任务1')
+    expect(signals).toHaveTextContent('risk-v1')
+    expect(signals).toHaveTextContent('risk-v2')
+    expect(summary).not.toContainElement(signals)
+    expect(screen.queryByRole('region', { name: '核心指标' })).not.toBeInTheDocument()
     expect(within(trendRegion).getAllByRole('listitem')).toHaveLength(30)
     expect(screen.getByRole('region', { name: '高风险待办' })).toHaveTextContent('MCP 扫描')
     expect(screen.getByRole('link', { name: '查看报告 report-opaque-1' })).toHaveAttribute(
