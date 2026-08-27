@@ -201,6 +201,30 @@ func TestRunner_Close_Idempotent(t *testing.T) {
 	r.Close()
 }
 
+func TestRunner_CloseHandlesEmptyAndPartialRunners(t *testing.T) {
+	assert.NotPanics(t, func() {
+		(&Runner{}).Close()
+	})
+
+	var r *Runner
+	assert.NotPanics(t, func() {
+		r.Close()
+	})
+}
+
+func TestNewCleansUpAfterStorageWhenComponentsFail(t *testing.T) {
+	opts := baseOptions([]string{"127.0.0.1"})
+	opts.ProxyURL = "http://[::1"
+
+	var r *Runner
+	var err error
+	assert.NotPanics(t, func() {
+		r, err = New(opts)
+	})
+	require.Error(t, err)
+	assert.Nil(t, r)
+}
+
 // ---------------------------------------------------------------------------
 // RunEnumeration with a live test server (table-driven)
 // ---------------------------------------------------------------------------

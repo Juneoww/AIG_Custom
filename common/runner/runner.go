@@ -83,6 +83,12 @@ func New(options2 *options.Options) (*Runner, error) {
 	if err := runner.initStorage(); err != nil {
 		return nil, err
 	}
+	success := false
+	defer func() {
+		if !success {
+			runner.Close()
+		}
+	}()
 	runner.storeTargets(targets)
 
 	if err := runner.initComponents(); err != nil {
@@ -97,6 +103,7 @@ func New(options2 *options.Options) (*Runner, error) {
 		return nil, err
 	}
 
+	success = true
 	return runner, nil
 }
 
@@ -253,6 +260,7 @@ func (r *Runner) initComponents() error {
 	// 创建HTTP客户端
 	hp, err := httpx.NewHttpx(httpOptions)
 	if err != nil {
+		dialer.Close()
 		return err
 	}
 	r.hp = hp
@@ -387,8 +395,15 @@ func (r *Runner) runDomainRequest(fullUrl string) error {
 
 // Close cleans up resources used by the Runner
 func (r *Runner) Close() {
-	r.hp.Options.Dialer.Close()
-	_ = r.hm.Close()
+	if r == nil {
+		return
+	}
+	if r.hp != nil && r.hp.Options != nil && r.hp.Options.Dialer != nil {
+		r.hp.Options.Dialer.Close()
+	}
+	if r.hm != nil {
+		_ = r.hm.Close()
+	}
 }
 
 func (r *Runner) callbackProcess(current, total int) {
