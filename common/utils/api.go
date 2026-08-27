@@ -24,6 +24,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"mime/multipart"
 	"net/http"
 	"os"
@@ -45,8 +46,8 @@ func DownloadFile(server, sessionId, uri, path string) error {
 
 // DownloadFileBounded downloads an attachment without writing more than maxBytes to disk.
 func DownloadFileBounded(server, sessionId, uri, path string, maxBytes int64) error {
-	if maxBytes < 0 {
-		return fmt.Errorf("download size limit must not be negative")
+	if maxBytes < 0 || maxBytes >= math.MaxInt64 {
+		return fmt.Errorf("download size limit is not representable")
 	}
 	return downloadFile(server, sessionId, uri, path, &maxBytes)
 }
