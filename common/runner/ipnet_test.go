@@ -60,7 +60,7 @@ func TestParseTargets_DeduplicatesAcrossBatch(t *testing.T) {
 }
 
 func TestParseTargets_RejectsInvalidExpressions(t *testing.T) {
-	for _, input := range []string{"10.0.0.2-10.0.0.1", "10.*.1.*", `104.147.75.1\~104.147.75.10`, "2001:db8::/64", "10.0.0.1-10.0.0"} {
+	for _, input := range []string{"10.0.0.2-10.0.0.1", "10.*.1.*", `104.147.75.1\~104.147.75.10`, "2001:db8::/64", "2001:db8::1", "10.0.0.1-10.0.0", "10.0.0.1-example.com", "example.com-10.0.0.1", "10.0.0.1-10.0.0.2-extra"} {
 		_, err := ParseTargets([]string{input})
 		assert.Error(t, err, input)
 	}

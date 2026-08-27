@@ -59,6 +59,9 @@ func ParseTargets(expressions []string) ([]string, error) {
 			if strings.ContainsAny(target, " \t\r\n") {
 				return nil, fmt.Errorf("invalid target %q", target)
 			}
+			if addr, parseErr := netip.ParseAddr(target); parseErr == nil && addr.Is6() {
+				return nil, fmt.Errorf("IPv6 targets are not supported: %q", target)
+			}
 			expanded = []string{target}
 		}
 		if err != nil {
@@ -79,11 +82,28 @@ func ParseTargets(expressions []string) ([]string, error) {
 }
 
 func isRangeExpression(target string) bool {
-	parts := strings.Split(target, "-")
-	if len(parts) != 2 || !strings.Contains(target, ".") {
+	if strings.HasPrefix(target, "http://") || strings.HasPrefix(target, "https://") {
 		return false
 	}
-	return looksLikeIPv4(parts[0]) && looksLikeIPv4(parts[1])
+	parts := strings.Split(target, "-")
+	if !strings.Contains(target, ".") {
+		return false
+	}
+	if len(parts) != 2 {
+		for _, part := range parts {
+			if isCompleteIPv4(part) {
+				return true
+			}
+		}
+		return false
+	}
+	return isCompleteIPv4(parts[0]) || isCompleteIPv4(parts[1]) ||
+		(looksLikeIPv4(parts[0]) && looksLikeIPv4(parts[1]))
+}
+
+func isCompleteIPv4(value string) bool {
+	addr, err := netip.ParseAddr(value)
+	return err == nil && addr.Is4()
 }
 
 
