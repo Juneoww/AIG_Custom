@@ -53,6 +53,12 @@ func TestParseTargets_WildcardsMatchCIDR(t *testing.T) {
 	assert.Equal(t, cidr, wildcard)
 }
 
+func TestParseTargets_PreservesSingleIPv4(t *testing.T) {
+	got, err := ParseTargets([]string{"10.0.0.1"})
+	require.NoError(t, err)
+	assert.Equal(t, []string{"10.0.0.1"}, got)
+}
+
 func TestParseTargets_DeduplicatesAcrossBatch(t *testing.T) {
 	got, err := ParseTargets([]string{"10.0.0.1", "10.0.0.0/30", "10.0.0.1-10.0.0.2", "  "})
 	require.NoError(t, err)

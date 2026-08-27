@@ -86,7 +86,7 @@ func isRangeExpression(target string) bool {
 		return false
 	}
 	parts := strings.Split(target, "-")
-	if !strings.Contains(target, ".") {
+	if !strings.Contains(target, "-") || !strings.Contains(target, ".") {
 		return false
 	}
 	if len(parts) != 2 {
