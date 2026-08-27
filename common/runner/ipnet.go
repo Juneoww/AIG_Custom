@@ -21,10 +21,170 @@ package runner
 
 import (
 	"encoding/binary"
-	"github.com/Juneoww/AIG_Custom/common/utils"
+	"errors"
+	"fmt"
 	"net"
+	"net/netip"
 	"strings"
 )
+
+const maxTargetExpressions = 4096
+
+// ErrTooManyTargets indicates that expansion would exceed the batch limit.
+var ErrTooManyTargets = errors.New("target expansion exceeds 4096 targets")
+
+// ParseTargets trims, expands, and deduplicates a batch of target expressions.
+// IPv4 CIDRs, complete IPv4 ranges, and trailing IPv4 wildcards are expanded.
+func ParseTargets(expressions []string) ([]string, error) {
+	result := make([]string, 0)
+	seen := make(map[string]struct{})
+	for _, raw := range expressions {
+		target := strings.TrimSpace(raw)
+		if target == "" {
+			continue
+		}
+		if strings.ContainsAny(target, "\\~") {
+			return nil, fmt.Errorf("invalid target %q: ranges cannot contain backslash or tilde", target)
+		}
+		var expanded []string
+		var err error
+		switch {
+		case isCIDRExpression(target):
+			expanded, err = expandCIDR(target)
+		case strings.Contains(target, "-"):
+			expanded, err = expandRange(target)
+		case strings.Contains(target, "*"):
+			expanded, err = expandWildcard(target)
+		default:
+			if strings.ContainsAny(target, " \t\r\n") {
+				return nil, fmt.Errorf("invalid target %q", target)
+			}
+			expanded = []string{target}
+		}
+		if err != nil {
+			return nil, err
+		}
+		for _, value := range expanded {
+			if _, ok := seen[value]; ok {
+				continue
+			}
+			if len(result) >= maxTargetExpressions {
+				return nil, ErrTooManyTargets
+			}
+			seen[value] = struct{}{}
+			result = append(result, value)
+		}
+	}
+	return result, nil
+}
+
+func isCIDRExpression(target string) bool {
+	if !strings.Contains(target, "/") {
+		return false
+	}
+	if strings.HasPrefix(target, "http://") || strings.HasPrefix(target, "https://") {
+		return false
+	}
+	parts := strings.SplitN(target, "/", 2)
+	if addr, err := netip.ParseAddr(parts[0]); err == nil {
+		return addr.Is4() || addr.Is6()
+	}
+	return false
+}
+
+func expandCIDR(target string) ([]string, error) {
+	prefix, err := netip.ParsePrefix(target)
+	if err != nil {
+		return nil, fmt.Errorf("invalid CIDR %q: %w", target, err)
+	}
+	if !prefix.Addr().Is4() {
+		return nil, fmt.Errorf("IPv6 CIDR is not supported: %q", target)
+	}
+	prefix = prefix.Masked()
+	count := uint64(1) << uint(32-prefix.Bits())
+	if count > maxTargetExpressions {
+		return nil, ErrTooManyTargets
+	}
+	start := ipv4Uint32(prefix.Addr())
+	return expandIPv4Numbers(start, count), nil
+}
+
+func expandRange(target string) ([]string, error) {
+	parts := strings.Split(target, "-")
+	if len(parts) != 2 {
+		return nil, fmt.Errorf("invalid IPv4 range %q", target)
+	}
+	start, err := netip.ParseAddr(parts[0])
+	if err != nil || !start.Is4() {
+		return nil, fmt.Errorf("invalid IPv4 range %q", target)
+	}
+	finish, err := netip.ParseAddr(parts[1])
+	if err != nil || !finish.Is4() {
+		return nil, fmt.Errorf("invalid IPv4 range %q", target)
+	}
+	first := ipv4Uint32(start)
+	last := ipv4Uint32(finish)
+	if first > last {
+		return nil, fmt.Errorf("reversed IPv4 range %q", target)
+	}
+	count := uint64(last-first) + 1
+	if count > maxTargetExpressions {
+		return nil, ErrTooManyTargets
+	}
+	return expandIPv4Numbers(first, count), nil
+}
+
+func expandWildcard(target string) ([]string, error) {
+	parts := strings.Split(target, ".")
+	if len(parts) != 4 {
+		return nil, fmt.Errorf("invalid IPv4 wildcard %q", target)
+	}
+	firstStar := -1
+	for i, part := range parts {
+		if part == "*" {
+			if firstStar == -1 {
+				firstStar = i
+			}
+			continue
+		}
+		if strings.Contains(part, "*") || (firstStar != -1) {
+			return nil, fmt.Errorf("invalid IPv4 wildcard %q", target)
+		}
+		value, err := netip.ParseAddr("0.0.0." + part)
+		if err != nil || !value.Is4() {
+			return nil, fmt.Errorf("invalid IPv4 wildcard %q", target)
+		}
+	}
+	if firstStar == -1 {
+		return nil, fmt.Errorf("invalid IPv4 wildcard %q", target)
+	}
+	count := uint64(1) << uint(8*(4-firstStar))
+	if count > maxTargetExpressions {
+		return nil, ErrTooManyTargets
+	}
+	base := uint32(0)
+	for i := 0; i < firstStar; i++ {
+		value, _ := netip.ParseAddr("0.0.0." + parts[i])
+		base = (base << 8) | uint32(value.As4()[3])
+	}
+	base <<= uint(8 * (4 - firstStar))
+	return expandIPv4Numbers(base, count), nil
+}
+
+func ipv4Uint32(addr netip.Addr) uint32 {
+	bytes := addr.As4()
+	return binary.BigEndian.Uint32(bytes[:])
+}
+
+func expandIPv4Numbers(start uint32, count uint64) []string {
+	result := make([]string, 0, count)
+	for i := uint64(0); i < count; i++ {
+		ip := make(net.IP, 4)
+		binary.BigEndian.PutUint32(ip, start+uint32(i))
+		result = append(result, ip.String())
+	}
+	return result
+}
 
 // Targets returns all the targets within a cidr range or the single target
 func Targets(target string) chan string {
@@ -32,24 +192,17 @@ func Targets(target string) chan string {
 	go func() {
 		defer close(results)
 
-		// A valid target does not contain:
-		// *
-		// spaces
-		if strings.ContainsAny(target, " *") {
+		// Preserve the legacy API's best-effort rejection of wildcard/range input.
+		if strings.ContainsAny(target, "*-") {
 			return
 		}
-
-		// test if the target is a cidr
-		if utils.IsCIDR(target) {
-			cidrIps, err := IPAddresses(target)
-			if err != nil {
-				return
-			}
-			for _, ip := range cidrIps {
-				results <- ip
-			}
-		} else {
-			results <- target
+		// Legacy best-effort API: parsing errors produce an empty channel.
+		parsed, err := ParseTargets([]string{target})
+		if err != nil {
+			return
+		}
+		for _, value := range parsed {
+			results <- value
 		}
 	}()
 	return results

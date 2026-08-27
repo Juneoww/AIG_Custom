@@ -25,6 +25,52 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+func TestParseTargets_ExpandsIPv4RangeInOrder(t *testing.T) {
+	got, err := ParseTargets([]string{" 192.168.10.2-192.168.10.10 "})
+	require.NoError(t, err)
+	require.Len(t, got, 9)
+	assert.Equal(t, "192.168.10.2", got[0])
+	assert.Equal(t, "192.168.10.10", got[8])
+}
+
+func TestParseTargets_PastedRangesYield100Targets(t *testing.T) {
+	lines := []string{
+		"104.147.75.1-104.147.75.10", "104.147.75.12-104.147.75.13",
+		"104.147.75.15-104.147.75.30", "104.147.75.32-104.147.75.34",
+		"104.147.75.37-104.147.75.39", "104.147.75.41-104.147.75.102",
+		"104.147.75.104-104.147.75.107",
+	}
+	got, err := ParseTargets(lines)
+	require.NoError(t, err)
+	assert.Len(t, got, 100)
+}
+
+func TestParseTargets_WildcardsMatchCIDR(t *testing.T) {
+	wildcard, err := ParseTargets([]string{"22.2.*.*", "22.2.10.*"})
+	require.NoError(t, err)
+	cidr, err := ParseTargets([]string{"22.2.0.0/16", "22.2.10.0/24"})
+	require.NoError(t, err)
+	assert.Equal(t, cidr, wildcard)
+}
+
+func TestParseTargets_DeduplicatesAcrossBatch(t *testing.T) {
+	got, err := ParseTargets([]string{"10.0.0.1", "10.0.0.0/30", "10.0.0.1-10.0.0.2", "  "})
+	require.NoError(t, err)
+	assert.Equal(t, []string{"10.0.0.1", "10.0.0.0", "10.0.0.2", "10.0.0.3"}, got)
+}
+
+func TestParseTargets_RejectsInvalidExpressions(t *testing.T) {
+	for _, input := range []string{"10.0.0.2-10.0.0.1", "10.*.1.*", `104.147.75.1\~104.147.75.10`, "2001:db8::/64", "10.0.0.1-10.0.0"} {
+		_, err := ParseTargets([]string{input})
+		assert.Error(t, err, input)
+	}
+}
+
+func TestParseTargets_RejectsBatchOver4096(t *testing.T) {
+	_, err := ParseTargets([]string{"10.0.0.0/16"})
+	assert.Error(t, err)
+}
+
 // collectTargets 将 chan string 收集为 []string，便于断言
 func collectTargets(ch chan string) []string {
 	var result []string
