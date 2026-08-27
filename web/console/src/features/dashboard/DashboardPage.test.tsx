@@ -124,6 +124,10 @@ describe('DashboardPage', () => {
     expect(summary).not.toContainElement(signals)
     expect(screen.queryByRole('region', { name: '核心指标' })).not.toBeInTheDocument()
     expect(within(trendRegion).getAllByRole('listitem')).toHaveLength(30)
+    const trendFigure = within(trendRegion).getByRole('figure', {
+      name: '最近 30 日快照平均安全分',
+    })
+    expect(within(trendFigure).getAllByRole('listitem')).toHaveLength(30)
     expect(screen.getByRole('region', { name: '高风险待办' })).toHaveTextContent('MCP 扫描')
     expect(screen.getByRole('link', { name: '查看报告 report-opaque-1' })).toHaveAttribute(
       'href',
