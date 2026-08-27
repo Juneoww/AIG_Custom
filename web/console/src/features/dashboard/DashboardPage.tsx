@@ -1,11 +1,11 @@
 /**
- * 功能：展示按当前主体限定的治理总览四区和独立加载、空、失败、无权限状态。
+ * 功能：展示按当前主体限定的管理者摘要、治理总览及独立加载、空、失败、无权限状态。
  * 实现：用 TanStack Query 读取服务端聚合 DTO，以 Fluent 指标、趋势和原生表格呈现。
  * 输入：GET /api/v1/platform/dashboard 的安全白名单响应。
- * 输出：核心指标、30 日趋势、高风险待办和最近扫描任务。
+ * 输出：管理者摘要、核心指标、30 日趋势、高风险待办和最近扫描任务。
  * 依赖：React Query、React Router、Fluent UI 与共享监管台账组件。
  */
-import { Card, Text, makeStyles, tokens } from '@fluentui/react-components'
+import { Card, makeStyles, tokens } from '@fluentui/react-components'
 import { useQuery } from '@tanstack/react-query'
 import { Link } from 'react-router-dom'
 
@@ -16,6 +16,7 @@ import { MetricCard } from '../../shared/components/MetricCard'
 import { PageHeader } from '../../shared/components/PageHeader'
 import { StatePanel } from '../../shared/components/StatePanel'
 import { fetchDashboard, type AttentionItem, type DashboardView } from './api'
+import { ExecutiveSummary } from './components/ExecutiveSummary'
 import { RiskTrend } from './components/RiskTrend'
 
 const useStyles = makeStyles({
@@ -55,11 +56,6 @@ const useStyles = makeStyles({
     fontSize: tokens.fontSizeBase400,
     lineHeight: tokens.lineHeightBase400,
     fontWeight: tokens.fontWeightSemibold,
-  },
-  notice: {
-    display: 'block',
-    marginTop: tokens.spacingVerticalS,
-    color: tokens.colorNeutralForeground2,
   },
   taskLink: {
     color: tokens.colorBrandForegroundLink,
@@ -150,6 +146,7 @@ function DashboardContent({ view }: { view: DashboardView }) {
           description="完成首份扫描并生成安全报告后，此处将展示快照指标。"
         />
       ) : null}
+      {view.has_data ? <ExecutiveSummary view={view} /> : null}
       <section aria-label="核心指标">
         <div className={styles.metrics}>
           <MetricCard label="快照平均安全分" value={view.security_score ?? '暂无'} supportingText="最近 30 个 UTC 自然日" />
@@ -157,9 +154,6 @@ function DashboardContent({ view }: { view: DashboardView }) {
           <MetricCard label="中风险" value={view.risk.medium} status="medium" supportingText="有效报告快照汇总" />
           <MetricCard label="低风险" value={view.risk.low} status="low" supportingText="有效报告快照汇总" />
         </div>
-        {view.mapping_versions.length > 1 ? (
-          <Text className={styles.notice}>当前总览包含多个风险映射版本</Text>
-        ) : null}
       </section>
       <div className={styles.ledgerGrid}>
         <Card className={styles.panel} role="region" aria-label="最近 30 日趋势">
