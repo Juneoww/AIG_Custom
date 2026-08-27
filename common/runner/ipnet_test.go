@@ -118,6 +118,12 @@ func TestTargets_HyphenatedHostname(t *testing.T) {
 	require.Equal(t, []string{"api-prod.example.com"}, result)
 }
 
+func TestParseTargets_PreservesDigitBearingHostnamesAndURLs(t *testing.T) {
+	got, err := ParseTargets([]string{"api1-prod2.example.com", "https://api1-prod2.example.com/path"})
+	require.NoError(t, err)
+	assert.Equal(t, []string{"api1-prod2.example.com", "https://api1-prod2.example.com/path"}, got)
+}
+
 // TestTargets_CIDR_Small 测试 /30 CIDR 展开 4 个 IP
 func TestTargets_CIDR_Small(t *testing.T) {
 	ch := Targets("192.168.1.0/30")

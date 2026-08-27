@@ -83,16 +83,20 @@ func isRangeExpression(target string) bool {
 	if len(parts) != 2 || !strings.Contains(target, ".") {
 		return false
 	}
-	return containsDigit(parts[0]) && containsDigit(parts[1])
+	return looksLikeIPv4(parts[0]) && looksLikeIPv4(parts[1])
 }
 
-func containsDigit(value string) bool {
+
+func looksLikeIPv4(value string) bool {
+	if value == "" {
+		return false
+	}
 	for _, char := range value {
-		if char >= '0' && char <= '9' {
-			return true
+		if (char < '0' || char > '9') && char != '.' {
+			return false
 		}
 	}
-	return false
+	return true
 }
 
 func isCIDRExpression(target string) bool {
