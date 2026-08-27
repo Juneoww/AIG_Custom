@@ -43,7 +43,7 @@ func baseOptions(targets []string) *options.Options {
 	}
 }
 
-func TestProcessTargetsExpandsAndDeduplicatesAcrossSources(t *testing.T) {
+func TestParseTargetsExpandsAndDeduplicatesAcrossSources(t *testing.T) {
 	targetFile := filepath.Join(t.TempDir(), "targets.txt")
 	require.NoError(t, os.WriteFile(targetFile, []byte("10.0.0.2\n22.2.10.*\n"), 0600))
 
@@ -51,19 +51,28 @@ func TestProcessTargetsExpandsAndDeduplicatesAcrossSources(t *testing.T) {
 		Target:     []string{"10.0.0.1-10.0.0.2"},
 		TargetFile: targetFile,
 	}}
-	require.NoError(t, r.initStorage())
-	defer r.hm.Close()
-
-	require.NoError(t, r.processTargets())
-	assert.Equal(t, 258, r.total)
+	targets, err := r.parseTargets()
+	require.NoError(t, err)
+	assert.Len(t, targets, 258)
+	assert.Equal(t, "10.0.0.1", targets[0])
+	assert.Equal(t, "10.0.0.2", targets[1])
+	assert.Equal(t, "22.2.10.0", targets[2])
+	assert.Equal(t, "22.2.10.255", targets[257])
 }
 
 func TestProcessTargetsReturnsRequestedFileError(t *testing.T) {
-	r := &Runner{Options: &options.Options{TargetFile: filepath.Join(t.TempDir(), "missing.txt")}}
+	r, err := New(&options.Options{TargetFile: filepath.Join(t.TempDir(), "missing.txt")})
 
-	err := r.processTargets()
 	require.Error(t, err)
+	assert.Nil(t, r)
 	assert.ErrorIs(t, err, os.ErrNotExist)
+}
+
+func TestNewReturnsTargetFileReadError(t *testing.T) {
+	r, err := New(&options.Options{TargetFile: t.TempDir()})
+
+	require.Error(t, err)
+	assert.Nil(t, r)
 }
 
 func TestProcessTargetsRejectsInvalidAndOversizedExpressions(t *testing.T) {
@@ -78,7 +87,11 @@ func TestProcessTargetsRejectsInvalidAndOversizedExpressions(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			r, err := New(&options.Options{Target: tc.targets})
+			r, err := New(&options.Options{
+				Target:       tc.targets,
+				FPTemplates:  filepath.Join(t.TempDir(), "missing-fingerprints"),
+				AdvTemplates: filepath.Join(t.TempDir(), "missing-vulnerabilities"),
+			})
 			require.Error(t, err)
 			assert.Nil(t, r)
 			if tc.wantErr != nil {

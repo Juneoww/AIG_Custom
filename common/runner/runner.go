@@ -74,15 +74,16 @@ func New(options2 *options.Options) (*Runner, error) {
 		done:    make(chan struct{}), // 初始化done通道用于优雅关闭
 	}
 
+	targets, err := runner.parseTargets()
+	if err != nil {
+		return nil, err
+	}
+
 	// 依次初始化各个组件
 	if err := runner.initStorage(); err != nil {
 		return nil, err
 	}
-
-	if err := runner.processTargets(); err != nil {
-		_ = runner.hm.Close()
-		return nil, err
-	}
+	runner.storeTargets(targets)
 
 	if err := runner.initComponents(); err != nil {
 		return nil, err
@@ -204,17 +205,17 @@ func (r *Runner) collectTargetExpressions() ([]string, error) {
 	return targets, nil
 }
 
-// processTargets parses all sources as one batch and stores the final targets.
-func (r *Runner) processTargets() error {
+// parseTargets parses all configured target sources as one batch.
+func (r *Runner) parseTargets() ([]string, error) {
 	expressions, err := r.collectTargetExpressions()
 	if err != nil {
-		return err
+		return nil, err
 	}
-	targets, err := ParseTargets(expressions)
-	if err != nil {
-		return err
-	}
+	return ParseTargets(expressions)
+}
 
+// storeTargets writes the parsed targets to storage and records their final count.
+func (r *Runner) storeTargets(targets []string) {
 	for _, target := range targets {
 		r.hm.Set(target, nil)
 	}
@@ -222,7 +223,6 @@ func (r *Runner) processTargets() error {
 	if r.total > 0 {
 		gologger.Infof("加载目标数量:%d", r.total)
 	}
-	return nil
 }
 
 // initComponents 初始化基础组件
