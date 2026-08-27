@@ -80,6 +80,7 @@ func New(options2 *options.Options) (*Runner, error) {
 	}
 
 	if err := runner.processTargets(); err != nil {
+		_ = runner.hm.Close()
 		return nil, err
 	}
 
@@ -170,70 +171,54 @@ func (r *Runner) initStorage() error {
 	return nil
 }
 
-// processTargetList 处理目标列表
-// 支持处理CIDR格式的IP段和单个目标
-func (r *Runner) processTargetList(targets []string) {
-	for _, t := range targets {
-		if utils.IsCIDR(t) {
-			// 处理CIDR格式
-			cidrIps, err := IPAddresses(t)
-			if err != nil {
-				r.hm.Set(t, nil)
-				r.total++
-			} else {
-				// 展开CIDR中的所有IP
-				for _, ip := range cidrIps {
-					r.hm.Set(ip, nil)
-					r.total++
-				}
-			}
-		} else {
-			// 处理单个目标
-			r.hm.Set(t, nil)
-			r.total++
-		}
-	}
-}
+// collectTargetExpressions gathers raw target expressions from every configured source.
+func (r *Runner) collectTargetExpressions() ([]string, error) {
+	targets := append([]string(nil), r.Options.Target...)
 
-// processTargets 处理所有输入的目标
-// 支持从命令行参数和文件读取目标
-func (r *Runner) processTargets() error {
-	// 处理命令行指定的目标
-	if r.Options.Target != nil {
-		r.processTargetList(r.Options.Target)
-	}
-
-	// 处理目标文件
 	if r.Options.TargetFile != "" {
-		if utils.IsFileExists(r.Options.TargetFile) {
-			file, err := os.Open(r.Options.TargetFile)
-			if err != nil {
-				return err
-			}
-			defer file.Close()
-			scanner := bufio.NewScanner(file)
-			targets := make([]string, 0)
-			for scanner.Scan() {
-				t := strings.TrimSpace(scanner.Text())
-				if t != "" {
-					targets = append(targets, t)
-				}
-			}
-			r.processTargetList(targets)
+		file, err := os.Open(r.Options.TargetFile)
+		if err != nil {
+			return nil, err
+		}
+		defer file.Close()
+
+		scanner := bufio.NewScanner(file)
+		for scanner.Scan() {
+			targets = append(targets, scanner.Text())
+		}
+		if err := scanner.Err(); err != nil {
+			return nil, err
 		}
 	}
 
 	if r.Options.LocalScan {
 		op, err := utils.GetLocalOpenPorts()
 		if err != nil {
-			gologger.Fatalf("get local open port failed,err:%s", err)
+			return nil, fmt.Errorf("get local open port: %w", err)
 		}
-		var targets []string
 		for _, p := range op {
 			targets = append(targets, p.Address+":"+strconv.Itoa(p.Port))
 		}
-		r.processTargetList(targets)
 	}
+
+	return targets, nil
+}
+
+// processTargets parses all sources as one batch and stores the final targets.
+func (r *Runner) processTargets() error {
+	expressions, err := r.collectTargetExpressions()
+	if err != nil {
+		return err
+	}
+	targets, err := ParseTargets(expressions)
+	if err != nil {
+		return err
+	}
+
+	for _, target := range targets {
+		r.hm.Set(target, nil)
+	}
+	r.total = len(targets)
 	if r.total > 0 {
 		gologger.Infof("加载目标数量:%d", r.total)
 	}

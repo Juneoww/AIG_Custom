@@ -15,8 +15,11 @@
 package runner
 
 import (
+	"errors"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/Juneoww/AIG_Custom/internal/gologger"
@@ -37,6 +40,51 @@ func baseOptions(targets []string) *options.Options {
 		RateLimit:    10,
 		FPTemplates:  "../../data/fingerprints",
 		AdvTemplates: "../../data/vuln",
+	}
+}
+
+func TestProcessTargetsExpandsAndDeduplicatesAcrossSources(t *testing.T) {
+	targetFile := filepath.Join(t.TempDir(), "targets.txt")
+	require.NoError(t, os.WriteFile(targetFile, []byte("10.0.0.2\n22.2.10.*\n"), 0600))
+
+	r := &Runner{Options: &options.Options{
+		Target:     []string{"10.0.0.1-10.0.0.2"},
+		TargetFile: targetFile,
+	}}
+	require.NoError(t, r.initStorage())
+	defer r.hm.Close()
+
+	require.NoError(t, r.processTargets())
+	assert.Equal(t, 258, r.total)
+}
+
+func TestProcessTargetsReturnsRequestedFileError(t *testing.T) {
+	r := &Runner{Options: &options.Options{TargetFile: filepath.Join(t.TempDir(), "missing.txt")}}
+
+	err := r.processTargets()
+	require.Error(t, err)
+	assert.ErrorIs(t, err, os.ErrNotExist)
+}
+
+func TestProcessTargetsRejectsInvalidAndOversizedExpressions(t *testing.T) {
+	cases := []struct {
+		name    string
+		targets []string
+		wantErr error
+	}{
+		{name: "invalid range", targets: []string{"10.0.0.1-not-an-ip"}},
+		{name: "oversized CIDR", targets: []string{"10.0.0.0/15"}, wantErr: ErrTooManyTargets},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			r, err := New(&options.Options{Target: tc.targets})
+			require.Error(t, err)
+			assert.Nil(t, r)
+			if tc.wantErr != nil {
+				assert.True(t, errors.Is(err, tc.wantErr))
+			}
+		})
 	}
 }
 
