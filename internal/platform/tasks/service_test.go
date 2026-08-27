@@ -390,6 +390,41 @@ func TestCreateAIInfraTargetAttachmentValidationRejectsUnsafeLists(t *testing.T)
 	}
 }
 
+func TestCreateAIInfraTargetAttachmentValidationRejectsSymlink(t *testing.T) {
+	repository := NewMemoryRepository()
+	audits := audit.NewService(audit.NewMemoryRepository())
+	attachments, err := NewAttachmentService(repository, AttachmentConfig{
+		UploadDir: t.TempDir(), MaxFileBytes: 2 << 20, MaxChunkBytes: 1 << 20,
+	}, audits)
+	require.NoError(t, err)
+	owner := identity.Subject{UserID: "target-symlink-owner", Username: "alice", Role: identity.RoleUser}
+	attachment, err := attachments.Upload(context.Background(), owner, "targets.txt", strings.NewReader("192.168.10.2"))
+	require.NoError(t, err)
+	storedAttachment, err := repository.GetAttachment(context.Background(), attachment.ID)
+	require.NoError(t, err)
+	storagePath, err := attachments.storagePath(storedAttachment.StorageName)
+	require.NoError(t, err)
+	replacementPath := filepath.Join(t.TempDir(), "replacement.txt")
+	require.NoError(t, os.WriteFile(replacementPath, []byte("192.168.10.3"), 0600))
+	require.NoError(t, os.Remove(storagePath))
+	if err := os.Symlink(replacementPath, storagePath); err != nil {
+		t.Skipf("symlink creation is unavailable: %v", err)
+	}
+
+	engine := &recordingEngine{}
+	service := NewService(repository, engine, audits)
+	service.SetAttachmentService(attachments)
+	_, err = service.Create(context.Background(), owner, CreateInput{
+		IdempotencyKey: "target-symlink", TaskType: "ai_infra_scan", Content: "192.168.10.1",
+		AttachmentIDs: []string{attachment.ID},
+	})
+	require.ErrorIs(t, err, ErrInvalid)
+	storedTasks, listErr := repository.List(context.Background())
+	require.NoError(t, listErr)
+	assert.Empty(t, storedTasks)
+	assert.Zero(t, engine.submits.Load())
+}
+
 func TestCancelCannotOverwriteConcurrentTerminalEngineState(t *testing.T) {
 	repository := NewMemoryRepository()
 	engine := &blockingCancelEngine{cancelEntered: make(chan struct{}), releaseCancel: make(chan struct{})}

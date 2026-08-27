@@ -21,13 +21,15 @@ package agent
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path"
-	"path/filepath"
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/Juneoww/AIG_Custom/pkg/vulstruct"
 	iputil "github.com/projectdiscovery/utils/ip"
@@ -92,9 +94,13 @@ type ScanRequest struct {
 
 type AIInfraScanAgent struct {
 	Server       string
-	downloadFile func(server, sessionID, uri, destination string) error
+	downloadFile func(server, sessionID, uri, destination string, maxBytes int64) error
 	nmapScan     func(target, ports string) (*utils.NmapRun, error)
 }
+
+const maxTargetListAttachmentBytes int64 = 1 << 20
+
+var errInvalidTargetListAttachment = errors.New("invalid target-list attachment")
 
 func logAgentAttachmentTransfer(action, sessionID, taskType string) {
 	gologger.Infof("agent attachment transfer: action=%s session_id=%s task_type=%s", action, sessionID, taskType)
@@ -268,36 +274,39 @@ func (t *AIInfraScanAgent) prepareTargets(request TaskRequest, reqScan ScanReque
 	targets := strings.Split(strings.TrimSpace(request.Content), "\n")
 
 	if len(request.Attachments) > 0 {
-		tempDir := "temp_uploads"
-		if err := os.MkdirAll(tempDir, 0755); err != nil {
-			gologger.Errorf("%s: %v", texts.createTempDir, err)
-			return nil, err
+		tempDir, err := os.MkdirTemp("", "aig-target-list-")
+		if err != nil {
+			gologger.Errorf("%s", texts.createTempDir)
+			return nil, errInvalidTargetListAttachment
 		}
+		defer func() { _ = os.RemoveAll(tempDir) }()
 		downloadFile := t.downloadFile
 		if downloadFile == nil {
-			downloadFile = utils.DownloadFile
+			downloadFile = utils.DownloadFileBounded
 		}
 
 		for _, file := range request.Attachments {
 			logAgentAttachmentTransfer("download_started", request.SessionId, TaskTypeAIInfraScan)
-			fileName := filepath.Join(tempDir, fmt.Sprintf("tmp-%d%s", time.Now().UnixMicro(), filepath.Ext(file)))
-			// Verify the path is within tempDir to prevent path traversal
-			absTempDir, _ := filepath.Abs(tempDir)
-			absFileName, _ := filepath.Abs(fileName)
-			if !strings.HasPrefix(absFileName, absTempDir+string(os.PathSeparator)) {
-				logAgentAttachmentFailure("download_rejected", request.SessionId, TaskTypeAIInfraScan, nil)
-				return nil, fmt.Errorf("非法文件路径")
+			targetListFile, createErr := os.CreateTemp(tempDir, "target-list-")
+			if createErr != nil {
+				logAgentAttachmentFailure("create_failed", request.SessionId, TaskTypeAIInfraScan, createErr)
+				return nil, errInvalidTargetListAttachment
 			}
-			if err := downloadFile(t.Server, request.SessionId, file, fileName); err != nil {
-				logAgentAttachmentFailure("download_failed", request.SessionId, TaskTypeAIInfraScan, err)
-				return nil, err
+			fileName := targetListFile.Name()
+			if closeErr := targetListFile.Close(); closeErr != nil {
+				logAgentAttachmentFailure("create_failed", request.SessionId, TaskTypeAIInfraScan, closeErr)
+				return nil, errInvalidTargetListAttachment
 			}
-			lines, err := os.ReadFile(fileName)
-			if err != nil {
-				logAgentAttachmentFailure("read_failed", request.SessionId, TaskTypeAIInfraScan, err)
-				return nil, err
+			if downloadErr := downloadFile(t.Server, request.SessionId, file, fileName, maxTargetListAttachmentBytes); downloadErr != nil {
+				logAgentAttachmentFailure("download_failed", request.SessionId, TaskTypeAIInfraScan, downloadErr)
+				return nil, errInvalidTargetListAttachment
 			}
-			targets = append(targets, strings.Split(string(lines), "\n")...)
+			contents, readErr := readTargetListAttachment(fileName)
+			if readErr != nil {
+				logAgentAttachmentFailure("read_failed", request.SessionId, TaskTypeAIInfraScan, readErr)
+				return nil, errInvalidTargetListAttachment
+			}
+			targets = append(targets, strings.Split(string(contents), "\n")...)
 		}
 	}
 
@@ -306,6 +315,28 @@ func (t *AIInfraScanAgent) prepareTargets(request TaskRequest, reqScan ScanReque
 		return nil, fmt.Errorf("invalid infrastructure scan target expressions")
 	}
 	return expanded, nil
+}
+
+func readTargetListAttachment(fileName string) ([]byte, error) {
+	preOpenInfo, err := os.Lstat(fileName)
+	if err != nil || !preOpenInfo.Mode().IsRegular() || preOpenInfo.Size() > maxTargetListAttachmentBytes {
+		return nil, errInvalidTargetListAttachment
+	}
+	file, err := os.Open(fileName)
+	if err != nil {
+		return nil, errInvalidTargetListAttachment
+	}
+	postOpenInfo, statErr := file.Stat()
+	if statErr != nil || !postOpenInfo.Mode().IsRegular() || !os.SameFile(preOpenInfo, postOpenInfo) || postOpenInfo.Size() > maxTargetListAttachmentBytes {
+		_ = file.Close()
+		return nil, errInvalidTargetListAttachment
+	}
+	contents, readErr := io.ReadAll(io.LimitReader(file, maxTargetListAttachmentBytes+1))
+	closeErr := file.Close()
+	if readErr != nil || closeErr != nil || int64(len(contents)) > maxTargetListAttachmentBytes || !utf8.Valid(contents) {
+		return nil, errInvalidTargetListAttachment
+	}
+	return contents, nil
 }
 
 // scanPortsAndPrepareTargets 扫描端口并准备最终目标列表

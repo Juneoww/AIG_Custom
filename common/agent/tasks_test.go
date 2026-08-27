@@ -23,6 +23,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/Juneoww/AIG_Custom/common/utils"
@@ -82,15 +84,12 @@ func (mc *MockCallbacks) GetCallbacks() TaskCallbacks {
 }
 
 func TestAIInfraScanAgentPrepareTargetsExpandsBodyAndAttachmentRangesBeforePortDiscovery(t *testing.T) {
-	originalWorkingDirectory, err := os.Getwd()
-	require.NoError(t, err)
-	require.NoError(t, os.Chdir(t.TempDir()))
-	t.Cleanup(func() {
-		require.NoError(t, os.Chdir(originalWorkingDirectory))
-	})
 	var discovered []string
+	var downloadDirectory string
 	agent := &AIInfraScanAgent{
-		downloadFile: func(_, _, _, destination string) error {
+		downloadFile: func(_, _, _, destination string, maxBytes int64) error {
+			assert.Equal(t, maxTargetListAttachmentBytes, maxBytes)
+			downloadDirectory = filepath.Dir(destination)
 			return os.WriteFile(destination, []byte("192.168.10.3-192.168.10.4\n"), 0600)
 		},
 		nmapScan: func(host, _ string) (*utils.NmapRun, error) {
@@ -109,6 +108,7 @@ func TestAIInfraScanAgentPrepareTargetsExpandsBodyAndAttachmentRangesBeforePortD
 	targets, err := agent.prepareTargets(request, ScanRequest{}, initTexts("zh"))
 	require.NoError(t, err)
 	assert.Equal(t, []string{"192.168.10.2", "192.168.10.3", "192.168.10.5", "192.168.10.4"}, targets)
+	assert.NoDirExists(t, downloadDirectory)
 
 	callbacks := TaskCallbacks{
 		StepStatusUpdateCallback: func(string, string, string, string, string) {},
@@ -124,6 +124,34 @@ func TestAIInfraScanAgentPrepareTargetsRejectsInvalidWildcard(t *testing.T) {
 	agent := &AIInfraScanAgent{}
 	_, err := agent.prepareTargets(TaskRequest{Content: "22.*.10.*"}, ScanRequest{}, initTexts("zh"))
 	assert.Error(t, err)
+}
+
+func TestAIInfraScanAgentPrepareTargetsRejectsUnsafeAttachmentAndCleansUp(t *testing.T) {
+	tests := []struct {
+		name     string
+		contents string
+	}{
+		{name: "oversized", contents: strings.Repeat("x", (1<<20)+1)},
+		{name: "non utf8", contents: string([]byte{0xff, 0xfe})},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			var downloadDirectory string
+			agent := &AIInfraScanAgent{
+				downloadFile: func(_, _, _, destination string, maxBytes int64) error {
+					assert.Equal(t, maxTargetListAttachmentBytes, maxBytes)
+					downloadDirectory = filepath.Dir(destination)
+					return os.WriteFile(destination, []byte(test.contents), 0600)
+				},
+			}
+
+			_, err := agent.prepareTargets(TaskRequest{
+				SessionId: "unsafe-target-list", Content: "192.168.10.1", Attachments: []string{"targets.txt"},
+			}, ScanRequest{}, initTexts("zh"))
+			require.Error(t, err)
+			assert.NoDirExists(t, downloadDirectory)
+		})
+	}
 }
 
 // TestDemoAgent测试用例

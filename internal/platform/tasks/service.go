@@ -1969,7 +1969,7 @@ func (service *AttachmentService) ReadReadyTargetExpressions(ctx context.Context
 		if err != nil {
 			return nil, err
 		}
-		preOpenInfo, err := os.Stat(path)
+		preOpenInfo, err := os.Lstat(path)
 		if err != nil {
 			return nil, classifyAttachmentStorageError(err)
 		}
