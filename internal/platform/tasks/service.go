@@ -17,6 +17,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/Juneoww/AIG_Custom/common/portscan"
 	"github.com/Juneoww/AIG_Custom/common/runner"
 	"github.com/Juneoww/AIG_Custom/internal/platform/audit"
 	"github.com/Juneoww/AIG_Custom/internal/platform/identity"
@@ -140,7 +141,11 @@ func (service *Service) Create(ctx context.Context, subject identity.Subject, in
 	if len(params) == 0 {
 		params = json.RawMessage(`{}`)
 	}
-	if len(params) > MaxTaskParamsLength || !validTaskParams(input.TaskType, params) {
+	if len(params) > MaxTaskParamsLength {
+		return View{}, ErrInvalid
+	}
+	params, valid := normalizeTaskParams(input.TaskType, params)
+	if !valid {
 		return View{}, ErrInvalid
 	}
 	attachmentRefs, err := json.Marshal(input.AttachmentIDs)
@@ -230,7 +235,7 @@ func (service *Service) createLocked(
 	var persisted *Task
 	var created bool
 	var repositoryErr error
-	err = mutation.Run(ctx, taskID, map[string]any{"task_type": input.TaskType}, func(transactionContext context.Context) error {
+	err = mutation.Run(ctx, taskID, taskCreatedAuditMetadata(input.TaskType, params), func(transactionContext context.Context) error {
 		persisted, created, repositoryErr = service.repository.CreateOrGet(transactionContext, candidate)
 		if repositoryErr == nil && !sameCreateRequest(persisted, candidate) {
 			repositoryErr = ErrInvalid
@@ -318,8 +323,9 @@ type mcpTaskParams struct {
 }
 
 type infrastructureTaskParams struct {
-	ModelID string `json:"model_id"`
-	Timeout *int   `json:"timeout"`
+	ModelID      string `json:"model_id,omitempty"`
+	Timeout      *int   `json:"timeout,omitempty"`
+	PortScanMode string `json:"port_scan_mode"`
 }
 
 type redteamDatasetParams struct {
@@ -351,9 +357,8 @@ func validTaskParams(taskType string, raw json.RawMessage) bool {
 		return decodeExactJSON(raw, &params) && validOptionalReference(fields, "model_id", params.ModelID) &&
 			(params.Thread == nil || *params.Thread >= 1 && *params.Thread <= 1_024)
 	case "ai_infra_scan":
-		var params infrastructureTaskParams
-		return decodeExactJSON(raw, &params) && validOptionalReference(fields, "model_id", params.ModelID) &&
-			(params.Timeout == nil || *params.Timeout >= 1 && *params.Timeout <= 86_400)
+		_, valid := normalizeInfrastructureTaskParams(raw)
+		return valid
 	case "model_redteam_report":
 		var params redteamTaskParams
 		if !decodeExactJSON(raw, &params) || !validReferences(params.ModelIDs, 10) || !validReference(params.EvalModelID) ||
@@ -369,6 +374,81 @@ func validTaskParams(taskType string, raw json.RawMessage) bool {
 	default:
 		return false
 	}
+}
+
+func normalizeTaskParams(taskType string, raw json.RawMessage) (json.RawMessage, bool) {
+	if taskType == "ai_infra_scan" {
+		return normalizeInfrastructureTaskParams(raw)
+	}
+	if !validTaskParams(taskType, raw) {
+		return nil, false
+	}
+	return append(json.RawMessage(nil), raw...), true
+}
+
+func normalizeInfrastructureTaskParams(raw json.RawMessage) (json.RawMessage, bool) {
+	params, fields, valid := decodeInfrastructureTaskParams(raw)
+	if !valid || infrastructurePortScanModeIsNull(fields) {
+		return nil, false
+	}
+	mode, err := portscan.Normalize(params.PortScanMode)
+	if err != nil {
+		return nil, false
+	}
+	params.PortScanMode = string(mode)
+	normalized, err := json.Marshal(params)
+	if err != nil {
+		return nil, false
+	}
+	return json.RawMessage(normalized), true
+}
+
+func normalizedInfrastructurePortScanMode(raw json.RawMessage) (portscan.Mode, bool) {
+	params, fields, valid := decodeInfrastructureTaskParams(raw)
+	if !valid || infrastructurePortScanModeIsNull(fields) {
+		return "", false
+	}
+	modeRaw, exists := fields["port_scan_mode"]
+	if !exists || len(modeRaw) == 0 {
+		return "", false
+	}
+	mode, err := portscan.Normalize(params.PortScanMode)
+	if err != nil || params.PortScanMode != string(mode) || portscan.PortSpec(mode) == "" {
+		return "", false
+	}
+	return mode, true
+}
+
+func decodeInfrastructureTaskParams(raw json.RawMessage) (infrastructureTaskParams, map[string]json.RawMessage, bool) {
+	var fields map[string]json.RawMessage
+	if json.Unmarshal(raw, &fields) != nil || fields == nil {
+		return infrastructureTaskParams{}, nil, false
+	}
+	var params infrastructureTaskParams
+	if !decodeExactJSON(raw, &params) || !validOptionalReference(fields, "model_id", params.ModelID) ||
+		params.Timeout != nil && (*params.Timeout < 1 || *params.Timeout > 86_400) {
+		return infrastructureTaskParams{}, nil, false
+	}
+	return params, fields, true
+}
+
+func infrastructurePortScanModeIsNull(fields map[string]json.RawMessage) bool {
+	raw, exists := fields["port_scan_mode"]
+	return exists && bytes.Equal(bytes.TrimSpace(raw), []byte("null"))
+}
+
+func taskCreatedAuditMetadata(taskType string, params json.RawMessage) map[string]any {
+	metadata := map[string]any{"task_type": taskType}
+	if taskType != "ai_infra_scan" {
+		return metadata
+	}
+	mode, valid := normalizedInfrastructurePortScanMode(params)
+	if !valid {
+		return metadata
+	}
+	metadata["port_scan_mode"] = string(mode)
+	metadata["port_spec"] = portscan.PortSpec(mode)
+	return metadata
 }
 
 func decodeExactJSON(raw json.RawMessage, target any) bool {

@@ -27,11 +27,12 @@ type TaskListResponse struct {
 // Raw content, raw params, credentials, URLs, attachment IDs and engine data
 // are intentionally not representable by this type.
 type TaskInputSummary struct {
-	Language    string `json:"language,omitempty"`
-	Thread      int    `json:"thread,omitempty"`
-	Timeout     int    `json:"timeout,omitempty"`
-	TargetCount int    `json:"target_count,omitempty"`
-	NumPrompts  int    `json:"num_prompts,omitempty"`
+	Language     string `json:"language,omitempty"`
+	Thread       int    `json:"thread,omitempty"`
+	Timeout      int    `json:"timeout,omitempty"`
+	TargetCount  int    `json:"target_count,omitempty"`
+	NumPrompts   int    `json:"num_prompts,omitempty"`
+	PortScanMode string `json:"port_scan_mode,omitempty"`
 }
 
 type TaskDetail struct {
@@ -116,11 +117,15 @@ func safeInputSummary(task *Task) TaskInputSummary {
 			Thread:   safePositiveInt(params.Thread, 1024),
 		}
 	case "ai_infra_scan":
-		return TaskInputSummary{
+		summary := TaskInputSummary{
 			Language:    safeLanguage(task.CountryIsoCode),
 			Timeout:     safePositiveInt(params.Timeout, 86400),
 			TargetCount: nonEmptyLineCount(task.Content),
 		}
+		if mode, valid := normalizedInfrastructurePortScanMode(task.Params); valid {
+			summary.PortScanMode = string(mode)
+		}
+		return summary
 	case "model_redteam_report":
 		return TaskInputSummary{
 			Language:   safeLanguage(task.CountryIsoCode),

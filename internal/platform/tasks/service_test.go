@@ -821,6 +821,186 @@ func TestCreateUsesExactPerTaskParameterSchemas(t *testing.T) {
 	assert.Equal(t, int64(len(valid)), engine.submits.Load())
 }
 
+func TestCreateAIInfrastructureNormalizesPortScanMode(t *testing.T) {
+	tests := []struct {
+		name   string
+		params string
+		want   string
+	}{
+		{name: "omitted defaults to fixed AI", params: `{"model_id":"model-1","timeout":30}`, want: "fixed_ai"},
+		{name: "full TCP is preserved", params: `{"model_id":"model-1","timeout":30,"port_scan_mode":"full_tcp"}`, want: "full_tcp"},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			repository := NewMemoryRepository()
+			engine := &recordingEngine{}
+			service := NewService(repository, engine, audit.NewService(audit.NewMemoryRepository()))
+			subject := identity.Subject{UserID: "user-1", Username: "alice", Role: identity.RoleUser}
+
+			created, err := service.Create(context.Background(), subject, CreateInput{
+				IdempotencyKey: "port-scan-" + test.want, TaskType: "ai_infra_scan", Content: "127.0.0.1",
+				Params: json.RawMessage(test.params),
+			})
+			require.NoError(t, err)
+
+			var viewParams map[string]any
+			require.NoError(t, json.Unmarshal(created.Params, &viewParams))
+			assert.Equal(t, test.want, viewParams["port_scan_mode"])
+			assert.Equal(t, "model-1", viewParams["model_id"])
+			assert.Equal(t, float64(30), viewParams["timeout"])
+
+			stored, err := repository.Get(context.Background(), created.ID)
+			require.NoError(t, err)
+			var storedParams map[string]any
+			require.NoError(t, json.Unmarshal(stored.Params, &storedParams))
+			assert.Equal(t, test.want, storedParams["port_scan_mode"])
+
+			engine.mu.Lock()
+			dispatchedParams := append(json.RawMessage(nil), engine.last.Params...)
+			engine.mu.Unlock()
+			var dispatched map[string]any
+			require.NoError(t, json.Unmarshal(dispatchedParams, &dispatched))
+			assert.Equal(t, test.want, dispatched["port_scan_mode"])
+
+			detail, err := service.BrowserGet(context.Background(), subject, created.ID)
+			require.NoError(t, err)
+			assert.Equal(t, test.want, detail.InputSummary.PortScanMode)
+		})
+	}
+}
+
+func TestCreateAIInfrastructureRejectsInvalidPortScanModeBeforeMutation(t *testing.T) {
+	repository := NewMemoryRepository()
+	engine := &controlledReferenceEngine{}
+	audits := audit.NewMemoryRepository()
+	service := NewService(repository, engine, audit.NewService(audits))
+	subject := identity.Subject{UserID: "user-1", Username: "alice", Role: identity.RoleUser}
+
+	for name, params := range map[string]string{
+		"unknown string": `{"port_scan_mode":"full"}`,
+		"case variant":   `{"port_scan_mode":"FULL_TCP"}`,
+		"array":          `{"port_scan_mode":["fixed_ai"]}`,
+		"number":         `{"port_scan_mode":1}`,
+		"unknown field":  `{"port_scan_mode":"fixed_ai","unexpected":true}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			_, err := service.Create(context.Background(), subject, CreateInput{
+				IdempotencyKey: "invalid-port-scan-" + strings.ReplaceAll(name, " ", "-"),
+				TaskType:       "ai_infra_scan",
+				Content:        "127.0.0.1",
+				Params:         json.RawMessage(params),
+			})
+			require.ErrorIs(t, err, ErrInvalid)
+		})
+	}
+
+	tasks, err := repository.List(context.Background())
+	require.NoError(t, err)
+	assert.Empty(t, tasks)
+	assert.Zero(t, engine.referenceCalls.Load())
+	assert.Zero(t, engine.submits.Load())
+	events, err := audits.List(context.Background(), audit.Filter{Action: audit.Action("task.created")})
+	require.NoError(t, err)
+	assert.Empty(t, events)
+}
+
+func TestCreateAIInfrastructureTreatsOmittedAndExplicitFixedPortScanModeAsSameRequest(t *testing.T) {
+	repository := NewMemoryRepository()
+	engine := &recordingEngine{}
+	service := NewService(repository, engine, audit.NewService(audit.NewMemoryRepository()))
+	subject := identity.Subject{UserID: "user-1", Username: "alice", Role: identity.RoleUser}
+
+	created, err := service.Create(context.Background(), subject, CreateInput{
+		IdempotencyKey: "same-port-scan-mode", TaskType: "ai_infra_scan", Content: "127.0.0.1",
+		Params: json.RawMessage(`{"model_id":"model-1","timeout":30}`),
+	})
+	require.NoError(t, err)
+	retried, err := service.Create(context.Background(), subject, CreateInput{
+		IdempotencyKey: "same-port-scan-mode", TaskType: "ai_infra_scan", Content: "127.0.0.1",
+		Params: json.RawMessage(`{"model_id":"model-1","timeout":30,"port_scan_mode":"fixed_ai"}`),
+	})
+	require.NoError(t, err)
+	assert.Equal(t, created.ID, retried.ID)
+	assert.Equal(t, int64(1), engine.submits.Load())
+
+	var params map[string]any
+	require.NoError(t, json.Unmarshal(retried.Params, &params))
+	assert.Equal(t, "fixed_ai", params["port_scan_mode"])
+}
+
+func TestTaskInputSummaryOnlyProjectsNormalizedInfrastructurePortScanMode(t *testing.T) {
+	trusted := taskDetailOf(&Task{
+		TaskType: "ai_infra_scan", Content: "127.0.0.1",
+		Params: json.RawMessage(`{"model_id":"model-1","timeout":30,"port_scan_mode":"full_tcp"}`),
+	})
+	assert.Equal(t, "full_tcp", trusted.InputSummary.PortScanMode)
+
+	for _, raw := range []json.RawMessage{
+		json.RawMessage(`{"port_scan_mode":"FULL_TCP"}`),
+		json.RawMessage(`{"port_scan_mode":"fixed_ai","unexpected":"do-not-project"}`),
+		json.RawMessage(`{"port_scan_mode":""}`),
+		json.RawMessage(`{}`),
+	} {
+		detail := taskDetailOf(&Task{TaskType: "ai_infra_scan", Content: "https://secret.example.com", Params: raw})
+		assert.Empty(t, detail.InputSummary.PortScanMode)
+		encoded, err := json.Marshal(detail)
+		require.NoError(t, err)
+		assert.NotContains(t, string(encoded), "do-not-project")
+		assert.NotContains(t, string(encoded), "secret.example.com")
+	}
+}
+
+func TestCreateAuditUsesOnlyNormalizedInfrastructurePortScanModeMetadata(t *testing.T) {
+	repository := NewMemoryRepository()
+	engine := &recordingEngine{}
+	audits := audit.NewMemoryRepository()
+	service := NewService(repository, engine, audit.NewService(audits))
+	subject := identity.Subject{UserID: "user-1", Username: "alice", Role: identity.RoleUser}
+
+	infrastructure, err := service.Create(context.Background(), subject, CreateInput{
+		IdempotencyKey: "audited-full-tcp", TaskType: "ai_infra_scan", Content: "https://ai.example.com/private-target",
+		Params: json.RawMessage(`{"model_id":"model-private","port_scan_mode":"full_tcp"}`),
+	})
+	require.NoError(t, err)
+	mcp, err := service.Create(context.Background(), subject, CreateInput{
+		IdempotencyKey: "audited-mcp", TaskType: "mcp_scan", Content: "scan",
+	})
+	require.NoError(t, err)
+
+	metadataFor := func(taskID string) map[string]any {
+		t.Helper()
+		events, listErr := audits.List(context.Background(), audit.Filter{ResourceID: taskID, Action: audit.Action("task.created")})
+		require.NoError(t, listErr)
+		for _, event := range events {
+			if event.Outcome != audit.OutcomeSuccess {
+				continue
+			}
+			metadata := map[string]any{}
+			require.NoError(t, json.Unmarshal(event.Metadata, &metadata))
+			return metadata
+		}
+		t.Fatalf("missing successful task.created audit event")
+		return nil
+	}
+
+	infrastructureMetadata := metadataFor(infrastructure.ID)
+	assert.ElementsMatch(t, []string{"task_type", "port_scan_mode", "port_spec", "phase"}, mapKeys(infrastructureMetadata))
+	assert.Equal(t, "ai_infra_scan", infrastructureMetadata["task_type"])
+	assert.Equal(t, "full_tcp", infrastructureMetadata["port_scan_mode"])
+	assert.Equal(t, "1-65535", infrastructureMetadata["port_spec"])
+	serializedMetadata, marshalErr := json.Marshal(infrastructureMetadata)
+	require.NoError(t, marshalErr)
+	assert.NotContains(t, string(serializedMetadata), "private-target")
+	assert.NotContains(t, string(serializedMetadata), "model-private")
+
+	mcpMetadata := metadataFor(mcp.ID)
+	assert.ElementsMatch(t, []string{"task_type", "phase"}, mapKeys(mcpMetadata))
+	assert.Equal(t, "mcp_scan", mcpMetadata["task_type"])
+	assert.NotContains(t, mcpMetadata, "port_scan_mode")
+	assert.NotContains(t, mcpMetadata, "port_spec")
+}
+
 func TestCreateRejectsUnboundedOrNonCanonicalInputBeforeAttachmentReads(t *testing.T) {
 	repository := &countingAttachmentRepository{MemoryRepository: NewMemoryRepository()}
 	audits := audit.NewService(audit.NewMemoryRepository())
