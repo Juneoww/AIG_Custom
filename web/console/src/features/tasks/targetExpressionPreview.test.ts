@@ -26,6 +26,15 @@ describe('previewTargetExpressions', () => {
     expect(preview).toEqual({ ok: true, count: 2, targets: ['https://ai.example.com', '192.168.10.2'] })
   })
 
+  it.each([
+    'https://ai.example.com/~health',
+    'https://ai.example.com/api\\v1',
+    'https://ai.example.com/search?q=*',
+    'https://[2001:db8::1]:443/health',
+  ])('保留 URL 中的表达式字符 %s', (url) => {
+    expect(previewTargetExpressions(url)).toEqual({ ok: true, count: 1, targets: [url] })
+  })
+
   it('展开 IPv4 CIDR', () => {
     const preview = previewTargetExpressions('192.168.10.0/30')
 
@@ -79,8 +88,23 @@ describe('previewTargetExpressions', () => {
     'https://api-blue.example.com/scan-target',
     '192.168.10.2:8080',
     'model-gateway.example.com',
+    'api-192.168.10.2',
   ])('保留正常的非范围目标 %s', (expression) => {
     expect(previewTargetExpressions(expression)).toEqual({ ok: true, count: 1, targets: [expression] })
+  })
+
+  it('拒绝使用 NBSP 分隔的多个目标', () => {
+    const preview = previewTargetExpressions('192.168.10.2\u00A0192.168.10.3')
+
+    expect(preview).toMatchObject({ ok: false, count: 0, targets: [] })
+    expect(preview.ok ? '' : preview.error).toContain('每行只能填写一个目标')
+  })
+
+  it('拒绝非 URL 的方括号 IPv6 加端口目标', () => {
+    const preview = previewTargetExpressions('[2001:db8::1]:443')
+
+    expect(preview).toMatchObject({ ok: false, count: 0, targets: [] })
+    expect(preview.ok ? '' : preview.error).toContain('IPv6 目标')
   })
 
   it('展开末尾 IPv4 通配符', () => {

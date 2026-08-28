@@ -110,9 +110,8 @@ function isIPv6RangeExpression(target: string): boolean {
 function isRangeExpression(target: string): boolean {
   if (isWebURL(target) || !target.includes('-') || !target.includes('.')) return false
   const parts = target.split('-')
-  if (parts.length !== 2) return parts.some((part) => parseIPv4(part) !== undefined)
+  if (parts.length !== 2) return parseIPv4(parts[0]) !== undefined
   return parseIPv4(parts[0]) !== undefined
-    || parseIPv4(parts[1]) !== undefined
     || (looksLikeIPv4(parts[0]) && looksLikeIPv4(parts[1]))
 }
 
@@ -176,6 +175,8 @@ function expandWildcard(target: string): string[] | string {
 }
 
 function expandExpression(target: string): string[] | string {
+  // URL 是单一目标；其中的路径和查询参数可合法包含 ~、反斜杠或 *。
+  if (isWebURL(target)) return [target]
   if (target.includes('\\') || target.includes('~')) {
     return '目标格式无效：范围只能使用标准连字符 -，不能包含反斜杠或波浪号。'
   }
