@@ -49,6 +49,40 @@ describe('previewTargetExpressions', () => {
     expect(preview.ok ? '' : preview.error).toContain('端口')
   })
 
+  it.each([
+    '192.168.10.2:not-a-port-192.168.10.10:80',
+    '192.168.10.2:80-192.168.10.10:not-a-port',
+    '192.168.10.2:99999-192.168.10.10:80',
+    '192.168.10.2:80-192.168.10.10:99999',
+  ])('拒绝任一端带非法端口的 IPv4 范围 %s', (expression) => {
+    const preview = previewTargetExpressions(expression)
+
+    expect(preview).toMatchObject({ ok: false, count: 0, targets: [] })
+    expect(preview.ok ? '' : preview.error).toContain('端口')
+  })
+
+  it('拒绝 IPv6 连字符范围', () => {
+    const preview = previewTargetExpressions('2001:db8::1-2001:db8::2')
+
+    expect(preview).toMatchObject({ ok: false, count: 0, targets: [] })
+    expect(preview.ok ? '' : preview.error).toContain('IPv6 范围')
+  })
+
+  it('拒绝带方括号和端口的 IPv6 连字符范围', () => {
+    const preview = previewTargetExpressions('[2001:db8::1]:443-[2001:db8::2]:443')
+
+    expect(preview).toMatchObject({ ok: false, count: 0, targets: [] })
+    expect(preview.ok ? '' : preview.error).toContain('IPv6 范围')
+  })
+
+  it.each([
+    'https://api-blue.example.com/scan-target',
+    '192.168.10.2:8080',
+    'model-gateway.example.com',
+  ])('保留正常的非范围目标 %s', (expression) => {
+    expect(previewTargetExpressions(expression)).toEqual({ ok: true, count: 1, targets: [expression] })
+  })
+
   it('展开末尾 IPv4 通配符', () => {
     const smallPreview = previewTargetExpressions('22.2.10.*')
     const largePreview = previewTargetExpressions('22.2.*.*')

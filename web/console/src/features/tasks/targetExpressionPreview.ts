@@ -16,7 +16,9 @@ type IPv4 = readonly [number, number, number, number]
 
 const TOO_MANY_TARGETS_ERROR = `目标数量超过 ${MAX_EXPANDED_TARGETS.toLocaleString('en-US')}，请缩小网段或拆分任务。`
 const INVALID_WILDCARD_ERROR = '目标格式无效：IPv4 通配符必须从某一段开始连续出现在末尾，例如 22.2.10.*。'
-const INVALID_RANGE_ERROR = '目标格式无效：IPv4 范围必须使用两个不带端口的合法 IPv4 地址，且起始地址不能大于结束地址。'
+const INVALID_RANGE_ERROR = '目标格式无效：IPv4 范围必须使用两个合法 IPv4 地址，且起始地址不能大于结束地址。'
+const INVALID_IPV4_PORT_RANGE_ERROR = '目标格式无效：不支持 IPv4 端口范围；请使用两个不带端口的 IPv4 地址。'
+const INVALID_IPV6_RANGE_ERROR = '目标格式无效：暂不支持 IPv6 范围。'
 
 function failed(error: string): TargetExpressionPreview {
   return { ok: false, count: 0, targets: [], error }
@@ -88,9 +90,21 @@ function looksLikeIPv4(value: string): boolean {
   return value.length > 0 && /^[0-9.]+$/.test(value)
 }
 
-function looksLikeIPv4WithPort(value: string): boolean {
-  const separator = value.indexOf(':')
-  return separator > 0 && looksLikeIPv4(value.slice(0, separator))
+function isIPv4PortRangeExpression(target: string): boolean {
+  if (isWebURL(target) || !target.includes('-')) return false
+  return target.split('-').some((part) => {
+    const separator = part.indexOf(':')
+    return separator > 0 && parseIPv4(part.slice(0, separator)) !== undefined
+  })
+}
+
+function isIPv6RangeExpression(target: string): boolean {
+  if (isWebURL(target) || !target.includes('-')) return false
+  return target.split('-').some((part) => {
+    if (isIPv6Literal(part)) return true
+    const closing = part.indexOf(']')
+    return part.startsWith('[') && closing > 1 && isIPv6Literal(part.slice(1, closing))
+  })
 }
 
 function isRangeExpression(target: string): boolean {
@@ -100,8 +114,6 @@ function isRangeExpression(target: string): boolean {
   return parseIPv4(parts[0]) !== undefined
     || parseIPv4(parts[1]) !== undefined
     || (looksLikeIPv4(parts[0]) && looksLikeIPv4(parts[1]))
-    || looksLikeIPv4WithPort(parts[0])
-    || looksLikeIPv4WithPort(parts[1])
 }
 
 function expandNumbers(start: number, count: number): string[] {
@@ -171,6 +183,8 @@ function expandExpression(target: string): string[] | string {
     if (isIPv6Literal(target.split('/', 2)[0])) return '目标格式无效：暂不支持 IPv6 CIDR。'
     return expandCIDR(target)
   }
+  if (isIPv4PortRangeExpression(target)) return INVALID_IPV4_PORT_RANGE_ERROR
+  if (isIPv6RangeExpression(target)) return INVALID_IPV6_RANGE_ERROR
   if (isRangeExpression(target)) return expandRange(target)
   if (target.includes('*')) return expandWildcard(target)
   if (/\s/.test(target)) return '目标格式无效：每行只能填写一个目标。'
