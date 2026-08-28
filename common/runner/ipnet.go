@@ -44,12 +44,31 @@ type ipv4Interval struct {
 	count uint64
 }
 
+const ipv4CoverageThreshold uint64 = 64
+
+type ipv4Coverage struct {
+	intervals      []ipv4Interval
+	smallIntervals map[ipv4Interval]struct{}
+}
+
+func newIPv4Coverage() *ipv4Coverage {
+	return &ipv4Coverage{smallIntervals: make(map[ipv4Interval]struct{})}
+}
+
+func (coverage *ipv4Coverage) add(interval ipv4Interval) {
+	if interval.count < ipv4CoverageThreshold {
+		coverage.smallIntervals[interval] = struct{}{}
+		return
+	}
+	coverage.intervals = addCoveredIPv4Interval(coverage.intervals, interval)
+}
+
 // ParseTargets trims, expands, and deduplicates a batch of target expressions.
 // IPv4 CIDRs, complete IPv4 ranges, and trailing IPv4 wildcards are expanded.
 func ParseTargets(expressions []string) ([]string, error) {
 	result := make([]string, 0)
 	seen := make(map[string]struct{})
-	expandedIntervals := make(map[ipv4Interval]struct{})
+	coveredIPv4 := newIPv4Coverage()
 	rawExpressionCount := 0
 	for _, raw := range expressions {
 		target := strings.TrimSpace(raw)
@@ -78,11 +97,7 @@ func ParseTargets(expressions []string) ([]string, error) {
 				err = intervalErr
 				break
 			}
-			if _, ok := expandedIntervals[interval]; ok {
-				continue
-			}
-			expanded = expandIPv4Numbers(interval.start, interval.count)
-			expandedIntervals[interval] = struct{}{}
+			result, err = appendUncoveredIPv4Targets(result, seen, coveredIPv4, interval)
 		case isIPv4PortRangeExpression(target):
 			err = fmt.Errorf("IPv4 port ranges are not supported: %q", target)
 		case isIPv6RangeExpression(target):
@@ -93,28 +108,26 @@ func ParseTargets(expressions []string) ([]string, error) {
 				err = intervalErr
 				break
 			}
-			if _, ok := expandedIntervals[interval]; ok {
-				continue
-			}
-			expanded = expandIPv4Numbers(interval.start, interval.count)
-			expandedIntervals[interval] = struct{}{}
+			result, err = appendUncoveredIPv4Targets(result, seen, coveredIPv4, interval)
 		case strings.Contains(target, "*"):
 			interval, intervalErr := parseWildcardInterval(target)
 			if intervalErr != nil {
 				err = intervalErr
 				break
 			}
-			if _, ok := expandedIntervals[interval]; ok {
-				continue
-			}
-			expanded = expandIPv4Numbers(interval.start, interval.count)
-			expandedIntervals[interval] = struct{}{}
+			result, err = appendUncoveredIPv4Targets(result, seen, coveredIPv4, interval)
 		default:
 			if isBracketedIPv6Address(target) {
 				return nil, fmt.Errorf("IPv6 targets are not supported: %q", target)
 			}
-			if addr, parseErr := netip.ParseAddr(target); parseErr == nil && addr.Is6() {
-				return nil, fmt.Errorf("IPv6 targets are not supported: %q", target)
+			if addr, parseErr := netip.ParseAddr(target); parseErr == nil {
+				if addr.Is6() {
+					return nil, fmt.Errorf("IPv6 targets are not supported: %q", target)
+				}
+				if addr.Is4() {
+					result, err = appendUncoveredIPv4Targets(result, seen, coveredIPv4, ipv4Interval{start: ipv4Uint32(addr), count: 1})
+					break
+				}
 			}
 			expanded = []string{target}
 		}
@@ -133,6 +146,98 @@ func ParseTargets(expressions []string) ([]string, error) {
 		}
 	}
 	return result, nil
+}
+
+func appendUncoveredIPv4Targets(result []string, seen map[string]struct{}, coverage *ipv4Coverage, interval ipv4Interval) ([]string, error) {
+	if interval.count < ipv4CoverageThreshold {
+		if _, ok := coverage.smallIntervals[interval]; ok {
+			return result, nil
+		}
+	}
+	uncovered := []ipv4Interval{interval}
+	if interval.count >= ipv4CoverageThreshold {
+		uncovered = uncoveredIPv4Intervals(coverage.intervals, interval)
+	}
+	for _, part := range uncovered {
+		for offset := uint64(0); offset < part.count; offset++ {
+			value := netip.AddrFrom4([4]byte{
+				byte((part.start + uint32(offset)) >> 24),
+				byte((part.start + uint32(offset)) >> 16),
+				byte((part.start + uint32(offset)) >> 8),
+				byte(part.start + uint32(offset)),
+			}).String()
+			if _, ok := seen[value]; ok {
+				continue
+			}
+			if len(result) >= maxTargetExpressions {
+				return nil, ErrTooManyTargets
+			}
+			seen[value] = struct{}{}
+			result = append(result, value)
+		}
+	}
+	coverage.add(interval)
+	return result, nil
+}
+
+func uncoveredIPv4Intervals(covered []ipv4Interval, interval ipv4Interval) []ipv4Interval {
+	start := uint64(interval.start)
+	end := start + interval.count - 1
+	result := make([]ipv4Interval, 0, 1)
+	for _, existing := range covered {
+		existingStart := uint64(existing.start)
+		existingEnd := existingStart + existing.count - 1
+		if existingEnd < start {
+			continue
+		}
+		if existingStart > end {
+			break
+		}
+		if existingStart > start {
+			result = append(result, ipv4Interval{start: uint32(start), count: existingStart - start})
+		}
+		if existingEnd >= end {
+			return result
+		}
+		start = existingEnd + 1
+	}
+	if start <= end {
+		result = append(result, ipv4Interval{start: uint32(start), count: end - start + 1})
+	}
+	return result
+}
+
+func addCoveredIPv4Interval(covered []ipv4Interval, interval ipv4Interval) []ipv4Interval {
+	start := uint64(interval.start)
+	end := start + interval.count - 1
+	result := make([]ipv4Interval, 0, len(covered)+1)
+	inserted := false
+	for _, existing := range covered {
+		existingStart := uint64(existing.start)
+		existingEnd := existingStart + existing.count - 1
+		if existingEnd+1 < start {
+			result = append(result, existing)
+			continue
+		}
+		if end+1 < existingStart {
+			if !inserted {
+				result = append(result, ipv4Interval{start: uint32(start), count: end - start + 1})
+				inserted = true
+			}
+			result = append(result, existing)
+			continue
+		}
+		if existingStart < start {
+			start = existingStart
+		}
+		if existingEnd > end {
+			end = existingEnd
+		}
+	}
+	if !inserted {
+		result = append(result, ipv4Interval{start: uint32(start), count: end - start + 1})
+	}
+	return result
 }
 
 // AppendTargetExpressionLines appends non-empty target-list lines while

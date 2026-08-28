@@ -133,6 +133,33 @@ func TestParseTargets_DeduplicatesEquivalentMaximumIPv4Expressions(t *testing.T)
 	assert.Equal(t, "22.2.255.255", got[len(got)-1])
 }
 
+func TestParseTargets_DeduplicatesPartiallyCoveredIPv4Ranges(t *testing.T) {
+	got, err := ParseTargets([]string{
+		"10.0.0.1",
+		"10.0.0.0-10.0.0.2",
+		"10.0.0.0/30",
+	})
+	require.NoError(t, err)
+	assert.Equal(t, []string{"10.0.0.1", "10.0.0.0", "10.0.0.2", "10.0.0.3"}, got)
+}
+
+func TestUncoveredIPv4IntervalsSkipsCoveredSections(t *testing.T) {
+	covered := []ipv4Interval{{start: 0x0A000001, count: 1}}
+	got := uncoveredIPv4Intervals(covered, ipv4Interval{start: 0x0A000000, count: 3})
+	assert.Equal(t, []ipv4Interval{
+		{start: 0x0A000000, count: 1},
+		{start: 0x0A000002, count: 1},
+	}, got)
+}
+
+func TestIPv4CoverageDoesNotTrackSparseSingleAddresses(t *testing.T) {
+	coverage := newIPv4Coverage()
+	for offset := uint32(0); offset < MaxTargetExpressions; offset++ {
+		coverage.add(ipv4Interval{start: 0x0A000000 + (MaxTargetExpressions - 1 - offset), count: 1})
+	}
+	assert.Empty(t, coverage.intervals)
+}
+
 func TestParseTargets_DeduplicatesAcrossBatch(t *testing.T) {
 	got, err := ParseTargets([]string{"10.0.0.1", "10.0.0.0/30", "10.0.0.1-10.0.0.2", "  "})
 	require.NoError(t, err)
