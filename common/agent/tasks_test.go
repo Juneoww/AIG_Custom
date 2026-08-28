@@ -188,13 +188,36 @@ func TestAIInfraScanAgentExecuteRejectsInvalidPortScanModeBeforeScanStarts(t *te
 }
 
 func TestAIInfraScanAgentExecuteRejectsExplicitNullPortScanModeBeforeScanStarts(t *testing.T) {
+	assertPortScanModeRejectedBeforeScan(t, `{"port_scan_mode":null}`)
+}
+
+func TestAIInfraScanAgentExecuteRejectsPortScanModeFieldNameVariantsAndDuplicatesBeforeScanStarts(t *testing.T) {
+	tests := []struct {
+		name   string
+		params string
+	}{
+		{name: "uppercase null", params: `{"PORT_SCAN_MODE":null}`},
+		{name: "mixed case null", params: `{"Port_Scan_Mode":null}`},
+		{name: "canonical and uppercase collision", params: `{"port_scan_mode":"full_tcp","PORT_SCAN_MODE":null}`},
+		{name: "uppercase name with valid value", params: `{"PORT_SCAN_MODE":"full_tcp"}`},
+		{name: "duplicate canonical field", params: `{"port_scan_mode":"fixed_ai","port_scan_mode":"full_tcp"}`},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			assertPortScanModeRejectedBeforeScan(t, test.params)
+		})
+	}
+}
+
+func assertPortScanModeRejectedBeforeScan(t *testing.T, params string) {
+	t.Helper()
 	var callbackCalls int
 	var nmapCalls int
-	unexpectedNmapErr := errors.New("nmap must not run for an explicit null port scan mode")
 	agent := &AIInfraScanAgent{
 		nmapScan: func(string, string) (*utils.NmapRun, error) {
 			nmapCalls++
-			return nil, unexpectedNmapErr
+			return nil, errors.New("nmap must not run for an invalid port scan mode")
 		},
 	}
 	callbacks := TaskCallbacks{
@@ -213,7 +236,7 @@ func TestAIInfraScanAgentExecuteRejectsExplicitNullPortScanModeBeforeScanStarts(
 
 	err := agent.Execute(context.Background(), TaskRequest{
 		Content: "198.51.100.1",
-		Params:  json.RawMessage(`{"port_scan_mode":null}`),
+		Params:  json.RawMessage(params),
 	}, callbacks)
 
 	assert.ErrorIs(t, err, portscan.ErrInvalidMode)
@@ -224,54 +247,48 @@ func TestAIInfraScanAgentExecuteRejectsExplicitNullPortScanModeBeforeScanStarts(
 func TestAIInfraScanAgentExecuteRejectsNonStringPortScanModeBeforeScanStarts(t *testing.T) {
 	for _, value := range []string{"true", "1", "[]", "{}"} {
 		t.Run(value, func(t *testing.T) {
-			var callbackCalls int
-			var nmapCalls int
-			agent := &AIInfraScanAgent{
-				nmapScan: func(string, string) (*utils.NmapRun, error) {
-					nmapCalls++
-					return nil, errors.New("nmap must not run for a non-string port scan mode")
-				},
-			}
-			callbacks := TaskCallbacks{
-				PlanUpdateCallback: func([]SubTask) { callbackCalls++ },
-			}
-
-			err := agent.Execute(context.Background(), TaskRequest{
-				Content: "198.51.100.1",
-				Params:  json.RawMessage(`{"port_scan_mode":` + value + `}`),
-			}, callbacks)
-
-			require.Error(t, err)
-			assert.Zero(t, callbackCalls)
-			assert.Zero(t, nmapCalls)
+			assertPortScanModeRejectedBeforeScan(t, `{"port_scan_mode":`+value+`}`)
 		})
 	}
 }
 
-func TestAIInfraScanAgentExecuteUsesFixedPortScanModeWhenFieldIsOmitted(t *testing.T) {
-	stopAfterNmap := errors.New("stop after nmap")
-	var portSpec string
-	agent := &AIInfraScanAgent{
-		nmapScan: func(_ string, gotPortSpec string) (*utils.NmapRun, error) {
-			portSpec = gotPortSpec
-			return nil, stopAfterNmap
-		},
-	}
-	callbacks := TaskCallbacks{
-		PlanUpdateCallback:       func([]SubTask) {},
-		NewPlanStepCallback:      func(string, string) {},
-		StepStatusUpdateCallback: func(string, string, string, string, string) {},
-		ToolUsedCallback:         func(string, string, string, []Tool) {},
-		ToolUseLogCallback:       func(string, string, string, string) {},
+func TestAIInfraScanAgentExecuteUsesVerifiedCanonicalPortScanModeOrDefault(t *testing.T) {
+	tests := []struct {
+		name     string
+		params   json.RawMessage
+		wantSpec string
+	}{
+		{name: "omitted defaults to fixed AI", params: json.RawMessage(`{}`), wantSpec: portscan.FixedAIPortSpec},
+		{name: "canonical full TCP", params: json.RawMessage(`{"port_scan_mode":"full_tcp"}`), wantSpec: portscan.FullTCPPortSpec},
 	}
 
-	err := agent.Execute(context.Background(), TaskRequest{
-		Content: "198.51.100.1",
-		Params:  json.RawMessage(`{}`),
-	}, callbacks)
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			stopAfterNmap := errors.New("stop after nmap")
+			var portSpec string
+			agent := &AIInfraScanAgent{
+				nmapScan: func(_ string, gotPortSpec string) (*utils.NmapRun, error) {
+					portSpec = gotPortSpec
+					return nil, stopAfterNmap
+				},
+			}
+			callbacks := TaskCallbacks{
+				PlanUpdateCallback:       func([]SubTask) {},
+				NewPlanStepCallback:      func(string, string) {},
+				StepStatusUpdateCallback: func(string, string, string, string, string) {},
+				ToolUsedCallback:         func(string, string, string, []Tool) {},
+				ToolUseLogCallback:       func(string, string, string, string) {},
+			}
 
-	require.ErrorIs(t, err, stopAfterNmap)
-	assert.Equal(t, portscan.FixedAIPortSpec, portSpec)
+			err := agent.Execute(context.Background(), TaskRequest{
+				Content: "198.51.100.1",
+				Params:  test.params,
+			}, callbacks)
+
+			require.ErrorIs(t, err, stopAfterNmap)
+			assert.Equal(t, test.wantSpec, portSpec)
+		})
+	}
 }
 
 func TestAIInfraScanAgentPortDiscoveryUsesModePortSpecInNmapAndToolEvents(t *testing.T) {

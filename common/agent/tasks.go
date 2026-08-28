@@ -28,6 +28,7 @@ import (
 	"net/netip"
 	"os"
 	"path"
+	"strings"
 	"sync"
 	"time"
 	"unicode/utf8"
@@ -179,24 +180,70 @@ func decodeScanRequest(params json.RawMessage) (ScanRequest, error) {
 		return request, nil
 	}
 
-	var fields map[string]json.RawMessage
-	if err := json.Unmarshal(params, &fields); err != nil {
+	mode, hasMode, err := decodePortScanMode(params)
+	if err != nil {
 		return request, err
-	}
-	if rawMode, exists := fields["port_scan_mode"]; exists {
-		if bytes.Equal(bytes.TrimSpace(rawMode), []byte("null")) {
-			return request, fmt.Errorf("invalid port scan mode: %w", portscan.ErrInvalidMode)
-		}
-		var mode string
-		if err := json.Unmarshal(rawMode, &mode); err != nil {
-			return request, err
-		}
 	}
 
 	if err := json.Unmarshal(params, &request); err != nil {
 		return request, err
 	}
+	if hasMode {
+		request.PortScanMode = mode
+	}
 	return request, nil
+}
+
+func decodePortScanMode(params json.RawMessage) (string, bool, error) {
+	decoder := json.NewDecoder(bytes.NewReader(params))
+	token, err := decoder.Token()
+	if err != nil {
+		return "", false, err
+	}
+	delimiter, isObject := token.(json.Delim)
+	if !isObject || delimiter != '{' {
+		return "", false, nil
+	}
+
+	var mode string
+	var hasMode bool
+	for decoder.More() {
+		token, err := decoder.Token()
+		if err != nil {
+			return "", false, err
+		}
+		field, isString := token.(string)
+		if !isString {
+			return "", false, invalidPortScanModeError("field name must be a string")
+		}
+
+		var rawValue json.RawMessage
+		if err := decoder.Decode(&rawValue); err != nil {
+			return "", false, err
+		}
+		if !strings.EqualFold(field, "port_scan_mode") {
+			continue
+		}
+		if field != "port_scan_mode" || hasMode {
+			return "", false, invalidPortScanModeError("field name must be canonical and unique")
+		}
+
+		if bytes.Equal(bytes.TrimSpace(rawValue), []byte("null")) {
+			return "", false, invalidPortScanModeError("value must be a string")
+		}
+		if err := json.Unmarshal(rawValue, &mode); err != nil {
+			return "", false, invalidPortScanModeError("value must be a string")
+		}
+		hasMode = true
+	}
+	if _, err := decoder.Token(); err != nil {
+		return "", false, err
+	}
+	return mode, hasMode, nil
+}
+
+func invalidPortScanModeError(reason string) error {
+	return fmt.Errorf("invalid port scan mode (%s): %w", reason, portscan.ErrInvalidMode)
 }
 
 // scanTexts 包含所有语言相关的文本
