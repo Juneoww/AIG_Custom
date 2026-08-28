@@ -179,6 +179,7 @@ function isIPv4Interval(value: ParsedExpression): value is IPv4Interval {
 
 function parseExpression(target: string): ParsedExpression {
   // URL 是单一目标；其中的路径和查询参数可合法包含 ~、反斜杠或 *。
+  if (/\s/.test(target)) return '目标格式无效：每行只能填写一个目标。'
   if (isWebURL(target)) return [target]
   if (target.includes('\\') || target.includes('~')) {
     return '目标格式无效：范围只能使用标准连字符 -，不能包含反斜杠或波浪号。'
@@ -191,7 +192,6 @@ function parseExpression(target: string): ParsedExpression {
   if (isIPv6RangeExpression(target)) return INVALID_IPV6_RANGE_ERROR
   if (isRangeExpression(target)) return parseRangeInterval(target)
   if (target.includes('*')) return parseWildcardInterval(target)
-  if (/\s/.test(target)) return '目标格式无效：每行只能填写一个目标。'
   if (isIPv6Literal(target)) return '目标格式无效：暂不支持 IPv6 目标。'
   const ipv4 = parseIPv4(target)
   if (ipv4) return { start: ipv4Number(ipv4), count: 1 }

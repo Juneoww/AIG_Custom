@@ -37,6 +37,16 @@ describe('previewTargetExpressions', () => {
     expect(previewTargetExpressions(url)).toEqual({ ok: true, count: 1, targets: [url] })
   })
 
+  it.each([
+    'https://a.example.test https://b.example.test',
+    'HTTPS://a.example.test\u00A0HTTPS://b.example.test',
+  ])('拒绝以空白拼接的多个 URL %s', (expression) => {
+    const preview = previewTargetExpressions(expression)
+
+    expect(preview).toMatchObject({ ok: false, count: 0, targets: [] })
+    expect(preview.ok ? '' : preview.error).toContain('每行只能填写一个目标')
+  })
+
   it('展开 IPv4 CIDR', () => {
     const preview = previewTargetExpressions('192.168.10.0/30')
 
