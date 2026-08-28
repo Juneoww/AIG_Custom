@@ -85,7 +85,7 @@ const reviewReports: readonly ReportSummaryView[] = [
 
 function renderAt(page: React.ReactNode, path: string, routePath: string) {
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } })
-  return render(
+  const view = render(
     <ThemeProvider initialMode="light">
       <QueryClientProvider client={queryClient}>
         <MemoryRouter initialEntries={[path]}>
@@ -94,6 +94,7 @@ function renderAt(page: React.ReactNode, path: string, routePath: string) {
       </QueryClientProvider>
     </ThemeProvider>,
   )
+  return { ...view, queryClient }
 }
 
 function ReportSwitchHarness() {
@@ -188,6 +189,28 @@ describe('ReportListPage', () => {
     renderAt(<ReportListPage />, '/reports', '/reports')
     expect(await screen.findByText(message)).toBeInTheDocument()
     expect(screen.queryByRole('region', { name: '报告复核态势' })).not.toBeInTheDocument()
+  })
+
+  it.each([
+    [403, '无权查看安全报告'],
+    [500, '暂时无法加载安全报告'],
+  ])('缓存报告在重取%s失败后只显示独立安全状态', async (status, message) => {
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(jsonResponse({ items: reviewReports, total: 45, page: 2, page_size: 20 }))
+      .mockResolvedValueOnce(new Response(null, { status }))
+    vi.stubGlobal('fetch', fetchMock)
+    const { queryClient } = renderAt(<ReportListPage />, '/reports?page=2', '/reports')
+
+    expect(await screen.findByRole('table', { name: '不可变安全报告台账' })).toBeInTheDocument()
+    await act(async () => {
+      await queryClient.invalidateQueries({ queryKey: ['reports', { page: 2, pageSize: 20 }], exact: true })
+    })
+
+    expect(await screen.findByText(message)).toBeInTheDocument()
+    expect(fetchMock).toHaveBeenCalledTimes(2)
+    expect(screen.queryByRole('region', { name: '报告复核态势' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('table', { name: '不可变安全报告台账' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('navigation', { name: '报告分页' })).not.toBeInTheDocument()
   })
 
   it('加载安全报告时不提前渲染报告复核态势', async () => {

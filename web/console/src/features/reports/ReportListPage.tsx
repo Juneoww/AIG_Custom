@@ -15,10 +15,23 @@ import { DataTable, type DataTableColumn } from '../../shared/components/DataTab
 import { PageHeader } from '../../shared/components/PageHeader'
 import { StatePanel } from '../../shared/components/StatePanel'
 import { fetchReportList, type ReportSummaryView } from './api'
+import { ReportPageReviewSummary } from './components/ReportPageReviewSummary'
 
 const useStyles = makeStyles({
-  page: { display: 'flex', flexDirection: 'column', gap: tokens.spacingVerticalL },
-  pagination: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: tokens.spacingHorizontalM },
+  page: { display: 'flex', flexDirection: 'column', gap: tokens.spacingVerticalL, minWidth: 0 },
+  tableViewport: { minWidth: 0, overflowX: 'auto' },
+  pagination: {
+    display: 'flex',
+    flexWrap: 'wrap',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    gap: tokens.spacingHorizontalM,
+    '@media (max-width: 960px)': {
+      flexDirection: 'column',
+      alignItems: 'stretch',
+    },
+  },
+  paginationActions: { display: 'flex', flexWrap: 'wrap', gap: tokens.spacingHorizontalS },
   link: { color: tokens.colorBrandForegroundLink },
   risk: { whiteSpace: 'nowrap' },
 })
@@ -51,6 +64,10 @@ export function ReportListPage() {
     queryFn: ({ signal }) => fetchReportList(page, 20, signal),
     retry: false,
   })
+  const reportList = query.isSuccess ? query.data : null
+  const hasEmptyPage = reportList?.items.length === 0
+  const hasEmptyCollection = hasEmptyPage && reportList?.total === 0
+  const hasOutOfRangePage = hasEmptyPage && reportList?.total > 0
   const columns: readonly DataTableColumn<ReportSummaryView>[] = [
     { id: 'type', header: '任务类型', render: (report) => taskTypeLabels[report.task_type] },
     { id: 'score', header: '安全分', render: (report) => report.risk.score },
@@ -65,19 +82,25 @@ export function ReportListPage() {
   return (
     <section className={styles.page}>
       <PageHeader title="安全报告" description="查看当前权限范围内已固化的安全快照，分页由服务端执行。" />
+      {reportList ? <ReportPageReviewSummary reports={reportList.items} total={reportList.total} /> : null}
       {query.isPending ? <StatePanel state="loading" title="正在加载安全报告" /> : null}
       {query.isError && query.error instanceof ApiError && query.error.kind === 'forbidden' ? <StatePanel state="forbidden" title="无权查看安全报告" /> : null}
       {query.isError && !(query.error instanceof ApiError && query.error.kind === 'forbidden') ? (
         <StatePanel state="error" title="暂时无法加载安全报告" description="请稍后重试。" actionLabel="重试" onAction={() => void query.refetch()} />
       ) : null}
-      {query.data?.items.length === 0 ? <StatePanel state="empty" title="暂无安全报告" description="扫描任务完成并生成报告后将在此显示。" /> : null}
-      {query.data?.items.length ? <DataTable caption="不可变安全报告台账" columns={columns} rows={query.data.items} getRowKey={(report) => report.id} /> : null}
-      {query.data ? (
+      {hasEmptyCollection ? <StatePanel state="empty" title="暂无安全报告" description="扫描任务完成并生成报告后将在此显示。" /> : null}
+      {hasOutOfRangePage ? <StatePanel state="empty" title="当前页没有报告" description="报告数据可能已变化，请返回上一页继续查看。" /> : null}
+      {reportList?.items.length ? (
+        <div className={styles.tableViewport}>
+          <DataTable caption="不可变安全报告台账" columns={columns} rows={reportList.items} getRowKey={(report) => report.id} />
+        </div>
+      ) : null}
+      {reportList ? (
         <nav className={styles.pagination} aria-label="报告分页">
-          <span>共 {query.data.total} 条，第 {query.data.page} 页</span>
-          <div>
-            <Button appearance="secondary" disabled={page <= 1} onClick={() => setSearchParams(page > 2 ? { page: String(page - 1) } : {})}>上一页</Button>{' '}
-            <Button appearance="secondary" disabled={page * query.data.page_size >= query.data.total} onClick={() => setSearchParams({ page: String(page + 1) })}>下一页</Button>
+          <span>共 {reportList.total} 条，第 {reportList.page} 页</span>
+          <div className={styles.paginationActions}>
+            <Button appearance="secondary" disabled={page <= 1} onClick={() => setSearchParams(page > 2 ? { page: String(page - 1) } : {})}>上一页</Button>
+            <Button appearance="secondary" disabled={page * reportList.page_size >= reportList.total} onClick={() => setSearchParams({ page: String(page + 1) })}>下一页</Button>
           </div>
         </nav>
       ) : null}
