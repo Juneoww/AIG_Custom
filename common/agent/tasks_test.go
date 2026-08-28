@@ -69,6 +69,19 @@ func TestAIInfraScanAgentPrepareTargetsRejectsInvalidWildcard(t *testing.T) {
 	assert.Error(t, err)
 }
 
+func TestAIInfraScanAgentPrepareTargetsRejectsTooManyAttachmentExpressions(t *testing.T) {
+	agent := &AIInfraScanAgent{
+		downloadFile: func(_, _, _, destination string, _ int64) error {
+			return os.WriteFile(destination, []byte(strings.Repeat("example.com\n", 65537)), 0600)
+		},
+	}
+
+	_, err := agent.prepareTargets(TaskRequest{
+		SessionId: "too-many-target-expressions", Content: "192.168.10.1", Attachments: []string{"targets.txt"},
+	}, ScanRequest{}, initTexts("zh"))
+	assert.Error(t, err)
+}
+
 func TestAIInfraScanAgentPortDiscoveryCanAppendToMaximumExpandedInput(t *testing.T) {
 	targets, err := runner.ParseTargets([]string{"22.2.*.*"})
 	require.NoError(t, err)

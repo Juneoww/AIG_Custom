@@ -26,7 +26,6 @@ import (
 	"io"
 	"os"
 	"path"
-	"strings"
 	"sync"
 	"time"
 	"unicode/utf8"
@@ -271,7 +270,10 @@ func initTexts(language string) scanTexts {
 
 // prepareTargets 处理目标和附件
 func (t *AIInfraScanAgent) prepareTargets(request TaskRequest, reqScan ScanRequest, texts scanTexts) ([]string, error) {
-	targets := strings.Split(strings.TrimSpace(request.Content), "\n")
+	targets, err := runner.AppendTargetExpressionLines(nil, request.Content)
+	if err != nil {
+		return nil, fmt.Errorf("invalid infrastructure scan target expressions")
+	}
 
 	if len(request.Attachments) > 0 {
 		tempDir, err := os.MkdirTemp("", "aig-target-list-")
@@ -306,7 +308,11 @@ func (t *AIInfraScanAgent) prepareTargets(request TaskRequest, reqScan ScanReque
 				logAgentAttachmentFailure("read_failed", request.SessionId, TaskTypeAIInfraScan, readErr)
 				return nil, errInvalidTargetListAttachment
 			}
-			targets = append(targets, strings.Split(string(contents), "\n")...)
+			targets, readErr = runner.AppendTargetExpressionLines(targets, string(contents))
+			if readErr != nil {
+				logAgentAttachmentFailure("read_failed", request.SessionId, TaskTypeAIInfraScan, readErr)
+				return nil, errInvalidTargetListAttachment
+			}
 		}
 	}
 

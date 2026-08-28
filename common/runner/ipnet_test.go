@@ -111,6 +111,11 @@ func TestParseTargets_PreservesHyphenatedHostnameEndingInIPv4(t *testing.T) {
 	assert.Equal(t, []string{"api-192.168.10.2"}, got)
 }
 
+func TestParseTargets_RejectsDomainHostnameEndingInIPv4RangeShape(t *testing.T) {
+	_, err := ParseTargets([]string{"example.com-10.0.0.1"})
+	assert.Error(t, err)
+}
+
 func TestParseTargets_RejectsUnicodeWhitespace(t *testing.T) {
 	_, err := ParseTargets([]string{"192.168.10.2\u00a0192.168.10.3"})
 	assert.Error(t, err)

@@ -370,6 +370,31 @@ func TestCreateAIInfraTargetAttachmentExpressionsCombineWithBody(t *testing.T) {
 	assert.Equal(t, int64(1), engine.submits.Load())
 }
 
+func TestCreateAIInfraTargetValidationRejectsTooManyAttachmentExpressions(t *testing.T) {
+	repository := NewMemoryRepository()
+	audits := audit.NewService(audit.NewMemoryRepository())
+	attachments, err := NewAttachmentService(repository, AttachmentConfig{
+		UploadDir: t.TempDir(), MaxFileBytes: 2 << 20, MaxChunkBytes: 1 << 20,
+	}, audits)
+	require.NoError(t, err)
+	owner := identity.Subject{UserID: "target-expression-limit-owner", Username: "alice", Role: identity.RoleUser}
+	attachment, err := attachments.Upload(context.Background(), owner, "targets.txt", strings.NewReader(strings.Repeat("example.com\n", 65537)))
+	require.NoError(t, err)
+	engine := &recordingEngine{}
+	service := NewService(repository, engine, audits)
+	service.SetAttachmentService(attachments)
+
+	_, err = service.Create(context.Background(), owner, CreateInput{
+		IdempotencyKey: "too-many-target-expressions", TaskType: "ai_infra_scan", Content: "192.168.10.1",
+		AttachmentIDs: []string{attachment.ID},
+	})
+	require.ErrorIs(t, err, ErrInvalid)
+	stored, listErr := repository.List(context.Background())
+	require.NoError(t, listErr)
+	assert.Empty(t, stored)
+	assert.Zero(t, engine.submits.Load())
+}
+
 func TestCreateAIInfraTargetAttachmentValidationRejectsUnsafeLists(t *testing.T) {
 	tests := []struct {
 		name       string

@@ -252,16 +252,19 @@ func (service *Service) createLocked(
 }
 
 func (service *Service) validateInfrastructureTargets(ctx context.Context, ownerUserID, content string, attachmentIDs []string) error {
-	expressions := strings.Split(content, "\n")
+	expressions, err := runner.AppendTargetExpressionLines(nil, content)
+	if err != nil {
+		return ErrInvalid
+	}
 	if len(attachmentIDs) > 0 {
 		if service.attachments == nil {
 			return ErrInvalid
 		}
-		attachmentExpressions, err := service.attachments.ReadReadyTargetExpressions(ctx, ownerUserID, attachmentIDs)
+		attachmentExpressions, err := service.attachments.ReadReadyTargetExpressions(ctx, ownerUserID, attachmentIDs, expressions)
 		if err != nil {
 			return ErrInvalid
 		}
-		expressions = append(expressions, attachmentExpressions...)
+		expressions = attachmentExpressions
 	}
 	if _, err := runner.ParseTargets(expressions); err != nil {
 		return ErrInvalid
@@ -1946,11 +1949,10 @@ func (service *AttachmentService) ResolveAttached(ctx context.Context, ownerUser
 }
 
 // ReadReadyTargetExpressions reads ready, owner-scoped target-list attachments without exposing storage paths.
-func (service *AttachmentService) ReadReadyTargetExpressions(ctx context.Context, ownerUserID string, ids []string) ([]string, error) {
+func (service *AttachmentService) ReadReadyTargetExpressions(ctx context.Context, ownerUserID string, ids []string, expressions []string) ([]string, error) {
 	if _, err := service.ResolveReady(ctx, ownerUserID, ids); err != nil {
 		return nil, err
 	}
-	expressions := make([]string, 0)
 	for _, id := range ids {
 		attachment, err := service.repository.GetAttachment(ctx, id)
 		if err != nil {
@@ -2002,7 +2004,10 @@ func (service *AttachmentService) ReadReadyTargetExpressions(ctx context.Context
 		if !utf8.Valid(contents) {
 			return nil, ErrInvalid
 		}
-		expressions = append(expressions, strings.Split(string(contents), "\n")...)
+		expressions, err = runner.AppendTargetExpressionLines(expressions, string(contents))
+		if err != nil {
+			return nil, ErrInvalid
+		}
 	}
 	return expressions, nil
 }

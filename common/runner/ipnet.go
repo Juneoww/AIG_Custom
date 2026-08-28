@@ -20,6 +20,7 @@
 package runner
 
 import (
+	"bufio"
 	"encoding/binary"
 	"errors"
 	"fmt"
@@ -29,7 +30,11 @@ import (
 	"unicode"
 )
 
-const maxTargetExpressions = 65536
+const (
+	MaxTargetExpressions       = 65536
+	maxTargetExpressions       = MaxTargetExpressions
+	maxTargetExpressionLineLen = 1 << 20
+)
 
 // ErrTooManyTargets indicates that expansion would exceed the batch limit.
 var ErrTooManyTargets = errors.New("target expansion exceeds 65536 targets")
@@ -45,10 +50,15 @@ func ParseTargets(expressions []string) ([]string, error) {
 	result := make([]string, 0)
 	seen := make(map[string]struct{})
 	expandedIntervals := make(map[ipv4Interval]struct{})
+	rawExpressionCount := 0
 	for _, raw := range expressions {
 		target := strings.TrimSpace(raw)
 		if target == "" {
 			continue
+		}
+		rawExpressionCount++
+		if rawExpressionCount > maxTargetExpressions {
+			return nil, ErrTooManyTargets
 		}
 		isURL := isHTTPURL(target)
 		if !isURL && strings.ContainsAny(target, "\\~") {
@@ -125,6 +135,27 @@ func ParseTargets(expressions []string) ([]string, error) {
 	return result, nil
 }
 
+// AppendTargetExpressionLines appends non-empty target-list lines while
+// bounding raw expressions before they reach ParseTargets.
+func AppendTargetExpressionLines(expressions []string, content string) ([]string, error) {
+	scanner := bufio.NewScanner(strings.NewReader(content))
+	scanner.Buffer(make([]byte, 1024), maxTargetExpressionLineLen)
+	for scanner.Scan() {
+		line := scanner.Text()
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+		if len(expressions) >= maxTargetExpressions {
+			return nil, ErrTooManyTargets
+		}
+		expressions = append(expressions, line)
+	}
+	if err := scanner.Err(); err != nil {
+		return nil, fmt.Errorf("invalid target expression list: %w", err)
+	}
+	return expressions, nil
+}
+
 func isRangeExpression(target string) bool {
 	if isHTTPURL(target) {
 		return false
@@ -142,6 +173,7 @@ func isRangeExpression(target string) bool {
 		return false
 	}
 	return isCompleteIPv4(parts[0]) ||
+		(strings.Contains(parts[0], ".") && isCompleteIPv4(parts[1])) ||
 		(looksLikeIPv4(parts[0]) && looksLikeIPv4(parts[1]))
 }
 
