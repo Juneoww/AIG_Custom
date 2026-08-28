@@ -19,6 +19,7 @@
 package agent
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -118,11 +119,9 @@ func (t *AIInfraScanAgent) GetName() string {
 	return TaskTypeAIInfraScan
 }
 func (t *AIInfraScanAgent) Execute(ctx context.Context, request TaskRequest, callbacks TaskCallbacks) error {
-	var reqScan ScanRequest
-	if len(request.Params) > 0 {
-		if err := json.Unmarshal(request.Params, &reqScan); err != nil {
-			return err
-		}
+	reqScan, err := decodeScanRequest(request.Params)
+	if err != nil {
+		return err
 	}
 	portScanMode, err := normalizePortScanMode(reqScan.PortScanMode)
 	if err != nil {
@@ -172,6 +171,32 @@ func normalizePortScanMode(value string) (portscan.Mode, error) {
 		return "", fmt.Errorf("invalid port scan mode: %w", err)
 	}
 	return mode, nil
+}
+
+func decodeScanRequest(params json.RawMessage) (ScanRequest, error) {
+	var request ScanRequest
+	if len(params) == 0 {
+		return request, nil
+	}
+
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(params, &fields); err != nil {
+		return request, err
+	}
+	if rawMode, exists := fields["port_scan_mode"]; exists {
+		if bytes.Equal(bytes.TrimSpace(rawMode), []byte("null")) {
+			return request, fmt.Errorf("invalid port scan mode: %w", portscan.ErrInvalidMode)
+		}
+		var mode string
+		if err := json.Unmarshal(rawMode, &mode); err != nil {
+			return request, err
+		}
+	}
+
+	if err := json.Unmarshal(params, &request); err != nil {
+		return request, err
+	}
+	return request, nil
 }
 
 // scanTexts 包含所有语言相关的文本
