@@ -684,26 +684,35 @@ func TestLegacyAIInfrastructureTaskDispatchNormalizesPortScanMode(t *testing.T) 
 }
 
 func TestMalformedLegacyAIInfrastructureTaskDoesNotDispatch(t *testing.T) {
-	repository := NewMemoryRepository()
-	engine := &recordingEngine{}
-	service := NewService(repository, engine, audit.NewService(audit.NewMemoryRepository()))
-	now := time.Now().UTC()
-	task := &Task{
-		ID: "malformed-legacy-ai", OwnerUserID: "legacy-owner", OwnerUsername: "alice",
-		IdempotencyKey: "malformed-legacy-ai", EngineSessionID: "malformed-legacy-ai", TaskType: "ai_infra_scan",
-		Content: "127.0.0.1", Params: json.RawMessage(`{"port_scan_mode":"not-approved"}`), AttachmentRefs: json.RawMessage(`[]`),
-		Status: StatusPending, CreatedAt: now, UpdatedAt: now,
-	}
-	_, created, err := repository.CreateOrGet(context.Background(), task)
-	require.NoError(t, err)
-	require.True(t, created)
-	claim, claimed, err := repository.ClaimDispatch(context.Background(), task.ID, now, now.Add(dispatchLeaseDuration))
-	require.NoError(t, err)
-	require.True(t, claimed)
+	for name, params := range map[string]json.RawMessage{
+		"unknown mode":  json.RawMessage(`{"port_scan_mode":"not-approved"}`),
+		"explicit null": json.RawMessage(`{"port_scan_mode":null}`),
+		"empty string":  json.RawMessage(`{"port_scan_mode":""}`),
+	} {
+		t.Run(name, func(t *testing.T) {
+			repository := NewMemoryRepository()
+			engine := &recordingEngine{}
+			service := NewService(repository, engine, audit.NewService(audit.NewMemoryRepository()))
+			now := time.Now().UTC()
+			taskID := "malformed-legacy-ai-" + strings.ReplaceAll(name, " ", "-")
+			task := &Task{
+				ID: taskID, OwnerUserID: "legacy-owner", OwnerUsername: "alice",
+				IdempotencyKey: taskID, EngineSessionID: taskID, TaskType: "ai_infra_scan",
+				Content: "127.0.0.1", Params: params, AttachmentRefs: json.RawMessage(`[]`),
+				Status: StatusPending, CreatedAt: now, UpdatedAt: now,
+			}
+			_, created, err := repository.CreateOrGet(context.Background(), task)
+			require.NoError(t, err)
+			require.True(t, created)
+			claim, claimed, err := repository.ClaimDispatch(context.Background(), task.ID, now, now.Add(dispatchLeaseDuration))
+			require.NoError(t, err)
+			require.True(t, claimed)
 
-	_, err = service.dispatch(context.Background(), identity.Subject{UserID: task.OwnerUserID, Username: task.OwnerUsername, Role: identity.RoleUser}, task, claim)
-	require.ErrorIs(t, err, ErrInvalid)
-	assert.Zero(t, engine.submits.Load())
+			_, err = service.dispatch(context.Background(), identity.Subject{UserID: task.OwnerUserID, Username: task.OwnerUsername, Role: identity.RoleUser}, task, claim)
+			require.ErrorIs(t, err, ErrInvalid)
+			assert.Zero(t, engine.submits.Load())
+		})
+	}
 }
 
 func TestIdempotentRetryBypassesCreationAuditOutage(t *testing.T) {
@@ -999,6 +1008,9 @@ func TestCreateAIInfrastructureRejectsInvalidPortScanModeBeforeMutation(t *testi
 		"value case variant":    `{"port_scan_mode":"FULL_TCP"}`,
 		"uppercase field name":  `{"PORT_SCAN_MODE":"full_tcp"}`,
 		"mixed case field name": `{"PoRt_ScAn_MoDe":"full_tcp"}`,
+		"explicit null":         `{"port_scan_mode":null}`,
+		"empty string":          `{"port_scan_mode":""}`,
+		"whitespace string":     `{"port_scan_mode":" "}`,
 		"array":                 `{"port_scan_mode":["fixed_ai"]}`,
 		"number":                `{"port_scan_mode":1}`,
 		"unknown field":         `{"port_scan_mode":"fixed_ai","unexpected":true}`,

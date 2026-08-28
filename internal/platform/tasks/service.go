@@ -399,11 +399,11 @@ func normalizeTaskParams(taskType string, raw json.RawMessage) (json.RawMessage,
 
 func normalizeInfrastructureTaskParams(raw json.RawMessage) (json.RawMessage, bool) {
 	params, fields, valid := decodeInfrastructureTaskParams(raw)
-	if !valid || infrastructurePortScanModeIsNull(fields) {
+	if !valid {
 		return nil, false
 	}
-	mode, err := portscan.Normalize(params.PortScanMode)
-	if err != nil {
+	mode, valid := normalizedInfrastructurePortScanModeField(fields)
+	if !valid {
 		return nil, false
 	}
 	params.PortScanMode = string(mode)
@@ -415,16 +415,15 @@ func normalizeInfrastructureTaskParams(raw json.RawMessage) (json.RawMessage, bo
 }
 
 func normalizedInfrastructurePortScanMode(raw json.RawMessage) (portscan.Mode, bool) {
-	params, fields, valid := decodeInfrastructureTaskParams(raw)
-	if !valid || infrastructurePortScanModeIsNull(fields) {
+	_, fields, valid := decodeInfrastructureTaskParams(raw)
+	if !valid {
 		return "", false
 	}
-	modeRaw, exists := fields["port_scan_mode"]
-	if !exists || len(modeRaw) == 0 {
+	if _, exists := fields["port_scan_mode"]; !exists {
 		return "", false
 	}
-	mode, err := portscan.Normalize(params.PortScanMode)
-	if err != nil || params.PortScanMode != string(mode) || portscan.PortSpec(mode) == "" {
+	mode, valid := normalizedInfrastructurePortScanModeField(fields)
+	if !valid || portscan.PortSpec(mode) == "" {
 		return "", false
 	}
 	return mode, true
@@ -443,9 +442,20 @@ func decodeInfrastructureTaskParams(raw json.RawMessage) (infrastructureTaskPara
 	return params, fields, true
 }
 
-func infrastructurePortScanModeIsNull(fields map[string]json.RawMessage) bool {
+func normalizedInfrastructurePortScanModeField(fields map[string]json.RawMessage) (portscan.Mode, bool) {
 	raw, exists := fields["port_scan_mode"]
-	return exists && bytes.Equal(bytes.TrimSpace(raw), []byte("null"))
+	if !exists {
+		return portscan.DefaultMode, true
+	}
+	var value *string
+	if json.Unmarshal(raw, &value) != nil || value == nil || strings.TrimSpace(*value) == "" {
+		return "", false
+	}
+	mode, err := portscan.Normalize(*value)
+	if err != nil {
+		return "", false
+	}
+	return mode, true
 }
 
 func taskCreatedAuditMetadata(taskType string, params json.RawMessage) map[string]any {
