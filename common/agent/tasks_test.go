@@ -110,6 +110,35 @@ func TestAIInfraScanAgentPortDiscoveryCanAppendToMaximumExpandedInput(t *testing
 	assert.Equal(t, "22.2.0.0:11434", finalTargets[len(finalTargets)-1])
 }
 
+func TestAIInfraScanAgentPortDiscoveryRejectsTooManyDiscoveredEndpoints(t *testing.T) {
+	ports := make([]utils.Port, maxDiscoveredScanEndpoints+1)
+	for index := range ports {
+		ports[index] = utils.Port{PortID: index + 1, State: utils.State{State: "open"}}
+	}
+	calls := 0
+	agent := &AIInfraScanAgent{
+		nmapScan: func(host, _ string) (*utils.NmapRun, error) {
+			calls++
+			if host == "10.0.0.1" {
+				return &utils.NmapRun{Hosts: []utils.Host{{
+					Address: utils.Address{Addr: host}, Ports: utils.Ports{PortList: ports},
+				}}}, nil
+			}
+			return &utils.NmapRun{}, nil
+		},
+	}
+	callbacks := TaskCallbacks{
+		StepStatusUpdateCallback: func(string, string, string, string, string) {},
+		ToolUsedCallback:         func(string, string, string, []Tool) {},
+		ToolUseLogCallback:       func(string, string, string, string) {},
+	}
+
+	_, err := agent.scanPortsAndPrepareTargets([]string{"10.0.0.1", "10.0.0.2"}, "step-1", initTexts("zh"), callbacks)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "discovered scan endpoint limit")
+	assert.Equal(t, 1, calls)
+}
+
 func TestAIInfraScanAgentPrepareTargetsRejectsUnsafeAttachmentAndCleansUp(t *testing.T) {
 	tests := []struct {
 		name     string

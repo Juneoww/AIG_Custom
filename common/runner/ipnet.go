@@ -157,6 +157,9 @@ func appendUncoveredIPv4Targets(result []string, seen map[string]struct{}, cover
 	uncovered := []ipv4Interval{interval}
 	if interval.count >= ipv4CoverageThreshold {
 		uncovered = uncoveredIPv4Intervals(coverage.intervals, interval)
+		if len(uncovered) == 0 {
+			return result, nil
+		}
 	}
 	for _, part := range uncovered {
 		for offset := uint64(0); offset < part.count; offset++ {

@@ -20,6 +20,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 
 	"github.com/Juneoww/AIG_Custom/internal/gologger"
@@ -41,6 +42,13 @@ func baseOptions(targets []string) *options.Options {
 		FPTemplates:  "../../data/fingerprints",
 		AdvTemplates: "../../data/vuln",
 	}
+}
+
+func repositoryDataPath(t *testing.T, name string) string {
+	t.Helper()
+	_, file, _, ok := runtime.Caller(0)
+	require.True(t, ok)
+	return filepath.Join(filepath.Dir(file), "..", "..", "data", name)
 }
 
 func TestParseTargetsExpandsAndDeduplicatesAcrossSources(t *testing.T) {
@@ -128,8 +136,8 @@ func TestRunner_RunEnumeration(t *testing.T) {
 		TimeOut:      10,
 		JSON:         false,
 		RateLimit:    10,
-		FPTemplates:  "data/fingerprints",
-		AdvTemplates: "data/advisories",
+		FPTemplates:  repositoryDataPath(t, "fingerprints"),
+		AdvTemplates: repositoryDataPath(t, "vuln"),
 	}
 	r, err := New(parseOptions)
 	if err != nil {

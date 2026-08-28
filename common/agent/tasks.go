@@ -97,7 +97,10 @@ type AIInfraScanAgent struct {
 	nmapScan     func(target, ports string) (*utils.NmapRun, error)
 }
 
-const maxTargetListAttachmentBytes int64 = 1 << 20
+const (
+	maxTargetListAttachmentBytes int64 = 1 << 20
+	maxDiscoveredScanEndpoints         = 65536
+)
 
 var errInvalidTargetListAttachment = errors.New("invalid target-list attachment")
 
@@ -349,6 +352,7 @@ func readTargetListAttachment(fileName string) ([]byte, error) {
 func (t *AIInfraScanAgent) scanPortsAndPrepareTargets(targets []string, step01 string, texts scanTexts, callbacks TaskCallbacks) ([]string, error) {
 	finalTargets := []string{}
 	var hosts []string
+	discoveredEndpoints := 0
 	nmapScan := t.nmapScan
 	if nmapScan == nil {
 		nmapScan = utils.NmapScan
@@ -379,7 +383,11 @@ func (t *AIInfraScanAgent) scanPortsAndPrepareTargets(targets []string, step01 s
 			address := port.Address.Addr
 			for _, ported := range port.Ports.PortList {
 				if ported.State.State == "open" {
+					if discoveredEndpoints >= maxDiscoveredScanEndpoints {
+						return nil, fmt.Errorf("discovered scan endpoint limit exceeded")
+					}
 					finalTargets = append(finalTargets, fmt.Sprintf("%s:%d", address, ported.PortID))
+					discoveredEndpoints++
 					success += 1
 					callbacks.ToolUseLogCallback(toolId, texts.nmapTool, step01, fmt.Sprintf("%s: %s:%d\n", texts.foundPort, address, ported.PortID))
 				}

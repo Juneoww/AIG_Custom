@@ -19,6 +19,7 @@
 package runner
 
 import (
+	"fmt"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -158,6 +159,39 @@ func TestIPv4CoverageDoesNotTrackSparseSingleAddresses(t *testing.T) {
 		coverage.add(ipv4Interval{start: 0x0A000000 + (MaxTargetExpressions - 1 - offset), count: 1})
 	}
 	assert.Empty(t, coverage.intervals)
+}
+
+func TestParseTargetsSkipsFullyCoveredLargeSubranges(t *testing.T) {
+	expressions := []string{"22.2.0.0/16"}
+	coverage := newIPv4Coverage()
+	coverage.add(ipv4Interval{start: 0x16020000, count: MaxTargetExpressions})
+	for offset := 0; offset < MaxTargetExpressions; offset += 64 {
+		start := 0x16020000 + offset
+		assert.Empty(t, uncoveredIPv4Intervals(coverage.intervals, ipv4Interval{start: uint32(start), count: 64}))
+		expressions = append(expressions, fmt.Sprintf("22.2.%d.%d-22.2.%d.%d", offset>>8, offset&0xff, offset>>8, (offset&0xff)+63))
+	}
+	assert.Len(t, coverage.intervals, 1)
+
+	got, err := ParseTargets(expressions)
+	require.NoError(t, err)
+	assert.Len(t, got, MaxTargetExpressions)
+}
+
+func TestAppendUncoveredIPv4TargetsDoesNotMergeFullyCoveredLargeRange(t *testing.T) {
+	coverage := newIPv4Coverage()
+	first := ipv4Interval{start: 0x0A000000, count: 64}
+	coverage.add(first)
+	coverage.add(ipv4Interval{start: 0x0A000080, count: 64})
+	before := &coverage.intervals[0]
+	seen := make(map[string]struct{})
+	result := []string{}
+	for range 10 {
+		var err error
+		result, err = appendUncoveredIPv4Targets(result, seen, coverage, first)
+		require.NoError(t, err)
+		assert.Len(t, coverage.intervals, 2)
+		assert.Same(t, before, &coverage.intervals[0])
+	}
 }
 
 func TestParseTargets_DeduplicatesAcrossBatch(t *testing.T) {
