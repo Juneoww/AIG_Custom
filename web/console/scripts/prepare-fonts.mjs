@@ -70,7 +70,19 @@ const assets = [
 
 function normalizeAssetContent(content, asset) {
   if (!asset.normalizeLineEndings) return content
-  return Buffer.from(content.toString('utf8').replace(/\r\n/g, '\n'), 'utf8')
+  const normalized = Buffer.allocUnsafe(content.length)
+  let destination = 0
+  for (let source = 0; source < content.length; source += 1) {
+    if (content[source] === 0x0d && content[source + 1] === 0x0a) {
+      normalized[destination] = 0x0a
+      destination += 1
+      source += 1
+      continue
+    }
+    normalized[destination] = content[source]
+    destination += 1
+  }
+  return normalized.subarray(0, destination)
 }
 
 async function verifyAsset(path, asset, requirePlainFile = false, normalizeLineEndings = false) {

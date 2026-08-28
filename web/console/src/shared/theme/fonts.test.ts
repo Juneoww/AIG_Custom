@@ -174,6 +174,17 @@ describe('offline font assets', () => {
       expect(createHash('sha256').update(generatedLicense).digest('hex')).toBe(
         'd741e57d5f865e294df801f96b7b5161a88b211df65887e4358d271c9fc5fb4f',
       )
+
+      const tamperedLicense = Buffer.from(crlfLicense)
+      const copyrightIndex = tamperedLicense.indexOf(Buffer.from('Copyright', 'utf8'))
+      expect(copyrightIndex).toBeGreaterThanOrEqual(0)
+      tamperedLicense[copyrightIndex] = 'X'.charCodeAt(0)
+      await writeFile(resolve(fixtureRoot, 'assets/fonts/IBM_PLEX_LICENSE.txt'), tamperedLicense)
+
+      await expect(runPrepare(fixtureRoot)).rejects.toThrow('字体资产校验失败：IBM_PLEX_LICENSE.txt')
+      await expect(readFile(resolve(fixtureRoot, '.generated/licenses/IBM_PLEX_LICENSE.txt'))).resolves.toEqual(
+        canonicalLicense,
+      )
     } finally {
       await rm(fixtureRoot, { recursive: true, force: true })
     }
