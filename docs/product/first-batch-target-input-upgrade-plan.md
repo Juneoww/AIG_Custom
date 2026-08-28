@@ -209,3 +209,363 @@ git commit -m "feat: guide expanded infrastructure scan targets"
 - `192.168.10.2-192.168.10.10` 与用户提供的 7 行连字符范围被准确展开；后者合计得到 100 个目标，`22.2.10.*` 被准确展开为 256 个目标。
 - 解析或附件读取失败、目标超过 65,536 时，平台不创建、不分发任务；CLI 在实际网络请求前失败并报告原因。
 - Go、前端的定向测试与前述回归命令全部通过，嵌入式控制台静态产物由构建生成。
+
+---
+
+## 已确认的下一批改造：平台端口扫描模式
+
+### 目标
+
+让 **AI 基础设施扫描** 在平台端到端支持两种仅针对裸 IPv4 的端口发现模式：
+
+| 模式值 | 平台名称 | Nmap TCP 端口表达式 | 默认值 |
+| --- | --- | --- | --- |
+| `fixed_ai` | 固定 AI 端口扫描 | `11434,1337,7000-9000,18789`（共 2,004 个端口号） | 是 |
+| `full_tcp` | 全量 TCP 端口扫描 | `1-65535` | 否，必须由用户在平台明确选择 |
+
+“固定 AI 端口扫描”保持现有裸 IP 行为：`11434`、`1337`、`7000–9000`、`18789`。`7000–9000` 为闭区间，共 2,001 个端口；加上另外 3 个端口后总计 2,004 个端口号。
+
+### 已确认设计
+
+1. 平台控制台、创建 API、任务持久化、Agent 和任务详情必须使用同一个 `port_scan_mode` 契约；不能只在 CLI 或 Agent 中支持全量模式。
+2. `port_scan_mode` 缺省时必须规范化并持久化为 `fixed_ai`，使任务详情、审计与重试都能显示真实模式；仅接受 `fixed_ai` 与 `full_tcp`。
+3. 端口发现仅针对通过现有目标解析器得到的**裸 IPv4**。URL、域名和显式 `IP:port` 保持原有 Web 扫描路径，不因选择全量模式而对它们额外执行 Nmap。
+4. `full_tcp` 必须传递 `-p 1-65535`，不新增按全量模式区分的 IP/目标数量上限。此前已建立的通用输入表达式、附件和发现端点保护仍然有效；本批不移除这些跨模式安全边界。
+5. 本批只定义 TCP 端口发现模式；不添加 UDP 扫描、服务版本探测、任意自定义端口列表或自动升级为全量扫描。
+6. 控制台必须在选择 `full_tcp` 时清楚提示其会显著增加耗时和网络压力，并保留“仅扫描明确获授权目标”的提醒；该提示不是新的数量上限。
+7. 任务详情、进度事件、创建审计记录和报告元数据必须能够显示实际选择的模式与端口范围，避免把全量扫描误报为固定端口扫描。报告与审计只能从已规范化并持久化的任务参数派生，不能信任 Agent 自报的模式。
+
+### 文件结构
+
+| 文件 | 责任 |
+| --- | --- |
+| `common/portscan/mode.go` | 新建无副作用的共享端口扫描模式契约：模式值、默认值、TCP 端口表达式、规范化与错误。 |
+| `common/portscan/mode_test.go` | 覆盖默认、固定、全量和非法模式的纯单元测试。 |
+| `internal/platform/tasks/service.go` | 在 `ai_infra_scan` 创建前严格校验、规范化并持久化 `port_scan_mode`，将受限模式/端口规格写入创建审计元数据，并在报告桥接处从可信 `Task.Params` 填充报告输入。 |
+| `internal/platform/tasks/service_test.go` | 覆盖缺省规范化、非法模式在持久化/派发前拒绝、全量模式透传、审计元数据与幂等重试。 |
+| `internal/platform/tasks/dto.go` | 向安全输入摘要投影实际端口扫描模式，供任务详情展示。 |
+| `common/agent/tasks.go` | 防御性读取模式；仅为裸 IPv4 调用对应 TCP 端口表达式，并在进度中报告真实命令。 |
+| `common/agent/tasks_test.go` | 通过 Nmap seam 覆盖固定/全量端口参数、URL/域名不做端口发现、缺省兼容与既有端点保护。 |
+| `web/console/src/shared/api/types.ts` | 为任务创建请求和详情输入摘要增加受限端口扫描模式类型。 |
+| `web/console/src/features/tasks/api.ts` | 在任务详情响应白名单解析中接受且仅接受两个模式值，拒绝任意原始字符串。 |
+| `web/console/src/features/tasks/TaskCreatePage.tsx` | 仅在 AI 基础设施任务显示模式选择、默认值和全量 TCP 风险提示，并提交 `port_scan_mode`。 |
+| `web/console/src/features/tasks/TaskDetailPage.tsx` | 显示任务实际采用的端口扫描模式和端口范围。 |
+| `web/console/src/features/tasks/TaskPages.test.tsx` | 覆盖控制台默认值、全量模式提交、风险提示、任务详情显示与其他任务类型不受影响。 |
+| `internal/platform/reports/entity.go`、`internal/platform/reports/service.go` | 将已规范化的任务模式/端口规格纳入受控报告模型与导出数据流。 |
+| `internal/platform/reports/snapshot.go`、`internal/platform/reports/pdf.go`、`internal/platform/reports/handler.go` | 从可信任务参数生成不可变报告快照、PDF 与报告 API 响应；不回显原始 `params`。 |
+| `internal/platform/reports/*_test.go` | 覆盖固定/全量报告元数据、快照/PDF/API 展示，以及非法或缺失值不被信任。 |
+| `web/console/src/features/reports/api.ts`、`web/console/src/features/reports/ReportDetailPage.tsx` | 解析受限报告端口元数据并在报告详情显示模式与范围。 |
+| `web/console/src/features/reports/api.test.ts`、`web/console/src/features/reports/ReportPages.test.tsx` | 覆盖报告 API 白名单解析与前端展示。 |
+| `docs/api/reference.md`、`docs/api/reference.en.md` | 记录 `ai_infra_scan.params.port_scan_mode` 的枚举、默认值和裸 IP 适用范围。 |
+| `internal/apidocs/swagger.yaml`、`internal/apidocs/swagger.json`、`internal/apidocs/docs.go` | 同步 API 运行时三件套；不得直接运行默认 `swag init` 覆盖现有文件。 |
+| `docs/product/core-risk-discovery.md` | 在实现落地后更新用户可见说明，区分固定 AI 端口与全量 TCP 扫描。 |
+| `common/websocket/static/*` | 仅由通过检查的控制台构建脚本生成，绝不手工编辑。 |
+
+### Task 5: 建立共享端口扫描模式契约与平台参数规范化
+
+**Files:**
+- Create: `common/portscan/mode.go`
+- Create: `common/portscan/mode_test.go`
+- Modify: `internal/platform/tasks/service.go:320-360`
+- Modify: `internal/platform/tasks/service_test.go`
+- Modify: `internal/platform/tasks/dto.go:29-35,103-130`
+
+- [ ] **Step 1: 写出失败的共享契约与平台服务测试**
+
+为共享契约断言：空字符串规范化为 `fixed_ai`；`fixed_ai` 映射 `11434,1337,7000-9000,18789`；`full_tcp` 映射 `1-65535`；其他值返回错误。为平台服务断言：
+
+- 省略 `port_scan_mode` 的 `ai_infra_scan` 成功创建，持久化的 `params` 中为 `fixed_ai`；
+- `full_tcp` 成功创建并保留该值；
+- `"full"`、大小写变体、数组、数字和额外 JSON 字段在审计、持久化和分发前返回 `ErrInvalid`；
+- 使用相同幂等键重试省略模式的请求仍与已规范化的 `fixed_ai` 任务相等；
+- 任务详情的 `input_summary` 显示受限模式值，而非回显任意原始 JSON。
+- 成功的 `task.created` 审计事件仅为 AI 基础设施任务带有受控的 `port_scan_mode` 与对应 TCP `port_spec`；非 AI 任务和非法模式不能伪造这些字段。
+
+Run: `go test ./common/portscan ./internal/platform/tasks -run 'Test.*PortScanMode' -count=1`
+
+Expected: FAIL，因为尚无共享契约、严格校验或摘要字段。
+
+- [ ] **Step 2: 实现最小共享模式包**
+
+在 `common/portscan/mode.go` 定义：
+
+```go
+type Mode string
+
+const (
+    FixedAI Mode = "fixed_ai"
+    FullTCP Mode = "full_tcp"
+    FixedAIPortSpec = "11434,1337,7000-9000,18789"
+    FullTCPPortSpec = "1-65535"
+)
+
+func Normalize(value string) (Mode, error) // "" -> FixedAI
+func PortSpec(mode Mode) string
+```
+
+不要把 Nmap 调用、WebSocket、用户输入或 UI 文案放入该包；它只能表达已批准的两种模式及其 TCP 端口字符串。
+
+- [ ] **Step 3: 在平台创建边界规范化 `port_scan_mode`**
+
+扩展 `infrastructureTaskParams`，在现有严格 JSON 解码之后增加 AI 基础设施专用规范化函数。该函数必须：
+
+1. 保留已允许的 `model_id`、`timeout`；
+2. 通过 `portscan.Normalize` 得到规范模式；
+3. 将规范化后的 JSON 写回创建流程，使缺省请求也持久化 `"port_scan_mode":"fixed_ai"`；
+4. 在附件读取、审计 mutation、持久化和调度之前返回 `ErrInvalid`；
+5. 维持非 AI 任务的现有参数行为。
+
+为 `TaskInputSummary` 增加受限字符串字段（例如 `PortScanMode`），只由已规范化的 AI 基础设施参数填充。
+
+构造 `task.created` 审计 metadata 时，保留既有 `task_type`，并且仅当任务为 AI 基础设施扫描时附加 `port_scan_mode` 与由共享契约导出的 `port_spec`。不得将原始 `params`、目标、URL 或 Agent 回调内容写入审计。
+
+- [ ] **Step 4: 运行平台回归测试**
+
+Run: `go test ./common/portscan ./internal/platform/tasks -count=1`
+
+Expected: PASS。
+
+- [ ] **Step 5: 提交共享契约与平台改动**
+
+```powershell
+git add common/portscan internal/platform/tasks/service.go internal/platform/tasks/service_test.go internal/platform/tasks/dto.go
+git commit -m "feat: add infrastructure port scan modes"
+```
+
+### Task 6: 让 Agent 按模式执行裸 IPv4 端口发现
+
+**Files:**
+- Modify: `common/agent/tasks.go:83-105,351-410`
+- Modify: `common/agent/tasks_test.go`
+
+- [ ] **Step 1: 写出失败的 Agent 模式传播测试**
+
+经由现有 `nmapScan` seam 构造受控测试，断言：
+
+- 缺省参数在裸 IPv4 上调用 `nmapScan(host, "11434,1337,7000-9000,18789")`；
+- `full_tcp` 在裸 IPv4 上调用 `nmapScan(host, "1-65535")`；
+- 工具/进度事件中的 `-p` 字符串与实际 Nmap 参数相同；
+- URL、域名和显式 `IP:port` 不调用 Nmap，无论模式为何；
+- Agent 收到非法模式时防御性失败，不将其降级为全量或固定扫描；
+- 既有 `maxDiscoveredScanEndpoints` 保护仍生效，且不因全量模式被移除或绕过。
+
+Run: `go test ./common/agent -run 'TestAIInfraScanAgent.*PortScanMode' -count=1`
+
+Expected: FAIL，因为 Agent 当前硬编码固定端口字符串。
+
+- [ ] **Step 2: 在 Agent 中防御性规范化并复用共享端口字符串**
+
+给 `ScanRequest` 增加 `PortScanMode string \`json:"port_scan_mode,omitempty"\``。在 `Execute` 解码后立即调用共享 `portscan.Normalize`；平台已规范化的参数仍必须在 Agent 再验证一次。让 `scanPortsAndPrepareTargets` 接收模式或端口规格，而不是硬编码字符串。
+
+对每个裸 IPv4：
+
+```go
+portSpec := portscan.PortSpec(mode)
+portScanResult, err := nmapScan(host, portSpec)
+```
+
+工具事件必须使用同一个 `portSpec` 构造 `-T4 -p ...` 描述。不得对 URL、域名、显式端口目标或 IPv6 目标发起端口发现；不得在 `full_tcp` 中隐式增加目标数限制。
+
+- [ ] **Step 3: 运行 Agent 定向与包编译测试**
+
+Run: `go test ./common/agent -run 'TestAIInfraScanAgent.*(PortScanMode|PortDiscovery)' -count=1`
+
+Run: `go test ./common/agent -run '^$' -count=1`
+
+Expected: PASS。
+
+- [ ] **Step 4: 提交 Agent 改动**
+
+```powershell
+git add common/agent/tasks.go common/agent/tasks_test.go
+git commit -m "feat: select infrastructure port scan profile"
+```
+
+### Task 7: 在平台控制台选择并展示端口扫描模式
+
+**Files:**
+- Modify: `web/console/src/shared/api/types.ts:91-105`
+- Modify: `web/console/src/features/tasks/api.ts`
+- Modify: `web/console/src/features/tasks/TaskCreatePage.tsx:55-75,138-150,260-282`
+- Modify: `web/console/src/features/tasks/TaskDetailPage.tsx:20-110`
+- Modify: `web/console/src/features/tasks/TaskPages.test.tsx`
+- Modify: `web/console/src/features/tasks/TaskWorkflow.test.tsx`
+
+- [ ] **Step 1: 写出失败的控制台测试**
+
+覆盖以下可观察行为：
+
+- 仅 `ai_infra_scan` 显示“端口扫描模式”选择器，首次渲染值为 `fixed_ai`；
+- 固定模式显示固定端口清单及“共 2,004 个端口”；
+- 选择 `full_tcp` 后显示“TCP 1–65535”以及耗时/网络压力和授权范围提示，不显示虚构的全量模式目标数量上限；
+- 提交固定模式和全量模式时，`createTaskSubmission` 分别收到 `params.port_scan_mode: "fixed_ai"` 与 `"full_tcp"`；
+- 切换任务类型后该字段不提交给 MCP、红队或 Agent 扫描；
+- 任务详情只显示安全映射后的“固定 AI 端口（11434、1337、7000–9000、18789）”或“全量 TCP（1–65535）”，不回显任意原始参数值。
+- 任务详情 API 解析器只接受 `fixed_ai` 与 `full_tcp`；未知 `input_summary.port_scan_mode` 必须作为异常响应拒绝，而不能传给页面。
+
+Run: `pnpm --dir web/console test:run -- TaskPages.test.tsx TaskWorkflow.test.tsx`
+
+Expected: FAIL，因为现有控制台没有端口模式字段或详情投影。
+
+- [ ] **Step 2: 实现受限 UI 状态与请求参数**
+
+在共享 API 类型中使用字面量联合类型：
+
+```ts
+export type InfrastructurePortScanMode = 'fixed_ai' | 'full_tcp'
+```
+
+在 `TaskCreatePage` 中将状态初始化为 `fixed_ai`，只在 AI 基础设施任务表单显示 `<Select>`。无论用户是否改选，提交时都显式发送规范模式，避免浏览器依赖后端缺省行为。全量提示必须说明它只适用于裸 IP 的 TCP 端口发现，URL 和域名仍走现有 Web 路径。
+
+在 `TaskDetailPage` 使用服务器输入摘要中的受限模式值进行本地映射展示；没有合法值时显示无模式，不根据任意 `params` 字符串推断。同步更新 `features/tasks/api.ts` 的白名单解析器，保证该字段确实从 API 安全传递到页面。
+
+- [ ] **Step 3: 运行前端质量检查并生成嵌入静态资源**
+
+Run: `pwsh ./scripts/build-console.ps1`
+
+Expected: PASS；该脚本必须完成冻结安装、字体准备、lint、类型检查、Vitest、Vite 构建和原子静态替换。
+
+Run: `pwsh ./scripts/check-console-assets.ps1 -StaticDirectory ./common/websocket/static`
+
+Expected: PASS。
+
+- [ ] **Step 4: 提交控制台与生成产物**
+
+```powershell
+git add web/console/src/shared/api/types.ts web/console/src/features/tasks/api.ts web/console/src/features/tasks/TaskCreatePage.tsx web/console/src/features/tasks/TaskDetailPage.tsx web/console/src/features/tasks/TaskPages.test.tsx web/console/src/features/tasks/TaskWorkflow.test.tsx common/websocket/static
+git commit -m "feat: expose infrastructure port scan modes"
+```
+
+### Task 8: 让审计与报告基于可信端口模式
+
+**Files:**
+- Modify: `internal/platform/tasks/service.go`
+- Modify: `internal/platform/tasks/completed_task_source_test.go`
+- Modify: `internal/platform/reports/entity.go`
+- Modify: `internal/platform/reports/service.go`
+- Modify: `internal/platform/reports/snapshot.go`
+- Modify: `internal/platform/reports/pdf.go`
+- Modify: `internal/platform/reports/handler.go`
+- Modify: `internal/platform/reports/{snapshot_test.go,pdf_test.go,handler_test.go,service_export_test.go}`
+- Modify: `web/console/src/features/reports/api.ts`
+- Modify: `web/console/src/features/reports/api.test.ts`
+- Modify: `web/console/src/features/reports/ReportDetailPage.tsx`
+- Modify: `web/console/src/features/reports/ReportPages.test.tsx`
+
+- [ ] **Step 1: 写出失败的报告与审计可见性测试**
+
+在 Task 5 的创建审计测试之外，为报告数据流断言：
+
+- 固定模式的报告快照、报告详情 API、导出 PDF 与控制台报告页显示“固定 AI 端口”及 `11434,1337,7000-9000,18789`；
+- 全量模式显示“全量 TCP”及 `1-65535`；
+- 任务服务在交给报告服务前从已持久化、已规范化的 AI 基础设施任务 `Params` 派生模式与端口规格，不采用 Agent 结果中同名字段；
+- 非 AI 任务、历史无该字段的任务、未知模式或畸形参数不显示伪造模式，并保持现有报告可读；
+- 报告前端解析器对未知模式安全拒绝，不将其渲染为 HTML 或原样文本。
+
+Run: `go test ./internal/platform/reports -run 'Test.*PortScanMode' -count=1`
+
+Expected: FAIL，因为当前报告模型、快照与渲染模型没有端口模式字段。
+
+- [ ] **Step 2: 从可信任务参数派生受限报告字段**
+
+扩展 `reports.CompletedTask`、报告实体/渲染模型和快照数据，只携带已验证的模式与由 `portscan.PortSpec` 导出的端口范围。在 `internal/platform/tasks` 的受信任边界（任务完成快照与报告回填的两条路径）从 `task.Params` 解析模式并填入 `CompletedTask`，使 `reports` 包只消费已验证字段，避免 `tasks` 与 `reports` 形成导入环。无合法值的历史任务可按此前实际默认的 `fixed_ai` 兼容展示；无法可信派生时明确省略字段，绝不猜测或使用 Agent 回调。
+
+将安全字段贯穿报告详情 handler、PDF 模板和控制台报告 API/详情页。报告页使用固定的显示映射，不能直接渲染模式字符串或原始任务参数。
+
+- [ ] **Step 3: 运行报告回归测试**
+
+Run: `go test ./internal/platform/reports -count=1`
+
+Run: `pnpm --dir web/console test:run -- src/features/reports/api.test.ts src/features/reports/ReportPages.test.tsx`
+
+Expected: PASS。
+
+- [ ] **Step 4: 提交审计与报告改动**
+
+```powershell
+git add internal/platform/tasks/service.go internal/platform/tasks/completed_task_source_test.go internal/platform/reports web/console/src/features/reports
+git commit -m "feat: report infrastructure port scan modes"
+```
+
+### Task 9: 同步 API 与产品文档
+
+**Files:**
+- Modify: `docs/api/reference.md`
+- Modify: `docs/api/reference.en.md`
+- Modify: `internal/apidocs/swagger.yaml`
+- Modify: `internal/apidocs/swagger.json`
+- Modify: `internal/apidocs/docs.go`
+- Modify: `docs/product/core-risk-discovery.md`
+
+- [ ] **Step 1: 写出 API 文档断言或快照检查**
+
+在已有 API 文档测试/断言处覆盖 `ai_infra_scan.params.port_scan_mode`、任务 `input_summary.port_scan_mode` 与报告详情安全渲染字段：输入枚举只含 `fixed_ai` 和 `full_tcp`，缺省为 `fixed_ai`，仅裸 IPv4 执行端口发现，全量模式为 TCP `1-65535`。不要在 API 文档中承诺 UDP、服务版本识别或不存在的独立数量上限。
+
+- [ ] **Step 2: 更新三套 API 说明**
+
+同步中英文 API 参考和 Swagger 运行时三件套，包括任务创建、任务详情输入摘要和报告详情安全渲染模型；禁止运行默认 `swag init` 覆盖现有定义。更新产品文档，将现有默认固定 2,004 端口与用户明确选择的全量 TCP 模式分开描述，并强调授权范围、耗时与网络压力。
+
+- [ ] **Step 3: 运行文档与 API 包验证**
+
+Run: `go test ./internal/apidocs -count=1`
+
+Expected: PASS。
+
+- [ ] **Step 4: 提交文档改动**
+
+```powershell
+git add docs/api/reference.md docs/api/reference.en.md internal/apidocs/swagger.yaml internal/apidocs/swagger.json internal/apidocs/docs.go docs/product/core-risk-discovery.md
+git commit -m "docs: describe infrastructure port scan modes"
+```
+
+### Task 10: 跨层验证与发布前回归
+
+**Files:**
+- Verify only; no hand edits to generated static assets.
+
+- [ ] **Step 1: 运行 Go 回归**
+
+Run: `go test ./common/portscan ./common/runner ./common/agent ./internal/platform/tasks ./internal/platform/reports ./common/websocket ./internal/apidocs -count=1`
+
+Expected: PASS。若完整 Agent 套件仍有未配置外部服务的既有集成测试，必须单独记录其前置条件，不能将本批定向测试误报为全套成功。
+
+- [ ] **Step 2: 运行前端与嵌入资源验证**
+
+Run: `pwsh ./scripts/build-console.ps1`
+
+Run: `pwsh ./scripts/check-console-assets.ps1 -StaticDirectory ./common/websocket/static`
+
+Run: `go test ./common/websocket -run TestEmbeddedConsole -count=1`
+
+Expected: 全部 PASS。
+
+- [ ] **Step 3: 进行受控行为验收**
+
+在隔离测试环境中，以 Nmap mock 或受控测试主机验证：
+
+1. 省略模式时，裸 IPv4 的工具事件和 Nmap 参数为 `-p 11434,1337,7000-9000,18789`；
+2. 选择 `full_tcp` 时，裸 IPv4 的工具事件和 Nmap 参数为 `-p 1-65535`；
+3. URL、域名、显式 `IP:port` 不触发 Nmap；
+4. 任务详情显示与持久化参数一致的模式；
+5. 审计记录、报告详情与导出 PDF 从可信任务参数显示相同模式，不信任 Agent 自报字段；
+6. 非法模式在任务创建前被拒绝，未写入、未调度；
+7. 不对未授权外部目标进行全量端口扫描。
+
+- [ ] **Step 4: 提交发布候选验证记录**
+
+```powershell
+git add -A
+git commit -m "test: verify infrastructure port scan modes"
+```
+
+仅在暂存区确认没有构建缓存、密钥、真实目标、扫描日志或不相关文件时执行该提交。
+
+### 第二批完成定义
+
+- 平台 AI 基础设施任务可明确选择 `fixed_ai` 或 `full_tcp`，缺省请求稳定持久化为 `fixed_ai`。
+- 对裸 IPv4，固定模式准确扫描 2,004 个已列端口；全量模式准确传递 TCP `1-65535`。
+- 全量模式不增加专属目标数量上限；既有跨模式解析、附件与发现端点安全保护仍有效。
+- URL、域名和显式端口目标不触发新增端口发现；无效模式不会写入或派发任务。
+- 创建审计、任务详情、报告快照/详情/PDF 均从受信任的持久化参数得到相同模式，Agent 结果不能覆盖该事实。
+- 控制台创建页、任务详情、报告页、平台 API、Agent 工具事件、产品/API 文档和嵌入静态资源对模式值与端口范围一致。
+- 所有定向与跨层验证通过，且任何外部扫描均仅在明确授权的受控环境中执行。
