@@ -15,11 +15,14 @@
 package agent
 
 import (
+	"context"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
+	"github.com/Juneoww/AIG_Custom/common/portscan"
 	"github.com/Juneoww/AIG_Custom/common/runner"
 	"github.com/Juneoww/AIG_Custom/common/utils"
 	"github.com/stretchr/testify/assert"
@@ -57,7 +60,7 @@ func TestAIInfraScanAgentPrepareTargetsExpandsBodyAndAttachmentRangesBeforePortD
 		StepStatusUpdateCallback: func(string, string, string, string, string) {},
 		ToolUsedCallback:         func(string, string, string, []Tool) {},
 	}
-	finalTargets, err := agent.scanPortsAndPrepareTargets(targets, "step-1", initTexts("zh"), callbacks)
+	finalTargets, err := agent.scanPortsAndPrepareTargets(targets, portscan.DefaultMode, "step-1", initTexts("zh"), callbacks)
 	require.NoError(t, err)
 	assert.Equal(t, targets, finalTargets)
 	assert.Equal(t, targets, discovered)
@@ -104,7 +107,7 @@ func TestAIInfraScanAgentPortDiscoveryCanAppendToMaximumExpandedInput(t *testing
 		ToolUseLogCallback:       func(string, string, string, string) {},
 	}
 
-	finalTargets, err := agent.scanPortsAndPrepareTargets(targets, "step-1", initTexts("zh"), callbacks)
+	finalTargets, err := agent.scanPortsAndPrepareTargets(targets, portscan.DefaultMode, "step-1", initTexts("zh"), callbacks)
 	require.NoError(t, err)
 	assert.Len(t, finalTargets, len(targets)+1)
 	assert.Equal(t, "22.2.0.0:11434", finalTargets[len(finalTargets)-1])
@@ -133,10 +136,128 @@ func TestAIInfraScanAgentPortDiscoveryRejectsTooManyDiscoveredEndpoints(t *testi
 		ToolUseLogCallback:       func(string, string, string, string) {},
 	}
 
-	_, err := agent.scanPortsAndPrepareTargets([]string{"10.0.0.1", "10.0.0.2"}, "step-1", initTexts("zh"), callbacks)
+	_, err := agent.scanPortsAndPrepareTargets([]string{"10.0.0.1", "10.0.0.2"}, portscan.FullTCP, "step-1", initTexts("zh"), callbacks)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "discovered scan endpoint limit")
 	assert.Equal(t, 1, calls)
+}
+
+func TestAIInfraScanAgentNormalizesPortScanModeFromRequest(t *testing.T) {
+	tests := []struct {
+		name    string
+		params  string
+		want    portscan.Mode
+		wantErr error
+	}{
+		{name: "omitted defaults to fixed AI", params: `{}`, want: portscan.FixedAI},
+		{name: "full TCP", params: `{"port_scan_mode":"full_tcp"}`, want: portscan.FullTCP},
+		{name: "invalid mode fails", params: `{"port_scan_mode":"all"}`, wantErr: portscan.ErrInvalidMode},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			var request ScanRequest
+			require.NoError(t, json.Unmarshal([]byte(test.params), &request))
+
+			mode, err := normalizePortScanMode(request.PortScanMode)
+			if test.wantErr != nil {
+				require.ErrorIs(t, err, test.wantErr)
+				return
+			}
+
+			require.NoError(t, err)
+			assert.Equal(t, test.want, mode)
+		})
+	}
+}
+
+func TestAIInfraScanAgentExecuteRejectsInvalidPortScanModeBeforeScanStarts(t *testing.T) {
+	agent := &AIInfraScanAgent{}
+	callbacks := TaskCallbacks{
+		PlanUpdateCallback: func([]SubTask) {
+			t.Fatal("scan execution started for an invalid port scan mode")
+		},
+	}
+
+	err := agent.Execute(context.Background(), TaskRequest{
+		Params: json.RawMessage(`{"port_scan_mode":"all"}`),
+	}, callbacks)
+
+	require.ErrorIs(t, err, portscan.ErrInvalidMode)
+}
+
+func TestAIInfraScanAgentPortDiscoveryUsesModePortSpecInNmapAndToolEvents(t *testing.T) {
+	tests := []struct {
+		name string
+		mode portscan.Mode
+		want string
+	}{
+		{name: "fixed AI default", mode: portscan.DefaultMode, want: portscan.FixedAIPortSpec},
+		{name: "full TCP", mode: portscan.FullTCP, want: portscan.FullTCPPortSpec},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			var nmapPortSpecs []string
+			var toolParams []string
+			agent := &AIInfraScanAgent{
+				nmapScan: func(_ string, portSpec string) (*utils.NmapRun, error) {
+					nmapPortSpecs = append(nmapPortSpecs, portSpec)
+					return &utils.NmapRun{}, nil
+				},
+			}
+			callbacks := TaskCallbacks{
+				StepStatusUpdateCallback: func(string, string, string, string, string) {},
+				ToolUsedCallback: func(_ string, _ string, _ string, tools []Tool) {
+					for _, tool := range tools {
+						if tool.Tool == initTexts("en").nmapTool {
+							toolParams = append(toolParams, tool.Message.Param)
+						}
+					}
+				},
+				ToolUseLogCallback: func(string, string, string, string) {},
+			}
+
+			_, err := agent.scanPortsAndPrepareTargets([]string{"198.51.100.1"}, test.mode, "step-1", initTexts("en"), callbacks)
+
+			require.NoError(t, err)
+			assert.Equal(t, []string{test.want}, nmapPortSpecs)
+			assert.Equal(t, []string{"-T4 -p " + test.want, "-T4 -p " + test.want}, toolParams)
+		})
+	}
+}
+
+func TestAIInfraScanAgentPortDiscoverySkipsNonBareIPv4Targets(t *testing.T) {
+	targets := []string{
+		"https://198.51.100.1",
+		"example.test",
+		"198.51.100.1:8080",
+		"2001:db8::1",
+		"[2001:db8::1]:443",
+		"http://[2001:db8::1]:8080",
+	}
+	for _, mode := range []portscan.Mode{portscan.FixedAI, portscan.FullTCP} {
+		t.Run(string(mode), func(t *testing.T) {
+			var nmapCalls int
+			agent := &AIInfraScanAgent{
+				nmapScan: func(string, string) (*utils.NmapRun, error) {
+					nmapCalls++
+					return &utils.NmapRun{}, nil
+				},
+			}
+			callbacks := TaskCallbacks{
+				StepStatusUpdateCallback: func(string, string, string, string, string) {},
+				ToolUsedCallback:         func(string, string, string, []Tool) {},
+				ToolUseLogCallback:       func(string, string, string, string) {},
+			}
+
+			finalTargets, err := agent.scanPortsAndPrepareTargets(targets, mode, "step-1", initTexts("en"), callbacks)
+
+			require.NoError(t, err)
+			assert.Equal(t, targets, finalTargets)
+			assert.Zero(t, nmapCalls)
+		})
+	}
 }
 
 func TestAIInfraScanAgentPrepareTargetsRejectsUnsafeAttachmentAndCleansUp(t *testing.T) {

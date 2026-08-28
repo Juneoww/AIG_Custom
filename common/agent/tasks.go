@@ -24,6 +24,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/netip"
 	"os"
 	"path"
 	"sync"
@@ -31,8 +32,8 @@ import (
 	"unicode/utf8"
 
 	"github.com/Juneoww/AIG_Custom/pkg/vulstruct"
-	iputil "github.com/projectdiscovery/utils/ip"
 
+	"github.com/Juneoww/AIG_Custom/common/portscan"
 	"github.com/Juneoww/AIG_Custom/common/utils"
 
 	"github.com/Juneoww/AIG_Custom/common/utils/models"
@@ -81,10 +82,11 @@ type TaskInterface interface {
 
 // ScanRequest 扫描请求结构
 type ScanRequest struct {
-	Target  []string          `json:"-"`
-	Headers map[string]string `json:"headers"`
-	Timeout int               `json:"timeout,omitempty"`
-	Model   struct {
+	Target       []string          `json:"-"`
+	Headers      map[string]string `json:"headers"`
+	Timeout      int               `json:"timeout,omitempty"`
+	PortScanMode string            `json:"port_scan_mode,omitempty"`
+	Model        struct {
 		Model   string `json:"model"`
 		Token   string `json:"token"`
 		BaseUrl string `json:"base_url"`
@@ -122,6 +124,11 @@ func (t *AIInfraScanAgent) Execute(ctx context.Context, request TaskRequest, cal
 			return err
 		}
 	}
+	portScanMode, err := normalizePortScanMode(reqScan.PortScanMode)
+	if err != nil {
+		return err
+	}
+	reqScan.PortScanMode = string(portScanMode)
 
 	language := request.Language
 	if language == "" {
@@ -156,7 +163,15 @@ func (t *AIInfraScanAgent) Execute(ctx context.Context, request TaskRequest, cal
 		}
 	}
 
-	return t.executeScan(ctx, request, reqScan, texts, callbacks, model)
+	return t.executeScan(ctx, request, reqScan, portScanMode, texts, callbacks, model)
+}
+
+func normalizePortScanMode(value string) (portscan.Mode, error) {
+	mode, err := portscan.Normalize(value)
+	if err != nil {
+		return "", fmt.Errorf("invalid port scan mode: %w", err)
+	}
+	return mode, nil
 }
 
 // scanTexts 包含所有语言相关的文本
@@ -349,7 +364,12 @@ func readTargetListAttachment(fileName string) ([]byte, error) {
 }
 
 // scanPortsAndPrepareTargets 扫描端口并准备最终目标列表
-func (t *AIInfraScanAgent) scanPortsAndPrepareTargets(targets []string, step01 string, texts scanTexts, callbacks TaskCallbacks) ([]string, error) {
+func (t *AIInfraScanAgent) scanPortsAndPrepareTargets(targets []string, mode portscan.Mode, step01 string, texts scanTexts, callbacks TaskCallbacks) ([]string, error) {
+	portSpec := portscan.PortSpec(mode)
+	if portSpec == "" {
+		return nil, fmt.Errorf("invalid port scan mode: %w", portscan.ErrInvalidMode)
+	}
+	nmapArgs := fmt.Sprintf("-T4 -p %s", portSpec)
 	finalTargets := []string{}
 	var hosts []string
 	discoveredEndpoints := 0
@@ -359,7 +379,7 @@ func (t *AIInfraScanAgent) scanPortsAndPrepareTargets(targets []string, step01 s
 	}
 
 	for _, target := range targets {
-		if iputil.IsIP(target) {
+		if address, err := netip.ParseAddr(target); err == nil && address.Is4() {
 			hosts = append(hosts, target)
 		}
 		finalTargets = append(finalTargets, target)
@@ -370,10 +390,10 @@ func (t *AIInfraScanAgent) scanPortsAndPrepareTargets(targets []string, step01 s
 		toolId := uuid.NewString()
 		callbacks.StepStatusUpdateCallback(step01, statusNmap, AgentStatusRunning, texts.portDetection, fmt.Sprintf(texts.portDetectDescTemplate, host))
 		callbacks.ToolUsedCallback(step01, statusNmap, texts.nmapTool, []Tool{
-			CreateTool(toolId, texts.nmapTool, SubTaskStatusDoing, texts.portScan, texts.nmapTool, "-T4 -p 11434,1337,7000-9000,18789", ""),
+			CreateTool(toolId, texts.nmapTool, SubTaskStatusDoing, texts.portScan, texts.nmapTool, nmapArgs, ""),
 		})
 
-		portScanResult, err := nmapScan(host, "11434,1337,7000-9000,18789")
+		portScanResult, err := nmapScan(host, portSpec)
 		if err != nil {
 			return nil, err
 		}
@@ -395,7 +415,7 @@ func (t *AIInfraScanAgent) scanPortsAndPrepareTargets(targets []string, step01 s
 		}
 
 		callbacks.ToolUsedCallback(step01, statusNmap, texts.nmapTool, []Tool{
-			CreateTool(toolId, texts.nmapTool, SubTaskStatusDone, texts.portScan, texts.nmapTool, "-T4", fmt.Sprintf("%s: %d", texts.portCount, success)),
+			CreateTool(toolId, texts.nmapTool, SubTaskStatusDone, texts.portScan, texts.nmapTool, nmapArgs, fmt.Sprintf("%s: %d", texts.portCount, success)),
 		})
 		callbacks.StepStatusUpdateCallback(step01, statusNmap, AgentStatusCompleted, fmt.Sprintf(texts.portCompleteTemplate, host), "")
 	}
@@ -404,7 +424,7 @@ func (t *AIInfraScanAgent) scanPortsAndPrepareTargets(targets []string, step01 s
 }
 
 // executeScan 执行扫描任务的统一入口
-func (t *AIInfraScanAgent) executeScan(ctx context.Context, request TaskRequest, reqScan ScanRequest, texts scanTexts, callbacks TaskCallbacks, model *models.OpenAI) error {
+func (t *AIInfraScanAgent) executeScan(ctx context.Context, request TaskRequest, reqScan ScanRequest, portScanMode portscan.Mode, texts scanTexts, callbacks TaskCallbacks, model *models.OpenAI) error {
 	// 创建任务计划
 	taskTitles := []string{texts.initEnv, texts.execScan, texts.genReport}
 	var tasks []SubTask
@@ -437,7 +457,7 @@ func (t *AIInfraScanAgent) executeScan(ctx context.Context, request TaskRequest,
 	opts.Headers = headers
 
 	// 扫描端口并准备目标
-	targets, err := t.scanPortsAndPrepareTargets(reqScan.Target, step01, texts, callbacks)
+	targets, err := t.scanPortsAndPrepareTargets(reqScan.Target, portScanMode, step01, texts, callbacks)
 	if err != nil {
 		return err
 	}
