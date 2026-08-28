@@ -10,6 +10,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"reflect"
 	"sort"
 	"strconv"
 	"strings"
@@ -226,8 +227,9 @@ func (service *Service) createLocked(
 		}
 	}
 
+	metadata := taskCreatedAuditMetadata(input.TaskType, params)
 	mutation, err := audit.BeginMutation(ctx, service.audits, subject, audit.EventInput{
-		Action: audit.Action("task.created"), ResourceType: "task", ResourceID: taskID,
+		Action: audit.Action("task.created"), ResourceType: "task", ResourceID: taskID, Metadata: metadata,
 	})
 	if err != nil {
 		return nil, err
@@ -235,7 +237,7 @@ func (service *Service) createLocked(
 	var persisted *Task
 	var created bool
 	var repositoryErr error
-	err = mutation.Run(ctx, taskID, taskCreatedAuditMetadata(input.TaskType, params), func(transactionContext context.Context) error {
+	err = mutation.Run(ctx, taskID, metadata, func(transactionContext context.Context) error {
 		persisted, created, repositoryErr = service.repository.CreateOrGet(transactionContext, candidate)
 		if repositoryErr == nil && !sameCreateRequest(persisted, candidate) {
 			repositoryErr = ErrInvalid
@@ -452,12 +454,85 @@ func taskCreatedAuditMetadata(taskType string, params json.RawMessage) map[strin
 }
 
 func decodeExactJSON(raw json.RawMessage, target any) bool {
+	var decoded any
 	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder.UseNumber()
+	if decoder.Decode(&decoded) != nil || decoder.Decode(&struct{}{}) != io.EOF || !hasExactJSONFieldNames(decoded, reflect.TypeOf(target)) {
+		return false
+	}
+
+	decoder = json.NewDecoder(bytes.NewReader(raw))
 	decoder.DisallowUnknownFields()
 	if decoder.Decode(target) != nil {
 		return false
 	}
 	return decoder.Decode(&struct{}{}) == io.EOF
+}
+
+func hasExactJSONFieldNames(value any, targetType reflect.Type) bool {
+	if value == nil {
+		return true
+	}
+	for targetType.Kind() == reflect.Pointer {
+		targetType = targetType.Elem()
+	}
+	switch targetType.Kind() {
+	case reflect.Struct:
+		object, ok := value.(map[string]any)
+		if !ok {
+			return false
+		}
+		fields := exactJSONStructFields(targetType)
+		for name, child := range object {
+			fieldType, exists := fields[name]
+			if !exists || !hasExactJSONFieldNames(child, fieldType) {
+				return false
+			}
+		}
+	case reflect.Slice, reflect.Array:
+		items, ok := value.([]any)
+		if !ok {
+			return false
+		}
+		for _, item := range items {
+			if !hasExactJSONFieldNames(item, targetType.Elem()) {
+				return false
+			}
+		}
+	case reflect.Map:
+		object, ok := value.(map[string]any)
+		if !ok {
+			return false
+		}
+		for _, child := range object {
+			if !hasExactJSONFieldNames(child, targetType.Elem()) {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+func exactJSONStructFields(targetType reflect.Type) map[string]reflect.Type {
+	fields := make(map[string]reflect.Type, targetType.NumField())
+	for index := 0; index < targetType.NumField(); index++ {
+		field := targetType.Field(index)
+		if field.PkgPath != "" {
+			continue
+		}
+		name := field.Tag.Get("json")
+		if comma := strings.IndexByte(name, ','); comma >= 0 {
+			name = name[:comma]
+		}
+		if name == "-" {
+			continue
+		}
+		if name == "" {
+			name = field.Name
+		}
+		fields[name] = field.Type
+	}
+	return fields
 }
 
 func validTaskCountry(country string) bool {

@@ -878,11 +878,13 @@ func TestCreateAIInfrastructureRejectsInvalidPortScanModeBeforeMutation(t *testi
 	subject := identity.Subject{UserID: "user-1", Username: "alice", Role: identity.RoleUser}
 
 	for name, params := range map[string]string{
-		"unknown string": `{"port_scan_mode":"full"}`,
-		"case variant":   `{"port_scan_mode":"FULL_TCP"}`,
-		"array":          `{"port_scan_mode":["fixed_ai"]}`,
-		"number":         `{"port_scan_mode":1}`,
-		"unknown field":  `{"port_scan_mode":"fixed_ai","unexpected":true}`,
+		"unknown string":        `{"port_scan_mode":"full"}`,
+		"value case variant":    `{"port_scan_mode":"FULL_TCP"}`,
+		"uppercase field name":  `{"PORT_SCAN_MODE":"full_tcp"}`,
+		"mixed case field name": `{"PoRt_ScAn_MoDe":"full_tcp"}`,
+		"array":                 `{"port_scan_mode":["fixed_ai"]}`,
+		"number":                `{"port_scan_mode":1}`,
+		"unknown field":         `{"port_scan_mode":"fixed_ai","unexpected":true}`,
 	} {
 		t.Run(name, func(t *testing.T) {
 			_, err := service.Create(context.Background(), subject, CreateInput{
@@ -903,6 +905,27 @@ func TestCreateAIInfrastructureRejectsInvalidPortScanModeBeforeMutation(t *testi
 	events, err := audits.List(context.Background(), audit.Filter{Action: audit.Action("task.created")})
 	require.NoError(t, err)
 	assert.Empty(t, events)
+}
+
+func TestCreateRejectsCaseVariantTaskParameterFieldNames(t *testing.T) {
+	repository := NewMemoryRepository()
+	engine := &recordingEngine{}
+	service := NewService(repository, engine, audit.NewService(audit.NewMemoryRepository()))
+	subject := identity.Subject{UserID: "user-1", Username: "alice", Role: identity.RoleUser}
+
+	for _, test := range []CreateInput{
+		{IdempotencyKey: "case-mcp", TaskType: "mcp_scan", Content: "scan", Params: json.RawMessage(`{"MODEL_ID":"model-1","thread":4}`)},
+		{IdempotencyKey: "case-redteam", TaskType: "model_redteam_report", Content: "scan", Params: json.RawMessage(`{"MODEL_ID":["model-1"],"eval_model_id":"model-2"}`)},
+		{IdempotencyKey: "case-agent", TaskType: "agent_scan", Content: "scan", Params: json.RawMessage(`{"AGENT_ID":"agent-1","eval_model_id":"model-2"}`)},
+	} {
+		_, err := service.Create(context.Background(), subject, test)
+		require.ErrorIs(t, err, ErrInvalid, test.TaskType)
+	}
+
+	tasks, err := repository.List(context.Background())
+	require.NoError(t, err)
+	assert.Empty(t, tasks)
+	assert.Zero(t, engine.submits.Load())
 }
 
 func TestCreateAIInfrastructureTreatsOmittedAndExplicitFixedPortScanModeAsSameRequest(t *testing.T) {
@@ -968,37 +991,50 @@ func TestCreateAuditUsesOnlyNormalizedInfrastructurePortScanModeMetadata(t *test
 	})
 	require.NoError(t, err)
 
-	metadataFor := func(taskID string) map[string]any {
+	metadataFor := func(taskID string) map[audit.Outcome]map[string]any {
 		t.Helper()
 		events, listErr := audits.List(context.Background(), audit.Filter{ResourceID: taskID, Action: audit.Action("task.created")})
 		require.NoError(t, listErr)
+		metadataByOutcome := make(map[audit.Outcome]map[string]any, len(events))
 		for _, event := range events {
-			if event.Outcome != audit.OutcomeSuccess {
-				continue
-			}
 			metadata := map[string]any{}
 			require.NoError(t, json.Unmarshal(event.Metadata, &metadata))
-			return metadata
+			metadataByOutcome[event.Outcome] = metadata
 		}
-		t.Fatalf("missing successful task.created audit event")
-		return nil
+		return metadataByOutcome
 	}
 
 	infrastructureMetadata := metadataFor(infrastructure.ID)
-	assert.ElementsMatch(t, []string{"task_type", "port_scan_mode", "port_spec", "phase"}, mapKeys(infrastructureMetadata))
-	assert.Equal(t, "ai_infra_scan", infrastructureMetadata["task_type"])
-	assert.Equal(t, "full_tcp", infrastructureMetadata["port_scan_mode"])
-	assert.Equal(t, "1-65535", infrastructureMetadata["port_spec"])
-	serializedMetadata, marshalErr := json.Marshal(infrastructureMetadata)
-	require.NoError(t, marshalErr)
-	assert.NotContains(t, string(serializedMetadata), "private-target")
-	assert.NotContains(t, string(serializedMetadata), "model-private")
+	for outcome, phase := range map[audit.Outcome]string{
+		audit.OutcomePending: "requested",
+		audit.OutcomeSuccess: "succeeded",
+	} {
+		metadata, exists := infrastructureMetadata[outcome]
+		require.True(t, exists, outcome)
+		assert.ElementsMatch(t, []string{"task_type", "port_scan_mode", "port_spec", "phase"}, mapKeys(metadata))
+		assert.Equal(t, "ai_infra_scan", metadata["task_type"])
+		assert.Equal(t, "full_tcp", metadata["port_scan_mode"])
+		assert.Equal(t, "1-65535", metadata["port_spec"])
+		assert.Equal(t, phase, metadata["phase"])
+		serializedMetadata, marshalErr := json.Marshal(metadata)
+		require.NoError(t, marshalErr)
+		assert.NotContains(t, string(serializedMetadata), "private-target")
+		assert.NotContains(t, string(serializedMetadata), "model-private")
+	}
 
 	mcpMetadata := metadataFor(mcp.ID)
-	assert.ElementsMatch(t, []string{"task_type", "phase"}, mapKeys(mcpMetadata))
-	assert.Equal(t, "mcp_scan", mcpMetadata["task_type"])
-	assert.NotContains(t, mcpMetadata, "port_scan_mode")
-	assert.NotContains(t, mcpMetadata, "port_spec")
+	for outcome, phase := range map[audit.Outcome]string{
+		audit.OutcomePending: "requested",
+		audit.OutcomeSuccess: "succeeded",
+	} {
+		metadata, exists := mcpMetadata[outcome]
+		require.True(t, exists, outcome)
+		assert.ElementsMatch(t, []string{"task_type", "phase"}, mapKeys(metadata))
+		assert.Equal(t, "mcp_scan", metadata["task_type"])
+		assert.Equal(t, phase, metadata["phase"])
+		assert.NotContains(t, metadata, "port_scan_mode")
+		assert.NotContains(t, metadata, "port_spec")
+	}
 }
 
 func TestCreateRejectsUnboundedOrNonCanonicalInputBeforeAttachmentReads(t *testing.T) {
