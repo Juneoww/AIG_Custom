@@ -24,6 +24,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/netip"
 	"strings"
@@ -246,7 +247,13 @@ func addCoveredIPv4Interval(covered []ipv4Interval, interval ipv4Interval) []ipv
 // AppendTargetExpressionLines appends non-empty target-list lines while
 // bounding raw expressions before they reach ParseTargets.
 func AppendTargetExpressionLines(expressions []string, content string) ([]string, error) {
-	scanner := bufio.NewScanner(strings.NewReader(content))
+	return AppendTargetExpressionReader(expressions, strings.NewReader(content))
+}
+
+// AppendTargetExpressionReader appends non-empty target-list lines from a
+// bounded reader without accumulating every raw line before validation.
+func AppendTargetExpressionReader(expressions []string, reader io.Reader) ([]string, error) {
+	scanner := bufio.NewScanner(reader)
 	scanner.Buffer(make([]byte, 1024), maxTargetExpressionLineLen)
 	for scanner.Scan() {
 		line := scanner.Text()

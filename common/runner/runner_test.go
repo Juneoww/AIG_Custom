@@ -21,6 +21,8 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
+	"sync"
 	"testing"
 
 	"github.com/Juneoww/AIG_Custom/internal/gologger"
@@ -66,6 +68,15 @@ func TestParseTargetsExpandsAndDeduplicatesAcrossSources(t *testing.T) {
 	assert.Equal(t, "10.0.0.2", targets[1])
 	assert.Equal(t, "22.2.10.0", targets[2])
 	assert.Equal(t, "22.2.10.255", targets[257])
+}
+
+func TestParseTargetsRejectsTooManyTargetFileExpressions(t *testing.T) {
+	targetFile := filepath.Join(t.TempDir(), "targets.txt")
+	require.NoError(t, os.WriteFile(targetFile, []byte(strings.Repeat("example.test\n", MaxTargetExpressions+1)), 0600))
+
+	r := &Runner{Options: &options.Options{TargetFile: targetFile}}
+	_, err := r.parseTargets()
+	require.ErrorIs(t, err, ErrTooManyTargets)
 }
 
 func TestParseTargetsKeepsPreparedPortDiscoveryBeyondExpressionLimit(t *testing.T) {
@@ -145,6 +156,31 @@ func TestRunner_RunEnumeration(t *testing.T) {
 	}
 	defer r.Close()
 	r.RunEnumeration()
+}
+
+func TestRunnerRunEnumerationRecognizesUppercaseHTTPURLs(t *testing.T) {
+	targets := []string{"HTTP://example.test", "HTTPS://example.test"}
+	r, err := New(baseOptions(targets))
+	require.NoError(t, err)
+	defer r.Close()
+	var hostRequests, domainRequests []string
+	var requestsMu sync.Mutex
+	r.runHostRequestFunc = func(target string) error {
+		requestsMu.Lock()
+		defer requestsMu.Unlock()
+		hostRequests = append(hostRequests, target)
+		return nil
+	}
+	r.runDomainRequestFunc = func(target string) error {
+		requestsMu.Lock()
+		defer requestsMu.Unlock()
+		domainRequests = append(domainRequests, target)
+		return nil
+	}
+
+	r.RunEnumeration()
+	assert.Empty(t, hostRequests)
+	assert.ElementsMatch(t, targets, domainRequests)
 }
 
 // ---------------------------------------------------------------------------

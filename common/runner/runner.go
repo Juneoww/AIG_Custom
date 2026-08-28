@@ -20,7 +20,6 @@
 package runner
 
 import (
-	"bufio"
 	"fmt"
 	"net/http"
 	"os"
@@ -50,16 +49,18 @@ import (
 
 // Runner struct 保存运行指纹扫描所需的所有组件
 type Runner struct {
-	Options     *options.Options          // 配置选项
-	hp          *httpx.HTTPX              // HTTP 客户端
-	hm          *hybrid.HybridMap         // 混合存储
-	rateLimiter ratelimit.Limiter         // 速率限制器
-	result      chan HttpResult           // 结果通道
-	fpEngine    *preload.Runner           // 指纹引擎
-	advEngine   *vulstruct.AdvisoryEngine // 漏洞建议引擎
-	total       int                       // 总目标数
-	done        chan struct{}             // 用于优雅关闭的通道
-	callback    func(interface{})
+	Options              *options.Options          // 配置选项
+	hp                   *httpx.HTTPX              // HTTP 客户端
+	hm                   *hybrid.HybridMap         // 混合存储
+	rateLimiter          ratelimit.Limiter         // 速率限制器
+	result               chan HttpResult           // 结果通道
+	fpEngine             *preload.Runner           // 指纹引擎
+	advEngine            *vulstruct.AdvisoryEngine // 漏洞建议引擎
+	total                int                       // 总目标数
+	done                 chan struct{}             // 用于优雅关闭的通道
+	callback             func(interface{})
+	runHostRequestFunc   func(string) error
+	runDomainRequestFunc func(string) error
 }
 
 type Step01 struct {
@@ -190,11 +191,8 @@ func (r *Runner) collectTargetExpressions() ([]string, error) {
 		}
 		defer file.Close()
 
-		scanner := bufio.NewScanner(file)
-		for scanner.Scan() {
-			targets = append(targets, scanner.Text())
-		}
-		if err := scanner.Err(); err != nil {
+		targets, err = AppendTargetExpressionReader(targets, file)
+		if err != nil {
 			return nil, err
 		}
 	}
@@ -455,11 +453,19 @@ func (r *Runner) RunEnumeration() {
 	r.hm.Scan(func(k, _ []byte) error {
 		wg.Add()
 		target := string(k)
-		if !strings.HasPrefix(target, "http") {
+		runHostRequest := r.runHostRequest
+		runDomainRequest := r.runDomainRequest
+		if r.runHostRequestFunc != nil {
+			runHostRequest = r.runHostRequestFunc
+		}
+		if r.runDomainRequestFunc != nil {
+			runDomainRequest = r.runDomainRequestFunc
+		}
+		if !isHTTPURL(target) {
 			go func() {
 				defer wg.Done()
 				r.rateLimiter.Take()
-				err := r.runHostRequest(target)
+				err := runHostRequest(target)
 				if err != nil {
 					if r.Options.Callback != nil {
 						r.Options.Callback(CallbackErrorInfo{
@@ -475,7 +481,7 @@ func (r *Runner) RunEnumeration() {
 			go func() {
 				defer wg.Done()
 				r.rateLimiter.Take()
-				err := r.runDomainRequest(target)
+				err := runDomainRequest(target)
 				if err != nil {
 					if r.Options.Callback != nil {
 						r.Options.Callback(CallbackErrorInfo{
