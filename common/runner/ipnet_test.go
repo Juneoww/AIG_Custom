@@ -101,6 +101,16 @@ func TestParseTargets_PreservesHTTPURLsWithWildcardAndTilde(t *testing.T) {
 	assert.Equal(t, inputs, got)
 }
 
+func TestParseTargets_RejectsWhitespaceSeparatedURLs(t *testing.T) {
+	for _, input := range []string{
+		"https://a.example.test https://b.example.test",
+		"https://a.example.test\u00a0https://b.example.test",
+	} {
+		_, err := ParseTargets([]string{input})
+		assert.Error(t, err, input)
+	}
+}
+
 func TestParseTargets_RejectsSingleBracketedIPv6Port(t *testing.T) {
 	_, err := ParseTargets([]string{"[2001:db8::1]:443"})
 	assert.Error(t, err)

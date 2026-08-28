@@ -81,11 +81,11 @@ func ParseTargets(expressions []string) ([]string, error) {
 			return nil, ErrTooManyTargets
 		}
 		isURL := isHTTPURL(target)
+		if strings.ContainsFunc(target, unicode.IsSpace) {
+			return nil, fmt.Errorf("invalid target %q", target)
+		}
 		if !isURL && strings.ContainsAny(target, "\\~") {
 			return nil, fmt.Errorf("invalid target %q: ranges cannot contain backslash or tilde", target)
-		}
-		if !isURL && strings.ContainsFunc(target, unicode.IsSpace) {
-			return nil, fmt.Errorf("invalid target %q", target)
 		}
 		var expanded []string
 		var err error

@@ -309,6 +309,7 @@ func TestCreateAIInfraTargetValidationRejectsInvalidWildcardAndExpansionLimit(t 
 		{name: "bracketed ipv6 port range", content: "[2001:db8::1]:80-[2001:db8::2]:80"},
 		{name: "single bracketed ipv6 port", content: "[2001:db8::1]:443"},
 		{name: "unicode whitespace", content: "192.168.10.2\u00a0192.168.10.3"},
+		{name: "whitespace separated urls", content: "https://a.example.test https://b.example.test"},
 		{name: "too many expanded targets", content: "22.2.*.*\n1.1.1.1"},
 	}
 	for _, test := range tests {
