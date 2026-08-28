@@ -51,6 +51,8 @@ func ParseTargets(expressions []string) ([]string, error) {
 		switch {
 		case isCIDRExpression(target):
 			expanded, err = expandCIDR(target)
+		case isIPv4PortRangeExpression(target):
+			err = fmt.Errorf("IPv4 port ranges are not supported: %q", target)
 		case isRangeExpression(target):
 			expanded, err = expandRange(target)
 		case strings.Contains(target, "*"):
@@ -101,11 +103,23 @@ func isRangeExpression(target string) bool {
 		(looksLikeIPv4(parts[0]) && looksLikeIPv4(parts[1]))
 }
 
+func isIPv4PortRangeExpression(target string) bool {
+	if strings.HasPrefix(target, "http://") || strings.HasPrefix(target, "https://") || !strings.Contains(target, "-") {
+		return false
+	}
+	for _, part := range strings.Split(target, "-") {
+		addressPort, err := netip.ParseAddrPort(part)
+		if err == nil && addressPort.Addr().Is4() {
+			return true
+		}
+	}
+	return false
+}
+
 func isCompleteIPv4(value string) bool {
 	addr, err := netip.ParseAddr(value)
 	return err == nil && addr.Is4()
 }
-
 
 func looksLikeIPv4(value string) bool {
 	if value == "" {

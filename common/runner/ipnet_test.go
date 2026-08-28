@@ -59,6 +59,23 @@ func TestParseTargets_PreservesSingleIPv4(t *testing.T) {
 	assert.Equal(t, []string{"10.0.0.1"}, got)
 }
 
+func TestParseTargets_RejectsIPv4PortRangeExpressions(t *testing.T) {
+	for _, input := range []string{
+		"192.168.10.2:80-192.168.10.10:80",
+		"192.168.10.2:80-90",
+		"192.168.10.2:80-192.168.10.10:443",
+	} {
+		_, err := ParseTargets([]string{input})
+		assert.Error(t, err, input)
+	}
+}
+
+func TestParseTargets_PreservesSingleIPv4Port(t *testing.T) {
+	got, err := ParseTargets([]string{"1.2.3.4:80"})
+	require.NoError(t, err)
+	assert.Equal(t, []string{"1.2.3.4:80"}, got)
+}
+
 func TestParseTargets_DeduplicatesAcrossBatch(t *testing.T) {
 	got, err := ParseTargets([]string{"10.0.0.1", "10.0.0.0/30", "10.0.0.1-10.0.0.2", "  "})
 	require.NoError(t, err)
@@ -125,9 +142,17 @@ func TestTargets_HyphenatedHostname(t *testing.T) {
 }
 
 func TestParseTargets_PreservesDigitBearingHostnamesAndURLs(t *testing.T) {
-	got, err := ParseTargets([]string{"api1-prod2.example.com", "https://api1-prod2.example.com/path"})
+	got, err := ParseTargets([]string{
+		"api1-prod2.example.com",
+		"https://api1-prod2.example.com/path",
+		"https://192.168.10.2:80/path-with-hyphen",
+	})
 	require.NoError(t, err)
-	assert.Equal(t, []string{"api1-prod2.example.com", "https://api1-prod2.example.com/path"}, got)
+	assert.Equal(t, []string{
+		"api1-prod2.example.com",
+		"https://api1-prod2.example.com/path",
+		"https://192.168.10.2:80/path-with-hyphen",
+	}, got)
 }
 
 // TestTargets_CIDR_Small 测试 /30 CIDR 展开 4 个 IP
