@@ -166,7 +166,7 @@ describe('ModelListPage', () => {
 
     const summary = await screen.findByRole('region', { name: '模型治理态势' })
     expect(screen.getByRole('group', { name: '当前查询' })).toHaveTextContent(/匹配模型\s*0/)
-    expect(await screen.findByText('暂无可见模型')).toBeInTheDocument()
+    expect(await screen.findByText('暂无可见模型', { selector: '[role="status"] *' })).toBeInTheDocument()
     expect(summary).not.toHaveTextContent(/可配置模型\s*0/)
     expect(summary).not.toHaveTextContent(/已停用\s*0/)
     expect(summary).not.toHaveTextContent(/只读项\s*0/)
@@ -177,7 +177,7 @@ describe('ModelListPage', () => {
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue(jsonResponse({ items: [], total: 45, page: 3, page_size: 20 })))
     renderWithProviders(<ModelListPage />, 'auditor', '/models?page=3')
 
-    expect(await screen.findByText('当前页没有模型')).toBeInTheDocument()
+    expect(await screen.findByText('当前页没有模型', { selector: '[role="status"] *' })).toBeInTheDocument()
     expect(screen.queryByText('暂无可见模型')).not.toBeInTheDocument()
     const summary = await screen.findByRole('region', { name: '模型治理态势' })
     expect(screen.getByRole('group', { name: '当前查询' })).toHaveTextContent(/匹配模型\s*45/)
@@ -195,7 +195,7 @@ describe('ModelListPage', () => {
     vi.stubGlobal('fetch', fetchMock)
     renderWithProviders(<ModelListPage />, 'auditor', '/models?page=1001&scope=private')
 
-    expect(await screen.findByText('暂无可见模型')).toBeInTheDocument()
+    expect(await screen.findByText('暂无可见模型', { selector: '[role="status"] *' })).toBeInTheDocument()
     expect(fetchMock.mock.calls[0]?.[0]).toBe('http://localhost:3000/api/v1/platform/models?page=1&page_size=20')
   })
 

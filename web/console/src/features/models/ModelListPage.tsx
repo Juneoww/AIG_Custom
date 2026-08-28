@@ -6,6 +6,7 @@
  * 依赖：Fluent UI、TanStack Query、React Router、Session 与共享台账组件。
  */
 import {
+  Badge,
   Button,
   Dialog,
   DialogActions,
@@ -29,12 +30,28 @@ import { DataTable, type DataTableColumn } from '../../shared/components/DataTab
 import { PageHeader } from '../../shared/components/PageHeader'
 import { StatePanel } from '../../shared/components/StatePanel'
 import { deleteModel, fetchModelCatalog, type ModelCatalogItem } from './api'
+import { ModelCatalogGovernanceSummary } from './components/ModelCatalogGovernanceSummary'
 import { ModelForm } from './ModelForm'
 import { RotateCredentialDialog } from './RotateCredentialDialog'
 
 const useStyles = makeStyles({
-  page: { display: 'flex', flexDirection: 'column', gap: tokens.spacingVerticalL },
-  pagination: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: tokens.spacingHorizontalM },
+  page: { display: 'flex', flexDirection: 'column', gap: tokens.spacingVerticalL, minWidth: 0 },
+  tableViewport: { minWidth: 0, overflowX: 'auto' },
+  pagination: {
+    display: 'flex',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    gap: tokens.spacingHorizontalM,
+    '@media (max-width: 960px)': {
+      flexDirection: 'column',
+      alignItems: 'flex-start',
+    },
+  },
+  paginationActions: {
+    display: 'flex',
+    flexWrap: 'wrap',
+    gap: tokens.spacingHorizontalXS,
+  },
   actions: { display: 'flex', flexWrap: 'wrap', gap: tokens.spacingHorizontalXS },
   secondary: { color: tokens.colorNeutralForeground2 },
 })
@@ -84,6 +101,10 @@ export function ModelListPage() {
     queryFn: ({ signal }) => fetchModelCatalog({ page, pageSize: 20 }, signal),
     retry: false,
   })
+  const modelCatalog = query.isSuccess ? query.data : null
+  const hasEmptyPage = modelCatalog?.items.length === 0
+  const hasEmptyCatalog = modelCatalog !== null && hasEmptyPage && modelCatalog.total === 0
+  const hasOutOfRangePage = modelCatalog !== null && hasEmptyPage && modelCatalog.total > 0
 
   const refresh = async () => {
     await queryClient.invalidateQueries({ queryKey: ['models'] })
@@ -115,9 +136,25 @@ export function ModelListPage() {
     { id: 'id', header: '模型 ID', render: (model) => model.id },
     { id: 'name', header: '模型名称', render: (model) => model.name },
     { id: 'provider', header: '供应商模型', render: (model) => model.provider_model || '未配置' },
-    { id: 'scope', header: '作用范围', render: (model) => model.scope === 'global' ? '全局' : '私有' },
-    { id: 'source', header: '来源', render: (model) => model.source === 'yaml' ? 'YAML 只读' : '数据库' },
-    { id: 'status', header: '状态', render: (model) => model.disabled ? '已停用' : model.read_only ? '只读' : '可用' },
+    {
+      id: 'scope',
+      header: '作用范围',
+      render: (model) => <Badge color={model.scope === 'global' ? 'brand' : 'subtle'}>{model.scope === 'global' ? '全局' : '私有'}</Badge>,
+    },
+    {
+      id: 'source',
+      header: '来源',
+      render: (model) => <Badge color={model.source === 'yaml' ? 'informative' : 'brand'}>{model.source === 'yaml' ? 'YAML 只读' : '数据库'}</Badge>,
+    },
+    {
+      id: 'status',
+      header: '状态',
+      render: (model) => {
+        if (model.disabled) return <Badge color="warning">已停用</Badge>
+        if (model.read_only) return <Badge color="informative">只读</Badge>
+        return <Badge color={canManage(role, model) ? 'brand' : 'subtle'}>{canManage(role, model) ? '可配置' : '受限'}</Badge>
+      },
+    },
     {
       id: 'action',
       header: '操作',
@@ -144,14 +181,22 @@ export function ModelListPage() {
       </PageHeader>
 
       {actionError ? <MessageBar intent="error" role="alert"><MessageBarBody>{actionError}</MessageBarBody></MessageBar> : null}
-      {editing ? (
-        <ModelForm
-          key={editing === 'create' ? `create:${role}` : `${editing.source}:${editing.id}`}
-          role={role === 'admin' ? 'admin' : 'user'}
-          model={editing === 'create' ? undefined : editing}
-          onCancel={() => setEditing(null)}
-          onSaved={() => { setEditing(null); void refresh() }}
+      {modelCatalog ? (
+        <ModelCatalogGovernanceSummary
+          catalog={modelCatalog}
+          isManageable={(item) => canManage(role, item)}
         />
+      ) : null}
+      {editing ? (
+        <section aria-label="模型配置工作区">
+          <ModelForm
+            key={editing === 'create' ? `create:${role}` : `${editing.source}:${editing.id}`}
+            role={role === 'admin' ? 'admin' : 'user'}
+            model={editing === 'create' ? undefined : editing}
+            onCancel={() => setEditing(null)}
+            onSaved={() => { setEditing(null); void refresh() }}
+          />
+        </section>
       ) : null}
 
       {query.isPending ? <StatePanel state="loading" title="正在加载模型目录" /> : null}
@@ -161,16 +206,19 @@ export function ModelListPage() {
       {query.isError && !(query.error instanceof ApiError && query.error.kind === 'forbidden') ? (
         <StatePanel state="error" title="暂时无法加载模型目录" description="请稍后重试。" actionLabel="重试" onAction={() => void query.refetch()} />
       ) : null}
-      {query.data?.items.length === 0 ? <StatePanel state="empty" title="暂无可见模型" description="在当前角色允许的范围内创建模型后将在此显示。" /> : null}
-      {query.data?.items.length ? (
-        <DataTable caption="受治理模型台账" columns={columns} rows={query.data.items} getRowKey={(model) => `${model.source}:${model.id}`} />
+      {hasEmptyCatalog ? <StatePanel state="empty" title="暂无可见模型" description="在当前角色允许的范围内创建模型后将在此显示。" /> : null}
+      {hasOutOfRangePage ? <StatePanel state="empty" title="当前页没有模型" description="可返回上一页继续查看匹配模型。" /> : null}
+      {modelCatalog?.items.length ? (
+        <div className={styles.tableViewport}>
+          <DataTable caption="受治理模型台账" columns={columns} rows={modelCatalog.items} getRowKey={(model) => `${model.source}:${model.id}`} />
+        </div>
       ) : null}
-      {query.data ? (
+      {modelCatalog ? (
         <nav className={styles.pagination} aria-label="模型分页">
-          <span>共 {query.data.total} 条，第 {query.data.page} 页</span>
-          <div>
-            <Button appearance="secondary" disabled={page <= 1} onClick={() => setSearchParams(page > 2 ? { page: String(page - 1) } : {})}>上一页</Button>{' '}
-            <Button appearance="secondary" disabled={page * query.data.page_size >= query.data.total} onClick={() => setSearchParams({ page: String(page + 1) })}>下一页</Button>
+          <span>共 {modelCatalog.total} 条，第 {modelCatalog.page} 页</span>
+          <div className={styles.paginationActions}>
+            <Button appearance="secondary" disabled={modelCatalog.page <= 1} onClick={() => setSearchParams(modelCatalog.page > 2 ? { page: String(modelCatalog.page - 1) } : {})}>上一页</Button>
+            <Button appearance="secondary" disabled={modelCatalog.page * modelCatalog.page_size >= modelCatalog.total} onClick={() => setSearchParams({ page: String(modelCatalog.page + 1) })}>下一页</Button>
           </div>
         </nav>
       ) : null}

@@ -48,9 +48,22 @@ const useStyles = makeStyles({
     display: 'grid',
     gridTemplateColumns: 'repeat(2, minmax(0, 1fr))',
     gap: tokens.spacingHorizontalL,
+    '@media (max-width: 960px)': {
+      gridTemplateColumns: '1fr',
+    },
   },
   wide: { gridColumn: '1 / -1' },
-  actions: { display: 'flex', justifyContent: 'flex-end', gap: tokens.spacingHorizontalM },
+  actions: {
+    display: 'flex',
+    justifyContent: 'flex-end',
+    flexWrap: 'wrap',
+    gap: tokens.spacingHorizontalM,
+    '@media (max-width: 960px)': {
+      flexDirection: 'column',
+      alignItems: 'stretch',
+      justifyContent: 'flex-start',
+    },
+  },
 })
 
 export function ModelForm({ role, model, onSaved, onCancel }: ModelFormProps) {
