@@ -360,4 +360,78 @@ describe('任务页面', () => {
 
     expect(await screen.findByText('附件下载失败，请稍后重试。')).toBeInTheDocument()
   })
+
+  it('仅为 AI 基础设施扫描显示目标格式引导', () => {
+    vi.stubGlobal('fetch', vi.fn())
+    renderPage(
+      <TaskCreatePage />,
+      { id: 'user-1', username: 'alice', role: 'user', must_change_password: false },
+      '/tasks/new',
+    )
+
+    expect(screen.queryByText('AI 基础设施扫描目标格式')).not.toBeInTheDocument()
+
+    fireEvent.change(screen.getByRole('combobox', { name: '扫描类型' }), { target: { value: 'ai_infra_scan' } })
+
+    expect(screen.getByText('AI 基础设施扫描目标格式')).toBeInTheDocument()
+    expect(screen.getByText(/最多 65,536 个展开后的唯一目标/)).toBeInTheDocument()
+
+    fireEvent.change(screen.getByRole('combobox', { name: '扫描类型' }), { target: { value: 'mcp_scan' } })
+
+    expect(screen.queryByText('AI 基础设施扫描目标格式')).not.toBeInTheDocument()
+  })
+
+  it('AI 基础设施扫描实时显示范围展开预览', () => {
+    vi.stubGlobal('fetch', vi.fn())
+    renderPage(
+      <TaskCreatePage />,
+      { id: 'user-1', username: 'alice', role: 'user', must_change_password: false },
+      '/tasks/new',
+    )
+    fireEvent.change(screen.getByRole('combobox', { name: '扫描类型' }), { target: { value: 'ai_infra_scan' } })
+    fireEvent.change(screen.getByRole('textbox', { name: '扫描目标或任务说明' }), {
+      target: { value: '192.168.10.2-192.168.10.10' },
+    })
+
+    expect(screen.getByText('已识别 9 个目标')).toBeInTheDocument()
+  })
+
+  it('AI 基础设施扫描在本地预览发现明显非法格式时不提交', async () => {
+    const fetchMock = vi.fn()
+    vi.stubGlobal('fetch', fetchMock)
+    renderPage(
+      <TaskCreatePage />,
+      { id: 'user-1', username: 'alice', role: 'user', must_change_password: false },
+      '/tasks/new',
+    )
+    fireEvent.change(screen.getByRole('combobox', { name: '扫描类型' }), { target: { value: 'ai_infra_scan' } })
+    const targetField = screen.getByRole('textbox', { name: '扫描目标或任务说明' })
+    fireEvent.change(targetField, { target: { value: '22.*.10.*' } })
+
+    screen.getByRole('button', { name: '创建任务' }).click()
+
+    expect(await screen.findByRole('alert')).toHaveTextContent('目标格式无效：IPv4 通配符必须从某一段开始连续出现在末尾，例如 22.2.10.*。')
+    expect(targetField).toHaveAttribute('aria-invalid', 'true')
+    expect(targetField).toHaveAttribute('aria-describedby', 'ai-infra-target-guidance ai-infra-target-preview')
+    expect(fetchMock).not.toHaveBeenCalled()
+  })
+
+  it('AI 基础设施扫描保留服务端 400 的安全错误反馈', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(new Response(null, { status: 400 }))
+    vi.stubGlobal('fetch', fetchMock)
+    renderPage(
+      <TaskCreatePage />,
+      { id: 'user-1', username: 'alice', role: 'user', must_change_password: false },
+      '/tasks/new',
+    )
+    fireEvent.change(screen.getByRole('combobox', { name: '扫描类型' }), { target: { value: 'ai_infra_scan' } })
+    fireEvent.change(screen.getByRole('textbox', { name: '扫描目标或任务说明' }), {
+      target: { value: '192.168.10.2-192.168.10.10' },
+    })
+
+    screen.getByRole('button', { name: '创建任务' }).click()
+
+    expect(await screen.findByText('请求内容无效。')).toBeInTheDocument()
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+  })
 })
