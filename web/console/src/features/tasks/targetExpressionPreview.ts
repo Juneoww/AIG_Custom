@@ -13,12 +13,17 @@ export type TargetExpressionPreview =
   | { ok: false; count: 0; targets: []; error: string }
 
 type IPv4 = readonly [number, number, number, number]
+type IPv4Interval = { start: number; count: number }
+type ParsedExpression = string[] | IPv4Interval | string
+type IPv4Coverage = { intervals: IPv4Interval[]; smallIntervals: Set<string> }
 
 const TOO_MANY_TARGETS_ERROR = `目标数量超过 ${MAX_EXPANDED_TARGETS.toLocaleString('en-US')}，请缩小网段或拆分任务。`
 const INVALID_WILDCARD_ERROR = '目标格式无效：IPv4 通配符必须从某一段开始连续出现在末尾，例如 22.2.10.*。'
 const INVALID_RANGE_ERROR = '目标格式无效：IPv4 范围必须使用两个合法 IPv4 地址，且起始地址不能大于结束地址。'
 const INVALID_IPV4_PORT_RANGE_ERROR = '目标格式无效：不支持 IPv4 端口范围；请使用两个不带端口的 IPv4 地址。'
 const INVALID_IPV6_RANGE_ERROR = '目标格式无效：暂不支持 IPv6 范围。'
+const TOO_MANY_EXPRESSIONS_ERROR = `目标表达式超过 ${MAX_EXPANDED_TARGETS.toLocaleString('en-US')} 条，请缩小输入范围或拆分任务。`
+const IPV4_COVERAGE_THRESHOLD = 64
 
 function failed(error: string): TargetExpressionPreview {
   return { ok: false, count: 0, targets: [], error }
@@ -50,7 +55,8 @@ function numberIPv4(value: number): string {
 }
 
 function isWebURL(target: string): boolean {
-  return target.startsWith('http://') || target.startsWith('https://')
+  const lowerTarget = target.toLowerCase()
+  return lowerTarget.startsWith('http://') || lowerTarget.startsWith('https://')
 }
 
 function isIPv6Literal(value: string): boolean {
@@ -110,20 +116,13 @@ function isIPv6RangeExpression(target: string): boolean {
 function isRangeExpression(target: string): boolean {
   if (isWebURL(target) || !target.includes('-') || !target.includes('.')) return false
   const parts = target.split('-')
-  if (parts.length !== 2) return parseIPv4(parts[0]) !== undefined
+  if (parts.length !== 2) return parts.some((part) => parseIPv4(part) !== undefined)
   return parseIPv4(parts[0]) !== undefined
+    || (parts[0].includes('.') && parseIPv4(parts[1]) !== undefined)
     || (looksLikeIPv4(parts[0]) && looksLikeIPv4(parts[1]))
 }
 
-function expandNumbers(start: number, count: number): string[] {
-  const expanded = new Array<string>(count)
-  for (let index = 0; index < count; index += 1) {
-    expanded[index] = numberIPv4(start + index)
-  }
-  return expanded
-}
-
-function expandCIDR(target: string): string[] | string {
+function parseCIDRInterval(target: string): IPv4Interval | string {
   const match = /^([^/]+)\/(\d{1,2})$/.exec(target)
   if (!match) return '目标格式无效：IPv4 CIDR 不正确。'
   const address = parseIPv4(match[1])
@@ -133,10 +132,10 @@ function expandCIDR(target: string): string[] | string {
   const count = 2 ** (32 - bits)
   if (count > MAX_EXPANDED_TARGETS) return TOO_MANY_TARGETS_ERROR
   const start = Math.floor(ipv4Number(address) / count) * count
-  return expandNumbers(start, count)
+  return { start, count }
 }
 
-function expandRange(target: string): string[] | string {
+function parseRangeInterval(target: string): IPv4Interval | string {
   const parts = target.split('-')
   if (parts.length !== 2) return INVALID_RANGE_ERROR
   const start = parseIPv4(parts[0])
@@ -147,10 +146,10 @@ function expandRange(target: string): string[] | string {
   if (first > last) return INVALID_RANGE_ERROR
   const count = last - first + 1
   if (count > MAX_EXPANDED_TARGETS) return TOO_MANY_TARGETS_ERROR
-  return expandNumbers(first, count)
+  return { start: first, count }
 }
 
-function expandWildcard(target: string): string[] | string {
+function parseWildcardInterval(target: string): IPv4Interval | string {
   const parts = target.split('.')
   if (parts.length !== 4) return INVALID_WILDCARD_ERROR
   let firstStar = -1
@@ -171,10 +170,14 @@ function expandWildcard(target: string): string[] | string {
   const count = 256 ** (4 - firstStar)
   if (count > MAX_EXPANDED_TARGETS) return TOO_MANY_TARGETS_ERROR
   const start = prefix.reduce((total, octet) => total * 256 + octet, 0) * 256 ** (4 - firstStar)
-  return expandNumbers(start, count)
+  return { start, count }
 }
 
-function expandExpression(target: string): string[] | string {
+function isIPv4Interval(value: ParsedExpression): value is IPv4Interval {
+  return typeof value !== 'string' && !Array.isArray(value)
+}
+
+function parseExpression(target: string): ParsedExpression {
   // URL 是单一目标；其中的路径和查询参数可合法包含 ~、反斜杠或 *。
   if (isWebURL(target)) return [target]
   if (target.includes('\\') || target.includes('~')) {
@@ -182,15 +185,97 @@ function expandExpression(target: string): string[] | string {
   }
   if (isCIDRExpression(target)) {
     if (isIPv6Literal(target.split('/', 2)[0])) return '目标格式无效：暂不支持 IPv6 CIDR。'
-    return expandCIDR(target)
+    return parseCIDRInterval(target)
   }
   if (isIPv4PortRangeExpression(target)) return INVALID_IPV4_PORT_RANGE_ERROR
   if (isIPv6RangeExpression(target)) return INVALID_IPV6_RANGE_ERROR
-  if (isRangeExpression(target)) return expandRange(target)
-  if (target.includes('*')) return expandWildcard(target)
+  if (isRangeExpression(target)) return parseRangeInterval(target)
+  if (target.includes('*')) return parseWildcardInterval(target)
   if (/\s/.test(target)) return '目标格式无效：每行只能填写一个目标。'
   if (isIPv6Literal(target)) return '目标格式无效：暂不支持 IPv6 目标。'
+  const ipv4 = parseIPv4(target)
+  if (ipv4) return { start: ipv4Number(ipv4), count: 1 }
   return [target]
+}
+
+function uncoveredIPv4Intervals(covered: IPv4Interval[], interval: IPv4Interval): IPv4Interval[] {
+  let start = interval.start
+  const end = start + interval.count - 1
+  const result: IPv4Interval[] = []
+  for (const existing of covered) {
+    const existingEnd = existing.start + existing.count - 1
+    if (existingEnd < start) continue
+    if (existing.start > end) break
+    if (existing.start > start) result.push({ start, count: existing.start - start })
+    if (existingEnd >= end) return result
+    start = existingEnd + 1
+  }
+  if (start <= end) result.push({ start, count: end - start + 1 })
+  return result
+}
+
+function addCoveredIPv4Interval(covered: IPv4Interval[], interval: IPv4Interval): IPv4Interval[] {
+  let start = interval.start
+  let end = start + interval.count - 1
+  const result: IPv4Interval[] = []
+  let inserted = false
+  for (const existing of covered) {
+    const existingEnd = existing.start + existing.count - 1
+    if (existingEnd + 1 < start) {
+      result.push(existing)
+      continue
+    }
+    if (end + 1 < existing.start) {
+      if (!inserted) {
+        result.push({ start, count: end - start + 1 })
+        inserted = true
+      }
+      result.push(existing)
+      continue
+    }
+    start = Math.min(start, existing.start)
+    end = Math.max(end, existingEnd)
+  }
+  if (!inserted) result.push({ start, count: end - start + 1 })
+  return result
+}
+
+function intervalKey(interval: IPv4Interval): string {
+  return `${interval.start}:${interval.count}`
+}
+
+function appendUncoveredIPv4Targets(
+  targets: string[],
+  seen: Set<string>,
+  coverage: IPv4Coverage,
+  interval: IPv4Interval,
+): string | IPv4Coverage {
+  if (interval.count < IPV4_COVERAGE_THRESHOLD) {
+    const key = intervalKey(interval)
+    if (coverage.smallIntervals.has(key)) return coverage
+    for (let offset = 0; offset < interval.count; offset += 1) {
+      const target = numberIPv4(interval.start + offset)
+      if (seen.has(target)) continue
+      if (targets.length >= MAX_EXPANDED_TARGETS) return TOO_MANY_TARGETS_ERROR
+      seen.add(target)
+      targets.push(target)
+    }
+    coverage.smallIntervals.add(key)
+    return coverage
+  }
+
+  const uncovered = uncoveredIPv4Intervals(coverage.intervals, interval)
+  if (uncovered.length === 0) return coverage
+  for (const part of uncovered) {
+    for (let offset = 0; offset < part.count; offset += 1) {
+      const target = numberIPv4(part.start + offset)
+      if (seen.has(target)) continue
+      if (targets.length >= MAX_EXPANDED_TARGETS) return TOO_MANY_TARGETS_ERROR
+      seen.add(target)
+      targets.push(target)
+    }
+  }
+  return { ...coverage, intervals: addCoveredIPv4Interval(coverage.intervals, interval) }
 }
 
 /**
@@ -199,12 +284,22 @@ function expandExpression(target: string): string[] | string {
 export function previewTargetExpressions(content: string): TargetExpressionPreview {
   const targets: string[] = []
   const seen = new Set<string>()
+  let coverage: IPv4Coverage = { intervals: [], smallIntervals: new Set<string>() }
+  let expressionCount = 0
   for (const rawLine of content.split(/\r?\n/)) {
     const expression = rawLine.trim()
     if (!expression) continue
-    const expanded = expandExpression(expression)
-    if (typeof expanded === 'string') return failed(expanded)
-    for (const target of expanded) {
+    expressionCount += 1
+    if (expressionCount > MAX_EXPANDED_TARGETS) return failed(TOO_MANY_EXPRESSIONS_ERROR)
+    const parsed = parseExpression(expression)
+    if (typeof parsed === 'string') return failed(parsed)
+    if (isIPv4Interval(parsed)) {
+      const updatedCoverage = appendUncoveredIPv4Targets(targets, seen, coverage, parsed)
+      if (typeof updatedCoverage === 'string') return failed(updatedCoverage)
+      coverage = updatedCoverage
+      continue
+    }
+    for (const target of parsed) {
       if (seen.has(target)) continue
       if (targets.length >= MAX_EXPANDED_TARGETS) return failed(TOO_MANY_TARGETS_ERROR)
       seen.add(target)

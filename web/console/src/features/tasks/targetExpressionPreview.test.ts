@@ -31,6 +31,8 @@ describe('previewTargetExpressions', () => {
     'https://ai.example.com/api\\v1',
     'https://ai.example.com/search?q=*',
     'https://[2001:db8::1]:443/health',
+    'HTTP://ai.example.com/~health',
+    'HTTPS://ai.example.com/search?q=*',
   ])('保留 URL 中的表达式字符 %s', (url) => {
     expect(previewTargetExpressions(url)).toEqual({ ok: true, count: 1, targets: [url] })
   })
@@ -93,6 +95,13 @@ describe('previewTargetExpressions', () => {
     expect(previewTargetExpressions(expression)).toEqual({ ok: true, count: 1, targets: [expression] })
   })
 
+  it('拒绝主机名到 IPv4 的连字符范围', () => {
+    const preview = previewTargetExpressions('example.com-10.0.0.1')
+
+    expect(preview).toMatchObject({ ok: false, count: 0, targets: [] })
+    expect(preview.ok ? '' : preview.error).toContain('IPv4 范围')
+  })
+
   it('拒绝使用 NBSP 分隔的多个目标', () => {
     const preview = previewTargetExpressions('192.168.10.2\u00A0192.168.10.3')
 
@@ -117,6 +126,32 @@ describe('previewTargetExpressions', () => {
     expect(largePreview).toMatchObject({ ok: true, count: 65_536 })
     expect(largePreview.targets[0]).toBe('22.2.0.0')
     expect(largePreview.targets.at(-1)).toBe('22.2.255.255')
+  })
+
+  it('对重复且完全覆盖的 IPv4 表达式保留首个区间结果', () => {
+    const preview = previewTargetExpressions([
+      '22.2.*.*',
+      '22.2.0.0/16',
+      '22.2.0.0-22.2.255.255',
+    ].join('\n'))
+
+    expect(preview).toMatchObject({ ok: true, count: 65_536 })
+    expect(preview.targets[0]).toBe('22.2.0.0')
+    expect(preview.targets.at(-1)).toBe('22.2.255.255')
+  })
+
+  it('保留逆序稀疏 65,536 个单 IPv4 目标的输入顺序', () => {
+    const expressions = Array.from({ length: 65_536 }, (_, index) => {
+      const third = Math.floor((65_535 - index) / 256)
+      const fourth = (65_535 - index) % 256
+      return `10.0.${third}.${fourth}`
+    })
+
+    const preview = previewTargetExpressions(expressions.join('\n'))
+
+    expect(preview).toMatchObject({ ok: true, count: 65_536 })
+    expect(preview.targets[0]).toBe('10.0.255.255')
+    expect(preview.targets.at(-1)).toBe('10.0.0.0')
   })
 
   it('跨多行稳定去重且保留首次出现顺序', () => {
