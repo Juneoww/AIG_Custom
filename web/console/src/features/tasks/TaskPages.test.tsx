@@ -275,6 +275,56 @@ describe('任务页面', () => {
 
   it.each([
     {
+      taskType: 'mcp_scan',
+      fields: [] as Array<[string, string]>,
+      params: { thread: 4 },
+    },
+    {
+      taskType: 'model_redteam_report',
+      fields: [
+        ['评测模型 ID（逗号分隔）', 'model-1'],
+        ['裁判模型 ID', 'eval-model-1'],
+      ] as Array<[string, string]>,
+      params: {
+        model_id: ['model-1'],
+        eval_model_id: 'eval-model-1',
+        dataset: { numPrompts: 100 },
+      },
+    },
+    {
+      taskType: 'agent_scan',
+      fields: [
+        ['Agent 配置 ID', 'agent-config-1'],
+        ['裁判模型 ID', 'eval-model-1'],
+      ] as Array<[string, string]>,
+      params: { agent_id: 'agent-config-1', eval_model_id: 'eval-model-1' },
+    },
+  ])('从 full_tcp 切换为 $taskType 后不提交端口扫描模式', async ({ taskType, fields, params }) => {
+    const fetchMock = vi.fn().mockResolvedValue(jsonResponse(task))
+    vi.stubGlobal('fetch', fetchMock)
+    renderPage(
+      <TaskCreatePage />,
+      { id: 'user-1', username: 'alice', role: 'user', must_change_password: false },
+      '/tasks/new',
+    )
+    fireEvent.change(screen.getByRole('combobox', { name: '扫描类型' }), { target: { value: 'ai_infra_scan' } })
+    fireEvent.change(screen.getByRole('combobox', { name: '端口扫描模式' }), { target: { value: 'full_tcp' } })
+    fireEvent.change(screen.getByRole('combobox', { name: '扫描类型' }), { target: { value: taskType } })
+    fireEvent.change(screen.getByRole('textbox', { name: '扫描目标或任务说明' }), { target: { value: '安全评测说明' } })
+    for (const [label, value] of fields) {
+      fireEvent.change(screen.getByRole('textbox', { name: label }), { target: { value } })
+    }
+
+    screen.getByRole('button', { name: '创建任务' }).click()
+
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1))
+    const body = JSON.parse(String((fetchMock.mock.calls[0]?.[1] as RequestInit).body))
+    expect(body).toEqual(expect.objectContaining({ task_type: taskType, params }))
+    expect(body.params).not.toHaveProperty('port_scan_mode')
+  })
+
+  it.each([
+    {
       taskType: 'model_redteam_report',
       fields: [
         ['评测模型 ID（逗号分隔）', 'model-1, model-2'],
