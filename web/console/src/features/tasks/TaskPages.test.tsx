@@ -443,7 +443,7 @@ describe('任务页面', () => {
   })
 
   it.each([
-    ['fixed_ai', '固定 AI 端口及范围'],
+    ['fixed_ai', '固定 AI 端口（11434、1337、7000–9000、18789）'],
     ['full_tcp', '全量 TCP 1–65535'],
   ] as const)('详情只显示已白名单端口扫描模式的本地映射：%s', async (portScanMode, display) => {
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue(jsonResponse({

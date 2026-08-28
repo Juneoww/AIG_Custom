@@ -27,7 +27,7 @@ const useStyles = makeStyles({
 
 const terminal = new Set(['succeeded', 'failed', 'cancelled'])
 const portScanModeLabels = {
-  fixed_ai: '固定 AI 端口及范围',
+  fixed_ai: '固定 AI 端口（11434、1337、7000–9000、18789）',
   full_tcp: '全量 TCP 1–65535',
 } as const
 
