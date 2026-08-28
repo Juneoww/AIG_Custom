@@ -304,6 +304,9 @@ func TestCreateAIInfraTargetValidationRejectsInvalidWildcardAndExpansionLimit(t 
 	}{
 		{name: "partial wildcard", content: "22.*.10.*"},
 		{name: "ipv4 port range", content: "192.168.10.2:80-192.168.10.10:80"},
+		{name: "invalid ipv4 port range", content: "192.168.10.2:99999-192.168.10.10:99999"},
+		{name: "ipv6 range", content: "2001:db8::1-2001:db8::2"},
+		{name: "bracketed ipv6 port range", content: "[2001:db8::1]:80-[2001:db8::2]:80"},
 		{name: "too many expanded targets", content: "22.2.*.*\n1.1.1.1"},
 	}
 	for _, test := range tests {

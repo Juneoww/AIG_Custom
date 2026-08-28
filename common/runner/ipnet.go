@@ -53,6 +53,8 @@ func ParseTargets(expressions []string) ([]string, error) {
 			expanded, err = expandCIDR(target)
 		case isIPv4PortRangeExpression(target):
 			err = fmt.Errorf("IPv4 port ranges are not supported: %q", target)
+		case isIPv6RangeExpression(target):
+			err = fmt.Errorf("IPv6 ranges are not supported: %q", target)
 		case isRangeExpression(target):
 			expanded, err = expandRange(target)
 		case strings.Contains(target, "*"):
@@ -108,9 +110,28 @@ func isIPv4PortRangeExpression(target string) bool {
 		return false
 	}
 	for _, part := range strings.Split(target, "-") {
-		addressPort, err := netip.ParseAddrPort(part)
-		if err == nil && addressPort.Addr().Is4() {
+		host, _, hasPort := strings.Cut(part, ":")
+		if hasPort && isCompleteIPv4(host) {
 			return true
+		}
+	}
+	return false
+}
+
+func isIPv6RangeExpression(target string) bool {
+	if strings.HasPrefix(target, "http://") || strings.HasPrefix(target, "https://") || !strings.Contains(target, "-") {
+		return false
+	}
+	for _, part := range strings.Split(target, "-") {
+		if address, err := netip.ParseAddr(part); err == nil && address.Is6() {
+			return true
+		}
+		if strings.HasPrefix(part, "[") {
+			if closing := strings.Index(part, "]"); closing > 1 {
+				if address, err := netip.ParseAddr(part[1:closing]); err == nil && address.Is6() {
+					return true
+				}
+			}
 		}
 	}
 	return false

@@ -64,6 +64,19 @@ func TestParseTargets_RejectsIPv4PortRangeExpressions(t *testing.T) {
 		"192.168.10.2:80-192.168.10.10:80",
 		"192.168.10.2:80-90",
 		"192.168.10.2:80-192.168.10.10:443",
+		"192.168.10.2:99999-192.168.10.10:99999",
+		"192.168.10.2:99999-90",
+	} {
+		_, err := ParseTargets([]string{input})
+		assert.Error(t, err, input)
+	}
+}
+
+func TestParseTargets_RejectsIPv6RangeExpressions(t *testing.T) {
+	for _, input := range []string{
+		"2001:db8::1-2001:db8::2",
+		"[2001:db8::1]:80-[2001:db8::2]:80",
+		"[2001:db8::1]:99999-[2001:db8::2]:99999",
 	} {
 		_, err := ParseTargets([]string{input})
 		assert.Error(t, err, input)
