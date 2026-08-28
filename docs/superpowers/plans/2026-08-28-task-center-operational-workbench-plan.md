@@ -65,7 +65,7 @@ expect(summary).not.toHaveTextContent('本页正在执行 47')
 2. 从 /tasks?page=3&status=running&task_type=agent_scan 渲染成功列表后点击“清除筛选”，验证第二次请求恰好是：
    http://localhost:3000/api/v1/platform/tasks?page=1&page_size=20
 
-无筛选的 /tasks 不出现清除筛选。使用 waitFor 和顺序 mock 响应，不读取路由内部状态来代替可见交互。
+无筛选的 /tasks 不出现清除筛选。每个成功、空态和失败路径都断言 `screen.getByRole('group', { name: '任务筛选' })` 可找到筛选容器，并在其中通过标签找到“任务状态”和“任务类型”两个 select。使用 waitFor 和顺序 mock 响应，不读取路由内部状态来代替可见交互。
 
 - [ ] **Step 4: 运行定向测试，确认它因工作台尚未实现而失败**
 
@@ -195,7 +195,7 @@ const hasActiveFilters = Boolean(status || taskType)
 
 在现有 makeStyles 中以 Fluent tokens 增加：
 
-- filterPanel：淡中性背景、描边和圆角，用于容纳现有 Field/Select；960px 以下单列。
+- filterPanel：淡中性背景、描边和圆角，用于容纳现有 Field/Select；其实际容器必须是 `role="group" aria-label="任务筛选"`，而不是仅有 aria-label 的普通 div；960px 以下单列。
 - filters：大屏横向、窄屏单列，minWidth 为 0；选择框在窄屏占满。
 - tableViewport：minWidth 为 0、overflowX 为 auto，只包裹 DataTable。
 - statusMark 以及 active/pending/attention/terminal 变体：用 token 的文字、背景和描边使完整 taskStatusLabels 文案在浅/深/系统模式中可读。
