@@ -589,6 +589,123 @@ func TestIdempotentCreateReturnsPersistedTaskWhenLiveReferencesBecomeUnavailable
 	}
 }
 
+func TestLegacyAIInfrastructureTaskRetriesNormalizePortScanMode(t *testing.T) {
+	tests := []struct {
+		name           string
+		legacyParams   json.RawMessage
+		omittedParams  json.RawMessage
+		explicitParams json.RawMessage
+	}{
+		{
+			name:           "model and timeout",
+			legacyParams:   json.RawMessage(`{"model_id":"model-1","timeout":30}`),
+			omittedParams:  json.RawMessage(`{"model_id":"model-1","timeout":30}`),
+			explicitParams: json.RawMessage(`{"model_id":"model-1","timeout":30,"port_scan_mode":"fixed_ai"}`),
+		},
+		{
+			name:           "empty params",
+			legacyParams:   json.RawMessage(`{}`),
+			omittedParams:  nil,
+			explicitParams: json.RawMessage(`{"port_scan_mode":"fixed_ai"}`),
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			repository := NewMemoryRepository()
+			engine := &recordingEngine{}
+			service := NewService(repository, engine, audit.NewService(audit.NewMemoryRepository()))
+			subject := identity.Subject{UserID: "legacy-owner", Username: "alice", Role: identity.RoleUser}
+			idempotencyKey := "legacy-idempotency-" + strings.ReplaceAll(test.name, " ", "-")
+			taskID := uuid.NewSHA1(taskIDNamespace, []byte(subject.UserID+"\x00"+idempotencyKey)).String()
+			now := time.Now().UTC()
+			_, created, err := repository.CreateOrGet(context.Background(), &Task{
+				ID: taskID, OwnerUserID: subject.UserID, OwnerUsername: subject.Username,
+				IdempotencyKey: idempotencyKey, EngineSessionID: taskID, TaskType: "ai_infra_scan",
+				Content: "127.0.0.1", Params: append(json.RawMessage(nil), test.legacyParams...), AttachmentRefs: json.RawMessage(`[]`),
+				Status: StatusRunning, CreatedAt: now, UpdatedAt: now,
+			})
+			require.NoError(t, err)
+			require.True(t, created)
+
+			for _, params := range []json.RawMessage{test.omittedParams, test.explicitParams} {
+				view, createErr := service.Create(context.Background(), subject, CreateInput{
+					IdempotencyKey: idempotencyKey, TaskType: "ai_infra_scan", Content: "127.0.0.1", Params: params,
+				})
+				require.NoError(t, createErr)
+				assert.Equal(t, taskID, view.ID)
+			}
+
+			stored, err := repository.Get(context.Background(), taskID)
+			require.NoError(t, err)
+			assert.JSONEq(t, string(test.legacyParams), string(stored.Params), "legacy task parameters must not be rewritten")
+			assert.Zero(t, engine.submits.Load())
+		})
+	}
+}
+
+func TestLegacyAIInfrastructureTaskDispatchNormalizesPortScanMode(t *testing.T) {
+	repository := NewMemoryRepository()
+	engine := &recordingEngine{}
+	service := NewService(repository, engine, audit.NewService(audit.NewMemoryRepository()))
+	subject := identity.Subject{UserID: "legacy-dispatch-owner", Username: "alice", Role: identity.RoleUser}
+	idempotencyKey := "legacy-dispatch"
+	taskID := uuid.NewSHA1(taskIDNamespace, []byte(subject.UserID+"\x00"+idempotencyKey)).String()
+	legacyParams := json.RawMessage(`{"model_id":"model-1","timeout":30}`)
+	now := time.Now().UTC()
+	_, created, err := repository.CreateOrGet(context.Background(), &Task{
+		ID: taskID, OwnerUserID: subject.UserID, OwnerUsername: subject.Username,
+		IdempotencyKey: idempotencyKey, EngineSessionID: taskID, TaskType: "ai_infra_scan",
+		Content: "127.0.0.1", Params: legacyParams, AttachmentRefs: json.RawMessage(`[]`),
+		Status: StatusPending, CreatedAt: now, UpdatedAt: now,
+	})
+	require.NoError(t, err)
+	require.True(t, created)
+
+	view, err := service.Create(context.Background(), subject, CreateInput{
+		IdempotencyKey: idempotencyKey, TaskType: "ai_infra_scan", Content: "127.0.0.1", Params: legacyParams,
+	})
+	require.NoError(t, err)
+	assert.Equal(t, StatusRunning, view.Status)
+	assert.Equal(t, int64(1), engine.submits.Load())
+
+	engine.mu.Lock()
+	dispatchedParams := append(json.RawMessage(nil), engine.last.Params...)
+	engine.mu.Unlock()
+	var dispatched map[string]any
+	require.NoError(t, json.Unmarshal(dispatchedParams, &dispatched))
+	assert.Equal(t, "fixed_ai", dispatched["port_scan_mode"])
+	assert.Equal(t, "model-1", dispatched["model_id"])
+	assert.Equal(t, float64(30), dispatched["timeout"])
+
+	stored, err := repository.Get(context.Background(), taskID)
+	require.NoError(t, err)
+	assert.JSONEq(t, string(legacyParams), string(stored.Params), "dispatch must not rewrite legacy task parameters")
+}
+
+func TestMalformedLegacyAIInfrastructureTaskDoesNotDispatch(t *testing.T) {
+	repository := NewMemoryRepository()
+	engine := &recordingEngine{}
+	service := NewService(repository, engine, audit.NewService(audit.NewMemoryRepository()))
+	now := time.Now().UTC()
+	task := &Task{
+		ID: "malformed-legacy-ai", OwnerUserID: "legacy-owner", OwnerUsername: "alice",
+		IdempotencyKey: "malformed-legacy-ai", EngineSessionID: "malformed-legacy-ai", TaskType: "ai_infra_scan",
+		Content: "127.0.0.1", Params: json.RawMessage(`{"port_scan_mode":"not-approved"}`), AttachmentRefs: json.RawMessage(`[]`),
+		Status: StatusPending, CreatedAt: now, UpdatedAt: now,
+	}
+	_, created, err := repository.CreateOrGet(context.Background(), task)
+	require.NoError(t, err)
+	require.True(t, created)
+	claim, claimed, err := repository.ClaimDispatch(context.Background(), task.ID, now, now.Add(dispatchLeaseDuration))
+	require.NoError(t, err)
+	require.True(t, claimed)
+
+	_, err = service.dispatch(context.Background(), identity.Subject{UserID: task.OwnerUserID, Username: task.OwnerUsername, Role: identity.RoleUser}, task, claim)
+	require.ErrorIs(t, err, ErrInvalid)
+	assert.Zero(t, engine.submits.Load())
+}
+
 func TestIdempotentRetryBypassesCreationAuditOutage(t *testing.T) {
 	repository := NewMemoryRepository()
 	engine := &recordingEngine{}

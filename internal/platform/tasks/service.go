@@ -285,8 +285,17 @@ func sameCreateRequest(persisted, candidate *Task) bool {
 		persisted.Content != candidate.Content || persisted.CountryIsoCode != candidate.CountryIsoCode {
 		return false
 	}
-	persistedParams, persistedParamsOK := canonicalJSON(persisted.Params)
-	candidateParams, candidateParamsOK := canonicalJSON(candidate.Params)
+	persistedRaw, candidateRaw := persisted.Params, candidate.Params
+	if persisted.TaskType == "ai_infra_scan" {
+		var persistedValid, candidateValid bool
+		persistedRaw, persistedValid = normalizeInfrastructureTaskParams(persistedRaw)
+		candidateRaw, candidateValid = normalizeInfrastructureTaskParams(candidateRaw)
+		if !persistedValid || !candidateValid {
+			return false
+		}
+	}
+	persistedParams, persistedParamsOK := canonicalJSON(persistedRaw)
+	candidateParams, candidateParamsOK := canonicalJSON(candidateRaw)
 	return persistedParamsOK && candidateParamsOK && bytes.Equal(persistedParams, candidateParams) &&
 		sameAttachmentRefs(persisted.AttachmentRefs, candidate.AttachmentRefs)
 }
@@ -596,9 +605,17 @@ func validBoundedString(value string, maximum int) bool {
 }
 
 func (service *Service) dispatch(ctx context.Context, subject identity.Subject, task *Task, claim string) (*Task, error) {
+	params := append(json.RawMessage(nil), task.Params...)
+	if task.TaskType == "ai_infra_scan" {
+		var valid bool
+		params, valid = normalizeInfrastructureTaskParams(params)
+		if !valid {
+			return task, ErrInvalid
+		}
+	}
 	engineTask := EngineTask{
 		PlatformTaskID: task.ID, OwnerUsername: task.OwnerUsername, TaskType: task.TaskType,
-		Content: task.Content, Params: append(json.RawMessage(nil), task.Params...), CountryIsoCode: task.CountryIsoCode,
+		Content: task.Content, Params: params, CountryIsoCode: task.CountryIsoCode,
 	}
 	var attachmentIDs []string
 	_ = json.Unmarshal(task.AttachmentRefs, &attachmentIDs)
