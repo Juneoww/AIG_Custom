@@ -16,7 +16,7 @@ type IPv4 = readonly [number, number, number, number]
 
 const TOO_MANY_TARGETS_ERROR = `目标数量超过 ${MAX_EXPANDED_TARGETS.toLocaleString('en-US')}，请缩小网段或拆分任务。`
 const INVALID_WILDCARD_ERROR = '目标格式无效：IPv4 通配符必须从某一段开始连续出现在末尾，例如 22.2.10.*。'
-const INVALID_RANGE_ERROR = '目标格式无效：IPv4 范围必须使用两个合法地址，且起始地址不能大于结束地址。'
+const INVALID_RANGE_ERROR = '目标格式无效：IPv4 范围必须使用两个不带端口的合法 IPv4 地址，且起始地址不能大于结束地址。'
 
 function failed(error: string): TargetExpressionPreview {
   return { ok: false, count: 0, targets: [], error }
@@ -88,6 +88,11 @@ function looksLikeIPv4(value: string): boolean {
   return value.length > 0 && /^[0-9.]+$/.test(value)
 }
 
+function looksLikeIPv4WithPort(value: string): boolean {
+  const separator = value.indexOf(':')
+  return separator > 0 && looksLikeIPv4(value.slice(0, separator))
+}
+
 function isRangeExpression(target: string): boolean {
   if (isWebURL(target) || !target.includes('-') || !target.includes('.')) return false
   const parts = target.split('-')
@@ -95,6 +100,8 @@ function isRangeExpression(target: string): boolean {
   return parseIPv4(parts[0]) !== undefined
     || parseIPv4(parts[1]) !== undefined
     || (looksLikeIPv4(parts[0]) && looksLikeIPv4(parts[1]))
+    || looksLikeIPv4WithPort(parts[0])
+    || looksLikeIPv4WithPort(parts[1])
 }
 
 function expandNumbers(start: number, count: number): string[] {

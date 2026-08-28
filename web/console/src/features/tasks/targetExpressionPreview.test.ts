@@ -42,6 +42,13 @@ describe('previewTargetExpressions', () => {
     ])
   })
 
+  it('拒绝带端口的 IPv4 连字符范围', () => {
+    const preview = previewTargetExpressions('192.168.10.2:80-192.168.10.10:80')
+
+    expect(preview).toMatchObject({ ok: false, count: 0, targets: [] })
+    expect(preview.ok ? '' : preview.error).toContain('端口')
+  })
+
   it('展开末尾 IPv4 通配符', () => {
     const smallPreview = previewTargetExpressions('22.2.10.*')
     const largePreview = previewTargetExpressions('22.2.*.*')
