@@ -6,7 +6,7 @@
  * 依赖：Testing Library、TanStack Query、React Router、SessionProvider 与 Fluent UI。
  */
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
-import { fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { MemoryRouter } from 'react-router-dom'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
@@ -32,6 +32,12 @@ function catalogItem(overrides: Record<string, unknown> = {}) {
   }
 }
 
+const governancePageItems = [
+  catalogItem({ id: 'model-configurable-page-2', name: '可配置私有模型' }),
+  catalogItem({ id: 'model-disabled-page-2', name: '已停用可配置模型', disabled: true }),
+  catalogItem({ id: 'model-read-only-page-2', name: '受限只读模型', read_only: true }),
+]
+
 function sessionFor(role: SubjectRole): SessionState {
   return {
     status: 'authenticated',
@@ -41,7 +47,7 @@ function sessionFor(role: SubjectRole): SessionState {
 
 function renderWithProviders(node: React.ReactNode, role: SubjectRole = 'user', path = '/models') {
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } })
-  return render(
+  const view = render(
     <ThemeProvider initialMode="light">
       <QueryClientProvider client={queryClient}>
         <SessionProvider initialState={sessionFor(role)}>
@@ -50,6 +56,7 @@ function renderWithProviders(node: React.ReactNode, role: SubjectRole = 'user', 
       </QueryClientProvider>
     </ThemeProvider>,
   )
+  return { ...view, queryClient }
 }
 
 beforeEach(() => {
@@ -113,6 +120,76 @@ describe('ModelListPage', () => {
     expect(screen.queryByRole('button', { name: /新增私有|新增全局|编辑|删除|轮换加密/ })).not.toBeInTheDocument()
   })
 
+  it('从可分享URL呈现模型治理态势与原生模型台账', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(jsonResponse({
+      items: governancePageItems, total: 45, page: 2, page_size: 20,
+    }))
+    vi.stubGlobal('fetch', fetchMock)
+    renderWithProviders(<ModelListPage />, 'user', '/models?page=2')
+
+    const table = await screen.findByRole('table', { name: '受治理模型台账' })
+    expect(table.tagName).toBe('TABLE')
+    expect(screen.getByRole('columnheader', { name: '来源' }).tagName).toBe('TH')
+    const ledger = within(table)
+    expect(ledger.getAllByText('数据库')).not.toHaveLength(0)
+    expect(ledger.getAllByText('私有')).not.toHaveLength(0)
+    expect(ledger.getAllByText('已停用')).not.toHaveLength(0)
+    expect(ledger.getAllByText('只读')).not.toHaveLength(0)
+    expect(fetchMock.mock.calls[0]?.[0]).toBe('http://localhost:3000/api/v1/platform/models?page=2&page_size=20')
+    expect(screen.getByRole('button', { name: '编辑 可配置私有模型' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: '编辑 已停用可配置模型' })).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /受限只读模型/ })).not.toBeInTheDocument()
+    expect(screen.getByText('共 45 条，第 2 页')).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: '上一页' })).toBeEnabled()
+
+    const summary = await screen.findByRole('region', { name: '模型治理态势' })
+    const currentQuery = screen.getByRole('group', { name: '当前查询' })
+    const signals = screen.getByRole('group', { name: '本页治理信号' })
+    expect(summary.compareDocumentPosition(table) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+    expect(currentQuery).toHaveTextContent('当前查询')
+    expect(currentQuery).toHaveTextContent(/匹配模型\s*45/)
+    expect(currentQuery).toHaveTextContent(/第\s*2\s*页/)
+    expect(signals).toHaveTextContent(/可配置模型\s*2/)
+    expect(signals).toHaveTextContent(/已停用\s*1/)
+    expect(signals).toHaveTextContent(/只读项\s*1/)
+    expect(signals).not.toHaveTextContent(/可配置模型\s*45/)
+
+    fireEvent.click(screen.getByRole('button', { name: '上一页' }))
+    await waitFor(() => expect(fetchMock.mock.calls.some(
+      ([input]) => input === 'http://localhost:3000/api/v1/platform/models?page=1&page_size=20',
+    )).toBe(true))
+  })
+
+  it('空模型目录保留当前查询但不渲染本页治理信号', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(jsonResponse({ items: [], total: 0, page: 1, page_size: 20 })))
+    renderWithProviders(<ModelListPage />, 'auditor')
+
+    const summary = await screen.findByRole('region', { name: '模型治理态势' })
+    expect(screen.getByRole('group', { name: '当前查询' })).toHaveTextContent(/匹配模型\s*0/)
+    expect(await screen.findByText('暂无可见模型')).toBeInTheDocument()
+    expect(summary).not.toHaveTextContent(/可配置模型\s*0/)
+    expect(summary).not.toHaveTextContent(/已停用\s*0/)
+    expect(summary).not.toHaveTextContent(/只读项\s*0/)
+    expect(screen.queryByRole('group', { name: '本页治理信号' })).not.toBeInTheDocument()
+  })
+
+  it('有匹配模型但当前页为空时保留服务端查询与可用上一页', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(jsonResponse({ items: [], total: 45, page: 3, page_size: 20 })))
+    renderWithProviders(<ModelListPage />, 'auditor', '/models?page=3')
+
+    expect(await screen.findByText('当前页没有模型')).toBeInTheDocument()
+    expect(screen.queryByText('暂无可见模型')).not.toBeInTheDocument()
+    const summary = await screen.findByRole('region', { name: '模型治理态势' })
+    expect(screen.getByRole('group', { name: '当前查询' })).toHaveTextContent(/匹配模型\s*45/)
+    expect(summary).toHaveTextContent(/第\s*3\s*页/)
+    expect(summary).not.toHaveTextContent(/可配置模型\s*0/)
+    expect(summary).not.toHaveTextContent(/已停用\s*0/)
+    expect(summary).not.toHaveTextContent(/只读项\s*0/)
+    expect(screen.queryByRole('group', { name: '本页治理信号' })).not.toBeInTheDocument()
+    expect(screen.getByText('共 45 条，第 3 页')).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: '上一页' })).toBeEnabled()
+  })
+
   it('规范化恶意页码并分离空、403和失败状态', async () => {
     const fetchMock = vi.fn().mockResolvedValue(jsonResponse({ items: [], total: 0, page: 1, page_size: 20 }))
     vi.stubGlobal('fetch', fetchMock)
@@ -127,8 +204,46 @@ describe('ModelListPage', () => {
       vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(null, { status })))
       renderWithProviders(<ModelListPage />, 'auditor')
       expect(await screen.findByText(message)).toBeInTheDocument()
+      expect(screen.queryByRole('region', { name: '模型治理态势' })).not.toBeInTheDocument()
+      expect(screen.queryByRole('table', { name: '受治理模型台账' })).not.toBeInTheDocument()
+      expect(screen.queryByRole('navigation', { name: '模型分页' })).not.toBeInTheDocument()
     },
   )
+
+  it.each([[403, '无权查看模型目录'], [500, '暂时无法加载模型目录']])(
+    '缓存模型在重取%s失败后只显示独立安全状态', async (status, message) => {
+      const fetchMock = vi.fn()
+        .mockResolvedValueOnce(jsonResponse({ items: governancePageItems, total: 45, page: 2, page_size: 20 }))
+        .mockResolvedValueOnce(new Response(null, { status }))
+      vi.stubGlobal('fetch', fetchMock)
+      const { queryClient } = renderWithProviders(<ModelListPage />, 'user', '/models?page=2')
+
+      expect(await screen.findByRole('table', { name: '受治理模型台账' })).toBeInTheDocument()
+      await act(async () => {
+        await queryClient.invalidateQueries({ queryKey: ['models'] })
+      })
+
+      expect(await screen.findByText(message)).toBeInTheDocument()
+      expect(fetchMock).toHaveBeenCalledTimes(2)
+      expect(screen.queryByRole('region', { name: '模型治理态势' })).not.toBeInTheDocument()
+      expect(screen.queryByRole('table', { name: '受治理模型台账' })).not.toBeInTheDocument()
+      expect(screen.queryByRole('button', { name: '编辑 可配置私有模型' })).not.toBeInTheDocument()
+      expect(screen.queryByText(/匹配模型\s*45/)).not.toBeInTheDocument()
+      expect(screen.queryByText('共 45 条，第 2 页')).not.toBeInTheDocument()
+      expect(screen.queryByRole('navigation', { name: '模型分页' })).not.toBeInTheDocument()
+    },
+  )
+
+  it('加载模型目录时不提前渲染治理态势、台账或分页', async () => {
+    vi.stubGlobal('fetch', vi.fn(() => new Promise<Response>(() => undefined)))
+    const view = renderWithProviders(<ModelListPage />, 'auditor')
+
+    expect(await screen.findByText('正在加载模型目录')).toBeInTheDocument()
+    expect(screen.queryByRole('region', { name: '模型治理态势' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('table', { name: '受治理模型台账' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('navigation', { name: '模型分页' })).not.toBeInTheDocument()
+    view.unmount()
+  })
 
   it('从编辑A切到B会取消旧写请求并清空A的字段与Token', async () => {
     let resolveOldWrite!: (response: Response) => void
