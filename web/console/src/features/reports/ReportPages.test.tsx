@@ -97,6 +97,27 @@ function renderAt(page: React.ReactNode, path: string, routePath: string) {
   return { ...view, queryClient }
 }
 
+function hasSingleColumnMetadataRule(metadata: Element) {
+  const classNames = new Set(metadata.classList)
+  return Array.from(document.styleSheets).some((sheet) => {
+    try {
+      return Array.from(sheet.cssRules).some((rule) => {
+        if (rule.type !== CSSRule.MEDIA_RULE) return false
+        const mediaRule = rule as CSSMediaRule
+        if (!mediaRule.conditionText.replaceAll(' ', '').includes('(max-width:960px)')) return false
+        return Array.from(mediaRule.cssRules).some((nestedRule) => {
+          if (nestedRule.type !== CSSRule.STYLE_RULE) return false
+          const styleRule = nestedRule as CSSStyleRule
+          return styleRule.style.getPropertyValue('grid-template-columns') === '1fr'
+            && styleRule.selectorText.split(',').some((selector) => [...classNames].some((className) => selector.includes(`.${className}`)))
+        })
+      })
+    } catch {
+      return false
+    }
+  })
+}
+
 function ReportSwitchHarness() {
   const navigate = useNavigate()
   return (
@@ -228,20 +249,40 @@ describe('ReportDetailPage', () => {
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue(jsonResponse(detail())))
     renderAt(<ReportDetailPage />, '/reports/report-opaque-1', '/reports/:reportId')
 
-    expect(await screen.findByRole('heading', { level: 1, name: '安全报告详情' })).toBeInTheDocument()
-    expect(screen.getByText('历史快照品牌')).toBeInTheDocument()
-    expect(screen.getByText('历史水印')).toBeInTheDocument()
-    expect(screen.getByText('安全评分')).toBeInTheDocument()
-    expect(screen.getByText('72')).toBeInTheDocument()
-    expect(screen.getByText('risk-v2')).toBeInTheDocument()
-    expect(screen.getByText('使用生成时固化的 risk-v2 映射。')).toBeInTheDocument()
+    const pageTitle = await screen.findByRole('heading', { level: 1, name: '安全报告详情' })
+    const exportButton = screen.getByRole('button', { name: '导出 PDF' })
+    const brief = screen.getByRole('region', { name: '报告决策摘要' })
+    expect(brief).toHaveTextContent('安全评分')
+    expect(brief).toHaveTextContent('72')
+    expect(brief).toHaveTextContent('risk-v2')
+    expect(brief).toHaveTextContent('使用生成时固化的 risk-v2 映射。')
+    expect(brief).toHaveTextContent('覆盖 1/1 条可信发现')
+    expect(brief).toHaveTextContent('完成修复后复核。')
+    const metadata = brief.querySelector('dl')
+    expect(metadata).not.toBeNull()
+    expect(hasSingleColumnMetadataRule(metadata!)).toBe(true)
     const top = screen.getByRole('region', { name: '重点风险' })
     const orderedText = top.textContent ?? ''
     expect(orderedText.indexOf('高风险')).toBeLessThan(orderedText.indexOf('中风险'))
     expect(orderedText.indexOf('中风险')).toBeLessThan(orderedText.indexOf('低风险'))
-    expect(screen.getByRole('region', { name: '技术发现' })).toHaveTextContent('可信证据')
-    expect(screen.getByRole('region', { name: '覆盖与结论' })).toHaveTextContent('覆盖 1/1 条可信发现')
+    expect(top).toHaveTextContent('立即修复')
+    const recommendations = screen.getByRole('region', { name: '修复建议' })
+    expect(recommendations).toHaveTextContent('优先修复高风险项')
+    const technicalFindings = screen.getByRole('region', { name: '技术发现' })
+    expect(technicalFindings).toHaveTextContent('可信证据')
+    const trend = screen.getByRole('region', { name: '风险趋势' })
     expect(screen.getByRole('table', { name: '不可变风险趋势' })).toBeInTheDocument()
+    const snapshot = screen.getByRole('region', { name: '快照信息' })
+    expect(snapshot).toHaveTextContent('历史快照品牌')
+    expect(snapshot).toHaveTextContent('历史水印')
+    expect(snapshot).toHaveTextContent('#2457a7')
+    expect(snapshot).not.toHaveTextContent('当前品牌')
+    expect(pageTitle.compareDocumentPosition(brief) & Node.DOCUMENT_POSITION_FOLLOWING).not.toBe(0)
+    expect(exportButton.compareDocumentPosition(brief) & Node.DOCUMENT_POSITION_FOLLOWING).not.toBe(0)
+    expect(brief.compareDocumentPosition(recommendations) & Node.DOCUMENT_POSITION_FOLLOWING).not.toBe(0)
+    expect(recommendations.compareDocumentPosition(technicalFindings) & Node.DOCUMENT_POSITION_FOLLOWING).not.toBe(0)
+    expect(technicalFindings.compareDocumentPosition(trend) & Node.DOCUMENT_POSITION_FOLLOWING).not.toBe(0)
+    expect(trend.compareDocumentPosition(snapshot) & Node.DOCUMENT_POSITION_FOLLOWING).not.toBe(0)
     expect(document.body).not.toHaveTextContent('当前品牌')
   })
 

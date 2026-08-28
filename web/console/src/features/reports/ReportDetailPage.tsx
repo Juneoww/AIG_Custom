@@ -19,16 +19,18 @@ import { RiskSummary } from './components/RiskSummary'
 import { TechnicalFindings } from './components/TechnicalFindings'
 
 const useStyles = makeStyles({
-  page: { display: 'flex', flexDirection: 'column', gap: tokens.spacingVerticalL },
-  snapshot: { padding: tokens.spacingVerticalL, boxShadow: 'none' },
+  page: { minWidth: 0, display: 'flex', flexDirection: 'column', gap: tokens.spacingVerticalL },
+  snapshot: { minWidth: 0, padding: tokens.spacingVerticalL, boxShadow: 'none' },
   snapshotTitle: { margin: 0, fontSize: tokens.fontSizeBase500 },
-  metadata: { display: 'grid', gridTemplateColumns: 'max-content minmax(0, 1fr)', gap: `${tokens.spacingVerticalS} ${tokens.spacingHorizontalM}` },
+  metadata: { display: 'grid', gridTemplateColumns: 'max-content minmax(0, 1fr)', gap: `${tokens.spacingVerticalS} ${tokens.spacingHorizontalM}`,
+    '@media (max-width: 960px)': { gridTemplateColumns: '1fr' } },
   term: { color: tokens.colorNeutralForeground2 },
   value: { margin: 0, overflowWrap: 'anywhere' },
   section: { minWidth: 0, padding: tokens.spacingVerticalL, boxShadow: 'none' },
   sectionTitle: { margin: 0, fontSize: tokens.fontSizeBase500 },
   text: { whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' },
   recommendations: { display: 'grid', gap: tokens.spacingVerticalS },
+  trendViewport: { minWidth: 0, overflowX: 'auto' },
 })
 
 const dateFormatter = new Intl.DateTimeFormat('zh-CN', { timeZone: 'UTC', year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hour12: false })
@@ -148,6 +150,18 @@ export function ReportDetailPage() {
         </Button>
       </PageHeader>
       {mutation.isError ? <MessageBar intent="error" role="alert"><MessageBarBody>PDF 导出失败，请重试。</MessageBarBody></MessageBar> : null}
+      <RiskSummary risk={report.render.risk} explanation={report.render.score_explanation} mappingVersion={report.render.mapping_version} coverage={report.render.coverage} conclusion={report.render.conclusion} topRisks={report.render.top_risks} />
+      <Card className={styles.section} role="region" aria-label="修复建议">
+        <h2 className={styles.sectionTitle}>修复建议</h2>
+        {report.render.recommendations.length ? <ol className={styles.recommendations}>{report.render.recommendations.map((item, index) => <li className={styles.text} key={`${item}-${index}`}>{item}</li>)}</ol> : <Text>此快照没有补充建议。</Text>}
+      </Card>
+      <TechnicalFindings findings={report.render.technical_findings} />
+      <Card className={styles.section} role="region" aria-label="风险趋势">
+        <h2 className={styles.sectionTitle}>30 日风险趋势</h2>
+        <div className={styles.trendViewport}>
+          <DataTable caption="不可变风险趋势" columns={columns} rows={report.render.risk_trend} getRowKey={(point) => point.date} />
+        </div>
+      </Card>
       <Card className={styles.snapshot} role="region" aria-label="快照信息">
         <h2 className={styles.snapshotTitle}>{report.render.product_name}</h2>
         <dl className={styles.metadata}>
@@ -157,23 +171,6 @@ export function ReportDetailPage() {
           <dt className={styles.term}>生成时间</dt><dd className={styles.value}>{dateFormatter.format(new Date(report.created_at))}</dd>
           <dt className={styles.term}>快照主色</dt><dd className={styles.value}>{report.render.primary_color}</dd>
           <dt className={styles.term}>水印</dt><dd className={styles.value}>{report.render.watermark || '无'}</dd>
-        </dl>
-      </Card>
-      <RiskSummary risk={report.render.risk} explanation={report.render.score_explanation} mappingVersion={report.render.mapping_version} topRisks={report.render.top_risks} />
-      <Card className={styles.section} role="region" aria-label="风险趋势">
-        <h2 className={styles.sectionTitle}>30 日风险趋势</h2>
-        <DataTable caption="不可变风险趋势" columns={columns} rows={report.render.risk_trend} getRowKey={(point) => point.date} />
-      </Card>
-      <TechnicalFindings findings={report.render.technical_findings} />
-      <Card className={styles.section} role="region" aria-label="修复建议">
-        <h2 className={styles.sectionTitle}>修复建议</h2>
-        {report.render.recommendations.length ? <ol className={styles.recommendations}>{report.render.recommendations.map((item, index) => <li className={styles.text} key={`${item}-${index}`}>{item}</li>)}</ol> : <Text>此快照没有补充建议。</Text>}
-      </Card>
-      <Card className={styles.section} role="region" aria-label="覆盖与结论">
-        <h2 className={styles.sectionTitle}>覆盖与结论</h2>
-        <dl className={styles.metadata}>
-          <dt className={styles.term}>覆盖范围</dt><dd className={styles.value}>{report.render.coverage || '未说明'}</dd>
-          <dt className={styles.term}>结论</dt><dd className={styles.value}>{report.render.conclusion || '未说明'}</dd>
         </dl>
       </Card>
     </section>
