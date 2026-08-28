@@ -12,20 +12,42 @@ import { MemoryRouter, Route, Routes } from 'react-router-dom'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { SessionProvider } from '../auth/session'
-import type { CurrentSubject } from '../../shared/api/types'
+import type { CurrentSubject, TaskSummary } from '../../shared/api/types'
 import { TaskCreatePage } from './TaskCreatePage'
 import { TaskDetailPage } from './TaskDetailPage'
 import { TaskListPage } from './TaskListPage'
 
-const task = {
+const taskSummary = {
   id: 'task-opaque-1',
   owner: 'alice',
   task_type: 'mcp_scan',
   status: 'running',
   created_at: '2026-08-18T01:00:00Z',
   updated_at: '2026-08-18T01:01:00Z',
+} as const satisfies TaskSummary
+
+const task = {
+  ...taskSummary,
   input_summary: { language: 'zh', thread: 4 },
 } as const
+
+const operationalTasks = [
+  { ...taskSummary, id: 'task-pending', status: 'pending' },
+  { ...taskSummary, id: 'task-dispatching', status: 'dispatching' },
+  { ...taskSummary, id: 'task-running', status: 'running' },
+  { ...taskSummary, id: 'task-failed', status: 'failed' },
+  { ...taskSummary, id: 'task-dispatch-failed', status: 'dispatch_failed' },
+  { ...taskSummary, id: 'task-unknown', status: 'dispatch_unknown' },
+  { ...taskSummary, id: 'task-cancelled', status: 'cancelled' },
+  { ...taskSummary, id: 'task-finished', status: 'succeeded' },
+] as const
+
+const agentScanRunningTask = {
+  ...taskSummary,
+  id: 'task-agent-running',
+  task_type: 'agent_scan',
+  status: 'running',
+} as const satisfies TaskSummary
 
 function jsonResponse(body: unknown) {
   return new Response(JSON.stringify(body), { status: 200, headers: { 'Content-Type': 'application/json' } })
@@ -76,6 +98,103 @@ describe('任务页面', () => {
     expect(table.tagName).toBe('TABLE')
     expect(screen.getByRole('columnheader', { name: '任务类型' }).tagName).toBe('TH')
     expect(screen.queryByRole('link', { name: '创建扫描任务' })).not.toBeInTheDocument()
+  })
+
+  it('普通用户在任务工作台查看当前页运行态势且保留原任务台账', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue(jsonResponse({ items: operationalTasks, total: 47, page: 1, page_size: 20 })),
+    )
+    renderPage(
+      <TaskListPage />,
+      { id: 'user-1', username: 'alice', role: 'user', must_change_password: false },
+      '/tasks',
+    )
+
+    const summary = await screen.findByRole('region', { name: '任务运行态势' })
+    expect(summary).toHaveTextContent('当前查询')
+    expect(summary).toHaveTextContent('全部状态')
+    expect(summary).toHaveTextContent('全部类型')
+    expect(summary).toHaveTextContent('匹配任务 47')
+    expect(summary).toHaveTextContent('本页正在执行 2')
+    expect(summary).toHaveTextContent('本页等待调度 1')
+    expect(summary).toHaveTextContent('本页需关注 3')
+    expect(summary).not.toHaveTextContent('本页正在执行 47')
+
+    const filters = screen.getByRole('group', { name: '任务筛选' })
+    expect(filters).toContainElement(screen.getByRole('combobox', { name: '任务状态' }))
+    expect(filters).toContainElement(screen.getByRole('combobox', { name: '任务类型' }))
+    expect(screen.getByRole('table', { name: '扫描任务台账' })).toBeInTheDocument()
+    for (const { id } of operationalTasks) {
+      expect(screen.getByRole('link', { name: `查看任务 ${id}` })).toBeInTheDocument()
+    }
+    expect(screen.queryByRole('button', { name: '清除筛选' })).not.toBeInTheDocument()
+  })
+
+  it('筛选后为空仍保留任务运行态势和可清除筛选入口', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(jsonResponse({ items: [], total: 0, page: 1, page_size: 20 }))
+    vi.stubGlobal('fetch', fetchMock)
+    renderPage(
+      <TaskListPage />,
+      { id: 'user-1', username: 'alice', role: 'user', must_change_password: false },
+      '/tasks?status=running&task_type=agent_scan',
+    )
+
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1))
+    const summary = await screen.findByRole('region', { name: '任务运行态势' })
+    expect(summary).toHaveTextContent('当前查询')
+    expect(summary).toHaveTextContent('状态：执行中')
+    expect(summary).toHaveTextContent('类型：Agent 扫描')
+    expect(summary).toHaveTextContent('匹配任务 0')
+    expect(screen.getByRole('button', { name: '清除筛选' })).toBeInTheDocument()
+    expect(summary).not.toHaveTextContent('本页正在执行 0')
+    expect(summary).not.toHaveTextContent('本页等待调度 0')
+    expect(summary).not.toHaveTextContent('本页需关注 0')
+
+    const filters = screen.getByRole('group', { name: '任务筛选' })
+    expect(filters).toContainElement(screen.getByRole('combobox', { name: '任务状态' }))
+    expect(filters).toContainElement(screen.getByRole('combobox', { name: '任务类型' }))
+  })
+
+  it('清除筛选后只以第一页无筛选请求任务列表', async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(jsonResponse({ items: [agentScanRunningTask], total: 41, page: 3, page_size: 20 }))
+      .mockResolvedValueOnce(jsonResponse({ items: operationalTasks, total: 47, page: 1, page_size: 20 }))
+    vi.stubGlobal('fetch', fetchMock)
+    renderPage(
+      <TaskListPage />,
+      { id: 'user-1', username: 'alice', role: 'user', must_change_password: false },
+      '/tasks?page=3&status=running&task_type=agent_scan',
+    )
+
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1))
+    expect(fetchMock.mock.calls[0]?.[0]).toBe(
+      'http://localhost:3000/api/v1/platform/tasks?page=3&page_size=20&status=running&task_type=agent_scan',
+    )
+    await screen.findByRole('table', { name: '扫描任务台账' })
+
+    screen.getByRole('button', { name: '清除筛选' }).click()
+
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2))
+    expect(fetchMock.mock.calls[1]?.[0]).toBe('http://localhost:3000/api/v1/platform/tasks?page=1&page_size=20')
+  })
+
+  it('列表加载失败时仍提供具名的任务筛选控件组', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(new Response(null, { status: 500 }))
+    vi.stubGlobal('fetch', fetchMock)
+    renderPage(
+      <TaskListPage />,
+      { id: 'user-1', username: 'alice', role: 'user', must_change_password: false },
+      '/tasks',
+    )
+
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1))
+    expect(await screen.findByText('暂时无法加载任务')).toBeInTheDocument()
+
+    const filters = screen.getByRole('group', { name: '任务筛选' })
+    expect(filters).toContainElement(screen.getByRole('combobox', { name: '任务状态' }))
+    expect(filters).toContainElement(screen.getByRole('combobox', { name: '任务类型' }))
   })
 
   it('列表卸载会取消仍在等待的真实查询', async () => {
