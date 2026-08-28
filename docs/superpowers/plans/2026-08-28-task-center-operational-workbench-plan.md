@@ -14,6 +14,8 @@
 
 - Create: web/console/src/features/tasks/components/TaskOperationsSummary.tsx
   - 纯展示当前查询、服务端匹配总数、当前页状态派生和可选清除筛选入口。
+- Create: web/console/src/features/tasks/components/TaskOperationsSummary.test.tsx
+  - 在尚未接入列表前，独立锁定本页状态派生、空态与无副作用展示语义。
 - Modify: web/console/src/features/tasks/TaskListPage.tsx
   - 接入工作台摘要、状态标记、雾灰筛选/台账布局、局部滚动和清除筛选回调。
 - Modify: web/console/src/features/tasks/TaskPages.test.tsx
@@ -88,13 +90,25 @@ git commit -m "test: define task operational workbench"
 
 **Files:**
 - Create: web/console/src/features/tasks/components/TaskOperationsSummary.tsx
-- Test: web/console/src/features/tasks/TaskPages.test.tsx
+- Create: web/console/src/features/tasks/components/TaskOperationsSummary.test.tsx
+- Verify: web/console/src/features/tasks/TaskPages.test.tsx
 
-- [ ] **Step 1: 创建带中文文件头注释的展示组件**
+- [ ] **Step 1: 先为独立摘要组件写失败测试**
+
+新建 `TaskOperationsSummary.test.tsx`，只通过公开 props 渲染组件并断言：
+
+- `dispatching` 与 `running` 计入“本页正在执行”，`pending` 计入“本页等待调度”，`failed`、`dispatch_failed`、`dispatch_unknown` 计入“本页需关注”；`succeeded` 与 `cancelled` 不增加任何信号。
+- 根节点是具名的“任务运行态势” region，包含“当前查询”“本页运行信号”“匹配任务 {total}”和筛选标签。
+- `tasks` 为空时仍显示当前查询、总数和可选“清除筛选”，但完全不显示三个零值信号。
+- 组件没有请求、URL 写入或回调副作用；仅在点击清除按钮时调用传入回调。
+
+先运行该测试，确认因组件尚不存在而失败。`TaskPages.test.tsx` 的四个工作台集成红灯在 Task 3 前仍属预期。
+
+- [ ] **Step 2: 创建带中文文件头注释的展示组件**
 
 建立 TaskOperationsSummary.tsx。文件头说明：从已校验任务列表响应呈现当前查询和本页态势；只做本地派生；输入安全任务摘要、总数和筛选显示信息；输出具名 region；依赖 React、Fluent UI 和共享任务 DTO。
 
-- [ ] **Step 2: 导出唯一的本页状态派生函数**
+- [ ] **Step 3: 导出唯一的本页状态派生函数**
 
 在组件内导出类型和函数，保持所有状态集合在此唯一处定义：
 
@@ -117,7 +131,7 @@ export function deriveTaskPageActivity(tasks: readonly TaskSummary[]): TaskPageA
 
 succeeded 和 cancelled 不能增加任何计数；不得通过状态标签文字或未知原始响应字段计算数量。
 
-- [ ] **Step 3: 定义受控 props 和语义结构**
+- [ ] **Step 4: 定义受控 props 和语义结构**
 
 使用如下 props，不把 URLSearchParams 或查询对象传入组件：
 
@@ -132,20 +146,21 @@ interface TaskOperationsSummaryProps {
 
 根元素使用 Card 的 region 语义和“任务运行态势”名称。内部用具名 group 分开“当前查询”和“本页运行信号”；“匹配任务 {total}”永远展示。tasks 为空时渲染当前查询和可选清除按钮，但不渲染三个零值信号。所有表面、描边、文字和阴影来自 Fluent tokens；需关注用警示 token，执行和等待不使用代表完成的绿色。
 
-- [ ] **Step 4: 将展示与空态断言跑绿**
 
-再次运行：
+- [ ] **Step 5: 将独立组件测试跑绿**
+
+先运行：
 
 ~~~powershell
-.\node_modules\.bin\vitest.CMD run src\features\tasks\TaskPages.test.tsx --reporter=verbose --pool=forks --maxWorkers=1 --no-file-parallelism
+.\node_modules\.bin\vitest.CMD run src\features\tasks\components\TaskOperationsSummary.test.tsx --reporter=verbose --pool=forks --maxWorkers=1 --no-file-parallelism
 ~~~
 
-Expected: 摘要缺失的断言通过；清除筛选的交互断言可以在 Task 3 前保持失败。
+Expected: PASS。随后运行 `TaskPages.test.tsx`，确认四个工作台集成红灯仍仅因列表尚未接入摘要、筛选 group 和清除按钮；既有回归继续通过。
 
-- [ ] **Step 5: 提交摘要组件和已通过的展示测试**
+- [ ] **Step 6: 提交摘要组件和已通过的展示测试**
 
 ~~~powershell
-git add web/console/src/features/tasks/components/TaskOperationsSummary.tsx web/console/src/features/tasks/TaskPages.test.tsx
+git add web/console/src/features/tasks/components/TaskOperationsSummary.tsx web/console/src/features/tasks/components/TaskOperationsSummary.test.tsx
 git commit -m "feat: add task operational summary"
 ~~~
 
