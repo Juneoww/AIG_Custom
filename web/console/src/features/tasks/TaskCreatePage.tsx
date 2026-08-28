@@ -22,7 +22,7 @@ import { useNavigate } from 'react-router-dom'
 
 import { useSession } from '../auth/session'
 import { ApiError } from '../../shared/api/errors'
-import type { AttachmentView, TaskCreateRequest } from '../../shared/api/types'
+import type { AttachmentView, InfrastructurePortScanMode, TaskCreateRequest } from '../../shared/api/types'
 import { PageHeader } from '../../shared/components/PageHeader'
 import { downloadAttachment, preflightAttachments, uploadAttachment } from './attachments'
 import { createTaskSubmission, type TaskSubmission } from './api'
@@ -45,6 +45,7 @@ const useStyles = makeStyles({
     backgroundColor: tokens.colorNeutralBackground2,
   },
   targetExamples: { display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: tokens.spacingHorizontalS },
+  portScanMode: { display: 'flex', flexDirection: 'column', gap: tokens.spacingVerticalXS, gridColumn: '1 / -1' },
 })
 
 export function TaskCreatePage() {
@@ -60,6 +61,7 @@ export function TaskCreatePage() {
   const [agentID, setAgentID] = useState('')
   const [thread, setThread] = useState('4')
   const [timeout, setTimeoutValue] = useState('300')
+  const [portScanMode, setPortScanMode] = useState<InfrastructurePortScanMode>('fixed_ai')
   const [numPrompts, setNumPrompts] = useState('100')
   const [files, setFiles] = useState<File[]>([])
   const [attachments, setAttachments] = useState<AttachmentView[]>([])
@@ -147,6 +149,7 @@ export function TaskCreatePage() {
         const parsed = Number(timeout)
         if (!Number.isInteger(parsed) || parsed < 1 || parsed > 86_400) throw new Error('请填写有效的超时秒数。')
         params.timeout = parsed
+        params.port_scan_mode = portScanMode
       }
       if (taskType === 'model_redteam_report') {
         const modelIDs = modelID.split(',').map((value) => value.trim()).filter(Boolean)
@@ -279,6 +282,26 @@ export function TaskCreatePage() {
             ) : null}
             {taskType === 'mcp_scan' ? <Field label="并发数"><Input type="number" min={1} max={1024} value={thread} onChange={(_, data) => { setThread(data.value); invalidateSubmission() }} /></Field> : null}
             {taskType === 'ai_infra_scan' ? <Field label="超时秒数"><Input type="number" min={1} max={86400} value={timeout} onChange={(_, data) => { setTimeoutValue(data.value); invalidateSubmission() }} /></Field> : null}
+            {taskType === 'ai_infra_scan' ? (
+              <div className={styles.portScanMode}>
+                <Field label="端口扫描模式">
+                  <Select value={portScanMode} onChange={(_, data) => { setPortScanMode(data.value as InfrastructurePortScanMode); invalidateSubmission() }}>
+                    <option value="fixed_ai">固定 AI 端口及范围</option>
+                    <option value="full_tcp">全量 TCP（1–65535）</option>
+                  </Select>
+                </Field>
+                {portScanMode === 'fixed_ai' ? (
+                  <Text size={200}>固定 AI 端口：11434、1337、7000–9000、18789（共 2,004 个端口）。</Text>
+                ) : (
+                  <MessageBar intent="warning">
+                    <MessageBarBody>
+                      <Text weight="semibold">全量 TCP 1–65535</Text>
+                      <Text size={200}>仅对裸 IPv4 执行 TCP 1–65535；会显著增加扫描耗时和网络压力，请仅扫描已获授权的目标。URL 和域名继续沿用现有 Web 扫描路径。</Text>
+                    </MessageBarBody>
+                  </MessageBar>
+                )}
+              </div>
+            ) : null}
             {taskType === 'model_redteam_report' ? <Field label="提示词数量"><Input type="number" min={1} max={1000000} value={numPrompts} onChange={(_, data) => { setNumPrompts(data.value); invalidateSubmission() }} /></Field> : null}
           </div>
         </fieldset>
