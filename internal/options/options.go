@@ -29,24 +29,25 @@ import (
 
 // Options 定义了程序的所有配置选项
 type Options struct {
-	Target          multiStringFlag   // 目标URL列表
-	TargetFile      string            // 包含目标的文件路径
-	Output          string            // 输出文件路径
-	ProxyURL        string            // 代理服务器URL
-	TimeOut         int               // 请求超时时间(秒)
-	JSON            bool              // 是否输出JSON格式
-	RateLimit       int               // 每秒请求限制数
-	FPTemplates     string            // 指纹模板路径
-	AdvTemplates    string            // 漏洞模板路径
-	ListVulTemplate bool              // 是否列出漏洞模板
-	CheckVulTargets bool              // 检查漏洞模板是否正确
-	LocalScan       bool              // 一键检测本地
-	WebServer       bool              // 是否启用WebSocket服务器
-	WebServerAddr   string            // WebSocket服务器地址
-	Headers         multiStringFlag   // HTTP请求头
-	Language        string            // 语言
-	Callback        func(interface{}) `json:"-"` // 回调函数
-	LoadRemote      bool              `json:"-"`
+	Target             multiStringFlag   // 目标URL列表
+	TargetFile         string            // 包含目标的文件路径
+	Output             string            // 输出文件路径
+	ProxyURL           string            // 代理服务器URL
+	TimeOut            int               // 请求超时时间(秒)
+	JSON               bool              // 是否输出JSON格式
+	RateLimit          int               // 每秒请求限制数
+	FPTemplates        string            // 指纹模板路径
+	AdvTemplates       string            // 漏洞模板路径
+	ListVulTemplate    bool              // 是否列出漏洞模板
+	CheckVulTargets    bool              // 检查漏洞模板是否正确
+	LocalScan          bool              // 一键检测本地
+	WebServer          bool              // 是否启用WebSocket服务器
+	WebServerAddr      string            // WebSocket服务器地址
+	Headers            multiStringFlag   // HTTP请求头
+	Language           string            // 语言
+	Callback           func(interface{}) `json:"-"` // 回调函数
+	LoadRemote         bool              `json:"-"`
+	PreExpandedTargets bool              `json:"-"` // Target 已由受信任调用方完成表达式解析
 }
 
 // multiStringFlag 用于支持命令行中多个相同参数的输入

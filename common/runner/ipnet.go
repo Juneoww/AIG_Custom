@@ -26,6 +26,7 @@ import (
 	"net"
 	"net/netip"
 	"strings"
+	"unicode"
 )
 
 const maxTargetExpressions = 65536
@@ -33,35 +34,74 @@ const maxTargetExpressions = 65536
 // ErrTooManyTargets indicates that expansion would exceed the batch limit.
 var ErrTooManyTargets = errors.New("target expansion exceeds 65536 targets")
 
+type ipv4Interval struct {
+	start uint32
+	count uint64
+}
+
 // ParseTargets trims, expands, and deduplicates a batch of target expressions.
 // IPv4 CIDRs, complete IPv4 ranges, and trailing IPv4 wildcards are expanded.
 func ParseTargets(expressions []string) ([]string, error) {
 	result := make([]string, 0)
 	seen := make(map[string]struct{})
+	expandedIntervals := make(map[ipv4Interval]struct{})
 	for _, raw := range expressions {
 		target := strings.TrimSpace(raw)
 		if target == "" {
 			continue
 		}
-		if strings.ContainsAny(target, "\\~") {
+		isURL := isHTTPURL(target)
+		if !isURL && strings.ContainsAny(target, "\\~") {
 			return nil, fmt.Errorf("invalid target %q: ranges cannot contain backslash or tilde", target)
+		}
+		if !isURL && strings.ContainsFunc(target, unicode.IsSpace) {
+			return nil, fmt.Errorf("invalid target %q", target)
 		}
 		var expanded []string
 		var err error
 		switch {
+		case isURL:
+			expanded = []string{target}
 		case isCIDRExpression(target):
-			expanded, err = expandCIDR(target)
+			interval, intervalErr := parseCIDRInterval(target)
+			if intervalErr != nil {
+				err = intervalErr
+				break
+			}
+			if _, ok := expandedIntervals[interval]; ok {
+				continue
+			}
+			expanded = expandIPv4Numbers(interval.start, interval.count)
+			expandedIntervals[interval] = struct{}{}
 		case isIPv4PortRangeExpression(target):
 			err = fmt.Errorf("IPv4 port ranges are not supported: %q", target)
 		case isIPv6RangeExpression(target):
 			err = fmt.Errorf("IPv6 ranges are not supported: %q", target)
 		case isRangeExpression(target):
-			expanded, err = expandRange(target)
+			interval, intervalErr := parseRangeInterval(target)
+			if intervalErr != nil {
+				err = intervalErr
+				break
+			}
+			if _, ok := expandedIntervals[interval]; ok {
+				continue
+			}
+			expanded = expandIPv4Numbers(interval.start, interval.count)
+			expandedIntervals[interval] = struct{}{}
 		case strings.Contains(target, "*"):
-			expanded, err = expandWildcard(target)
+			interval, intervalErr := parseWildcardInterval(target)
+			if intervalErr != nil {
+				err = intervalErr
+				break
+			}
+			if _, ok := expandedIntervals[interval]; ok {
+				continue
+			}
+			expanded = expandIPv4Numbers(interval.start, interval.count)
+			expandedIntervals[interval] = struct{}{}
 		default:
-			if strings.ContainsAny(target, " \t\r\n") {
-				return nil, fmt.Errorf("invalid target %q", target)
+			if isBracketedIPv6Address(target) {
+				return nil, fmt.Errorf("IPv6 targets are not supported: %q", target)
 			}
 			if addr, parseErr := netip.ParseAddr(target); parseErr == nil && addr.Is6() {
 				return nil, fmt.Errorf("IPv6 targets are not supported: %q", target)
@@ -86,7 +126,7 @@ func ParseTargets(expressions []string) ([]string, error) {
 }
 
 func isRangeExpression(target string) bool {
-	if strings.HasPrefix(target, "http://") || strings.HasPrefix(target, "https://") {
+	if isHTTPURL(target) {
 		return false
 	}
 	parts := strings.Split(target, "-")
@@ -101,12 +141,17 @@ func isRangeExpression(target string) bool {
 		}
 		return false
 	}
-	return isCompleteIPv4(parts[0]) || isCompleteIPv4(parts[1]) ||
+	return isCompleteIPv4(parts[0]) ||
 		(looksLikeIPv4(parts[0]) && looksLikeIPv4(parts[1]))
 }
 
+func isHTTPURL(target string) bool {
+	lowerTarget := strings.ToLower(target)
+	return strings.HasPrefix(lowerTarget, "http://") || strings.HasPrefix(lowerTarget, "https://")
+}
+
 func isIPv4PortRangeExpression(target string) bool {
-	if strings.HasPrefix(target, "http://") || strings.HasPrefix(target, "https://") || !strings.Contains(target, "-") {
+	if isHTTPURL(target) || !strings.Contains(target, "-") {
 		return false
 	}
 	for _, part := range strings.Split(target, "-") {
@@ -119,7 +164,7 @@ func isIPv4PortRangeExpression(target string) bool {
 }
 
 func isIPv6RangeExpression(target string) bool {
-	if strings.HasPrefix(target, "http://") || strings.HasPrefix(target, "https://") || !strings.Contains(target, "-") {
+	if isHTTPURL(target) || !strings.Contains(target, "-") {
 		return false
 	}
 	for _, part := range strings.Split(target, "-") {
@@ -135,6 +180,18 @@ func isIPv6RangeExpression(target string) bool {
 		}
 	}
 	return false
+}
+
+func isBracketedIPv6Address(target string) bool {
+	if !strings.HasPrefix(target, "[") {
+		return false
+	}
+	closing := strings.Index(target, "]")
+	if closing <= 1 {
+		return false
+	}
+	address, err := netip.ParseAddr(target[1:closing])
+	return err == nil && address.Is6()
 }
 
 func isCompleteIPv4(value string) bool {
@@ -158,7 +215,7 @@ func isCIDRExpression(target string) bool {
 	if !strings.Contains(target, "/") {
 		return false
 	}
-	if strings.HasPrefix(target, "http://") || strings.HasPrefix(target, "https://") {
+	if isHTTPURL(target) {
 		return false
 	}
 	parts := strings.SplitN(target, "/", 2)
@@ -169,51 +226,74 @@ func isCIDRExpression(target string) bool {
 }
 
 func expandCIDR(target string) ([]string, error) {
+	interval, err := parseCIDRInterval(target)
+	if err != nil {
+		return nil, err
+	}
+	return expandIPv4Numbers(interval.start, interval.count), nil
+}
+
+func parseCIDRInterval(target string) (ipv4Interval, error) {
 	prefix, err := netip.ParsePrefix(target)
 	if err != nil {
-		return nil, fmt.Errorf("invalid CIDR %q: %w", target, err)
+		return ipv4Interval{}, fmt.Errorf("invalid CIDR %q: %w", target, err)
 	}
 	if !prefix.Addr().Is4() {
-		return nil, fmt.Errorf("IPv6 CIDR is not supported: %q", target)
+		return ipv4Interval{}, fmt.Errorf("IPv6 CIDR is not supported: %q", target)
 	}
 	prefix = prefix.Masked()
 	count := uint64(1) << uint(32-prefix.Bits())
 	if count > maxTargetExpressions {
-		return nil, ErrTooManyTargets
+		return ipv4Interval{}, ErrTooManyTargets
 	}
-	start := ipv4Uint32(prefix.Addr())
-	return expandIPv4Numbers(start, count), nil
+	return ipv4Interval{start: ipv4Uint32(prefix.Addr()), count: count}, nil
 }
 
 func expandRange(target string) ([]string, error) {
+	interval, err := parseRangeInterval(target)
+	if err != nil {
+		return nil, err
+	}
+	return expandIPv4Numbers(interval.start, interval.count), nil
+}
+
+func parseRangeInterval(target string) (ipv4Interval, error) {
 	parts := strings.Split(target, "-")
 	if len(parts) != 2 {
-		return nil, fmt.Errorf("invalid IPv4 range %q", target)
+		return ipv4Interval{}, fmt.Errorf("invalid IPv4 range %q", target)
 	}
 	start, err := netip.ParseAddr(parts[0])
 	if err != nil || !start.Is4() {
-		return nil, fmt.Errorf("invalid IPv4 range %q", target)
+		return ipv4Interval{}, fmt.Errorf("invalid IPv4 range %q", target)
 	}
 	finish, err := netip.ParseAddr(parts[1])
 	if err != nil || !finish.Is4() {
-		return nil, fmt.Errorf("invalid IPv4 range %q", target)
+		return ipv4Interval{}, fmt.Errorf("invalid IPv4 range %q", target)
 	}
 	first := ipv4Uint32(start)
 	last := ipv4Uint32(finish)
 	if first > last {
-		return nil, fmt.Errorf("reversed IPv4 range %q", target)
+		return ipv4Interval{}, fmt.Errorf("reversed IPv4 range %q", target)
 	}
 	count := uint64(last-first) + 1
 	if count > maxTargetExpressions {
-		return nil, ErrTooManyTargets
+		return ipv4Interval{}, ErrTooManyTargets
 	}
-	return expandIPv4Numbers(first, count), nil
+	return ipv4Interval{start: first, count: count}, nil
 }
 
 func expandWildcard(target string) ([]string, error) {
+	interval, err := parseWildcardInterval(target)
+	if err != nil {
+		return nil, err
+	}
+	return expandIPv4Numbers(interval.start, interval.count), nil
+}
+
+func parseWildcardInterval(target string) (ipv4Interval, error) {
 	parts := strings.Split(target, ".")
 	if len(parts) != 4 {
-		return nil, fmt.Errorf("invalid IPv4 wildcard %q", target)
+		return ipv4Interval{}, fmt.Errorf("invalid IPv4 wildcard %q", target)
 	}
 	firstStar := -1
 	for i, part := range parts {
@@ -224,19 +304,19 @@ func expandWildcard(target string) ([]string, error) {
 			continue
 		}
 		if strings.Contains(part, "*") || (firstStar != -1) {
-			return nil, fmt.Errorf("invalid IPv4 wildcard %q", target)
+			return ipv4Interval{}, fmt.Errorf("invalid IPv4 wildcard %q", target)
 		}
 		value, err := netip.ParseAddr("0.0.0." + part)
 		if err != nil || !value.Is4() {
-			return nil, fmt.Errorf("invalid IPv4 wildcard %q", target)
+			return ipv4Interval{}, fmt.Errorf("invalid IPv4 wildcard %q", target)
 		}
 	}
 	if firstStar == -1 {
-		return nil, fmt.Errorf("invalid IPv4 wildcard %q", target)
+		return ipv4Interval{}, fmt.Errorf("invalid IPv4 wildcard %q", target)
 	}
 	count := uint64(1) << uint(8*(4-firstStar))
 	if count > maxTargetExpressions {
-		return nil, ErrTooManyTargets
+		return ipv4Interval{}, ErrTooManyTargets
 	}
 	base := uint32(0)
 	for i := 0; i < firstStar; i++ {
@@ -244,7 +324,7 @@ func expandWildcard(target string) ([]string, error) {
 		base = (base << 8) | uint32(value.As4()[3])
 	}
 	base <<= uint(8 * (4 - firstStar))
-	return expandIPv4Numbers(base, count), nil
+	return ipv4Interval{start: base, count: count}, nil
 }
 
 func ipv4Uint32(addr netip.Addr) uint32 {

@@ -60,6 +60,18 @@ func TestParseTargetsExpandsAndDeduplicatesAcrossSources(t *testing.T) {
 	assert.Equal(t, "22.2.10.255", targets[257])
 }
 
+func TestParseTargetsKeepsPreparedPortDiscoveryBeyondExpressionLimit(t *testing.T) {
+	rawTargets, err := ParseTargets([]string{"22.2.*.*"})
+	require.NoError(t, err)
+	preparedTargets := append(rawTargets, "22.2.0.0:11434")
+
+	r := &Runner{Options: &options.Options{Target: preparedTargets, PreExpandedTargets: true}}
+	targets, err := r.parseTargets()
+	require.NoError(t, err)
+	assert.Len(t, targets, maxTargetExpressions+1)
+	assert.Equal(t, "22.2.0.0:11434", targets[len(targets)-1])
+}
+
 func TestProcessTargetsReturnsRequestedFileError(t *testing.T) {
 	r, err := New(&options.Options{TargetFile: filepath.Join(t.TempDir(), "missing.txt")})
 

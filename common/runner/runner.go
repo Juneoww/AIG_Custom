@@ -218,7 +218,26 @@ func (r *Runner) parseTargets() ([]string, error) {
 	if err != nil {
 		return nil, err
 	}
+	if r.Options.PreExpandedTargets {
+		return deduplicatePreparedTargets(expressions), nil
+	}
 	return ParseTargets(expressions)
+}
+
+// deduplicatePreparedTargets retains trusted targets that have already passed
+// ParseTargets while allowing Agent-discovered host:port entries beyond the
+// raw expression expansion limit.
+func deduplicatePreparedTargets(targets []string) []string {
+	result := make([]string, 0, len(targets))
+	seen := make(map[string]struct{}, len(targets))
+	for _, target := range targets {
+		if _, ok := seen[target]; ok {
+			continue
+		}
+		seen[target] = struct{}{}
+		result = append(result, target)
+	}
+	return result
 }
 
 // storeTargets writes the parsed targets to storage and records their final count.

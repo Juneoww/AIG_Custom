@@ -89,6 +89,45 @@ func TestParseTargets_PreservesSingleIPv4Port(t *testing.T) {
 	assert.Equal(t, []string{"1.2.3.4:80"}, got)
 }
 
+func TestParseTargets_PreservesHTTPURLsWithWildcardAndTilde(t *testing.T) {
+	inputs := []string{
+		"https://ai.example.com/~health",
+		"https://ai.example.com/search?q=*",
+		"https://[2001:db8::1]:443/path-with-hyphen",
+	}
+	got, err := ParseTargets(inputs)
+	require.NoError(t, err)
+	assert.Equal(t, inputs, got)
+}
+
+func TestParseTargets_RejectsSingleBracketedIPv6Port(t *testing.T) {
+	_, err := ParseTargets([]string{"[2001:db8::1]:443"})
+	assert.Error(t, err)
+}
+
+func TestParseTargets_PreservesHyphenatedHostnameEndingInIPv4(t *testing.T) {
+	got, err := ParseTargets([]string{"api-192.168.10.2"})
+	require.NoError(t, err)
+	assert.Equal(t, []string{"api-192.168.10.2"}, got)
+}
+
+func TestParseTargets_RejectsUnicodeWhitespace(t *testing.T) {
+	_, err := ParseTargets([]string{"192.168.10.2\u00a0192.168.10.3"})
+	assert.Error(t, err)
+}
+
+func TestParseTargets_DeduplicatesEquivalentMaximumIPv4Expressions(t *testing.T) {
+	got, err := ParseTargets([]string{
+		"22.2.*.*",
+		"22.2.0.0/16",
+		"22.2.0.0-22.2.255.255",
+	})
+	require.NoError(t, err)
+	assert.Len(t, got, maxTargetExpressions)
+	assert.Equal(t, "22.2.0.0", got[0])
+	assert.Equal(t, "22.2.255.255", got[len(got)-1])
+}
+
 func TestParseTargets_DeduplicatesAcrossBatch(t *testing.T) {
 	got, err := ParseTargets([]string{"10.0.0.1", "10.0.0.0/30", "10.0.0.1-10.0.0.2", "  "})
 	require.NoError(t, err)

@@ -428,6 +428,7 @@ func (t *AIInfraScanAgent) executeScan(ctx context.Context, request TaskRequest,
 		return err
 	}
 	opts.Target = targets
+	opts.PreExpandedTargets = true
 
 	// AI模式下的初始化反馈
 	if model != nil {

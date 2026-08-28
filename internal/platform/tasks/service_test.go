@@ -307,6 +307,8 @@ func TestCreateAIInfraTargetValidationRejectsInvalidWildcardAndExpansionLimit(t 
 		{name: "invalid ipv4 port range", content: "192.168.10.2:99999-192.168.10.10:99999"},
 		{name: "ipv6 range", content: "2001:db8::1-2001:db8::2"},
 		{name: "bracketed ipv6 port range", content: "[2001:db8::1]:80-[2001:db8::2]:80"},
+		{name: "single bracketed ipv6 port", content: "[2001:db8::1]:443"},
+		{name: "unicode whitespace", content: "192.168.10.2\u00a0192.168.10.3"},
 		{name: "too many expanded targets", content: "22.2.*.*\n1.1.1.1"},
 	}
 	for _, test := range tests {
@@ -328,6 +330,21 @@ func TestCreateAIInfraTargetValidationRejectsInvalidWildcardAndExpansionLimit(t 
 			assert.Zero(t, engine.submits.Load())
 		})
 	}
+}
+
+func TestCreateAIInfraTargetValidationPreservesHTTPURLSpecialCharacters(t *testing.T) {
+	repository := NewMemoryRepository()
+	engine := &recordingEngine{}
+	service := NewService(repository, engine, audit.NewService(audit.NewMemoryRepository()))
+	owner := identity.Subject{UserID: "target-url-owner", Username: "alice", Role: identity.RoleUser}
+	content := "https://ai.example.com/~health\nhttps://ai.example.com/search?q=*"
+
+	created, err := service.Create(context.Background(), owner, CreateInput{
+		IdempotencyKey: "target-url-special-characters", TaskType: "ai_infra_scan", Content: content,
+	})
+	require.NoError(t, err)
+	assert.Equal(t, content, created.Content)
+	assert.Equal(t, int64(1), engine.submits.Load())
 }
 
 func TestCreateAIInfraTargetAttachmentExpressionsCombineWithBody(t *testing.T) {
