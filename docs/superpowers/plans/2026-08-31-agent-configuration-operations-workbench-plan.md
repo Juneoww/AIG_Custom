@@ -20,7 +20,14 @@
 
 ## Command convention
 
-本计划中的所有 pnpm 命令均从仓库根执行，并显式使用 `--dir web/console`。不要假定调用者已进入前端目录；后端仓库根没有前端 package manifest。
+前端 package manifest 固定要求 Node `22.18.0` 与 pnpm `10.15.0`。当前宿主运行时不满足该约束；所有前端验证均使用下面的一次性 Node `22.18.0` 容器。它只读挂载源码，在容器内建立临时副本和依赖目录，容器退出后自动删除，不会改写 `web/console/node_modules`。
+
+~~~powershell
+$consolePath = (Resolve-Path web/console).Path
+docker run --rm -v "${consolePath}:/source:ro" node:22.18.0-alpine sh -lc "set -e; mkdir /workspace; tar -C /source --exclude='./node_modules' --exclude='./.pnpm-store' --exclude='./dist' -cf - . | tar -C /workspace -xf -; cd /workspace; corepack pnpm install --frozen-lockfile --ignore-scripts; corepack pnpm <COMMAND>"
+~~~
+
+将 `<COMMAND>` 替换为各步骤给出的 `exec vitest …`、`run lint`、`run typecheck` 或 `run build`。不要在宿主直接执行 `pnpm --dir web/console …`；后端仓库根没有前端 package manifest，且宿主的 Node/pnpm 版本不符合本项目约束。
 
 ## File structure
 
@@ -71,7 +78,7 @@ expect(brief).not.toHaveTextContent(/agent-token-sentinel|prompt-sentinel|test-o
 
 - [ ] **Step 2: 运行新测试，确认因组件不存在而失败**
 
-Run: pnpm --dir web/console exec vitest run src/features/knowledge/components/AgentConfigurationBrief.test.tsx
+Run: `exec vitest run src/features/knowledge/components/AgentConfigurationBrief.test.tsx`（按 Command convention 执行）
 Expected: FAIL，原因是 AgentConfigurationBrief 尚未存在或未导出。
 
 - [ ] **Step 3: 实现最小纯展示组件**
@@ -89,7 +96,7 @@ export interface AgentConfigurationBriefProps {
 
 - [ ] **Step 4: 运行组件测试，确认通过**
 
-Run: pnpm --dir web/console exec vitest run src/features/knowledge/components/AgentConfigurationBrief.test.tsx
+Run: `exec vitest run src/features/knowledge/components/AgentConfigurationBrief.test.tsx`（按 Command convention 执行）
 Expected: PASS，三个安全/角色合同均通过。
 
 - [ ] **Step 5: 提交测试合同**
@@ -131,7 +138,7 @@ expect(screen.getByRole('textbox', { name: 'Agent 配置原文' })).toHaveValue(
 
 - [ ] **Step 2: 运行失败测试，确认当前页面错误地保留缓存目录**
 
-Run: pnpm --dir web/console exec vitest run src/features/knowledge/KnowledgePages.test.tsx
+Run: `exec vitest run src/features/knowledge/KnowledgePages.test.tsx`（按 Command convention 执行）
 Expected: FAIL，当前页面会在目录重取失败后继续由 namesQuery.data 渲染旧目录，且尚无 Agent 概览和“进入工作区”语义。
 
 - [ ] **Step 3: 实现目录成功门控与工作台入口**
@@ -148,7 +155,7 @@ const catalog = namesQuery.isSuccess ? namesQuery.data : null
 
 - [ ] **Step 4: 运行目录测试，确认通过**
 
-Run: pnpm --dir web/console exec vitest run src/features/knowledge/KnowledgePages.test.tsx
+Run: `exec vitest run src/features/knowledge/KnowledgePages.test.tsx`（按 Command convention 执行）
 Expected: PASS，403/500 时只显示安全状态；目录概览/表格隐藏；本地已加载原文保持可见且缓存无敏感哨兵。
 
 - [ ] **Step 5: 提交目录合同与实现**
@@ -186,7 +193,7 @@ expect(screen.queryByRole('textbox', { name: '测试 Prompt' })).not.toBeInTheDo
 
 - [ ] **Step 2: 运行新增测试，确认当前页面在非就绪态仍渲染操作区**
 
-Run: pnpm --dir web/console exec vitest run src/features/knowledge/KnowledgePages.test.tsx
+Run: `exec vitest run src/features/knowledge/KnowledgePages.test.tsx`（按 Command convention 执行）
 Expected: FAIL，当前实现会在原文加载/错误阶段保留管理员操作区，并可能沿用旧结构校验状态。
 
 - [ ] **Step 3: 实现显式的工作区就绪状态机**
@@ -206,7 +213,7 @@ const workbenchReady = existingReady || createReady
 
 - [ ] **Step 4: 运行生命周期与现有 Agent 测试，确认通过**
 
-Run: pnpm --dir web/console exec vitest run src/features/knowledge/KnowledgePages.test.tsx src/features/knowledge/api.test.ts
+Run: `exec vitest run src/features/knowledge/KnowledgePages.test.tsx src/features/knowledge/api.test.ts`（按 Command convention 执行）
 Expected: PASS，所有新门槛、关闭清理、角色边界和原有 API 解析合同均通过。
 
 - [ ] **Step 5: 提交工作区测试和实现**
@@ -239,7 +246,7 @@ expect(screen.getByRole('button', { name: '进入工作区 openai' })).toBeInThe
 
 - [ ] **Step 2: 运行结构测试，确认当前语义或区域尚不存在**
 
-Run: pnpm --dir web/console exec vitest run src/features/knowledge/KnowledgePages.test.tsx
+Run: `exec vitest run src/features/knowledge/KnowledgePages.test.tsx`（按 Command convention 执行）
 Expected: FAIL，直到具名工作区、操作分区和提示语义实现完成。
 
 - [ ] **Step 3: 完成雾灰工作台布局与语义**
@@ -266,11 +273,13 @@ Expected: FAIL，直到具名工作区、操作分区和提示语义实现完成
 Run:
 
 ~~~bash
-pnpm --dir web/console exec vitest run src/features/knowledge/KnowledgePages.test.tsx src/features/knowledge/components/AgentConfigurationBrief.test.tsx src/features/knowledge/api.test.ts
-pnpm --dir web/console run lint
-pnpm --dir web/console run typecheck
-pnpm --dir web/console run build
+exec vitest run src/features/knowledge/KnowledgePages.test.tsx src/features/knowledge/components/AgentConfigurationBrief.test.tsx src/features/knowledge/api.test.ts
+run lint
+run typecheck
+run build
 ~~~
+
+以上每一行均按 Command convention 分别执行。
 
 Expected: 每条命令 exit 0；没有 TypeScript、ESLint 或 Vite 构建错误。
 
