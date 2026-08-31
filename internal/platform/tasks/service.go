@@ -1047,10 +1047,7 @@ func (service *Service) RecordEngineEvent(ctx context.Context, engineSessionID s
 		if resultErr != nil {
 			return errors.New("无法生成任务报告快照")
 		}
-		snapshot, resultErr = service.reportSnapshots.Prepare(ctx, reports.CompletedTask{
-			TaskID: task.ID, OwnerUserID: task.OwnerUserID, TaskType: task.TaskType,
-			RawResult: rawResult, CompletedAt: completedAt,
-		})
+		snapshot, resultErr = service.reportSnapshots.Prepare(ctx, completedTaskForReport(task, rawResult, completedAt))
 		if resultErr != nil {
 			return errors.New("无法生成任务报告快照")
 		}
@@ -1171,8 +1168,39 @@ func (service *Service) GetCompletedTask(ctx context.Context, taskID string) (re
 	if err != nil {
 		return reports.CompletedTask{}, errors.New("无法读取任务结果")
 	}
-	return reports.CompletedTask{TaskID: task.ID, OwnerUserID: task.OwnerUserID, TaskType: task.TaskType,
-		RawResult: append(json.RawMessage(nil), rawResult...), CompletedAt: engineStatus.CompletedAt.UTC()}, nil
+	return completedTaskForReport(task, rawResult, engineStatus.CompletedAt.UTC()), nil
+}
+
+func completedTaskForReport(task *Task, rawResult json.RawMessage, completedAt time.Time) reports.CompletedTask {
+	completed := reports.CompletedTask{
+		TaskID: task.ID, OwnerUserID: task.OwnerUserID, TaskType: task.TaskType,
+		RawResult: append(json.RawMessage(nil), rawResult...), CompletedAt: completedAt.UTC(),
+	}
+	mode, spec, valid := trustedReportInfrastructurePortScan(task.TaskType, task.Params)
+	if valid {
+		completed.PortScanMode = mode
+		completed.PortSpec = spec
+	}
+	return completed
+}
+
+func trustedReportInfrastructurePortScan(taskType string, raw json.RawMessage) (portscan.Mode, string, bool) {
+	if taskType != "ai_infra_scan" {
+		return "", "", false
+	}
+	_, fields, valid := decodeInfrastructureTaskParams(raw)
+	if !valid {
+		return "", "", false
+	}
+	mode, valid := normalizedInfrastructurePortScanModeField(fields)
+	if !valid {
+		return "", "", false
+	}
+	spec := portscan.PortSpec(mode)
+	if spec == "" {
+		return "", "", false
+	}
+	return mode, spec, true
 }
 
 func sanitizeEngineFailureReason(reason string) string {

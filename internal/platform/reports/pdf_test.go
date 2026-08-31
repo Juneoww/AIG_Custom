@@ -193,6 +193,22 @@ func TestPDFRendererUsesOnlyImmutableRenderModelNotRawResult(t *testing.T) {
 	assert.Equal(t, first, second)
 }
 
+func TestPDFReportLinesUseOnlyWhitelistedInfrastructurePortScanDisplay(t *testing.T) {
+	var fixed RenderModel
+	require.NoError(t, json.Unmarshal([]byte(`{"task_type":"ai_infra_scan","port_scan_mode":"fixed_ai","port_spec":"11434,1337,7000-9000,18789"}`), &fixed))
+	assert.Contains(t, reportLines(fixed), "端口扫描模式: 固定 AI 端口（11434,1337,7000-9000,18789）")
+
+	var full RenderModel
+	require.NoError(t, json.Unmarshal([]byte(`{"task_type":"ai_infra_scan","port_scan_mode":"full_tcp","port_spec":"1-65535"}`), &full))
+	assert.Contains(t, reportLines(full), "端口扫描模式: 全量 TCP（1-65535）")
+
+	var forged RenderModel
+	require.NoError(t, json.Unmarshal([]byte(`{"task_type":"ai_infra_scan","port_scan_mode":"agent-supplied","port_spec":"sentinel-port-spec"}`), &forged))
+	lines := strings.Join(reportLines(forged), "\n")
+	assert.NotContains(t, lines, "agent-supplied")
+	assert.NotContains(t, lines, "sentinel-port-spec")
+}
+
 func TestPDFRendererNeverConsumesNaturalLanguageOrStructuredCredentials(t *testing.T) {
 	renderer, err := NewPDFRenderer(loadReportFont(t))
 	require.NoError(t, err)

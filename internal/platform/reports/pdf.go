@@ -12,6 +12,7 @@ import (
 	"strings"
 	"unicode"
 
+	"github.com/Juneoww/AIG_Custom/common/portscan"
 	"github.com/signintech/gopdf"
 	"golang.org/x/image/font/gofont/goregular"
 )
@@ -256,8 +257,11 @@ func reportLines(render RenderModel) []string {
 		"评分说明: " + render.ScoreExplanation,
 		"风险趋势: 最近30个UTC自然日完成 " + itoa(trendCompleted) + " 个任务",
 		"风险分布 高: " + itoa(render.RiskDistribution.High) + " 中: " + itoa(render.RiskDistribution.Medium) + " 低: " + itoa(render.RiskDistribution.Low),
-		"Top 风险:",
 	}
+	if line := infrastructurePortScanPDFLine(render); line != "" {
+		lines = append(lines, line)
+	}
+	lines = append(lines, "Top 风险:")
 	for _, item := range render.TopRisks {
 		lines = append(lines, "- "+item.Severity+" "+itoa(item.Count)+" 项；"+item.Impact+"；"+item.Remediation)
 	}
@@ -280,6 +284,21 @@ func reportLines(render RenderModel) []string {
 		}
 	}
 	return lines
+}
+
+func infrastructurePortScanPDFLine(render RenderModel) string {
+	mode, _, valid := trustedInfrastructurePortScan(render.TaskType, portscan.Mode(render.PortScanMode), render.PortSpec)
+	if !valid {
+		return ""
+	}
+	switch mode {
+	case portscan.FixedAI:
+		return "端口扫描模式: 固定 AI 端口（" + portscan.FixedAIPortSpec + "）"
+	case portscan.FullTCP:
+		return "端口扫描模式: 全量 TCP（" + portscan.FullTCPPortSpec + "）"
+	default:
+		return ""
+	}
 }
 
 func renderWatermark(pdf *gopdf.GoPdf, watermark string) error {

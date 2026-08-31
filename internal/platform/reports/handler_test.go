@@ -110,6 +110,47 @@ func TestReportDetailNeverExposesNaturalLanguageOrStructuredCredentials(t *testi
 	}
 }
 
+func TestReportDetailDropsUntrustedInfrastructurePortScanCombination(t *testing.T) {
+	now := time.Now().UTC()
+	snapshot, err := BuildSnapshotAt("invalid-port-task", "user-alice", "ai_infra_scan", event(`{"score":100,"results":[]}`), brand.Config{ProductName: "企业安全平台", PrimaryColor: "#1677FF"}, now, now)
+	require.NoError(t, err)
+	snapshot.ID = "invalid-port-report"
+	var render map[string]any
+	require.NoError(t, json.Unmarshal(snapshot.RenderData, &render))
+	render["port_scan_mode"] = "agent-supplied"
+	render["port_spec"] = "sentinel-port-spec"
+	snapshot.RenderData, err = json.Marshal(render)
+	require.NoError(t, err)
+
+	detail, err := detailOf(snapshot)
+	require.NoError(t, err)
+	encoded, err := json.Marshal(detail)
+	require.NoError(t, err)
+	assert.NotContains(t, string(encoded), "agent-supplied")
+	assert.NotContains(t, string(encoded), "sentinel-port-spec")
+}
+
+func TestReportDetailDropsPortScanFromNonInfrastructureSnapshot(t *testing.T) {
+	now := time.Now().UTC()
+	snapshot, err := BuildSnapshotAt("non-infra-port-task", "user-alice", "mcp_scan", event(`{"score":100,"results":[]}`), brand.Config{ProductName: "企业安全平台", PrimaryColor: "#1677FF"}, now, now)
+	require.NoError(t, err)
+	snapshot.ID = "non-infra-port-report"
+	var render map[string]any
+	require.NoError(t, json.Unmarshal(snapshot.RenderData, &render))
+	render["task_type"] = "ai_infra_scan"
+	render["port_scan_mode"] = "fixed_ai"
+	render["port_spec"] = "11434,1337,7000-9000,18789"
+	snapshot.RenderData, err = json.Marshal(render)
+	require.NoError(t, err)
+
+	detail, err := detailOf(snapshot)
+	require.NoError(t, err)
+	encoded, err := json.Marshal(detail)
+	require.NoError(t, err)
+	assert.NotContains(t, string(encoded), "fixed_ai")
+	assert.NotContains(t, string(encoded), "11434,1337,7000-9000,18789")
+}
+
 func newReportsHandlerFixture(t *testing.T) (http.Handler, map[string]string, Repository) {
 	t.Helper()
 	gin.SetMode(gin.TestMode)

@@ -6,17 +6,20 @@ import (
 	"errors"
 	"time"
 
+	"github.com/Juneoww/AIG_Custom/common/portscan"
 	"github.com/Juneoww/AIG_Custom/internal/platform/audit"
 	"github.com/Juneoww/AIG_Custom/internal/platform/brand"
 	"github.com/Juneoww/AIG_Custom/internal/platform/identity"
 )
 
 type CompletedTask struct {
-	TaskID      string
-	OwnerUserID string
-	TaskType    string
-	RawResult   json.RawMessage
-	CompletedAt time.Time
+	TaskID       string
+	OwnerUserID  string
+	TaskType     string
+	RawResult    json.RawMessage
+	CompletedAt  time.Time
+	PortScanMode portscan.Mode
+	PortSpec     string
 }
 
 type brandReader interface {
@@ -73,7 +76,7 @@ func (service *Service) Prepare(ctx context.Context, task CompletedTask) (*Snaps
 	if err != nil {
 		return nil, ErrInvalidSnapshot
 	}
-	return buildSnapshotAt(task.TaskID, task.OwnerUserID, task.TaskType, task.RawResult, branding, task.CompletedAt, generatedAt, trend)
+	return buildSnapshotWithInfrastructurePortScanAt(task.TaskID, task.OwnerUserID, task.TaskType, task.RawResult, branding, task.CompletedAt, generatedAt, trend, task.PortScanMode, task.PortSpec)
 }
 
 func (service *Service) Persist(ctx context.Context, snapshot *Snapshot) error {

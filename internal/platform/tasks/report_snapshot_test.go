@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Juneoww/AIG_Custom/common/portscan"
 	"github.com/Juneoww/AIG_Custom/internal/platform/audit"
 	"github.com/Juneoww/AIG_Custom/internal/platform/brand"
 	"github.com/Juneoww/AIG_Custom/internal/platform/identity"
@@ -83,6 +84,49 @@ func TestRecoveredSuccessPreservesTrustedEngineCompletionTime(t *testing.T) {
 	snapshot, err := snapshots.GetByTaskID(ctx, task.ID)
 	require.NoError(t, err)
 	assert.Equal(t, completedAt, snapshot.CompletedAt)
+}
+
+func TestTrustedSuccessSnapshotDerivesInfrastructurePortScanFromPersistedParams(t *testing.T) {
+	ctx := context.Background()
+	completedAt := time.Date(2026, 8, 10, 9, 30, 0, 0, time.UTC)
+	for _, testCase := range []struct {
+		name     string
+		params   string
+		wantMode portscan.Mode
+		wantSpec string
+	}{
+		{name: "fixed", params: `{"port_scan_mode":"fixed_ai"}`, wantMode: portscan.FixedAI, wantSpec: portscan.FixedAIPortSpec},
+		{name: "full", params: `{"port_scan_mode":"full_tcp"}`, wantMode: portscan.FullTCP, wantSpec: portscan.FullTCPPortSpec},
+		{name: "historical missing mode", params: `{}`, wantMode: portscan.FixedAI, wantSpec: portscan.FixedAIPortSpec},
+		{name: "unknown mode omitted", params: `{"port_scan_mode":"agent-supplied"}`},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			engine := &recordingEngine{results: map[string]json.RawMessage{}}
+			repository := NewMemoryRepository()
+			service := NewService(repository, engine, audit.NewService(audit.NewMemoryRepository()))
+			snapshots := reports.NewMemoryRepository()
+			service.SetReportSnapshotService(reports.NewService(snapshots, brand.NewService(brand.NewMemoryRepository())))
+			id := "snapshot-port-" + testCase.name
+			_, _, err := repository.CreateOrGet(ctx, &Task{ID: id, OwnerUserID: "alice", OwnerUsername: "alice", IdempotencyKey: id,
+				EngineSessionID: "engine-" + id, TaskType: "ai_infra_scan", Content: "127.0.0.1", Params: json.RawMessage(testCase.params), AttachmentRefs: json.RawMessage(`[]`),
+				Status: StatusRunning, CreatedAt: completedAt.Add(-time.Minute), UpdatedAt: completedAt})
+			require.NoError(t, err)
+			setEngineResult(engine, "engine-"+id, json.RawMessage(`{"id":"port-result","type":"resultUpdate","timestamp":1,"result":{"score":100,"results":[],"port_scan_mode":"agent-supplied","port_spec":"sentinel-port-spec"}}`))
+			engine.mu.Lock()
+			engine.status["engine-"+id] = EngineStatus{State: EngineStateSucceeded, CompletedAt: completedAt}
+			engine.mu.Unlock()
+
+			require.NoError(t, service.RecordEngineEvent(ctx, "engine-"+id, EngineStateSucceeded, ""))
+			snapshot, err := snapshots.GetByTaskID(ctx, id)
+			require.NoError(t, err)
+			var render reports.RenderModel
+			require.NoError(t, json.Unmarshal(snapshot.RenderData, &render))
+			assert.Equal(t, string(testCase.wantMode), render.PortScanMode)
+			assert.Equal(t, testCase.wantSpec, render.PortSpec)
+			assert.NotContains(t, string(snapshot.RenderData), "agent-supplied")
+			assert.NotContains(t, string(snapshot.RenderData), "sentinel-port-spec")
+		})
+	}
 }
 
 func TestTrustedSuccessRequiresNonZeroEngineCompletionTimeBeforeSnapshot(t *testing.T) {
