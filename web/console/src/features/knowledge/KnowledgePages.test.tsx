@@ -68,6 +68,24 @@ function mcpCatalogFixture(): Response {
   })
 }
 
+function agentTemplateFixture(): Response {
+  return new Response(JSON.stringify({
+    openai: {
+      name: 'OpenAI',
+      description: '受控 OpenAI 配置模板',
+      fields: [
+        { field: 'base_url', label: '服务地址', type: 'text', required: true },
+        { field: 'api_key', label: '访问密钥', type: 'password', required: true },
+      ],
+    },
+    common: {
+      fields: [
+        { field: 'timeout', label: '超时', type: 'number', required: false, min: 1 },
+      ],
+    },
+  }), { status: 200, headers: { 'Content-Type': 'application/json' } })
+}
+
 function knowledgeFetch(urlValue: RequestInfo | URL, init?: RequestInit): Promise<Response> {
   const url = new URL(String(urlValue))
   if (init?.method && init.method !== 'GET') return Promise.resolve(legacy(null, 0, 'saved'))
@@ -77,6 +95,7 @@ function knowledgeFetch(urlValue: RequestInfo | URL, init?: RequestInit): Promis
   if (url.pathname.endsWith('/evaluations')) return Promise.resolve(legacy({ total: 1, page: 1, size: 20, items: [{ name: 'safe', description: 'desc', count: 1, default: false }] }))
   if (url.pathname.endsWith('/mcp')) return Promise.resolve(mcpCatalogFixture())
   if (url.pathname.endsWith('/prompt_collections')) return Promise.resolve(legacy({ total: 1, items: [{ id: 'prompt-1', product: 'product', affiliation: 'lab', model_version: 'v1', prompt: 'prompt', code_exec: false, upload_file: false, multi_modal: false, web_search: false, sec_policies: true }] }))
+  if (url.pathname.endsWith('/agent/template') && url.searchParams.get('language') === 'zh') return Promise.resolve(agentTemplateFixture())
   if (url.pathname.endsWith('/agent/names')) return Promise.resolve(legacy(['openai']))
   if (url.pathname.endsWith('/agent/openai')) return Promise.resolve(legacy('type: http\nlabel: openai\n'))
   return new Promise<Response>(() => undefined)
@@ -136,6 +155,35 @@ function installFingerprintRefetchFailure(status: 403 | 500) {
     return knowledgeFetch(urlValue, init)
   }))
   return () => fingerprintRequests
+}
+
+function agentFailureTitle(status: 403 | 500): string {
+  return status === 403 ? '无权查看 Agent 配置' : 'Agent 配置加载失败'
+}
+
+async function expectAgentFailureState(status: 403 | 500) {
+  const panel = await screen.findByRole(status === 403 ? 'status' : 'alert')
+  expect(panel).toHaveTextContent(agentFailureTitle(status))
+}
+
+function expectAgentCatalogUIToBeHidden() {
+  expect(screen.queryByRole('region', { name: 'Agent 配置目录概览' })).not.toBeInTheDocument()
+  expect(screen.queryByRole('table', { name: 'Agent 配置台账' })).not.toBeInTheDocument()
+  expect(screen.queryByRole('button', { name: '进入工作区 agent-one' })).not.toBeInTheDocument()
+}
+
+function installAgentRefetchFailure(status: 403 | 500) {
+  let agentNameRequests = 0
+  vi.stubGlobal('fetch', vi.fn((urlValue: RequestInfo | URL, init?: RequestInit) => {
+    const url = new URL(String(urlValue))
+    if (url.pathname.endsWith('/agent/names')) {
+      agentNameRequests += 1
+      return Promise.resolve(agentNameRequests === 1 ? legacy(['agent-one']) : httpFailure(status))
+    }
+    if (url.pathname.endsWith('/agent/agent-one')) return Promise.resolve(legacy('agent-token-sentinel'))
+    return knowledgeFetch(urlValue, init)
+  }))
+  return () => agentNameRequests
 }
 
 beforeEach(() => {
@@ -358,6 +406,33 @@ describe('fingerprint catalog cache-safety contracts', () => {
   })
 })
 
+describe('agent configuration catalog cache-safety contracts', () => {
+  it.each([403, 500] as const)('管理员已进入本地工作区后，目录刷新返回真实 HTTP %i 时移除目录派生 UI', async (status) => {
+    const agentNameRequestCount = installAgentRefetchFailure(status)
+    const view = renderRoute('admin', '/knowledge/agents')
+
+    const overview = await screen.findByRole('region', { name: 'Agent 配置目录概览' })
+    const ledger = screen.getByRole('table', { name: 'Agent 配置台账' })
+    expect(overview).not.toHaveTextContent('agent-token-sentinel')
+    expect(ledger).not.toHaveTextContent('agent-token-sentinel')
+
+    fireEvent.click(screen.getByRole('button', { name: '进入工作区 agent-one' }))
+    expect(await screen.findByText('当前工作区')).toBeInTheDocument()
+    expect(await screen.findByRole('textbox', { name: 'Agent 配置原文' })).toHaveValue('agent-token-sentinel')
+    expect(JSON.stringify(view.queryClient.getQueryCache().getAll().map((query) => query.state.data))).not.toContain('agent-token-sentinel')
+    await waitFor(() => expect(agentNameRequestCount()).toBe(1))
+
+    await act(async () => {
+      await view.queryClient.invalidateQueries({ queryKey: ['knowledge', 'agents'] })
+    })
+    await waitFor(() => expect(agentNameRequestCount()).toBe(2))
+
+    await expectAgentFailureState(status)
+    expectAgentCatalogUIToBeHidden()
+    expect(screen.getByRole('textbox', { name: 'Agent 配置原文' })).toHaveValue('agent-token-sentinel')
+  })
+})
+
 describe('governed knowledge edits', () => {
   it('原文进入ready后不会因页面重渲染重复读取', async () => {
     let rawRequests = 0
@@ -408,7 +483,7 @@ describe('governed knowledge edits', () => {
     mcp.unmount()
 
     const agent = renderRoute('admin', '/knowledge/agents')
-    fireEvent.click(await screen.findByRole('button', { name: '查看 agent-one' }))
+    fireEvent.click(await screen.findByRole('button', { name: '进入工作区 agent-one' }))
     expect(await screen.findByRole('textbox', { name: 'Agent 配置原文' })).toHaveValue('agent-token-sentinel')
     expect(JSON.stringify(agent.queryClient.getQueryCache().getAll().map((query) => query.state.data))).not.toContain('agent-token-sentinel')
   })
@@ -514,7 +589,7 @@ describe('governed knowledge edits', () => {
     auditor.unmount()
 
     renderRoute('admin', '/knowledge/agents')
-    fireEvent.click(await screen.findByRole('button', { name: '查看 openai' }))
+    fireEvent.click(await screen.findByRole('button', { name: '进入工作区 openai' }))
     expect(await screen.findByRole('button', { name: '测试连通性' })).toBeInTheDocument()
     expect(screen.getByRole('button', { name: 'Prompt 测试' })).toBeInTheDocument()
   })
