@@ -665,6 +665,18 @@ definitions:
         type: string
       mapping_version:
         type: string
+      port_scan_mode:
+        description: Optional trusted AI infrastructure TCP port scan mode. Present only with its matching port_spec.
+        enum:
+        - fixed_ai
+        - full_tcp
+        type: string
+      port_spec:
+        description: Optional trusted TCP port expression paired with port_scan_mode; only the documented mode/spec combinations are valid.
+        enum:
+        - 11434,1337,7000-9000,18789
+        - 1-65535
+        type: string
       primary_color:
         type: string
       product_name:
@@ -932,6 +944,12 @@ definitions:
         maximum: 1000000
         minimum: 1
         type: integer
+      port_scan_mode:
+        description: Canonical AI infrastructure TCP port discovery mode; raw task parameters are not exposed.
+        enum:
+        - fixed_ai
+        - full_tcp
+        type: string
       target_count:
         minimum: 1
         type: integer
@@ -1930,7 +1948,7 @@ paths:
     post:
       consumes:
       - application/json
-      description: 'Breaking security hardening: create responses now use the browser-safe TaskDetail with bounded input_summary instead of the former internal task View; clients must migrate field access. The JSON body is limited to 256 KiB. Creates an owner-scoped platform task from the authenticated Cookie Subject. Idempotency-Key is required and unique per owner. A retry with the same persisted request payload returns the existing task without revalidating live governed references; reusing that key with a different payload returns 400 invalid task request. Only exact canonical task types are accepted and the platform maps them to private Agent aliases: mcp_scan params allow model_id and thread; ai_infra_scan params allow model_id and timeout; model_redteam_report params require model_id as a bounded string array plus eval_model_id and may include dataset numPrompts/randomSeed/promptColumn and techniques; agent_scan params require agent_id and eval_model_id. Every model_id/eval_model_id must resolve through the governed model boundary, and agent_id through the user or public Agent registry, before persistence; unknown or invisible references write no task. Unknown fields, nested credential objects, raw model credentials, and legacy aliases are rejected. Attachments are supplied only as at most ten opaque attachment IDs. Dispatch uses persisted claims and a global attempt budget. An uncertain network acknowledgement becomes dispatch_unknown and is never submitted automatically again; this is at-most-once dispatch, not exactly-once execution. Requires CSRF protection.'
+      description: 'Breaking security hardening: create responses now use the browser-safe TaskDetail with bounded input_summary instead of the former internal task View; clients must migrate field access. The JSON body is limited to 256 KiB. Creates an owner-scoped platform task from the authenticated Cookie Subject. Idempotency-Key is required and unique per owner. A retry with the same persisted request payload returns the existing task without revalidating live governed references; reusing that key with a different payload returns 400 invalid task request. Only exact canonical task types are accepted and the platform maps them to private Agent aliases: mcp_scan params allow model_id and thread; ai_infra_scan params allow model_id, timeout, and port_scan_mode (fixed_ai or full_tcp; omission defaults to fixed_ai); model_redteam_report params require model_id as a bounded string array plus eval_model_id and may include dataset numPrompts/randomSeed/promptColumn and techniques; agent_scan params require agent_id and eval_model_id. Every model_id/eval_model_id must resolve through the governed model boundary, and agent_id through the user or public Agent registry, before persistence; unknown or invisible references write no task. Unknown fields, nested credential objects, raw model credentials, and legacy aliases are rejected. Attachments are supplied only as at most ten opaque attachment IDs. Dispatch uses persisted claims and a global attempt budget. An uncertain network acknowledgement becomes dispatch_unknown and is never submitted automatically again; this is at-most-once dispatch, not exactly-once execution. Requires CSRF protection.'
       parameters:
       - in: header
         maxLength: 128
