@@ -86,6 +86,25 @@ function agentTemplateFixture(): Response {
   }), { status: 200, headers: { 'Content-Type': 'application/json' } })
 }
 
+function deferred<T>() {
+  let resolve!: (value: T | PromiseLike<T>) => void
+  let reject!: (reason?: unknown) => void
+  const promise = new Promise<T>((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise
+    reject = rejectPromise
+  })
+  return { promise, resolve, reject }
+}
+
+function expectAgentWorkbenchControlsHidden() {
+  expect(screen.queryByRole('textbox', { name: '配置名称' })).not.toBeInTheDocument()
+  expect(screen.queryByRole('textbox', { name: 'Agent 配置原文' })).not.toBeInTheDocument()
+  expect(screen.queryByRole('textbox', { name: '测试 Prompt' })).not.toBeInTheDocument()
+  for (const label of ['保存 Agent 配置', '删除 Agent 配置', '测试连通性', 'Prompt 测试']) {
+    expect(screen.queryByRole('button', { name: label })).not.toBeInTheDocument()
+  }
+}
+
 function knowledgeFetch(urlValue: RequestInfo | URL, init?: RequestInit): Promise<Response> {
   const url = new URL(String(urlValue))
   if (init?.method && init.method !== 'GET') return Promise.resolve(legacy(null, 0, 'saved'))
@@ -580,6 +599,180 @@ describe('governed knowledge edits', () => {
     fireEvent.click(await screen.findByRole('button', { name: '删除 prompt-1' }))
     fireEvent.click(screen.getByRole('button', { name: '确认删除' }))
     await waitFor(() => expect(fetchMock.mock.calls.some((call) => new URL(String(call[0])).pathname === '/api/v1/knowledge/prompt_collections/prompt-1' && (call[1] as RequestInit).method === 'DELETE')).toBe(true))
+  })
+
+  it('Agent 原文加载与失败时只保留局部状态、重试和关闭', async () => {
+    const rawResponse = deferred<Response>()
+    vi.stubGlobal('fetch', vi.fn((urlValue: RequestInfo | URL, init?: RequestInit) => {
+      const url = new URL(String(urlValue))
+      if (url.pathname.endsWith('/agent/names')) return Promise.resolve(legacy(['agent-one']))
+      if (url.pathname.endsWith('/agent/agent-one')) return rawResponse.promise
+      return knowledgeFetch(urlValue, init)
+    }))
+
+    renderRoute('admin', '/knowledge/agents')
+    fireEvent.click(await screen.findByRole('button', { name: '进入工作区 agent-one' }))
+
+    expect(await screen.findByText('正在加载 Agent 配置原文')).toBeInTheDocument()
+    expectAgentWorkbenchControlsHidden()
+    expect(screen.getByRole('button', { name: '关闭' })).toBeEnabled()
+
+    await act(async () => rawResponse.resolve(httpFailure(500)))
+
+    expect(await screen.findByText('Agent 配置原文加载失败')).toBeInTheDocument()
+    expectAgentWorkbenchControlsHidden()
+    expect(screen.getByRole('button', { name: '重试' })).toBeEnabled()
+    expect(screen.getByRole('button', { name: '关闭' })).toBeEnabled()
+  })
+
+  it('Agent 从已就绪配置切换到下一份原文加载时不继承旧 valid 或操作控件', async () => {
+    const nextRaw = deferred<Response>()
+    vi.stubGlobal('fetch', vi.fn((urlValue: RequestInfo | URL, init?: RequestInit) => {
+      const url = new URL(String(urlValue))
+      if (url.pathname.endsWith('/agent/names')) return Promise.resolve(legacy(['agent-one', 'agent-two']))
+      if (url.pathname.endsWith('/agent/agent-one')) return Promise.resolve(legacy('type: http\napi_key: first\n'))
+      if (url.pathname.endsWith('/agent/agent-two')) return nextRaw.promise
+      return knowledgeFetch(urlValue, init)
+    }))
+
+    renderRoute('admin', '/knowledge/agents')
+    fireEvent.click(await screen.findByRole('button', { name: '进入工作区 agent-one' }))
+    expect(await screen.findByRole('textbox', { name: 'Agent 配置原文' })).toHaveValue('type: http\napi_key: first\n')
+    await waitFor(() => expect(screen.getByRole('button', { name: '保存 Agent 配置' })).toBeEnabled())
+
+    fireEvent.click(screen.getByRole('button', { name: '进入工作区 agent-two' }))
+    expect(await screen.findByText('正在加载 Agent 配置原文')).toBeInTheDocument()
+    expectAgentWorkbenchControlsHidden()
+    expect(screen.getByRole('button', { name: '关闭' })).toBeEnabled()
+  })
+
+  it('新增 Agent 配置在模板等待时不显示编辑或操作控件', async () => {
+    const templates = deferred<Response>()
+    vi.stubGlobal('fetch', vi.fn((urlValue: RequestInfo | URL, init?: RequestInit) => {
+      const url = new URL(String(urlValue))
+      if (url.pathname.endsWith('/agent/template')) return templates.promise
+      return knowledgeFetch(urlValue, init)
+    }))
+
+    renderRoute('admin', '/knowledge/agents')
+    fireEvent.click(await screen.findByRole('button', { name: '新增 Agent 配置' }))
+
+    expect(await screen.findByText('正在加载 Agent 配置模板')).toBeInTheDocument()
+    expectAgentWorkbenchControlsHidden()
+    expect(screen.getByRole('button', { name: '关闭' })).toBeEnabled()
+  })
+
+  it('新增 Agent 配置在模板失败时只提供重试和关闭', async () => {
+    vi.stubGlobal('fetch', vi.fn((urlValue: RequestInfo | URL, init?: RequestInit) => {
+      const url = new URL(String(urlValue))
+      if (url.pathname.endsWith('/agent/template')) return Promise.resolve(httpFailure(500))
+      return knowledgeFetch(urlValue, init)
+    }))
+
+    renderRoute('admin', '/knowledge/agents')
+    fireEvent.click(await screen.findByRole('button', { name: '新增 Agent 配置' }))
+
+    expect(await screen.findByText('Agent 配置模板加载失败')).toBeInTheDocument()
+    expectAgentWorkbenchControlsHidden()
+    expect(screen.getByRole('button', { name: '重试' })).toBeEnabled()
+    expect(screen.getByRole('button', { name: '关闭' })).toBeEnabled()
+  })
+
+  it('新增 Agent 配置在空模板防御态时只提供重试和关闭', async () => {
+    const templates = deferred<Response>()
+    vi.stubGlobal('fetch', vi.fn((urlValue: RequestInfo | URL, init?: RequestInit) => {
+      const url = new URL(String(urlValue))
+      if (url.pathname.endsWith('/agent/template')) return templates.promise
+      return knowledgeFetch(urlValue, init)
+    }))
+
+    const view = renderRoute('admin', '/knowledge/agents')
+    fireEvent.click(await screen.findByRole('button', { name: '新增 Agent 配置' }))
+    await act(async () => { view.queryClient.setQueryData(['knowledge', 'agent-templates'], []) })
+
+    expect(await screen.findByText('暂无可用 Agent 配置模板')).toBeInTheDocument()
+    expectAgentWorkbenchControlsHidden()
+    expect(screen.getByRole('button', { name: '重试' })).toBeEnabled()
+    expect(screen.getByRole('button', { name: '关闭' })).toBeEnabled()
+  })
+
+  it('新增 Agent 配置仅在模板成功且默认模板已选中后保留 Provider 与模板入口', async () => {
+    renderRoute('admin', '/knowledge/agents')
+    fireEvent.click(await screen.findByRole('button', { name: '新增 Agent 配置' }))
+
+    expect(await screen.findByRole('combobox', { name: 'Provider 类型' })).toHaveValue('openai')
+    expect(screen.getByRole('textbox', { name: '配置名称' })).toBeInTheDocument()
+    expect(screen.getByRole('textbox', { name: '服务地址' })).toBeInTheDocument()
+    expect(screen.getByLabelText(/访问密钥/)).toBeInTheDocument()
+    expect(screen.getByText('高级设置')).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: '下载配置模板' })).toBeEnabled()
+    expect(screen.getByRole('textbox', { name: 'Agent 配置原文' })).toBeInTheDocument()
+  })
+
+  it('关闭 Agent 工作区后不在 DOM 或 Query cache 保留原文、模板值、Prompt 或测试输出', async () => {
+    vi.stubGlobal('fetch', vi.fn((urlValue: RequestInfo | URL, init?: RequestInit) => {
+      const url = new URL(String(urlValue))
+      if (url.pathname.endsWith('/agent/names')) return Promise.resolve(legacy(['agent-one']))
+      if (url.pathname.endsWith('/agent/agent-one')) return Promise.resolve(legacy('raw-config-sentinel'))
+      if (url.pathname.endsWith('/agent/prompt_test') && init?.method === 'POST') return Promise.resolve(legacy(null, 0, 'test-output-sentinel'))
+      return knowledgeFetch(urlValue, init)
+    }))
+
+    const view = renderRoute('admin', '/knowledge/agents')
+    fireEvent.click(await screen.findByRole('button', { name: '进入工作区 agent-one' }))
+    expect(await screen.findByRole('textbox', { name: 'Agent 配置原文' })).toHaveValue('raw-config-sentinel')
+    fireEvent.click(screen.getByRole('button', { name: '关闭' }))
+    expect(screen.queryByRole('textbox', { name: 'Agent 配置原文' })).not.toBeInTheDocument()
+
+    fireEvent.click(screen.getByRole('button', { name: '新增 Agent 配置' }))
+    expect(await screen.findByRole('combobox', { name: 'Provider 类型' })).toHaveValue('openai')
+    fireEvent.change(screen.getByRole('textbox', { name: '配置名称' }), { target: { value: 'created-agent' } })
+    fireEvent.change(screen.getByRole('textbox', { name: '服务地址' }), { target: { value: 'https://template-value-sentinel.invalid' } })
+    fireEvent.change(screen.getByLabelText(/访问密钥/), { target: { value: 'template-value-sentinel' } })
+    fireEvent.change(screen.getByRole('textbox', { name: '测试 Prompt' }), { target: { value: 'prompt-sentinel' } })
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Prompt 测试' })).toBeEnabled())
+    fireEvent.click(screen.getByRole('button', { name: 'Prompt 测试' }))
+    expect(await screen.findByText('Prompt 测试完成：test-output-sentinel')).toBeInTheDocument()
+
+    fireEvent.click(screen.getByRole('button', { name: '关闭' }))
+    expect(screen.queryByRole('textbox', { name: 'Agent 配置原文' })).not.toBeInTheDocument()
+    const cachedData = JSON.stringify(view.queryClient.getQueryCache().getAll().map((query) => query.state.data))
+    for (const sentinel of ['raw-config-sentinel', 'template-value-sentinel', 'prompt-sentinel', 'test-output-sentinel']) {
+      expect(document.body).not.toHaveTextContent(sentinel)
+      expect(cachedData).not.toContain(sentinel)
+    }
+  })
+
+  it.each([
+    ['保存', '保存 Agent 配置', 'Agent 配置保存失败，请显式重试。', '/api/v1/knowledge/agent/openai', true],
+    ['连通性', '测试连通性', 'Agent 测试失败，请显式重试。', '/api/v1/knowledge/agent/connect', false],
+    ['Prompt', 'Prompt 测试', 'Agent 测试失败，请显式重试。', '/api/v1/knowledge/agent/prompt_test', false],
+  ] as const)('Agent %s失败会清空局部敏感状态并使旧 valid 失效', async (_, actionLabel, errorMessage, failedPath, needsConfirmation) => {
+    vi.stubGlobal('fetch', vi.fn((urlValue: RequestInfo | URL, init?: RequestInit) => {
+      const url = new URL(String(urlValue))
+      if (init?.method === 'POST' && url.pathname === failedPath) return Promise.resolve(legacy(null, 1, 'server-secret-sentinel'))
+      if (url.pathname.endsWith('/agent/openai')) return Promise.resolve(legacy('type: http\napi_key: action-secret-sentinel\n'))
+      return knowledgeFetch(urlValue, init)
+    }))
+
+    renderRoute('admin', '/knowledge/agents')
+    fireEvent.click(await screen.findByRole('button', { name: '进入工作区 openai' }))
+    expect(await screen.findByRole('textbox', { name: 'Agent 配置原文' })).toHaveValue('type: http\napi_key: action-secret-sentinel\n')
+    await waitFor(() => expect(screen.getByRole('button', { name: '测试连通性' })).toBeEnabled())
+    fireEvent.change(screen.getByRole('textbox', { name: '测试 Prompt' }), { target: { value: 'prompt-secret-sentinel' } })
+    await waitFor(() => expect(screen.getByRole('button', { name: actionLabel })).toBeEnabled())
+    fireEvent.click(screen.getByRole('button', { name: actionLabel }))
+    if (needsConfirmation) fireEvent.click(screen.getByRole('button', { name: '确认保存' }))
+
+    expect(await screen.findByText(errorMessage)).toBeInTheDocument()
+    expect(screen.getByRole('textbox', { name: 'Agent 配置原文' })).toHaveValue('')
+    expect(screen.getByRole('textbox', { name: '测试 Prompt' })).toHaveValue('')
+    await waitFor(() => {
+      expect(screen.getByRole('button', { name: '保存 Agent 配置' })).toBeDisabled()
+      expect(screen.getByRole('button', { name: '测试连通性' })).toBeDisabled()
+      expect(screen.getByRole('button', { name: 'Prompt 测试' })).toBeDisabled()
+    })
+    expect(document.body).not.toHaveTextContent(/action-secret-sentinel|prompt-secret-sentinel|server-secret-sentinel/)
   })
 
   it('Agent管理员可执行连通性与Prompt测试，审计员只读', async () => {
