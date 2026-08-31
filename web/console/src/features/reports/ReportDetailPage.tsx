@@ -33,6 +33,10 @@ const useStyles = makeStyles({
 
 const dateFormatter = new Intl.DateTimeFormat('zh-CN', { timeZone: 'UTC', year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hour12: false })
 const dayFormatter = new Intl.DateTimeFormat('zh-CN', { timeZone: 'UTC', month: '2-digit', day: '2-digit' })
+const infrastructurePortScanModeLabels = {
+  fixed_ai: '固定 AI 端口（11434、1337、7000–9000、18789）',
+  full_tcp: '全量 TCP（1–65535）',
+} as const
 
 function DetailError({ error, retry }: { error: unknown; retry: () => void }) {
   if (error instanceof ApiError && error.kind === 'forbidden') return <StatePanel state="forbidden" title="无权查看此安全报告" />
@@ -134,6 +138,9 @@ export function ReportDetailPage() {
   if (query.isPending) return <StatePanel state="loading" title="正在加载安全报告" />
   if (query.isError) return <DetailError error={query.error} retry={() => void query.refetch()} />
   const report = query.data
+  const portScanModeLabel = report.render.port_scan_mode
+    ? infrastructurePortScanModeLabels[report.render.port_scan_mode]
+    : undefined
   const columns: readonly DataTableColumn<TrendPointView>[] = [
     { id: 'date', header: 'UTC 日期', render: (point) => dayFormatter.format(new Date(point.date)) },
     { id: 'completed', header: '报告数', render: (point) => point.completed },
@@ -157,6 +164,7 @@ export function ReportDetailPage() {
           <dt className={styles.term}>生成时间</dt><dd className={styles.value}>{dateFormatter.format(new Date(report.created_at))}</dd>
           <dt className={styles.term}>快照主色</dt><dd className={styles.value}>{report.render.primary_color}</dd>
           <dt className={styles.term}>水印</dt><dd className={styles.value}>{report.render.watermark || '无'}</dd>
+          {portScanModeLabel ? <><dt className={styles.term}>端口扫描模式</dt><dd className={styles.value}>{portScanModeLabel}</dd></> : null}
         </dl>
       </Card>
       <RiskSummary risk={report.render.risk} explanation={report.render.score_explanation} mappingVersion={report.render.mapping_version} topRisks={report.render.top_risks} />

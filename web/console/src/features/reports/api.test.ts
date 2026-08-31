@@ -116,11 +116,38 @@ describe('报告安全 DTO', () => {
   })
 
   it.each([
+    ['固定 AI 端口', 'fixed_ai', '11434,1337,7000-9000,18789'],
+    ['全量 TCP', 'full_tcp', '1-65535'],
+  ])('保留%s报告的受信任端口扫描快照', (_label, portScanMode, portSpec) => {
+    const value = reportDetail({ task_type: 'ai_infra_scan' })
+    Object.assign(value.render, {
+      task_type: 'ai_infra_scan',
+      port_scan_mode: portScanMode,
+      port_spec: portSpec,
+    })
+
+    expect(parseReportDetail(value).render).toMatchObject({ port_scan_mode: portScanMode, port_spec: portSpec })
+  })
+
+  it('允许旧报告缺少端口扫描快照字段', () => {
+    const parsed = parseReportDetail(reportDetail())
+
+    expect(parsed.render).not.toHaveProperty('port_scan_mode')
+    expect(parsed.render).not.toHaveProperty('port_spec')
+  })
+
+  it.each([
     ['空对象', {}],
     ['错误版本', reportDetail({ render: { ...(reportDetail().render as object), render_version: 'future-unsafe' } })],
     ['越界分页', { items: [], total: 0, page: 1001, page_size: 20 }],
     ['不一致任务', reportDetail({ task_id: 'task-other' })],
     ['不完整趋势', reportDetail({ render: { ...(reportDetail().render as object), risk_trend: trend().slice(1) } })],
+    ['仅含扫描模式', reportDetail({ render: { ...(reportDetail().render as object), port_scan_mode: 'fixed_ai' } })],
+    ['仅含端口范围', reportDetail({ render: { ...(reportDetail().render as object), port_spec: '1-65535' } })],
+    ['未知扫描模式', reportDetail({ render: { ...(reportDetail().render as object), port_scan_mode: 'agent-supplied', port_spec: '1-65535' } })],
+    ['固定模式配错端口范围', reportDetail({ render: { ...(reportDetail().render as object), port_scan_mode: 'fixed_ai', port_spec: '1-65535' } })],
+    ['全量模式配错端口范围', reportDetail({ render: { ...(reportDetail().render as object), port_scan_mode: 'full_tcp', port_spec: '11434,1337,7000-9000,18789' } })],
+    ['非 AI 任务携带端口快照', reportDetail({ render: { ...(reportDetail().render as object), port_scan_mode: 'fixed_ai', port_spec: '11434,1337,7000-9000,18789' } })],
   ])('拒绝%s的200响应', (_label, value) => {
     expect(() => (_label === '越界分页' ? parseReportList(value) : parseReportDetail(value))).toThrow(ApiError)
   })
