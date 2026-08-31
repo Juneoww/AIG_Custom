@@ -114,6 +114,7 @@ export function AgentConfigPage() {
   const namesQuery = useQuery({ queryKey: ['knowledge', 'agents'], queryFn: ({ signal }) => fetchAgentNames(signal), retry: false })
   const catalog = namesQuery.isSuccess ? namesQuery.data : null
   const templatesQuery = useQuery({ queryKey: ['knowledge', 'agent-templates'], queryFn: ({ signal }) => fetchAgentTemplates(signal), retry: false, enabled: admin })
+  const templates = templatesQuery.isSuccess ? templatesQuery.data : null
   const [selectedName, setSelectedName] = useState<string | null>(null)
   const [creating, setCreating] = useState(false)
   const [draftName, setDraftName] = useState('')
@@ -137,7 +138,10 @@ export function AgentConfigPage() {
   const downloadTimersRef = useRef(new Set<number>())
   const [configState, setConfigState] = useState<'idle' | 'loading' | 'ready' | 'error'>('idle')
   const [configReload, setConfigReload] = useState(0)
-  const selectedTemplate = useMemo(() => templatesQuery.data?.find((template) => template.id === templateID), [templateID, templatesQuery.data])
+  const selectedTemplate = useMemo(() => templates?.find((template) => template.id === templateID), [templateID, templates])
+  const existingReady = selectedName !== null && configState === 'ready'
+  const createReady = creating && templates !== null && templates.length > 0 && selectedTemplate !== undefined
+  const workbenchReady = existingReady || createReady
 
   useEffect(() => {
     mountedRef.current = true
@@ -162,6 +166,7 @@ export function AgentConfigPage() {
       setConfigState('idle')
       return
     }
+    setValid(false)
     setContent('')
     const controller = new AbortController()
     const epoch = configEpochRef.current
@@ -174,6 +179,7 @@ export function AgentConfigPage() {
     }).catch(() => {
       if (!mountedRef.current || controller.signal.aborted || configEpochRef.current !== epoch) return
       setContent('')
+      setValid(false)
       setConfigState('error')
     }).finally(() => {
       if (configControllerRef.current === controller) configControllerRef.current = null
@@ -182,13 +188,14 @@ export function AgentConfigPage() {
   }, [configReload, selectedName])
 
   useEffect(() => {
-    if (!creating || templateID || !templatesQuery.data?.length) return
-    const template = templatesQuery.data[0]
+    if (!creating || !templates?.length || selectedTemplate) return
+    const template = templates[0]
     const values = initialTemplateValues(template)
+    setValid(false)
     setTemplateID(template.id)
     setTemplateValues(values)
     setContent(buildTemplateContent(template, values) ?? '')
-  }, [creating, templateID, templatesQuery.data])
+  }, [creating, selectedTemplate, templates])
 
   const invalidateStage = () => {
     controllerRef.current?.abort()
@@ -211,6 +218,7 @@ export function AgentConfigPage() {
     setCreating(false)
     setDraftName(name)
     setContent('')
+    setValid(false)
     setSelectedName(name)
   }
 
@@ -222,7 +230,8 @@ export function AgentConfigPage() {
     setSelectedName(null)
     setCreating(true)
     setDraftName('')
-    const template = templatesQuery.data?.[0]
+    setValid(false)
+    const template = templates?.[0]
     setTemplateID(template?.id ?? '')
     const values = initialTemplateValues(template)
     setTemplateValues(values)
@@ -245,8 +254,9 @@ export function AgentConfigPage() {
   }
 
   const changeTemplate = (id: string) => {
-    const template = templatesQuery.data?.find((item) => item.id === id)
+    const template = templates?.find((item) => item.id === id)
     const values = initialTemplateValues(template)
+    setValid(false)
     setTemplateID(id)
     setTemplateValues(values)
     setContent(template ? buildTemplateContent(template, values) ?? '' : '')
@@ -255,6 +265,7 @@ export function AgentConfigPage() {
   const changeTemplateField = (field: string, value: string) => {
     if (!selectedTemplate) return
     const values = { ...templateValues, [field]: value }
+    setValid(false)
     setTemplateValues(values)
     setContent(buildTemplateContent(selectedTemplate, values) ?? '')
   }
@@ -277,7 +288,10 @@ export function AgentConfigPage() {
   }
 
   const runAction = async (kind: 'save' | 'delete' | 'connect' | 'prompt') => {
-    if (!admin || mutexRef.current || !isSafeKnowledgeID(draftName)) return
+    const actionReady = kind === 'delete'
+      ? existingReady && !creating
+      : valid && (kind !== 'prompt' || Boolean(prompt.trim()))
+    if (!admin || !workbenchReady || !actionReady || mutexRef.current || !isSafeKnowledgeID(draftName)) return
     mutexRef.current = true
     setSubmitting(true)
     setActionError('')
@@ -298,6 +312,7 @@ export function AgentConfigPage() {
         setContent('')
         setTemplateValues({})
         setPrompt('')
+        setValid(false)
         setCreating(false)
         setSelectedName(null)
         setDraftName('')
@@ -308,6 +323,8 @@ export function AgentConfigPage() {
         setContent('')
         setTemplateValues({})
         setPrompt('')
+        setActionResult('')
+        setValid(false)
         setConfirmSave(false)
         setConfirmDelete(false)
         setActionError(`${kind === 'delete' ? 'Agent 配置删除' : kind === 'save' ? 'Agent 配置保存' : 'Agent 测试'}失败，请显式重试。`)
@@ -337,8 +354,6 @@ export function AgentConfigPage() {
     <PageHeader title="Agent 配置" description="浏览 Agent provider 配置；管理员可使用既有模板维护并执行受控测试。">
       {admin ? <Button appearance="primary" onClick={openCreate}>新增 Agent 配置</Button> : null}
     </PageHeader>
-    {actionError ? <MessageBar role="alert" intent="error"><MessageBarBody>{actionError}</MessageBarBody></MessageBar> : null}
-    {actionResult ? <MessageBar role="status" intent="success"><MessageBarBody>{actionResult}</MessageBarBody></MessageBar> : null}
     {namesQuery.isPending ? <StatePanel state="loading" title="正在加载 Agent 配置" /> : null}
     {namesQuery.isError && namesQuery.error instanceof ApiError && namesQuery.error.kind === 'forbidden' ? <StatePanel state="forbidden" title="无权查看 Agent 配置" /> : null}
     {namesQuery.isError && !(namesQuery.error instanceof ApiError && namesQuery.error.kind === 'forbidden') ? <StatePanel state="error" title="Agent 配置加载失败" actionLabel="重试" onAction={() => void namesQuery.refetch()} /> : null}
@@ -349,23 +364,32 @@ export function AgentConfigPage() {
     </section> : null}
 
     {editorOpen ? <div className={styles.editor}>
-      <Field label="配置名称" required><Input value={draftName} disabled={!creating || submitting || !admin} maxLength={256} onChange={(_, data) => setDraftName(data.value)} /></Field>
-      {creating && templatesQuery.data ? <div className={styles.form}>
-        <Field label="Provider 类型" required><Select value={templateID} disabled={submitting} onChange={(_, data) => changeTemplate(data.value)}>{templatesQuery.data.map((template) => <option key={template.id} value={template.id}>{template.name}</option>)}</Select></Field>
-        <Button type="button" appearance="secondary" disabled={!selectedTemplate} onClick={downloadTemplate}>下载配置模板</Button>
-        {selectedTemplate?.fields.filter((field) => field.required).map((field) => <TemplateField key={field.field} field={field} value={templateValues[field.field] ?? ''} disabled={submitting} onChange={(value) => changeTemplateField(field.field, value)} />)}
-        {selectedTemplate?.fields.some((field) => !field.required) ? <details className={styles.advanced}><summary>高级设置</summary><div className={styles.form}>{selectedTemplate.fields.filter((field) => !field.required).map((field) => <TemplateField key={field.field} field={field} value={templateValues[field.field] ?? ''} disabled={submitting} onChange={(value) => changeTemplateField(field.field, value)} />)}</div></details> : null}
-      </div> : null}
-      {selectedName && configState === 'loading' ? <StatePanel state="loading" title="正在加载 Agent 配置原文" /> : null}
-      {selectedName && configState === 'error' ? <StatePanel state="error" title="Agent 配置原文加载失败" actionLabel="重试" onAction={() => setConfigReload((current) => current + 1)} /> : null}
-      {(!selectedName || configState === 'ready') ? <StructuredEditor format="yaml" label="Agent 配置原文" value={content} disabled={!admin || submitting} onChange={setContent} onValidationChange={(result: StructuredValidationResult) => setValid(result.valid)} /> : null}
-      {admin ? <div className={styles.actions}>
-        <Button appearance="primary" disabled={submitting || !valid || !isSafeKnowledgeID(draftName)} onClick={() => setConfirmSave(true)}>保存 Agent 配置</Button>
-        {!creating ? <Button disabled={submitting} onClick={() => setConfirmDelete(true)}>删除 Agent 配置</Button> : null}
-        <Button disabled={submitting || !valid} onClick={() => void runAction('connect')}>测试连通性</Button>
-        <Field label="测试 Prompt"><Textarea value={prompt} disabled={submitting} maxLength={16_384} onChange={(_, data) => setPrompt(data.value)} /></Field>
-        <Button disabled={submitting || !valid || !prompt.trim()} onClick={() => void runAction('prompt')}>Prompt 测试</Button>
-      </div> : null}
+      {workbenchReady ? <>
+        {actionError ? <MessageBar role="alert" intent="error"><MessageBarBody>{actionError}</MessageBarBody></MessageBar> : null}
+        {actionResult ? <MessageBar role="status" intent="success"><MessageBarBody>{actionResult}</MessageBarBody></MessageBar> : null}
+        <Field label="配置名称" required><Input value={draftName} disabled={!creating || submitting || !admin} maxLength={256} onChange={(_, data) => setDraftName(data.value)} /></Field>
+        {creating && templates && selectedTemplate ? <div className={styles.form}>
+          <Field label="Provider 类型" required><Select value={templateID} disabled={submitting} onChange={(_, data) => changeTemplate(data.value)}>{templates.map((template) => <option key={template.id} value={template.id}>{template.name}</option>)}</Select></Field>
+          <Button type="button" appearance="secondary" disabled={!selectedTemplate} onClick={downloadTemplate}>下载配置模板</Button>
+          {selectedTemplate.fields.filter((field) => field.required).map((field) => <TemplateField key={field.field} field={field} value={templateValues[field.field] ?? ''} disabled={submitting} onChange={(value) => changeTemplateField(field.field, value)} />)}
+          {selectedTemplate.fields.some((field) => !field.required) ? <details className={styles.advanced}><summary>高级设置</summary><div className={styles.form}>{selectedTemplate.fields.filter((field) => !field.required).map((field) => <TemplateField key={field.field} field={field} value={templateValues[field.field] ?? ''} disabled={submitting} onChange={(value) => changeTemplateField(field.field, value)} />)}</div></details> : null}
+        </div> : null}
+        <StructuredEditor format="yaml" label="Agent 配置原文" value={content} disabled={!admin || submitting} onChange={setContent} onValidationChange={(result: StructuredValidationResult) => setValid(result.valid)} />
+        {admin ? <div className={styles.actions}>
+          <Button appearance="primary" disabled={submitting || !valid || !isSafeKnowledgeID(draftName)} onClick={() => setConfirmSave(true)}>保存 Agent 配置</Button>
+          {existingReady ? <Button disabled={submitting} onClick={() => setConfirmDelete(true)}>删除 Agent 配置</Button> : null}
+          <Button disabled={submitting || !valid} onClick={() => void runAction('connect')}>测试连通性</Button>
+          <Field label="测试 Prompt"><Textarea value={prompt} disabled={submitting} maxLength={16_384} onChange={(_, data) => setPrompt(data.value)} /></Field>
+          <Button disabled={submitting || !valid || !prompt.trim()} onClick={() => void runAction('prompt')}>Prompt 测试</Button>
+        </div> : null}
+      </> : <>
+        {selectedName && configState !== 'error' ? <StatePanel state="loading" title="正在加载 Agent 配置原文" /> : null}
+        {selectedName && configState === 'error' ? <StatePanel state="error" title="Agent 配置原文加载失败" actionLabel="重试" onAction={() => setConfigReload((current) => current + 1)} /> : null}
+        {creating && templatesQuery.isPending ? <StatePanel state="loading" title="正在加载 Agent 配置模板" /> : null}
+        {creating && templatesQuery.isError ? <StatePanel state="error" title="Agent 配置模板加载失败" actionLabel="重试" onAction={() => void templatesQuery.refetch()} /> : null}
+        {creating && templates !== null && templates.length === 0 ? <StatePanel state="empty" title="暂无可用 Agent 配置模板" actionLabel="重试" onAction={() => void templatesQuery.refetch()} /> : null}
+        {creating && templates !== null && templates.length > 0 && !selectedTemplate ? <StatePanel state="loading" title="正在准备 Agent 配置模板" /> : null}
+      </>}
       <div className={styles.actions}><Button disabled={submitting} onClick={closeEditor}>关闭</Button></div>
     </div> : null}
     <Dialog open={confirmSave} onOpenChange={(_, data) => { if (!data.open && !submitting) setConfirmSave(false) }}><DialogSurface aria-label="确认保存 Agent 配置"><DialogBody><DialogTitle>确认保存 Agent 配置</DialogTitle><DialogContent>配置可能包含访问凭据，保存前请确认内容和作用域无误。</DialogContent><DialogActions><Button onClick={() => setConfirmSave(false)}>取消</Button><Button appearance="primary" onClick={() => void runAction('save')}>确认保存</Button></DialogActions></DialogBody></DialogSurface></Dialog>
