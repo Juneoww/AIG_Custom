@@ -19,6 +19,7 @@ import {
   MessageBar,
   MessageBarBody,
   Select,
+  Text,
   Textarea,
   makeStyles,
   tokens,
@@ -54,9 +55,109 @@ const useStyles = makeStyles({
   rowAction: { display: 'flex', alignItems: 'center', gap: tokens.spacingHorizontalS, flexWrap: 'wrap', minWidth: 0 },
   editor: { display: 'flex', flexDirection: 'column', gap: tokens.spacingVerticalM, minWidth: 0, maxWidth: '100%' },
   tableViewport: { minWidth: 0, maxWidth: '100%', overflowX: 'auto' },
-  form: { display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(16rem, 1fr))', gap: tokens.spacingHorizontalM },
+  form: {
+    display: 'grid',
+    gridTemplateColumns: 'repeat(auto-fit, minmax(16rem, 1fr))',
+    gap: tokens.spacingHorizontalM,
+    minWidth: 0,
+    maxWidth: '100%',
+    '@media (max-width: 390px)': {
+      gridTemplateColumns: 'minmax(0, 1fr)',
+    },
+  },
   wide: { gridColumn: '1 / -1' },
   advanced: { gridColumn: '1 / -1', padding: tokens.spacingVerticalS, border: `${tokens.strokeWidthThin} solid ${tokens.colorNeutralStroke2}`, borderRadius: tokens.borderRadiusMedium },
+  workspace: {
+    display: 'flex',
+    flexDirection: 'column',
+    gap: tokens.spacingVerticalL,
+    minWidth: 0,
+    maxWidth: '100%',
+    padding: tokens.spacingVerticalL,
+    border: `${tokens.strokeWidthThin} solid ${tokens.colorNeutralStroke2}`,
+    borderRadius: tokens.borderRadiusLarge,
+    backgroundColor: tokens.colorNeutralBackground1,
+    boxShadow: tokens.shadow2,
+  },
+  workspaceHeader: {
+    display: 'flex',
+    alignItems: 'flex-start',
+    justifyContent: 'space-between',
+    gap: tokens.spacingHorizontalL,
+    minWidth: 0,
+    paddingBottom: tokens.spacingVerticalM,
+    borderBottom: `${tokens.strokeWidthThin} solid ${tokens.colorNeutralStroke2}`,
+    '@media (max-width: 960px)': {
+      flexDirection: 'column',
+      alignItems: 'stretch',
+    },
+  },
+  workspaceIdentity: { display: 'flex', flexDirection: 'column', gap: tokens.spacingVerticalXS, minWidth: 0 },
+  workspaceTitle: {
+    color: tokens.colorNeutralForeground1,
+    fontSize: tokens.fontSizeBase500,
+    fontWeight: tokens.fontWeightSemibold,
+    lineHeight: tokens.lineHeightBase500,
+    overflowWrap: 'anywhere',
+  },
+  workspaceDescription: { color: tokens.colorNeutralForeground2, overflowWrap: 'anywhere' },
+  sourceZone: {
+    display: 'flex',
+    flexDirection: 'column',
+    gap: tokens.spacingVerticalM,
+    minWidth: 0,
+    maxWidth: '100%',
+    padding: tokens.spacingVerticalM,
+    border: `${tokens.strokeWidthThin} solid ${tokens.colorNeutralStroke2}`,
+    borderRadius: tokens.borderRadiusMedium,
+    backgroundColor: tokens.colorNeutralBackground2,
+  },
+  zoneHeader: { display: 'flex', flexDirection: 'column', gap: tokens.spacingVerticalXXS, minWidth: 0 },
+  zoneTitle: { color: tokens.colorNeutralForeground1, fontWeight: tokens.fontWeightSemibold },
+  zoneDescription: { color: tokens.colorNeutralForeground2, overflowWrap: 'anywhere' },
+  sourceNotice: { color: tokens.colorNeutralForeground2, fontWeight: tokens.fontWeightSemibold },
+  zoneGrid: {
+    display: 'grid',
+    gridTemplateColumns: 'repeat(2, minmax(0, 1fr))',
+    gap: tokens.spacingHorizontalM,
+    minWidth: 0,
+    maxWidth: '100%',
+    '@media (max-width: 960px)': {
+      gridTemplateColumns: 'minmax(0, 1fr)',
+    },
+  },
+  zone: {
+    display: 'flex',
+    flexDirection: 'column',
+    gap: tokens.spacingVerticalM,
+    minWidth: 0,
+    maxWidth: '100%',
+    padding: tokens.spacingVerticalM,
+    border: `${tokens.strokeWidthThin} solid ${tokens.colorNeutralStroke2}`,
+    borderRadius: tokens.borderRadiusMedium,
+    backgroundColor: tokens.colorNeutralBackground2,
+  },
+  actionButtons: {
+    display: 'flex',
+    flexWrap: 'wrap',
+    gap: tokens.spacingHorizontalS,
+    minWidth: 0,
+    maxWidth: '100%',
+    '@media (max-width: 390px)': {
+      flexDirection: 'column',
+      alignItems: 'stretch',
+    },
+  },
+  formControl: { width: '100%', minWidth: 0, maxWidth: '100%' },
+  workspaceClose: {
+    flexShrink: 0,
+    '@media (max-width: 960px)': {
+      alignSelf: 'flex-start',
+    },
+    '@media (max-width: 390px)': {
+      width: '100%',
+    },
+  },
 })
 
 function initialTemplateValues(template: AgentTemplate | undefined): Record<string, string> {
@@ -96,14 +197,15 @@ function buildTemplateContent(template: AgentTemplate, values: Record<string, st
 }
 
 function TemplateField({ field, value, disabled, onChange }: { field: AgentTemplateField; value: string; disabled: boolean; onChange: (value: string) => void }) {
+  const styles = useStyles()
   if (field.type === 'select') return <Field label={field.label} required={field.required} hint={field.description}>
-    <Select value={value} disabled={disabled} onChange={(_, data) => onChange(data.value)}>{field.options?.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}</Select>
+    <Select className={styles.formControl} value={value} disabled={disabled} onChange={(_, data) => onChange(data.value)}>{field.options?.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}</Select>
   </Field>
   if (field.type === 'textarea' || field.type === 'json') return <Field label={field.label} required={field.required} hint={field.description}>
-    <Textarea value={value} disabled={disabled} placeholder={field.placeholder} resize="vertical" onChange={(_, data) => onChange(data.value)} />
+    <Textarea className={styles.formControl} value={value} disabled={disabled} placeholder={field.placeholder} resize="vertical" onChange={(_, data) => onChange(data.value)} />
   </Field>
   return <Field label={field.label} required={field.required} hint={field.description}>
-    <Input type={field.type === 'password' ? 'password' : field.type === 'number' ? 'number' : 'text'} autoComplete={field.type === 'password' ? 'new-password' : 'off'} value={value} disabled={disabled} placeholder={field.placeholder} min={field.minimum} max={field.maximum} step={field.step} onChange={(_, data) => onChange(data.value)} />
+    <Input className={styles.formControl} type={field.type === 'password' ? 'password' : field.type === 'number' ? 'number' : 'text'} autoComplete={field.type === 'password' ? 'new-password' : 'off'} value={value} disabled={disabled} placeholder={field.placeholder} min={field.minimum} max={field.maximum} step={field.step} onChange={(_, data) => onChange(data.value)} />
   </Field>
 }
 
@@ -405,33 +507,63 @@ export function AgentConfigPage() {
       {catalog.length ? <div className={styles.tableViewport}><DataTable caption="Agent 配置台账" columns={columns} rows={catalog} getRowKey={(name) => name} /></div> : null}
     </section> : null}
 
-    {editorOpen ? <div className={styles.editor}>
-      {workbenchReady ? <>
-        {actionError ? <MessageBar role="alert" intent="error"><MessageBarBody>{actionError}</MessageBarBody></MessageBar> : null}
-        {actionResult ? <MessageBar role="status" intent="success"><MessageBarBody>{actionResult}</MessageBarBody></MessageBar> : null}
-        <Field label="配置名称" required><Input value={draftName} disabled={!creating || submitting || !admin} maxLength={256} onChange={(_, data) => setDraftName(data.value)} /></Field>
+    {editorOpen && workbenchReady ? <section className={styles.workspace} aria-label="Agent 配置工作区">
+      <header className={styles.workspaceHeader}>
+        <div className={styles.workspaceIdentity}>
+          <Text as="h2" className={styles.workspaceTitle}>{creating ? draftName || '新建 Agent 配置' : selectedName}</Text>
+          <Text className={styles.workspaceDescription}>{creating ? '使用已选模板在本地工作区生成和维护配置。' : '当前工作区仅展示所选 Agent 配置，并在本地完成受控操作。'}</Text>
+        </div>
+        <Button className={styles.workspaceClose} disabled={submitting} onClick={closeEditor}>关闭</Button>
+      </header>
+      {actionError ? <MessageBar role="alert" intent="error"><MessageBarBody>{actionError}</MessageBarBody></MessageBar> : null}
+      {actionResult ? <MessageBar role="status" intent="success"><MessageBarBody>{actionResult}</MessageBarBody></MessageBar> : null}
+      <section className={styles.sourceZone} aria-label="配置来源与原文">
+        <div className={styles.zoneHeader}>
+          <Text as="h3" className={styles.zoneTitle}>配置来源与原文</Text>
+          <Text className={styles.sourceNotice}>原文仅在当前本地工作区显示</Text>
+        </div>
+        <Field label="配置名称" required><Input className={styles.formControl} value={draftName} disabled={!creating || submitting || !admin} maxLength={256} onChange={(_, data) => setDraftName(data.value)} /></Field>
         {creating && templates && selectedTemplate ? <div className={styles.form}>
-          <Field label="Provider 类型" required><Select value={templateID} disabled={submitting} onChange={(_, data) => changeTemplate(data.value)}>{templates.map((template) => <option key={template.id} value={template.id}>{template.name}</option>)}</Select></Field>
-          <Button type="button" appearance="secondary" disabled={!selectedTemplate} onClick={downloadTemplate}>下载配置模板</Button>
+          <Field label="Provider 类型" required><Select className={styles.formControl} value={templateID} disabled={submitting} onChange={(_, data) => changeTemplate(data.value)}>{templates.map((template) => <option key={template.id} value={template.id}>{template.name}</option>)}</Select></Field>
+          <Button className={styles.formControl} type="button" appearance="secondary" disabled={!selectedTemplate} onClick={downloadTemplate}>下载配置模板</Button>
           {selectedTemplate.fields.filter((field) => field.required).map((field) => <TemplateField key={field.field} field={field} value={templateValues[field.field] ?? ''} disabled={submitting} onChange={(value) => changeTemplateField(field.field, value)} />)}
           {selectedTemplate.fields.some((field) => !field.required) ? <details className={styles.advanced}><summary>高级设置</summary><div className={styles.form}>{selectedTemplate.fields.filter((field) => !field.required).map((field) => <TemplateField key={field.field} field={field} value={templateValues[field.field] ?? ''} disabled={submitting} onChange={(value) => changeTemplateField(field.field, value)} />)}</div></details> : null}
         </div> : null}
         <StructuredEditor format="yaml" label="Agent 配置原文" value={content} disabled={!admin || submitting} onChange={(value) => replaceContent(value, true)} onValidationChange={updateContentValidation} />
-        {admin ? <div className={styles.actions}>
-          <Button appearance="primary" disabled={submitting || !valid || !isSafeKnowledgeID(draftName)} onClick={openSaveConfirmation}>保存 Agent 配置</Button>
-          {existingReady ? <Button disabled={submitting} onClick={openDeleteConfirmation}>删除 Agent 配置</Button> : null}
-          <Button disabled={submitting || !valid} onClick={() => void runAction('connect')}>测试连通性</Button>
-          <Field label="测试 Prompt"><Textarea value={prompt} disabled={submitting} maxLength={16_384} onChange={(_, data) => { setPrompt(data.value); setActionResult('') }} /></Field>
-          <Button disabled={submitting || !valid || !prompt.trim()} onClick={() => void runAction('prompt')}>Prompt 测试</Button>
-        </div> : null}
-      </> : <>
-        {selectedName && configState !== 'error' ? <StatePanel state="loading" title="正在加载 Agent 配置原文" /> : null}
-        {selectedName && configState === 'error' ? <StatePanel state="error" title="Agent 配置原文加载失败" actionLabel="重试" onAction={() => setConfigReload((current) => current + 1)} /> : null}
-        {creating && templatesQuery.isPending ? <StatePanel state="loading" title="正在加载 Agent 配置模板" /> : null}
-        {creating && templatesQuery.isError ? <StatePanel state="error" title="Agent 配置模板加载失败" actionLabel="重试" onAction={() => void templatesQuery.refetch()} /> : null}
-        {creating && templates !== null && templates.length === 0 ? <StatePanel state="empty" title="暂无可用 Agent 配置模板" actionLabel="重试" onAction={() => void templatesQuery.refetch()} /> : null}
-        {creating && templates !== null && templates.length > 0 && !selectedTemplate ? <StatePanel state="loading" title="正在准备 Agent 配置模板" /> : null}
-      </>}
+      </section>
+      {admin ? <div className={styles.zoneGrid}>
+        <section className={styles.zone} aria-label="配置操作">
+          <div className={styles.zoneHeader}>
+            <Text as="h3" className={styles.zoneTitle}>配置操作</Text>
+            <Text className={styles.zoneDescription}>保存或删除前会再次要求确认。</Text>
+          </div>
+          <div className={styles.actionButtons}>
+            <Button appearance="primary" disabled={submitting || !valid || !isSafeKnowledgeID(draftName)} onClick={openSaveConfirmation}>保存 Agent 配置</Button>
+            {existingReady ? <Button disabled={submitting} onClick={openDeleteConfirmation}>删除 Agent 配置</Button> : null}
+          </div>
+        </section>
+        <section className={styles.zone} aria-label="受控验证">
+          <div className={styles.zoneHeader}>
+            <Text as="h3" className={styles.zoneTitle}>受控验证</Text>
+            <Text className={styles.zoneDescription}>单次测试不代表持续健康</Text>
+          </div>
+          <div className={styles.actionButtons}>
+            <Button disabled={submitting || !valid} onClick={() => void runAction('connect')}>测试连通性</Button>
+          </div>
+          <Field label="测试 Prompt"><Textarea className={styles.formControl} value={prompt} disabled={submitting} maxLength={16_384} onChange={(_, data) => { setPrompt(data.value); setActionResult('') }} /></Field>
+          <div className={styles.actionButtons}>
+            <Button disabled={submitting || !valid || !prompt.trim()} onClick={() => void runAction('prompt')}>Prompt 测试</Button>
+          </div>
+        </section>
+      </div> : null}
+    </section> : null}
+    {editorOpen && !workbenchReady ? <div className={styles.editor}>
+      {selectedName && configState !== 'error' ? <StatePanel state="loading" title="正在加载 Agent 配置原文" /> : null}
+      {selectedName && configState === 'error' ? <StatePanel state="error" title="Agent 配置原文加载失败" actionLabel="重试" onAction={() => setConfigReload((current) => current + 1)} /> : null}
+      {creating && templatesQuery.isPending ? <StatePanel state="loading" title="正在加载 Agent 配置模板" /> : null}
+      {creating && templatesQuery.isError ? <StatePanel state="error" title="Agent 配置模板加载失败" actionLabel="重试" onAction={() => void templatesQuery.refetch()} /> : null}
+      {creating && templates !== null && templates.length === 0 ? <StatePanel state="empty" title="暂无可用 Agent 配置模板" actionLabel="重试" onAction={() => void templatesQuery.refetch()} /> : null}
+      {creating && templates !== null && templates.length > 0 && !selectedTemplate ? <StatePanel state="loading" title="正在准备 Agent 配置模板" /> : null}
       <div className={styles.actions}><Button disabled={submitting} onClick={closeEditor}>关闭</Button></div>
     </div> : null}
     <Dialog open={confirmSave} onOpenChange={(_, data) => { if (!data.open && !submitting) setConfirmSave(false) }}><DialogSurface aria-label="确认保存 Agent 配置"><DialogBody><DialogTitle>确认保存 Agent 配置</DialogTitle><DialogContent>配置可能包含访问凭据，保存前请确认内容和作用域无误。</DialogContent><DialogActions><Button onClick={() => setConfirmSave(false)}>取消</Button><Button appearance="primary" onClick={() => void runAction('save')}>确认保存</Button></DialogActions></DialogBody></DialogSurface></Dialog>
