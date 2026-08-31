@@ -1185,7 +1185,7 @@ func completedTaskForReport(task *Task, rawResult json.RawMessage, completedAt t
 }
 
 func trustedReportInfrastructurePortScan(taskType string, raw json.RawMessage) (portscan.Mode, string, bool) {
-	if taskType != "ai_infra_scan" {
+	if taskType != "ai_infra_scan" || !hasUniqueJSONObjectKeys(raw) {
 		return "", "", false
 	}
 	_, fields, valid := decodeInfrastructureTaskParams(raw)
@@ -1201,6 +1201,43 @@ func trustedReportInfrastructurePortScan(taskType string, raw json.RawMessage) (
 		return "", "", false
 	}
 	return mode, spec, true
+}
+
+func hasUniqueJSONObjectKeys(raw json.RawMessage) bool {
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	token, err := decoder.Token()
+	if err != nil {
+		return false
+	}
+	start, ok := token.(json.Delim)
+	if !ok || start != '{' {
+		return false
+	}
+
+	keys := make(map[string]struct{})
+	for decoder.More() {
+		token, err = decoder.Token()
+		key, ok := token.(string)
+		if err != nil || !ok {
+			return false
+		}
+		if _, exists := keys[key]; exists {
+			return false
+		}
+		keys[key] = struct{}{}
+
+		var value json.RawMessage
+		if decoder.Decode(&value) != nil {
+			return false
+		}
+	}
+
+	token, err = decoder.Token()
+	end, ok := token.(json.Delim)
+	if err != nil || !ok || end != '}' {
+		return false
+	}
+	return decoder.Decode(&struct{}{}) == io.EOF
 }
 
 func sanitizeEngineFailureReason(reason string) string {

@@ -99,6 +99,7 @@ func TestTrustedSuccessSnapshotDerivesInfrastructurePortScanFromPersistedParams(
 		{name: "full", params: `{"port_scan_mode":"full_tcp"}`, wantMode: portscan.FullTCP, wantSpec: portscan.FullTCPPortSpec},
 		{name: "historical missing mode", params: `{}`, wantMode: portscan.FixedAI, wantSpec: portscan.FixedAIPortSpec},
 		{name: "unknown mode omitted", params: `{"port_scan_mode":"agent-supplied"}`},
+		{name: "duplicate canonical mode omitted", params: `{"port_scan_mode":"agent-supplied","port_scan_mode":"full_tcp"}`},
 	} {
 		t.Run(testCase.name, func(t *testing.T) {
 			engine := &recordingEngine{results: map[string]json.RawMessage{}}

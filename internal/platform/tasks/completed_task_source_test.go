@@ -107,6 +107,7 @@ func TestCompletedTaskSourceDerivesInfrastructurePortScanOnlyFromTrustedTaskPara
 		{name: "full mode", taskType: "ai_infra_scan", params: `{"port_scan_mode":"full_tcp"}`, wantMode: portscan.FullTCP, wantSpec: portscan.FullTCPPortSpec},
 		{name: "legacy omitted mode", taskType: "ai_infra_scan", params: `{}`, wantMode: portscan.FixedAI, wantSpec: portscan.FixedAIPortSpec},
 		{name: "unknown mode omitted", taskType: "ai_infra_scan", params: `{"port_scan_mode":"agent-supplied"}`},
+		{name: "duplicate canonical mode omitted", taskType: "ai_infra_scan", params: `{"port_scan_mode":"agent-supplied","port_scan_mode":"full_tcp"}`},
 		{name: "malformed params omitted", taskType: "ai_infra_scan", params: `{"port_scan_mode":["full_tcp"]}`},
 		{name: "non infrastructure omitted", taskType: "mcp_scan", params: `{"port_scan_mode":"full_tcp"}`},
 	} {
