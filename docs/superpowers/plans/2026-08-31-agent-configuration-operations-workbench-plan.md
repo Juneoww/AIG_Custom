@@ -18,6 +18,10 @@
 - 前端只对管理员启用模板查询与创建工作流；不改变既有模板路由的兼容授权语义。
 - 每个 TypeScript/TSX 新文件或实质性重写都遵守 @chinese-script-comments 的中文文件头要求；每个实现任务先遵守 @test-driven-development。
 
+## Command convention
+
+本计划中的所有 pnpm 命令均从仓库根执行，并显式使用 `--dir web/console`。不要假定调用者已进入前端目录；后端仓库根没有前端 package manifest。
+
 ## File structure
 
 - Create: web/console/src/features/knowledge/components/AgentConfigurationBrief.tsx — 纯展示的完整目录概览，不读取会话、路由或查询缓存。
@@ -39,6 +43,7 @@ function agentTemplateFixture(): Response {
       fields: [
         { field: 'base_url', label: '服务地址', type: 'text', required: true },
         { field: 'api_key', label: '访问凭据', type: 'password', required: true },
+        { field: 'timeout', label: '请求超时', type: 'number', required: false, min: 1 },
       ],
     },
   }), { status: 200, headers: { 'Content-Type': 'application/json' } })
@@ -66,7 +71,7 @@ expect(brief).not.toHaveTextContent(/agent-token-sentinel|prompt-sentinel|test-o
 
 - [ ] **Step 2: 运行新测试，确认因组件不存在而失败**
 
-Run: pnpm exec vitest run src/features/knowledge/components/AgentConfigurationBrief.test.tsx
+Run: pnpm --dir web/console exec vitest run src/features/knowledge/components/AgentConfigurationBrief.test.tsx
 Expected: FAIL，原因是 AgentConfigurationBrief 尚未存在或未导出。
 
 - [ ] **Step 3: 实现最小纯展示组件**
@@ -84,7 +89,7 @@ export interface AgentConfigurationBriefProps {
 
 - [ ] **Step 4: 运行组件测试，确认通过**
 
-Run: pnpm exec vitest run src/features/knowledge/components/AgentConfigurationBrief.test.tsx
+Run: pnpm --dir web/console exec vitest run src/features/knowledge/components/AgentConfigurationBrief.test.tsx
 Expected: PASS，三个安全/角色合同均通过。
 
 - [ ] **Step 5: 提交测试合同**
@@ -126,7 +131,7 @@ expect(screen.getByRole('textbox', { name: 'Agent 配置原文' })).toHaveValue(
 
 - [ ] **Step 2: 运行失败测试，确认当前页面错误地保留缓存目录**
 
-Run: pnpm exec vitest run src/features/knowledge/KnowledgePages.test.tsx
+Run: pnpm --dir web/console exec vitest run src/features/knowledge/KnowledgePages.test.tsx
 Expected: FAIL，当前页面会在目录重取失败后继续由 namesQuery.data 渲染旧目录，且尚无 Agent 概览和“进入工作区”语义。
 
 - [ ] **Step 3: 实现目录成功门控与工作台入口**
@@ -143,7 +148,7 @@ const catalog = namesQuery.isSuccess ? namesQuery.data : null
 
 - [ ] **Step 4: 运行目录测试，确认通过**
 
-Run: pnpm exec vitest run src/features/knowledge/KnowledgePages.test.tsx
+Run: pnpm --dir web/console exec vitest run src/features/knowledge/KnowledgePages.test.tsx
 Expected: PASS，403/500 时只显示安全状态；目录概览/表格隐藏；本地已加载原文保持可见且缓存无敏感哨兵。
 
 - [ ] **Step 5: 提交目录合同与实现**
@@ -169,6 +174,8 @@ git commit -m "feat: arrange agent configuration catalog"
 2. 已准备好的配置切换到另一个尚未返回原文的配置时，旧 valid 不能使任何操作出现或可用。
 3. 管理员点击“新增 Agent 配置”后，模板加载、模板错误、模板空态都只能重试/关闭；模板成功且有已选模板后才显示原文编辑器和配置/测试区。
 4. 关闭工作区后，agent-token-sentinel、模板值、prompt-sentinel 和 test-output-sentinel 不在 DOM 或 query cache。
+5. 模板 ready 后保留 Provider 类型、两个必填字段、可展开的“高级设置”和“下载配置模板”入口。
+6. 保存、连接或 Prompt 测试返回失败时，清空原文并使保存、连接、Prompt 测试不可用；旧 valid 不得保留为 true。
 
 ~~~tsx
 expect(screen.queryByRole('button', { name: '保存 Agent 配置' })).not.toBeInTheDocument()
@@ -179,7 +186,7 @@ expect(screen.queryByRole('textbox', { name: '测试 Prompt' })).not.toBeInTheDo
 
 - [ ] **Step 2: 运行新增测试，确认当前页面在非就绪态仍渲染操作区**
 
-Run: pnpm exec vitest run src/features/knowledge/KnowledgePages.test.tsx
+Run: pnpm --dir web/console exec vitest run src/features/knowledge/KnowledgePages.test.tsx
 Expected: FAIL，当前实现会在原文加载/错误阶段保留管理员操作区，并可能沿用旧结构校验状态。
 
 - [ ] **Step 3: 实现显式的工作区就绪状态机**
@@ -193,13 +200,13 @@ const createReady = creating && templates !== null && templates.length > 0 && se
 const workbenchReady = existingReady || createReady
 ~~~
 
-在 openExisting、原文 effect 开始、原文 effect 失败和 openCreate 中立即 setValid(false)。新增模板的 loading/error/empty StatePanel 与显式重试；除关闭（及 retry）外，所有编辑器、写入、删除、连接、Prompt 控件都必须受 workbenchReady 门控。runAction 也必须早退检查 workbenchReady，而不能只依赖已隐藏的按钮。
+在 openExisting、原文 effect 开始、原文 effect 失败、openCreate 以及 runAction 的失败分支中立即 setValid(false)。新增模板的 loading/error/empty StatePanel 与显式重试；除关闭（及 retry）外，所有编辑器、写入、删除、连接、Prompt 控件都必须受 workbenchReady 门控。runAction 也必须早退检查 workbenchReady，而不能只依赖已隐藏的按钮。
 
 把操作结果消息移入具名“Agent 配置工作区”内，以便关闭和切换时连同原文/Prompt 一起消失；保留现有 AbortController、epoch、mutex、确认弹窗、下载 URL 回收和固定安全错误。已有配置在未 ready 时也不允许删除，避免基于未确认原文进行破坏性操作。
 
 - [ ] **Step 4: 运行生命周期与现有 Agent 测试，确认通过**
 
-Run: pnpm exec vitest run src/features/knowledge/KnowledgePages.test.tsx src/features/knowledge/api.test.ts
+Run: pnpm --dir web/console exec vitest run src/features/knowledge/KnowledgePages.test.tsx src/features/knowledge/api.test.ts
 Expected: PASS，所有新门槛、关闭清理、角色边界和原有 API 解析合同均通过。
 
 - [ ] **Step 5: 提交工作区测试和实现**
@@ -232,7 +239,7 @@ expect(screen.getByRole('button', { name: '进入工作区 openai' })).toBeInThe
 
 - [ ] **Step 2: 运行结构测试，确认当前语义或区域尚不存在**
 
-Run: pnpm exec vitest run src/features/knowledge/KnowledgePages.test.tsx
+Run: pnpm --dir web/console exec vitest run src/features/knowledge/KnowledgePages.test.tsx
 Expected: FAIL，直到具名工作区、操作分区和提示语义实现完成。
 
 - [ ] **Step 3: 完成雾灰工作台布局与语义**
@@ -259,10 +266,10 @@ Expected: FAIL，直到具名工作区、操作分区和提示语义实现完成
 Run:
 
 ~~~bash
-pnpm exec vitest run src/features/knowledge/KnowledgePages.test.tsx src/features/knowledge/components/AgentConfigurationBrief.test.tsx src/features/knowledge/api.test.ts
-pnpm run lint
-pnpm run typecheck
-pnpm run build
+pnpm --dir web/console exec vitest run src/features/knowledge/KnowledgePages.test.tsx src/features/knowledge/components/AgentConfigurationBrief.test.tsx src/features/knowledge/api.test.ts
+pnpm --dir web/console run lint
+pnpm --dir web/console run typecheck
+pnpm --dir web/console run build
 ~~~
 
 Expected: 每条命令 exit 0；没有 TypeScript、ESLint 或 Vite 构建错误。
