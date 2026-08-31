@@ -883,4 +883,59 @@ describe('governed knowledge edits', () => {
     expect(await screen.findByRole('button', { name: '测试连通性' })).toBeInTheDocument()
     expect(screen.getByRole('button', { name: 'Prompt 测试' })).toBeInTheDocument()
   })
+
+  it('Agent 管理员在具名本地工作区中区分原文、配置操作和受控验证', async () => {
+    renderRoute('admin', '/knowledge/agents')
+    expect(await screen.findByRole('button', { name: '进入工作区 openai' })).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: '进入工作区 openai' }))
+
+    const workspace = await screen.findByRole('region', { name: 'Agent 配置工作区' })
+    expect(within(workspace).getByRole('heading', { name: 'openai' })).toBeInTheDocument()
+    expect(within(workspace).getByText('原文仅在当前本地工作区显示')).toBeInTheDocument()
+    expect(within(workspace).getByText('单次测试不代表持续健康')).toBeInTheDocument()
+    expect(within(workspace).getByRole('region', { name: '配置来源与原文' })).toBeInTheDocument()
+    expect(within(workspace).getByRole('region', { name: '配置操作' })).toBeInTheDocument()
+    expect(within(workspace).getByRole('region', { name: '受控验证' })).toBeInTheDocument()
+  })
+
+  it.each(['user', 'auditor'] as const)('Agent %s 在本地工作区内只读原文且没有治理操作区', async (role) => {
+    renderRoute(role, '/knowledge/agents')
+    fireEvent.click(await screen.findByRole('button', { name: '进入工作区 openai' }))
+
+    const workspace = await screen.findByRole('region', { name: 'Agent 配置工作区' })
+    expect(within(workspace).getByRole('textbox', { name: 'Agent 配置原文' })).toBeDisabled()
+    expect(within(workspace).queryByRole('region', { name: '配置操作' })).not.toBeInTheDocument()
+    expect(within(workspace).queryByRole('region', { name: '受控验证' })).not.toBeInTheDocument()
+  })
+
+  it('Agent 测试反馈仅显示在本地工作区且关闭后清除', async () => {
+    let connectionAttempts = 0
+    vi.stubGlobal('fetch', vi.fn((urlValue: RequestInfo | URL, init?: RequestInit) => {
+      const url = new URL(String(urlValue))
+      if (url.pathname.endsWith('/agent/connect') && init?.method === 'POST') {
+        connectionAttempts += 1
+        return Promise.resolve(connectionAttempts === 1 ? legacy(null) : legacy(null, 1, 'provider://private/raw-error-sentinel'))
+      }
+      return knowledgeFetch(urlValue, init)
+    }))
+
+    renderRoute('admin', '/knowledge/agents')
+    fireEvent.click(await screen.findByRole('button', { name: '进入工作区 openai' }))
+    const workspace = await screen.findByRole('region', { name: 'Agent 配置工作区' })
+    await waitFor(() => expect(within(workspace).getByRole('button', { name: '测试连通性' })).toBeEnabled())
+
+    fireEvent.click(within(workspace).getByRole('button', { name: '测试连通性' }))
+    expect(await within(workspace).findByText('连通性测试通过。')).toBeInTheDocument()
+
+    await waitFor(() => expect(within(workspace).getByRole('button', { name: '测试连通性' })).toBeEnabled())
+    fireEvent.click(within(workspace).getByRole('button', { name: '测试连通性' }))
+    expect(await within(workspace).findByText('Agent 测试失败，请显式重试。')).toBeInTheDocument()
+    expect(document.body).not.toHaveTextContent('provider://private/raw-error-sentinel')
+
+    fireEvent.click(screen.getByRole('button', { name: '关闭' }))
+    expect(screen.queryByRole('region', { name: 'Agent 配置工作区' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('textbox', { name: 'Agent 配置原文' })).not.toBeInTheDocument()
+    expect(screen.queryByText('连通性测试通过。')).not.toBeInTheDocument()
+    expect(screen.queryByText('Agent 测试失败，请显式重试。')).not.toBeInTheDocument()
+  })
 })
