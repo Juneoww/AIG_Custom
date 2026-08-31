@@ -105,6 +105,13 @@ function expectAgentWorkbenchControlsHidden() {
   }
 }
 
+function changeTextAreaWithinCurrentAct(textarea: HTMLTextAreaElement, value: string) {
+  const setter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')?.set
+  if (!setter) throw new Error('textarea value setter is unavailable')
+  setter.call(textarea, value)
+  textarea.dispatchEvent(new Event('input', { bubbles: true }))
+}
+
 function knowledgeFetch(urlValue: RequestInfo | URL, init?: RequestInit): Promise<Response> {
   const url = new URL(String(urlValue))
   if (init?.method && init.method !== 'GET') return Promise.resolve(legacy(null, 0, 'saved'))
@@ -644,6 +651,96 @@ describe('governed knowledge edits', () => {
     expect(await screen.findByText('正在加载 Agent 配置原文')).toBeInTheDocument()
     expectAgentWorkbenchControlsHidden()
     expect(screen.getByRole('button', { name: '关闭' })).toBeEnabled()
+  })
+
+  it('Agent 从 ready A 切到原文未返回的 B 时同步撤销 delete 与工作区操作', async () => {
+    const nextRaw = deferred<Response>()
+    let deleteRequests = 0
+    vi.stubGlobal('fetch', vi.fn((urlValue: RequestInfo | URL, init?: RequestInit) => {
+      const url = new URL(String(urlValue))
+      if (url.pathname.endsWith('/agent/names')) return Promise.resolve(legacy(['agent-a', 'agent-b']))
+      if (url.pathname.endsWith('/agent/agent-a')) return Promise.resolve(legacy('type: http\napi_key: first\n'))
+      if (url.pathname.endsWith('/agent/agent-b')) return nextRaw.promise
+      if (init?.method === 'DELETE') deleteRequests += 1
+      return knowledgeFetch(urlValue, init)
+    }))
+
+    renderRoute('admin', '/knowledge/agents')
+    fireEvent.click(await screen.findByRole('button', { name: '进入工作区 agent-a' }))
+    expect(await screen.findByRole('textbox', { name: 'Agent 配置原文' })).toHaveValue('type: http\napi_key: first\n')
+    await waitFor(() => expect(screen.getByRole('button', { name: '删除 Agent 配置' })).toBeEnabled())
+
+    act(() => {
+      screen.getByRole('button', { name: '进入工作区 agent-b' }).click()
+      expectAgentWorkbenchControlsHidden()
+      expect(screen.queryByRole('dialog', { name: '确认删除 Agent 配置' })).not.toBeInTheDocument()
+    })
+
+    expect(screen.getByText('正在加载 Agent 配置原文')).toBeInTheDocument()
+    expect(deleteRequests).toBe(0)
+  })
+
+  it('Agent 原文改为无效 YAML 后立即阻断保存确认和连通性请求', async () => {
+    let saveRequests = 0
+    let connectRequests = 0
+    vi.stubGlobal('fetch', vi.fn((urlValue: RequestInfo | URL, init?: RequestInit) => {
+      const url = new URL(String(urlValue))
+      if (url.pathname.endsWith('/agent/openai') && init?.method === 'POST') saveRequests += 1
+      if (url.pathname.endsWith('/agent/connect') && init?.method === 'POST') connectRequests += 1
+      if (url.pathname.endsWith('/agent/openai')) return Promise.resolve(legacy('type: http\napi_key: valid\n'))
+      return knowledgeFetch(urlValue, init)
+    }))
+
+    renderRoute('admin', '/knowledge/agents')
+    fireEvent.click(await screen.findByRole('button', { name: '进入工作区 openai' }))
+    const editor = await screen.findByRole('textbox', { name: 'Agent 配置原文' }) as HTMLTextAreaElement
+    await waitFor(() => expect(screen.getByRole('button', { name: '保存 Agent 配置' })).toBeEnabled())
+
+    act(() => {
+      changeTextAreaWithinCurrentAct(editor, 'type: [unterminated')
+      screen.getByRole('button', { name: '保存 Agent 配置' }).click()
+      screen.getByRole('button', { name: '测试连通性' }).click()
+    })
+
+    expect(screen.queryByRole('dialog', { name: '确认保存 Agent 配置' })).not.toBeInTheDocument()
+    expect(saveRequests).toBe(0)
+    expect(connectRequests).toBe(0)
+  })
+
+  it('Agent 编辑原文或 Prompt 后清除上一轮测试结果', async () => {
+    renderRoute('admin', '/knowledge/agents')
+    fireEvent.click(await screen.findByRole('button', { name: '进入工作区 openai' }))
+    const editor = await screen.findByRole('textbox', { name: 'Agent 配置原文' })
+    await waitFor(() => expect(screen.getByRole('button', { name: '测试连通性' })).toBeEnabled())
+    fireEvent.click(screen.getByRole('button', { name: '测试连通性' }))
+    expect(await screen.findByText('连通性测试通过。')).toBeInTheDocument()
+
+    fireEvent.change(editor, { target: { value: 'type: http\napi_key: changed\n' } })
+    expect(screen.queryByText('连通性测试通过。')).not.toBeInTheDocument()
+
+    await waitFor(() => expect(screen.getByRole('button', { name: '测试连通性' })).toBeEnabled())
+    fireEvent.change(screen.getByRole('textbox', { name: '测试 Prompt' }), { target: { value: 'first prompt' } })
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Prompt 测试' })).toBeEnabled())
+    fireEvent.click(screen.getByRole('button', { name: 'Prompt 测试' }))
+    expect(await screen.findByText('Prompt 测试完成：saved')).toBeInTheDocument()
+
+    fireEvent.change(screen.getByRole('textbox', { name: '测试 Prompt' }), { target: { value: 'changed prompt' } })
+    expect(screen.queryByText('Prompt 测试完成：saved')).not.toBeInTheDocument()
+  })
+
+  it('Agent 编辑模板字段后清除上一轮测试结果', async () => {
+    renderRoute('admin', '/knowledge/agents')
+    fireEvent.click(await screen.findByRole('button', { name: '新增 Agent 配置' }))
+    expect(await screen.findByRole('combobox', { name: 'Provider 类型' })).toHaveValue('openai')
+    fireEvent.change(screen.getByRole('textbox', { name: '配置名称' }), { target: { value: 'created-agent' } })
+    fireEvent.change(screen.getByRole('textbox', { name: '服务地址' }), { target: { value: 'https://first.invalid' } })
+    fireEvent.change(screen.getByLabelText(/访问密钥/), { target: { value: 'template-key' } })
+    await waitFor(() => expect(screen.getByRole('button', { name: '测试连通性' })).toBeEnabled())
+    fireEvent.click(screen.getByRole('button', { name: '测试连通性' }))
+    expect(await screen.findByText('连通性测试通过。')).toBeInTheDocument()
+
+    fireEvent.change(screen.getByRole('textbox', { name: '服务地址' }), { target: { value: 'https://changed.invalid' } })
+    expect(screen.queryByText('连通性测试通过。')).not.toBeInTheDocument()
   })
 
   it('新增 Agent 配置在模板等待时不显示编辑或操作控件', async () => {
