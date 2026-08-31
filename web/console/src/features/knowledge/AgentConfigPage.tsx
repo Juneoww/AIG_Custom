@@ -6,6 +6,7 @@
  * 依赖：Fluent UI、TanStack Query、Session、StructuredEditor 与知识 API。
  */
 import {
+  Badge,
   Button,
   Dialog,
   DialogActions,
@@ -42,12 +43,16 @@ import {
   type AgentTemplate,
   type AgentTemplateField,
 } from './api'
+import { AgentConfigurationBrief } from './components/AgentConfigurationBrief'
 import { StructuredEditor, type StructuredValidationResult } from './components/StructuredEditor'
 
 const useStyles = makeStyles({
-  page: { display: 'flex', flexDirection: 'column', gap: tokens.spacingVerticalL },
+  page: { display: 'flex', flexDirection: 'column', gap: tokens.spacingVerticalL, minWidth: 0, maxWidth: '100%' },
+  catalog: { display: 'flex', flexDirection: 'column', gap: tokens.spacingVerticalM, minWidth: 0, maxWidth: '100%' },
   actions: { display: 'flex', gap: tokens.spacingHorizontalXS, flexWrap: 'wrap' },
-  editor: { display: 'flex', flexDirection: 'column', gap: tokens.spacingVerticalM },
+  rowAction: { display: 'flex', alignItems: 'center', gap: tokens.spacingHorizontalS, flexWrap: 'wrap', minWidth: 0 },
+  editor: { display: 'flex', flexDirection: 'column', gap: tokens.spacingVerticalM, minWidth: 0, maxWidth: '100%' },
+  tableViewport: { minWidth: 0, maxWidth: '100%', overflowX: 'auto' },
   form: { display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(16rem, 1fr))', gap: tokens.spacingHorizontalM },
   wide: { gridColumn: '1 / -1' },
   advanced: { gridColumn: '1 / -1', padding: tokens.spacingVerticalS, border: `${tokens.strokeWidthThin} solid ${tokens.colorNeutralStroke2}`, borderRadius: tokens.borderRadiusMedium },
@@ -107,6 +112,7 @@ export function AgentConfigPage() {
   const admin = state.status === 'authenticated' && state.subject.role === 'admin'
   const queryClient = useQueryClient()
   const namesQuery = useQuery({ queryKey: ['knowledge', 'agents'], queryFn: ({ signal }) => fetchAgentNames(signal), retry: false })
+  const catalog = namesQuery.isSuccess ? namesQuery.data : null
   const templatesQuery = useQuery({ queryKey: ['knowledge', 'agent-templates'], queryFn: ({ signal }) => fetchAgentTemplates(signal), retry: false, enabled: admin })
   const [selectedName, setSelectedName] = useState<string | null>(null)
   const [creating, setCreating] = useState(false)
@@ -316,7 +322,14 @@ export function AgentConfigPage() {
   const columns: readonly DataTableColumn<string>[] = [
     { id: 'name', header: '配置名称', render: (name) => name },
     { id: 'scope', header: '访问模式', render: () => '受身份范围控制' },
-    { id: 'actions', header: '操作', render: (name) => <Button appearance="subtle" aria-label={`查看 ${name}`} onClick={() => openExisting(name)}>查看</Button> },
+    {
+      id: 'actions',
+      header: '操作',
+      render: (name) => <div className={styles.rowAction}>
+        {selectedName === name ? <Badge color="brand">当前工作区</Badge> : null}
+        <Button appearance="subtle" aria-label={`进入工作区 ${name}`} onClick={() => openExisting(name)}>进入工作区</Button>
+      </div>,
+    },
   ]
 
   const editorOpen = selectedName !== null || creating
@@ -329,8 +342,11 @@ export function AgentConfigPage() {
     {namesQuery.isPending ? <StatePanel state="loading" title="正在加载 Agent 配置" /> : null}
     {namesQuery.isError && namesQuery.error instanceof ApiError && namesQuery.error.kind === 'forbidden' ? <StatePanel state="forbidden" title="无权查看 Agent 配置" /> : null}
     {namesQuery.isError && !(namesQuery.error instanceof ApiError && namesQuery.error.kind === 'forbidden') ? <StatePanel state="error" title="Agent 配置加载失败" actionLabel="重试" onAction={() => void namesQuery.refetch()} /> : null}
-    {namesQuery.data?.length === 0 ? <StatePanel state="empty" title="暂无 Agent 配置" /> : null}
-    {namesQuery.data?.length ? <DataTable caption="Agent 配置台账" columns={columns} rows={namesQuery.data} getRowKey={(name) => name} /> : null}
+    {catalog !== null ? <section className={styles.catalog} aria-label="Agent 配置目录">
+      <AgentConfigurationBrief total={catalog.length} canManage={admin} />
+      {catalog.length === 0 ? <StatePanel state="empty" title="暂无 Agent 配置" /> : null}
+      {catalog.length ? <div className={styles.tableViewport}><DataTable caption="Agent 配置台账" columns={columns} rows={catalog} getRowKey={(name) => name} /></div> : null}
+    </section> : null}
 
     {editorOpen ? <div className={styles.editor}>
       <Field label="配置名称" required><Input value={draftName} disabled={!creating || submitting || !admin} maxLength={256} onChange={(_, data) => setDraftName(data.value)} /></Field>
