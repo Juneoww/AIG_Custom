@@ -399,6 +399,11 @@ func TestSwaggerDocumentsImmutableReportAndBrandContracts(t *testing.T) {
 					t.Errorf("immutable RenderModel does not document %s", required)
 				}
 			}
+			assertSwaggerStringEnum(t, renderProperties, "port_scan_mode", []string{"fixed_ai", "full_tcp"})
+			assertSwaggerStringEnum(t, renderProperties, "port_spec", []string{"11434,1337,7000-9000,18789", "1-65535"})
+
+			taskInputSummaryProperties := swaggerValue(t, document, "definitions", "tasks.TaskInputSummary", "properties").(map[string]interface{})
+			assertSwaggerStringEnum(t, taskInputSummaryProperties, "port_scan_mode", []string{"fixed_ai", "full_tcp"})
 			trendSchema := renderProperties["risk_trend"]
 			if min := swaggerValue(t, trendSchema, "minItems"); min != float64(30) && min != 30 {
 				t.Errorf("RenderModel risk_trend minItems = %v, want 30", min)
@@ -873,6 +878,35 @@ func loadSwaggerDocuments(t *testing.T) map[string]interface{} {
 		"embedded": embedded,
 		"json":     decodeSwaggerJSON(t, jsonData),
 		"yaml":     decodeSwaggerJSON(t, normalizedYAML),
+	}
+}
+
+func assertSwaggerStringEnum(t *testing.T, properties map[string]interface{}, property string, want []string) {
+	t.Helper()
+	schema, exists := properties[property].(map[string]interface{})
+	if !exists {
+		t.Errorf("Swagger property %s is absent or invalid", property)
+		return
+	}
+	if schemaType, _ := schema["type"].(string); schemaType != "string" {
+		t.Errorf("Swagger property %s type = %q, want string", property, schemaType)
+	}
+	values, exists := schema["enum"].([]interface{})
+	if !exists {
+		t.Errorf("Swagger property %s has no enum", property)
+		return
+	}
+	got := make([]string, 0, len(values))
+	for _, value := range values {
+		text, ok := value.(string)
+		if !ok {
+			t.Errorf("Swagger property %s enum contains non-string %T", property, value)
+			return
+		}
+		got = append(got, text)
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("Swagger property %s enum = %#v, want %#v", property, got, want)
 	}
 }
 

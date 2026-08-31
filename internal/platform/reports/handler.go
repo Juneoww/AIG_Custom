@@ -169,6 +169,7 @@ func detailOf(snapshot *Snapshot) (ReportDetail, error) {
 	if snapshot == nil || json.Unmarshal(snapshot.RenderData, &render) != nil || render.RenderVersion == "" {
 		return ReportDetail{}, ErrInvalidSnapshot
 	}
+	sanitizeRenderInfrastructurePortScan(snapshot.TaskType, &render)
 	return ReportDetail{ID: snapshot.ID, TaskID: snapshot.TaskID, TaskType: snapshot.TaskType, CompletedAt: snapshot.CompletedAt, CreatedAt: snapshot.CreatedAt, Risk: snapshot.Risk, Render: render}, nil
 }
 

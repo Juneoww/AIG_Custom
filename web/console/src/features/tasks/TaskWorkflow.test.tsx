@@ -12,6 +12,7 @@ import {
   cancelTaskGoverned,
   createTaskSubmission,
   fetchTaskList,
+  parseTaskDetail,
   taskPollDelay,
   type TaskCreateRequest,
 } from './api'
@@ -59,6 +60,13 @@ describe('任务服务端列表合同', () => {
     )
     expect(result).toEqual({ items: [expect.objectContaining({ id: 'task-opaque-1' })], total: 1, page: 2, page_size: 20 })
     expect(JSON.stringify(result)).not.toContain('raw_result')
+  })
+
+  it('详情拒绝未知的端口扫描模式，不将其传给页面', () => {
+    expect(() => parseTaskDetail({
+      ...runningTask,
+      input_summary: { port_scan_mode: 'not-approved' },
+    })).toThrow(ApiError)
   })
 })
 

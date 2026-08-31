@@ -20,7 +20,6 @@
 package runner
 
 import (
-	"bufio"
 	"fmt"
 	"net/http"
 	"os"
@@ -50,16 +49,18 @@ import (
 
 // Runner struct 保存运行指纹扫描所需的所有组件
 type Runner struct {
-	Options     *options.Options          // 配置选项
-	hp          *httpx.HTTPX              // HTTP 客户端
-	hm          *hybrid.HybridMap         // 混合存储
-	rateLimiter ratelimit.Limiter         // 速率限制器
-	result      chan HttpResult           // 结果通道
-	fpEngine    *preload.Runner           // 指纹引擎
-	advEngine   *vulstruct.AdvisoryEngine // 漏洞建议引擎
-	total       int                       // 总目标数
-	done        chan struct{}             // 用于优雅关闭的通道
-	callback    func(interface{})
+	Options              *options.Options          // 配置选项
+	hp                   *httpx.HTTPX              // HTTP 客户端
+	hm                   *hybrid.HybridMap         // 混合存储
+	rateLimiter          ratelimit.Limiter         // 速率限制器
+	result               chan HttpResult           // 结果通道
+	fpEngine             *preload.Runner           // 指纹引擎
+	advEngine            *vulstruct.AdvisoryEngine // 漏洞建议引擎
+	total                int                       // 总目标数
+	done                 chan struct{}             // 用于优雅关闭的通道
+	callback             func(interface{})
+	runHostRequestFunc   func(string) error
+	runDomainRequestFunc func(string) error
 }
 
 type Step01 struct {
@@ -74,14 +75,22 @@ func New(options2 *options.Options) (*Runner, error) {
 		done:    make(chan struct{}), // 初始化done通道用于优雅关闭
 	}
 
+	targets, err := runner.parseTargets()
+	if err != nil {
+		return nil, err
+	}
+
 	// 依次初始化各个组件
 	if err := runner.initStorage(); err != nil {
 		return nil, err
 	}
-
-	if err := runner.processTargets(); err != nil {
-		return nil, err
-	}
+	success := false
+	defer func() {
+		if !success {
+			runner.Close()
+		}
+	}()
+	runner.storeTargets(targets)
 
 	if err := runner.initComponents(); err != nil {
 		return nil, err
@@ -95,6 +104,7 @@ func New(options2 *options.Options) (*Runner, error) {
 		return nil, err
 	}
 
+	success = true
 	return runner, nil
 }
 
@@ -170,74 +180,73 @@ func (r *Runner) initStorage() error {
 	return nil
 }
 
-// processTargetList 处理目标列表
-// 支持处理CIDR格式的IP段和单个目标
-func (r *Runner) processTargetList(targets []string) {
-	for _, t := range targets {
-		if utils.IsCIDR(t) {
-			// 处理CIDR格式
-			cidrIps, err := IPAddresses(t)
-			if err != nil {
-				r.hm.Set(t, nil)
-				r.total++
-			} else {
-				// 展开CIDR中的所有IP
-				for _, ip := range cidrIps {
-					r.hm.Set(ip, nil)
-					r.total++
-				}
-			}
-		} else {
-			// 处理单个目标
-			r.hm.Set(t, nil)
-			r.total++
-		}
-	}
-}
+// collectTargetExpressions gathers raw target expressions from every configured source.
+func (r *Runner) collectTargetExpressions() ([]string, error) {
+	targets := append([]string(nil), r.Options.Target...)
 
-// processTargets 处理所有输入的目标
-// 支持从命令行参数和文件读取目标
-func (r *Runner) processTargets() error {
-	// 处理命令行指定的目标
-	if r.Options.Target != nil {
-		r.processTargetList(r.Options.Target)
-	}
-
-	// 处理目标文件
 	if r.Options.TargetFile != "" {
-		if utils.IsFileExists(r.Options.TargetFile) {
-			file, err := os.Open(r.Options.TargetFile)
-			if err != nil {
-				return err
-			}
-			defer file.Close()
-			scanner := bufio.NewScanner(file)
-			targets := make([]string, 0)
-			for scanner.Scan() {
-				t := strings.TrimSpace(scanner.Text())
-				if t != "" {
-					targets = append(targets, t)
-				}
-			}
-			r.processTargetList(targets)
+		file, err := os.Open(r.Options.TargetFile)
+		if err != nil {
+			return nil, err
+		}
+		defer file.Close()
+
+		targets, err = AppendTargetExpressionReader(targets, file)
+		if err != nil {
+			return nil, err
 		}
 	}
 
 	if r.Options.LocalScan {
 		op, err := utils.GetLocalOpenPorts()
 		if err != nil {
-			gologger.Fatalf("get local open port failed,err:%s", err)
+			return nil, fmt.Errorf("get local open port: %w", err)
 		}
-		var targets []string
 		for _, p := range op {
 			targets = append(targets, p.Address+":"+strconv.Itoa(p.Port))
 		}
-		r.processTargetList(targets)
 	}
+
+	return targets, nil
+}
+
+// parseTargets parses all configured target sources as one batch.
+func (r *Runner) parseTargets() ([]string, error) {
+	expressions, err := r.collectTargetExpressions()
+	if err != nil {
+		return nil, err
+	}
+	if r.Options.PreExpandedTargets {
+		return deduplicatePreparedTargets(expressions), nil
+	}
+	return ParseTargets(expressions)
+}
+
+// deduplicatePreparedTargets retains trusted targets that have already passed
+// ParseTargets while allowing Agent-discovered host:port entries beyond the
+// raw expression expansion limit.
+func deduplicatePreparedTargets(targets []string) []string {
+	result := make([]string, 0, len(targets))
+	seen := make(map[string]struct{}, len(targets))
+	for _, target := range targets {
+		if _, ok := seen[target]; ok {
+			continue
+		}
+		seen[target] = struct{}{}
+		result = append(result, target)
+	}
+	return result
+}
+
+// storeTargets writes the parsed targets to storage and records their final count.
+func (r *Runner) storeTargets(targets []string) {
+	for _, target := range targets {
+		r.hm.Set(target, nil)
+	}
+	r.total = len(targets)
 	if r.total > 0 {
 		gologger.Infof("加载目标数量:%d", r.total)
 	}
-	return nil
 }
 
 // initComponents 初始化基础组件
@@ -268,6 +277,7 @@ func (r *Runner) initComponents() error {
 	// 创建HTTP客户端
 	hp, err := httpx.NewHttpx(httpOptions)
 	if err != nil {
+		dialer.Close()
 		return err
 	}
 	r.hp = hp
@@ -402,8 +412,15 @@ func (r *Runner) runDomainRequest(fullUrl string) error {
 
 // Close cleans up resources used by the Runner
 func (r *Runner) Close() {
-	r.hp.Options.Dialer.Close()
-	_ = r.hm.Close()
+	if r == nil {
+		return
+	}
+	if r.hp != nil && r.hp.Options != nil && r.hp.Options.Dialer != nil {
+		r.hp.Options.Dialer.Close()
+	}
+	if r.hm != nil {
+		_ = r.hm.Close()
+	}
 }
 
 func (r *Runner) callbackProcess(current, total int) {
@@ -436,11 +453,19 @@ func (r *Runner) RunEnumeration() {
 	r.hm.Scan(func(k, _ []byte) error {
 		wg.Add()
 		target := string(k)
-		if !strings.HasPrefix(target, "http") {
+		runHostRequest := r.runHostRequest
+		runDomainRequest := r.runDomainRequest
+		if r.runHostRequestFunc != nil {
+			runHostRequest = r.runHostRequestFunc
+		}
+		if r.runDomainRequestFunc != nil {
+			runDomainRequest = r.runDomainRequestFunc
+		}
+		if !isHTTPURL(target) {
 			go func() {
 				defer wg.Done()
 				r.rateLimiter.Take()
-				err := r.runHostRequest(target)
+				err := runHostRequest(target)
 				if err != nil {
 					if r.Options.Callback != nil {
 						r.Options.Callback(CallbackErrorInfo{
@@ -456,7 +481,7 @@ func (r *Runner) RunEnumeration() {
 			go func() {
 				defer wg.Done()
 				r.rateLimiter.Take()
-				err := r.runDomainRequest(target)
+				err := runDomainRequest(target)
 				if err != nil {
 					if r.Options.Callback != nil {
 						r.Options.Callback(CallbackErrorInfo{

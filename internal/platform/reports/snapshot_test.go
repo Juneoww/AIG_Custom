@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Juneoww/AIG_Custom/common/portscan"
 	"github.com/Juneoww/AIG_Custom/internal/platform/brand"
 	"github.com/Juneoww/AIG_Custom/internal/platform/identity"
 	"github.com/stretchr/testify/assert"
@@ -139,6 +140,39 @@ func TestBuildSnapshotRetainsBrandHistory(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "v1", first.Brand.ProductName)
 	assert.Equal(t, "v2", second.Brand.ProductName)
+}
+
+func TestPreparePersistsOnlyWhitelistedInfrastructurePortScanMetadata(t *testing.T) {
+	ctx := context.Background()
+	service := NewService(NewMemoryRepository(), brand.NewService(brand.NewMemoryRepository()))
+	completedAt := time.Date(2026, 8, 12, 8, 0, 0, 0, time.UTC)
+	for _, testCase := range []struct {
+		name     string
+		taskType string
+		mode     portscan.Mode
+		spec     string
+		wantMode string
+		wantSpec string
+	}{
+		{name: "fixed", taskType: "ai_infra_scan", mode: portscan.FixedAI, spec: portscan.FixedAIPortSpec, wantMode: "fixed_ai", wantSpec: portscan.FixedAIPortSpec},
+		{name: "full", taskType: "ai_infra_scan", mode: portscan.FullTCP, spec: portscan.FullTCPPortSpec, wantMode: "full_tcp", wantSpec: portscan.FullTCPPortSpec},
+		{name: "mismatched spec is omitted", taskType: "ai_infra_scan", mode: portscan.FixedAI, spec: portscan.FullTCPPortSpec},
+		{name: "unknown mode is omitted", taskType: "ai_infra_scan", mode: "agent-supplied", spec: "sentinel-port-spec"},
+		{name: "non infrastructure task is omitted", taskType: "mcp_scan", mode: portscan.FixedAI, spec: portscan.FixedAIPortSpec},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			snapshot, err := service.Prepare(ctx, CompletedTask{
+				TaskID: "report-" + testCase.name, OwnerUserID: "alice", TaskType: testCase.taskType,
+				RawResult: event(`{"score":100,"results":[]}`), CompletedAt: completedAt,
+				PortScanMode: testCase.mode, PortSpec: testCase.spec,
+			})
+			require.NoError(t, err)
+			var render RenderModel
+			require.NoError(t, json.Unmarshal(snapshot.RenderData, &render))
+			assert.Equal(t, testCase.wantMode, render.PortScanMode)
+			assert.Equal(t, testCase.wantSpec, render.PortSpec)
+		})
+	}
 }
 
 func reportSnapshotForTest(t *testing.T, id, taskID, owner string, completedAt time.Time) *Snapshot {

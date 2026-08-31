@@ -12,6 +12,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/Juneoww/AIG_Custom/common/portscan"
 	"github.com/Juneoww/AIG_Custom/internal/platform/brand"
 	"github.com/Juneoww/AIG_Custom/internal/platform/identity"
 	"github.com/Juneoww/AIG_Custom/internal/platform/txcontext"
@@ -750,6 +751,10 @@ func BuildSnapshotAt(taskID, ownerUserID, taskType string, raw json.RawMessage, 
 }
 
 func buildSnapshotAt(taskID, ownerUserID, taskType string, raw json.RawMessage, branding brand.Config, completedAt, generatedAt time.Time, history []TrendPoint) (*Snapshot, error) {
+	return buildSnapshotWithInfrastructurePortScanAt(taskID, ownerUserID, taskType, raw, branding, completedAt, generatedAt, history, "", "")
+}
+
+func buildSnapshotWithInfrastructurePortScanAt(taskID, ownerUserID, taskType string, raw json.RawMessage, branding brand.Config, completedAt, generatedAt time.Time, history []TrendPoint, portScanMode portscan.Mode, portSpec string) (*Snapshot, error) {
 	if strings.TrimSpace(taskID) == "" || strings.TrimSpace(ownerUserID) == "" || strings.TrimSpace(taskType) == "" || completedAt.IsZero() || generatedAt.IsZero() || !json.Valid(raw) {
 		return nil, ErrInvalidSnapshot
 	}
@@ -771,6 +776,10 @@ func buildSnapshotAt(taskID, ownerUserID, taskType string, raw json.RawMessage, 
 		RiskDistribution: RiskDistribution{High: risk.High, Medium: risk.Medium, Low: risk.Low},
 		TopRisks:         topRisksOf(risk), TechnicalFindings: technicalFindings, Recommendations: recommendationsOf(risk),
 		Coverage: technicalCoverage(len(technicalFindings), totalTechnicalFindings), Conclusion: "请根据风险摘要安排修复与复核。",
+	}
+	if mode, spec, valid := trustedInfrastructurePortScan(taskType, portScanMode, portSpec); valid {
+		render.PortScanMode = string(mode)
+		render.PortSpec = spec
 	}
 	renderData, err := json.Marshal(render)
 	if err != nil {

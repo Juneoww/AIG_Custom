@@ -21,8 +21,10 @@ package utils
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"math"
 	"mime/multipart"
 	"net/http"
 	"os"
@@ -33,10 +35,24 @@ import (
 	"github.com/Juneoww/AIG_Custom/internal/gologger"
 )
 
+var ErrDownloadTooLarge = errors.New("download exceeds size limit")
+
 // DownloadFile 下载文件
 // path 参数必须由调用方在调用前完成路径安全校验（防止路径穿越），
 // 本函数仅负责 HTTP 下载写入，不做路径验证。
 func DownloadFile(server, sessionId, uri, path string) error {
+	return downloadFile(server, sessionId, uri, path, nil)
+}
+
+// DownloadFileBounded downloads an attachment without writing more than maxBytes to disk.
+func DownloadFileBounded(server, sessionId, uri, path string, maxBytes int64) error {
+	if maxBytes < 0 || maxBytes >= math.MaxInt64 {
+		return fmt.Errorf("download size limit is not representable")
+	}
+	return downloadFile(server, sessionId, uri, path, &maxBytes)
+}
+
+func downloadFile(server, sessionId, uri, path string, maxBytes *int64) error {
 	// Validate that path is not empty and does not contain path traversal sequences.
 	// Callers are responsible for ensuring path is within an expected directory.
 	if path == "" || strings.Contains(path, "..") {
@@ -70,8 +86,22 @@ func DownloadFile(server, sessionId, uri, path string) error {
 
 	// 检查 HTTP 状态码
 	if resp.StatusCode != http.StatusOK {
+		if maxBytes != nil {
+			return fmt.Errorf("下载失败，HTTP 状态码：%d", resp.StatusCode)
+		}
 		dd, _ := io.ReadAll(resp.Body)
 		return fmt.Errorf("下载失败，HTTP 状态码：%d content:%s", resp.StatusCode, string(dd))
+	}
+
+	if maxBytes != nil {
+		contents, readErr := io.ReadAll(io.LimitReader(resp.Body, *maxBytes+1))
+		if readErr != nil {
+			return readErr
+		}
+		if int64(len(contents)) > *maxBytes {
+			return ErrDownloadTooLarge
+		}
+		return os.WriteFile(path, contents, 0600)
 	}
 
 	// 创建文件
@@ -83,11 +113,7 @@ func DownloadFile(server, sessionId, uri, path string) error {
 
 	// 将响应体复制到文件
 	_, err = io.Copy(file, resp.Body)
-	if err != nil {
-		return err
-	}
-
-	return nil
+	return err
 }
 
 // UploadFileResponse 上传文件响应结构

@@ -1,14 +1,13 @@
 /**
  * 功能：为企业控制台准备经过审查的离线字体与发布许可。
- * 实现：在唯一临时树校验固定白名单，再以失败关闭方式替换 Vite publicDir。
+ * 实现：在唯一临时树校验固定白名单；IBM 许可证来源只将 CRLF 规范为 LF 后校验，其余资产逐字节校验，再以失败关闭方式替换 Vite publicDir。
  * 输入：仓库内 IBM 资产，以及可由环境变量指定的 Droid 字体和许可源。
  * 输出：仅含固定 fonts 与 licenses 白名单的 .generated 目录。
  * 依赖：Node.js 22 的 fs、path、crypto 与 url 标准库。
  * 用法：pnpm run prepare:fonts
  */
 import { createHash, randomUUID } from 'node:crypto'
-import { constants as fsConstants } from 'node:fs'
-import { copyFile, lstat, mkdir, mkdtemp, readFile, rename, rm, stat } from 'node:fs/promises'
+import { lstat, mkdir, mkdtemp, readFile, rename, rm, stat, writeFile } from 'node:fs/promises'
 import { dirname, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
@@ -49,6 +48,7 @@ const assets = [
     name: 'IBM_PLEX_LICENSE.txt',
     directory: 'licenses',
     source: resolve(consoleRoot, 'assets/fonts/IBM_PLEX_LICENSE.txt'),
+    normalizeLineEndings: true,
     bytes: 4_362,
     sha256: 'd741e57d5f865e294df801f96b7b5161a88b211df65887e4358d271c9fc5fb4f',
   },
@@ -68,17 +68,37 @@ const assets = [
   },
 ]
 
-async function verifyAsset(path, asset, requirePlainFile = false) {
+function normalizeAssetContent(content, asset) {
+  if (!asset.normalizeLineEndings) return content
+  const normalized = Buffer.allocUnsafe(content.length)
+  let destination = 0
+  for (let source = 0; source < content.length; source += 1) {
+    if (content[source] === 0x0d && content[source + 1] === 0x0a) {
+      normalized[destination] = 0x0a
+      destination += 1
+      source += 1
+      continue
+    }
+    normalized[destination] = content[source]
+    destination += 1
+  }
+  return normalized.subarray(0, destination)
+}
+
+async function verifyAsset(path, asset, requirePlainFile = false, normalizeLineEndings = false) {
   try {
     const metadata = requirePlainFile ? await lstat(path) : await stat(path)
-    const hash = createHash('sha256').update(await readFile(path)).digest('hex')
+    const rawContent = await readFile(path)
+    const content = normalizeLineEndings ? normalizeAssetContent(rawContent, asset) : rawContent
+    const hash = createHash('sha256').update(content).digest('hex')
     if (
-      metadata.size !== asset.bytes ||
+      content.length !== asset.bytes ||
       hash !== asset.sha256 ||
       (requirePlainFile && (!metadata.isFile() || metadata.isSymbolicLink()))
     ) {
       throw new Error('mismatch')
     }
+    return content
   } catch {
     throw new Error(`字体资产校验失败：${asset.name}`)
   }
@@ -104,9 +124,9 @@ async function populateTemporaryTree(temporaryDirectory) {
   await mkdir(resolve(temporaryDirectory, 'licenses'))
 
   for (const asset of assets) {
-    await verifyAsset(asset.source, asset)
+    const content = await verifyAsset(asset.source, asset, false, asset.normalizeLineEndings === true)
     const destination = resolve(temporaryDirectory, asset.directory, asset.name)
-    await copyFile(asset.source, destination, fsConstants.COPYFILE_EXCL)
+    await writeFile(destination, content, { flag: 'wx' })
     await verifyAsset(destination, asset, true)
   }
 }

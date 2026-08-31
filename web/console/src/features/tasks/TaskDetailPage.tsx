@@ -26,6 +26,10 @@ const useStyles = makeStyles({
 })
 
 const terminal = new Set(['succeeded', 'failed', 'cancelled'])
+const portScanModeLabels = {
+  fixed_ai: '固定 AI 端口（11434、1337、7000–9000、18789）',
+  full_tcp: '全量 TCP 1–65535',
+} as const
 
 export function TaskDetailPage() {
   const styles = useStyles()
@@ -88,6 +92,7 @@ export function TaskDetailPage() {
             {query.data.input_summary.language ? <div className={styles.fact}><Text className={styles.label}>语言</Text><Text>{query.data.input_summary.language === 'zh' ? '中文' : '英文'}</Text></div> : null}
             {query.data.input_summary.thread ? <div className={styles.fact}><Text className={styles.label}>并发数</Text><Text>{query.data.input_summary.thread}</Text></div> : null}
             {query.data.input_summary.timeout ? <div className={styles.fact}><Text className={styles.label}>超时秒数</Text><Text>{query.data.input_summary.timeout}</Text></div> : null}
+            {query.data.input_summary.port_scan_mode ? <div className={styles.fact}><Text className={styles.label}>端口扫描模式</Text><Text>{portScanModeLabels[query.data.input_summary.port_scan_mode]}</Text></div> : null}
             {query.data.input_summary.target_count ? <div className={styles.fact}><Text className={styles.label}>目标数量</Text><Text>{query.data.input_summary.target_count}</Text></div> : null}
             {query.data.input_summary.num_prompts ? <div className={styles.fact}><Text className={styles.label}>提示词数量</Text><Text>{query.data.input_summary.num_prompts}</Text></div> : null}
           </div>

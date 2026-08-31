@@ -81,6 +81,10 @@ function parseInputSummary(value: unknown): TaskInputSummary | undefined {
     if (source.language !== 'zh' && source.language !== 'en') return undefined
     result.language = source.language
   }
+  if (source.port_scan_mode !== undefined) {
+    if (source.port_scan_mode !== 'fixed_ai' && source.port_scan_mode !== 'full_tcp') return undefined
+    result.port_scan_mode = source.port_scan_mode
+  }
   for (const [wire, key, maximum] of [
     ['thread', 'thread', 1_024],
     ['timeout', 'timeout', 86_400],

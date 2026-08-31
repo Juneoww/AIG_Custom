@@ -230,6 +230,99 @@ describe('任务页面', () => {
     expect(screen.queryByLabelText(/密钥|Token|API Key/i)).not.toBeInTheDocument()
   })
 
+  it.each(['fixed_ai', 'full_tcp'] as const)('AI 基础设施扫描提交显式发送端口扫描模式 %s', async (portScanMode) => {
+    const fetchMock = vi.fn().mockResolvedValue(jsonResponse(task))
+    vi.stubGlobal('fetch', fetchMock)
+    renderPage(
+      <TaskCreatePage />,
+      { id: 'user-1', username: 'alice', role: 'user', must_change_password: false },
+      '/tasks/new',
+    )
+    fireEvent.change(screen.getByRole('combobox', { name: '扫描类型' }), { target: { value: 'ai_infra_scan' } })
+    fireEvent.change(screen.getByRole('textbox', { name: '扫描目标或任务说明' }), { target: { value: '192.0.2.10' } })
+    if (portScanMode === 'full_tcp') {
+      fireEvent.change(screen.getByRole('combobox', { name: '端口扫描模式' }), { target: { value: portScanMode } })
+    }
+
+    screen.getByRole('button', { name: '创建任务' }).click()
+
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1))
+    const body = JSON.parse(String((fetchMock.mock.calls[0]?.[1] as RequestInit).body))
+    expect(body).toEqual(expect.objectContaining({
+      task_type: 'ai_infra_scan',
+      params: { timeout: 300, port_scan_mode: portScanMode },
+    }))
+  })
+
+  it('非 AI 任务既不显示也不发送端口扫描模式', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(jsonResponse(task))
+    vi.stubGlobal('fetch', fetchMock)
+    renderPage(
+      <TaskCreatePage />,
+      { id: 'user-1', username: 'alice', role: 'user', must_change_password: false },
+      '/tasks/new',
+    )
+    expect(screen.queryByRole('combobox', { name: '端口扫描模式' })).not.toBeInTheDocument()
+    fireEvent.change(screen.getByRole('textbox', { name: '扫描目标或任务说明' }), { target: { value: 'https://example.test' } })
+
+    screen.getByRole('button', { name: '创建任务' }).click()
+
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1))
+    const body = JSON.parse(String((fetchMock.mock.calls[0]?.[1] as RequestInit).body))
+    expect(body.params).toEqual({ thread: 4 })
+    expect(body.params).not.toHaveProperty('port_scan_mode')
+  })
+
+  it.each([
+    {
+      taskType: 'mcp_scan',
+      fields: [] as Array<[string, string]>,
+      params: { thread: 4 },
+    },
+    {
+      taskType: 'model_redteam_report',
+      fields: [
+        ['评测模型 ID（逗号分隔）', 'model-1'],
+        ['裁判模型 ID', 'eval-model-1'],
+      ] as Array<[string, string]>,
+      params: {
+        model_id: ['model-1'],
+        eval_model_id: 'eval-model-1',
+        dataset: { numPrompts: 100 },
+      },
+    },
+    {
+      taskType: 'agent_scan',
+      fields: [
+        ['Agent 配置 ID', 'agent-config-1'],
+        ['裁判模型 ID', 'eval-model-1'],
+      ] as Array<[string, string]>,
+      params: { agent_id: 'agent-config-1', eval_model_id: 'eval-model-1' },
+    },
+  ])('从 full_tcp 切换为 $taskType 后不提交端口扫描模式', async ({ taskType, fields, params }) => {
+    const fetchMock = vi.fn().mockResolvedValue(jsonResponse(task))
+    vi.stubGlobal('fetch', fetchMock)
+    renderPage(
+      <TaskCreatePage />,
+      { id: 'user-1', username: 'alice', role: 'user', must_change_password: false },
+      '/tasks/new',
+    )
+    fireEvent.change(screen.getByRole('combobox', { name: '扫描类型' }), { target: { value: 'ai_infra_scan' } })
+    fireEvent.change(screen.getByRole('combobox', { name: '端口扫描模式' }), { target: { value: 'full_tcp' } })
+    fireEvent.change(screen.getByRole('combobox', { name: '扫描类型' }), { target: { value: taskType } })
+    fireEvent.change(screen.getByRole('textbox', { name: '扫描目标或任务说明' }), { target: { value: '安全评测说明' } })
+    for (const [label, value] of fields) {
+      fireEvent.change(screen.getByRole('textbox', { name: label }), { target: { value } })
+    }
+
+    screen.getByRole('button', { name: '创建任务' }).click()
+
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1))
+    const body = JSON.parse(String((fetchMock.mock.calls[0]?.[1] as RequestInit).body))
+    expect(body).toEqual(expect.objectContaining({ task_type: taskType, params }))
+    expect(body.params).not.toHaveProperty('port_scan_mode')
+  })
+
   it.each([
     {
       taskType: 'model_redteam_report',
@@ -359,5 +452,119 @@ describe('任务页面', () => {
     download.click()
 
     expect(await screen.findByText('附件下载失败，请稍后重试。')).toBeInTheDocument()
+  })
+
+  it('AI 基础设施扫描显示固定端口模式并在切换任务类型时隐藏', () => {
+    vi.stubGlobal('fetch', vi.fn())
+    renderPage(
+      <TaskCreatePage />,
+      { id: 'user-1', username: 'alice', role: 'user', must_change_password: false },
+      '/tasks/new',
+    )
+
+    expect(screen.queryByText('AI 基础设施扫描目标格式')).not.toBeInTheDocument()
+    expect(screen.queryByRole('combobox', { name: '端口扫描模式' })).not.toBeInTheDocument()
+
+    fireEvent.change(screen.getByRole('combobox', { name: '扫描类型' }), { target: { value: 'ai_infra_scan' } })
+
+    expect(screen.getByText('AI 基础设施扫描目标格式')).toBeInTheDocument()
+    expect(screen.getByText(/最多 65,536 个展开后的唯一目标/)).toBeInTheDocument()
+    expect(screen.getByRole('combobox', { name: '端口扫描模式' })).toHaveValue('fixed_ai')
+    expect(screen.getByText('固定 AI 端口：11434、1337、7000–9000、18789（共 2,004 个端口）。')).toBeInTheDocument()
+
+    fireEvent.change(screen.getByRole('combobox', { name: '扫描类型' }), { target: { value: 'mcp_scan' } })
+
+    expect(screen.queryByText('AI 基础设施扫描目标格式')).not.toBeInTheDocument()
+    expect(screen.queryByRole('combobox', { name: '端口扫描模式' })).not.toBeInTheDocument()
+  })
+
+  it('全量 TCP 模式明确提示裸 IPv4 限制、网络压力和授权要求', () => {
+    vi.stubGlobal('fetch', vi.fn())
+    renderPage(
+      <TaskCreatePage />,
+      { id: 'user-1', username: 'alice', role: 'user', must_change_password: false },
+      '/tasks/new',
+    )
+    fireEvent.change(screen.getByRole('combobox', { name: '扫描类型' }), { target: { value: 'ai_infra_scan' } })
+    fireEvent.change(screen.getByRole('combobox', { name: '端口扫描模式' }), { target: { value: 'full_tcp' } })
+
+    expect(screen.getByText('全量 TCP 1–65535')).toBeInTheDocument()
+    expect(screen.getByText('仅对裸 IPv4 执行 TCP 1–65535；会显著增加扫描耗时和网络压力，请仅扫描已获授权的目标。URL 和域名继续沿用现有 Web 扫描路径。')).toBeInTheDocument()
+  })
+
+  it.each([
+    ['fixed_ai', '固定 AI 端口（11434、1337、7000–9000、18789）'],
+    ['full_tcp', '全量 TCP 1–65535'],
+  ] as const)('详情只显示已白名单端口扫描模式的本地映射：%s', async (portScanMode, display) => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(jsonResponse({
+      ...task,
+      task_type: 'ai_infra_scan',
+      input_summary: { port_scan_mode: portScanMode },
+      params: { port_scan_mode: 'raw-value-must-not-render' },
+    })))
+    renderPage(
+      <TaskDetailPage />,
+      { id: 'user-1', username: 'alice', role: 'user', must_change_password: false },
+      '/tasks/task-opaque-1',
+      '/tasks/:taskId',
+    )
+
+    expect(await screen.findByText('端口扫描模式')).toBeInTheDocument()
+    expect(screen.getByText(display)).toBeInTheDocument()
+    expect(screen.queryByText('raw-value-must-not-render')).not.toBeInTheDocument()
+  })
+
+  it('AI 基础设施扫描实时显示范围展开预览', () => {
+    vi.stubGlobal('fetch', vi.fn())
+    renderPage(
+      <TaskCreatePage />,
+      { id: 'user-1', username: 'alice', role: 'user', must_change_password: false },
+      '/tasks/new',
+    )
+    fireEvent.change(screen.getByRole('combobox', { name: '扫描类型' }), { target: { value: 'ai_infra_scan' } })
+    fireEvent.change(screen.getByRole('textbox', { name: '扫描目标或任务说明' }), {
+      target: { value: '192.168.10.2-192.168.10.10' },
+    })
+
+    expect(screen.getByText('已识别 9 个目标')).toBeInTheDocument()
+  })
+
+  it('AI 基础设施扫描在本地预览发现明显非法格式时不提交', async () => {
+    const fetchMock = vi.fn()
+    vi.stubGlobal('fetch', fetchMock)
+    renderPage(
+      <TaskCreatePage />,
+      { id: 'user-1', username: 'alice', role: 'user', must_change_password: false },
+      '/tasks/new',
+    )
+    fireEvent.change(screen.getByRole('combobox', { name: '扫描类型' }), { target: { value: 'ai_infra_scan' } })
+    const targetField = screen.getByRole('textbox', { name: '扫描目标或任务说明' })
+    fireEvent.change(targetField, { target: { value: '22.*.10.*' } })
+
+    screen.getByRole('button', { name: '创建任务' }).click()
+
+    expect(await screen.findByRole('alert')).toHaveTextContent('目标格式无效：IPv4 通配符必须从某一段开始连续出现在末尾，例如 22.2.10.*。')
+    expect(targetField).toHaveAttribute('aria-invalid', 'true')
+    expect(targetField).toHaveAttribute('aria-describedby', 'ai-infra-target-guidance ai-infra-target-preview')
+    expect(fetchMock).not.toHaveBeenCalled()
+  })
+
+  it('AI 基础设施扫描保留服务端 400 的安全错误反馈', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(new Response(null, { status: 400 }))
+    vi.stubGlobal('fetch', fetchMock)
+    renderPage(
+      <TaskCreatePage />,
+      { id: 'user-1', username: 'alice', role: 'user', must_change_password: false },
+      '/tasks/new',
+    )
+    fireEvent.change(screen.getByRole('combobox', { name: '扫描类型' }), { target: { value: 'ai_infra_scan' } })
+    fireEvent.change(screen.getByRole('textbox', { name: '扫描目标或任务说明' }), {
+      target: { value: '192.168.10.2-192.168.10.10' },
+    })
+
+    screen.getByRole('button', { name: '创建任务' }).click()
+
+    expect(await screen.findByText('请求内容无效。')).toBeInTheDocument()
+    expect(fetchMock).toHaveBeenCalledTimes(1)
   })
 })

@@ -122,6 +122,33 @@ describe('ReportListPage', () => {
 })
 
 describe('ReportDetailPage', () => {
+  it.each([
+    ['固定 AI 端口', 'fixed_ai', '11434,1337,7000-9000,18789', '固定 AI 端口（11434、1337、7000–9000、18789）'],
+    ['全量 TCP', 'full_tcp', '1-65535', '全量 TCP（1–65535）'],
+  ])('只用本地映射展示%s扫描模式', async (_label, portScanMode, portSpec, expectedLabel) => {
+    const report = detail({ task_type: 'ai_infra_scan' })
+    Object.assign(report.render, {
+      task_type: 'ai_infra_scan',
+      port_scan_mode: portScanMode,
+      port_spec: portSpec,
+    })
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(jsonResponse(report)))
+    renderAt(<ReportDetailPage />, '/reports/report-opaque-1', '/reports/:reportId')
+
+    expect(await screen.findByText('端口扫描模式')).toBeInTheDocument()
+    expect(screen.getByText(expectedLabel)).toBeInTheDocument()
+    expect(document.body).not.toHaveTextContent(portScanMode)
+    expect(document.body).not.toHaveTextContent(portSpec)
+  })
+
+  it('旧报告不展示端口扫描模式', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(jsonResponse(detail())))
+    renderAt(<ReportDetailPage />, '/reports/report-opaque-1', '/reports/:reportId')
+
+    await screen.findByRole('heading', { level: 1, name: '安全报告详情' })
+    expect(screen.queryByText('端口扫描模式')).not.toBeInTheDocument()
+  })
+
   it('只呈现同一不可变快照并按高、中、低稳定排序', async () => {
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue(jsonResponse(detail())))
     renderAt(<ReportDetailPage />, '/reports/report-opaque-1', '/reports/:reportId')

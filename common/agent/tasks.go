@@ -19,19 +19,23 @@
 package agent
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
+	"net/netip"
 	"os"
 	"path"
-	"path/filepath"
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/Juneoww/AIG_Custom/pkg/vulstruct"
-	iputil "github.com/projectdiscovery/utils/ip"
 
+	"github.com/Juneoww/AIG_Custom/common/portscan"
 	"github.com/Juneoww/AIG_Custom/common/utils"
 
 	"github.com/Juneoww/AIG_Custom/common/utils/models"
@@ -80,10 +84,11 @@ type TaskInterface interface {
 
 // ScanRequest 扫描请求结构
 type ScanRequest struct {
-	Target  []string          `json:"-"`
-	Headers map[string]string `json:"headers"`
-	Timeout int               `json:"timeout,omitempty"`
-	Model   struct {
+	Target       []string          `json:"-"`
+	Headers      map[string]string `json:"headers"`
+	Timeout      int               `json:"timeout,omitempty"`
+	PortScanMode string            `json:"port_scan_mode,omitempty"`
+	Model        struct {
 		Model   string `json:"model"`
 		Token   string `json:"token"`
 		BaseUrl string `json:"base_url"`
@@ -91,8 +96,17 @@ type ScanRequest struct {
 }
 
 type AIInfraScanAgent struct {
-	Server string
+	Server       string
+	downloadFile func(server, sessionID, uri, destination string, maxBytes int64) error
+	nmapScan     func(target, ports string) (*utils.NmapRun, error)
 }
+
+const (
+	maxTargetListAttachmentBytes int64 = 1 << 20
+	maxDiscoveredScanEndpoints         = 65536
+)
+
+var errInvalidTargetListAttachment = errors.New("invalid target-list attachment")
 
 func logAgentAttachmentTransfer(action, sessionID, taskType string) {
 	gologger.Infof("agent attachment transfer: action=%s session_id=%s task_type=%s", action, sessionID, taskType)
@@ -106,12 +120,15 @@ func (t *AIInfraScanAgent) GetName() string {
 	return TaskTypeAIInfraScan
 }
 func (t *AIInfraScanAgent) Execute(ctx context.Context, request TaskRequest, callbacks TaskCallbacks) error {
-	var reqScan ScanRequest
-	if len(request.Params) > 0 {
-		if err := json.Unmarshal(request.Params, &reqScan); err != nil {
-			return err
-		}
+	reqScan, err := decodeScanRequest(request.Params)
+	if err != nil {
+		return err
 	}
+	portScanMode, err := normalizePortScanMode(reqScan.PortScanMode)
+	if err != nil {
+		return err
+	}
+	reqScan.PortScanMode = string(portScanMode)
 
 	language := request.Language
 	if language == "" {
@@ -146,7 +163,87 @@ func (t *AIInfraScanAgent) Execute(ctx context.Context, request TaskRequest, cal
 		}
 	}
 
-	return t.executeScan(ctx, request, reqScan, texts, callbacks, model)
+	return t.executeScan(ctx, request, reqScan, portScanMode, texts, callbacks, model)
+}
+
+func normalizePortScanMode(value string) (portscan.Mode, error) {
+	mode, err := portscan.Normalize(value)
+	if err != nil {
+		return "", fmt.Errorf("invalid port scan mode: %w", err)
+	}
+	return mode, nil
+}
+
+func decodeScanRequest(params json.RawMessage) (ScanRequest, error) {
+	var request ScanRequest
+	if len(params) == 0 {
+		return request, nil
+	}
+
+	mode, hasMode, err := decodePortScanMode(params)
+	if err != nil {
+		return request, err
+	}
+
+	if err := json.Unmarshal(params, &request); err != nil {
+		return request, err
+	}
+	if hasMode {
+		request.PortScanMode = mode
+	}
+	return request, nil
+}
+
+func decodePortScanMode(params json.RawMessage) (string, bool, error) {
+	decoder := json.NewDecoder(bytes.NewReader(params))
+	token, err := decoder.Token()
+	if err != nil {
+		return "", false, err
+	}
+	delimiter, isObject := token.(json.Delim)
+	if !isObject || delimiter != '{' {
+		return "", false, nil
+	}
+
+	var mode string
+	var hasMode bool
+	for decoder.More() {
+		token, err := decoder.Token()
+		if err != nil {
+			return "", false, err
+		}
+		field, isString := token.(string)
+		if !isString {
+			return "", false, invalidPortScanModeError("field name must be a string")
+		}
+
+		var rawValue json.RawMessage
+		if err := decoder.Decode(&rawValue); err != nil {
+			return "", false, err
+		}
+		if !strings.EqualFold(field, "port_scan_mode") {
+			continue
+		}
+		if field != "port_scan_mode" || hasMode {
+			return "", false, invalidPortScanModeError("field name must be canonical and unique")
+		}
+
+		if bytes.Equal(bytes.TrimSpace(rawValue), []byte("null")) {
+			return "", false, invalidPortScanModeError("value must be a string")
+		}
+		if err := json.Unmarshal(rawValue, &mode); err != nil {
+			return "", false, invalidPortScanModeError("value must be a string")
+		}
+		hasMode = true
+	}
+	if _, err := decoder.Token(); err != nil {
+		return "", false, err
+	}
+	return mode, hasMode, nil
+}
+
+func invalidPortScanModeError(reason string) error {
+	return fmt.Errorf("invalid port scan mode (%s): %w", reason, portscan.ErrInvalidMode)
 }
 
 // scanTexts 包含所有语言相关的文本
@@ -263,50 +360,98 @@ func initTexts(language string) scanTexts {
 
 // prepareTargets 处理目标和附件
 func (t *AIInfraScanAgent) prepareTargets(request TaskRequest, reqScan ScanRequest, texts scanTexts) ([]string, error) {
-	targets := strings.Split(strings.TrimSpace(request.Content), "\n")
-
-	if len(request.Attachments) == 0 {
-		return targets, nil
+	targets, err := runner.AppendTargetExpressionLines(nil, request.Content)
+	if err != nil {
+		return nil, fmt.Errorf("invalid infrastructure scan target expressions")
 	}
 
-	tempDir := "temp_uploads"
-	if err := os.MkdirAll(tempDir, 0755); err != nil {
-		gologger.Errorf("%s: %v", texts.createTempDir, err)
-		return nil, err
-	}
-
-	for _, file := range request.Attachments {
-		logAgentAttachmentTransfer("download_started", request.SessionId, TaskTypeAIInfraScan)
-		fileName := filepath.Join(tempDir, fmt.Sprintf("tmp-%d%s", time.Now().UnixMicro(), filepath.Ext(file)))
-		// Verify the path is within tempDir to prevent path traversal
-		absTempDir, _ := filepath.Abs(tempDir)
-		absFileName, _ := filepath.Abs(fileName)
-		if !strings.HasPrefix(absFileName, absTempDir+string(os.PathSeparator)) {
-			logAgentAttachmentFailure("download_rejected", request.SessionId, TaskTypeAIInfraScan, nil)
-			return nil, fmt.Errorf("非法文件路径")
-		}
-		if err := utils.DownloadFile(t.Server, request.SessionId, file, fileName); err != nil {
-			logAgentAttachmentFailure("download_failed", request.SessionId, TaskTypeAIInfraScan, err)
-			return nil, err
-		}
-		lines, err := os.ReadFile(fileName)
+	if len(request.Attachments) > 0 {
+		tempDir, err := os.MkdirTemp("", "aig-target-list-")
 		if err != nil {
-			logAgentAttachmentFailure("read_failed", request.SessionId, TaskTypeAIInfraScan, err)
-			return nil, err
+			gologger.Errorf("%s", texts.createTempDir)
+			return nil, errInvalidTargetListAttachment
 		}
-		targets = append(targets, strings.Split(string(lines), "\n")...)
+		defer func() { _ = os.RemoveAll(tempDir) }()
+		downloadFile := t.downloadFile
+		if downloadFile == nil {
+			downloadFile = utils.DownloadFileBounded
+		}
+
+		for _, file := range request.Attachments {
+			logAgentAttachmentTransfer("download_started", request.SessionId, TaskTypeAIInfraScan)
+			targetListFile, createErr := os.CreateTemp(tempDir, "target-list-")
+			if createErr != nil {
+				logAgentAttachmentFailure("create_failed", request.SessionId, TaskTypeAIInfraScan, createErr)
+				return nil, errInvalidTargetListAttachment
+			}
+			fileName := targetListFile.Name()
+			if closeErr := targetListFile.Close(); closeErr != nil {
+				logAgentAttachmentFailure("create_failed", request.SessionId, TaskTypeAIInfraScan, closeErr)
+				return nil, errInvalidTargetListAttachment
+			}
+			if downloadErr := downloadFile(t.Server, request.SessionId, file, fileName, maxTargetListAttachmentBytes); downloadErr != nil {
+				logAgentAttachmentFailure("download_failed", request.SessionId, TaskTypeAIInfraScan, downloadErr)
+				return nil, errInvalidTargetListAttachment
+			}
+			contents, readErr := readTargetListAttachment(fileName)
+			if readErr != nil {
+				logAgentAttachmentFailure("read_failed", request.SessionId, TaskTypeAIInfraScan, readErr)
+				return nil, errInvalidTargetListAttachment
+			}
+			targets, readErr = runner.AppendTargetExpressionLines(targets, string(contents))
+			if readErr != nil {
+				logAgentAttachmentFailure("read_failed", request.SessionId, TaskTypeAIInfraScan, readErr)
+				return nil, errInvalidTargetListAttachment
+			}
+		}
 	}
 
-	return targets, nil
+	expanded, err := runner.ParseTargets(targets)
+	if err != nil {
+		return nil, fmt.Errorf("invalid infrastructure scan target expressions")
+	}
+	return expanded, nil
+}
+
+func readTargetListAttachment(fileName string) ([]byte, error) {
+	preOpenInfo, err := os.Lstat(fileName)
+	if err != nil || !preOpenInfo.Mode().IsRegular() || preOpenInfo.Size() > maxTargetListAttachmentBytes {
+		return nil, errInvalidTargetListAttachment
+	}
+	file, err := os.Open(fileName)
+	if err != nil {
+		return nil, errInvalidTargetListAttachment
+	}
+	postOpenInfo, statErr := file.Stat()
+	if statErr != nil || !postOpenInfo.Mode().IsRegular() || !os.SameFile(preOpenInfo, postOpenInfo) || postOpenInfo.Size() > maxTargetListAttachmentBytes {
+		_ = file.Close()
+		return nil, errInvalidTargetListAttachment
+	}
+	contents, readErr := io.ReadAll(io.LimitReader(file, maxTargetListAttachmentBytes+1))
+	closeErr := file.Close()
+	if readErr != nil || closeErr != nil || int64(len(contents)) > maxTargetListAttachmentBytes || !utf8.Valid(contents) {
+		return nil, errInvalidTargetListAttachment
+	}
+	return contents, nil
 }
 
 // scanPortsAndPrepareTargets 扫描端口并准备最终目标列表
-func (t *AIInfraScanAgent) scanPortsAndPrepareTargets(targets []string, step01 string, texts scanTexts, callbacks TaskCallbacks) ([]string, error) {
+func (t *AIInfraScanAgent) scanPortsAndPrepareTargets(targets []string, mode portscan.Mode, step01 string, texts scanTexts, callbacks TaskCallbacks) ([]string, error) {
+	portSpec := portscan.PortSpec(mode)
+	if portSpec == "" {
+		return nil, fmt.Errorf("invalid port scan mode: %w", portscan.ErrInvalidMode)
+	}
+	nmapArgs := fmt.Sprintf("-T4 -p %s", portSpec)
 	finalTargets := []string{}
 	var hosts []string
+	discoveredEndpoints := 0
+	nmapScan := t.nmapScan
+	if nmapScan == nil {
+		nmapScan = utils.NmapScan
+	}
 
 	for _, target := range targets {
-		if iputil.IsIP(target) {
+		if address, err := netip.ParseAddr(target); err == nil && address.Is4() {
 			hosts = append(hosts, target)
 		}
 		finalTargets = append(finalTargets, target)
@@ -317,10 +462,10 @@ func (t *AIInfraScanAgent) scanPortsAndPrepareTargets(targets []string, step01 s
 		toolId := uuid.NewString()
 		callbacks.StepStatusUpdateCallback(step01, statusNmap, AgentStatusRunning, texts.portDetection, fmt.Sprintf(texts.portDetectDescTemplate, host))
 		callbacks.ToolUsedCallback(step01, statusNmap, texts.nmapTool, []Tool{
-			CreateTool(toolId, texts.nmapTool, SubTaskStatusDoing, texts.portScan, texts.nmapTool, "-T4 -p 11434,1337,7000-9000,18789", ""),
+			CreateTool(toolId, texts.nmapTool, SubTaskStatusDoing, texts.portScan, texts.nmapTool, nmapArgs, ""),
 		})
 
-		portScanResult, err := utils.NmapScan(host, "11434,1337,7000-9000,18789")
+		portScanResult, err := nmapScan(host, portSpec)
 		if err != nil {
 			return nil, err
 		}
@@ -330,7 +475,11 @@ func (t *AIInfraScanAgent) scanPortsAndPrepareTargets(targets []string, step01 s
 			address := port.Address.Addr
 			for _, ported := range port.Ports.PortList {
 				if ported.State.State == "open" {
+					if discoveredEndpoints >= maxDiscoveredScanEndpoints {
+						return nil, fmt.Errorf("discovered scan endpoint limit exceeded")
+					}
 					finalTargets = append(finalTargets, fmt.Sprintf("%s:%d", address, ported.PortID))
+					discoveredEndpoints++
 					success += 1
 					callbacks.ToolUseLogCallback(toolId, texts.nmapTool, step01, fmt.Sprintf("%s: %s:%d\n", texts.foundPort, address, ported.PortID))
 				}
@@ -338,7 +487,7 @@ func (t *AIInfraScanAgent) scanPortsAndPrepareTargets(targets []string, step01 s
 		}
 
 		callbacks.ToolUsedCallback(step01, statusNmap, texts.nmapTool, []Tool{
-			CreateTool(toolId, texts.nmapTool, SubTaskStatusDone, texts.portScan, texts.nmapTool, "-T4", fmt.Sprintf("%s: %d", texts.portCount, success)),
+			CreateTool(toolId, texts.nmapTool, SubTaskStatusDone, texts.portScan, texts.nmapTool, nmapArgs, fmt.Sprintf("%s: %d", texts.portCount, success)),
 		})
 		callbacks.StepStatusUpdateCallback(step01, statusNmap, AgentStatusCompleted, fmt.Sprintf(texts.portCompleteTemplate, host), "")
 	}
@@ -347,7 +496,7 @@ func (t *AIInfraScanAgent) scanPortsAndPrepareTargets(targets []string, step01 s
 }
 
 // executeScan 执行扫描任务的统一入口
-func (t *AIInfraScanAgent) executeScan(ctx context.Context, request TaskRequest, reqScan ScanRequest, texts scanTexts, callbacks TaskCallbacks, model *models.OpenAI) error {
+func (t *AIInfraScanAgent) executeScan(ctx context.Context, request TaskRequest, reqScan ScanRequest, portScanMode portscan.Mode, texts scanTexts, callbacks TaskCallbacks, model *models.OpenAI) error {
 	// 创建任务计划
 	taskTitles := []string{texts.initEnv, texts.execScan, texts.genReport}
 	var tasks []SubTask
@@ -380,11 +529,12 @@ func (t *AIInfraScanAgent) executeScan(ctx context.Context, request TaskRequest,
 	opts.Headers = headers
 
 	// 扫描端口并准备目标
-	targets, err := t.scanPortsAndPrepareTargets(reqScan.Target, step01, texts, callbacks)
+	targets, err := t.scanPortsAndPrepareTargets(reqScan.Target, portScanMode, step01, texts, callbacks)
 	if err != nil {
 		return err
 	}
 	opts.Target = targets
+	opts.PreExpandedTargets = true
 
 	// AI模式下的初始化反馈
 	if model != nil {

@@ -10,6 +10,7 @@ import { ApiError } from '../../shared/api/errors'
 
 export type ReportTaskType = 'mcp_scan' | 'ai_infra_scan' | 'model_redteam_report' | 'agent_scan'
 export type RiskSeverity = 'high' | 'medium' | 'low'
+export type InfrastructurePortScanMode = 'fixed_ai' | 'full_tcp'
 
 export interface RiskSummaryView {
   mapping_version: string
@@ -77,6 +78,8 @@ export interface RenderModelView {
   recommendations: string[]
   coverage: string
   conclusion: string
+  port_scan_mode?: InfrastructurePortScanMode
+  port_spec?: string
 }
 
 export interface ReportDetailView {
@@ -92,6 +95,10 @@ export interface ReportDetailView {
 const TASK_TYPES = new Set<ReportTaskType>(['mcp_scan', 'ai_infra_scan', 'model_redteam_report', 'agent_scan'])
 const SEVERITIES = new Set<RiskSeverity>(['high', 'medium', 'low'])
 const MAX_PDF_BYTES = 50 * 1024 * 1024
+const FIXED_AI_PORT_SPEC = '11434,1337,7000-9000,18789'
+const FULL_TCP_PORT_SPEC = '1-65535'
+
+type InfrastructurePortScanSnapshot = Pick<RenderModelView, 'port_scan_mode' | 'port_spec'>
 
 function recordOf(value: unknown): Record<string, unknown> | undefined {
   return typeof value === 'object' && value !== null ? value as Record<string, unknown> : undefined
@@ -230,6 +237,18 @@ function parseFinding(value: unknown): TechnicalFindingView | undefined {
     : undefined
 }
 
+function parseInfrastructurePortScan(source: Record<string, unknown>, taskType: ReportTaskType | undefined): InfrastructurePortScanSnapshot | null | undefined {
+  if (source.port_scan_mode === undefined && source.port_spec === undefined) return undefined
+  if (taskType !== 'ai_infra_scan') return null
+  if (source.port_scan_mode === 'fixed_ai' && source.port_spec === FIXED_AI_PORT_SPEC) {
+    return { port_scan_mode: 'fixed_ai', port_spec: FIXED_AI_PORT_SPEC }
+  }
+  if (source.port_scan_mode === 'full_tcp' && source.port_spec === FULL_TCP_PORT_SPEC) {
+    return { port_scan_mode: 'full_tcp', port_spec: FULL_TCP_PORT_SPEC }
+  }
+  return null
+}
+
 function parseRender(value: unknown): RenderModelView | undefined {
   const source = recordOf(value)
   if (source?.render_version !== 'report-render-v2') return undefined
@@ -253,10 +272,11 @@ function parseRender(value: unknown): RenderModelView | undefined {
   const recommendations = parseArray(source.recommendations, 50, (item) => boundedString(item, 16_384))
   const coverage = boundedString(source.coverage, 16_384, true)
   const conclusion = boundedString(source.conclusion, 16_384, true)
+  const infrastructurePortScan = parseInfrastructurePortScan(source, type)
   if (!mappingVersion || !generatedAt || !completedAt || !taskID || !type || !productName || !primaryColor ||
     !/^#[0-9a-f]{6}$/i.test(primaryColor) || watermark === undefined || !risk || explanation === undefined ||
     !trend || trend.length !== 30 || high === undefined || medium === undefined || low === undefined || !topRisks ||
-    !findings || !recommendations || coverage === undefined || conclusion === undefined) return undefined
+    !findings || !recommendations || coverage === undefined || conclusion === undefined || infrastructurePortScan === null) return undefined
   const daysAreStable = trend.every((point, index) => {
     const current = new Date(point.date)
     if (current.getUTCHours() !== 0 || current.getUTCMinutes() !== 0 || current.getUTCSeconds() !== 0 || current.getUTCMilliseconds() !== 0) return false
@@ -268,7 +288,7 @@ function parseRender(value: unknown): RenderModelView | undefined {
     completed_at: completedAt, task_id: taskID, task_type: type, product_name: productName,
     primary_color: primaryColor, watermark, risk, score_explanation: explanation, risk_trend: trend,
     risk_distribution: { high, medium, low }, top_risks: topRisks, technical_findings: findings,
-    recommendations, coverage, conclusion,
+    recommendations, coverage, conclusion, ...infrastructurePortScan,
   }
 }
 

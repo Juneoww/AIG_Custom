@@ -2,6 +2,7 @@ package utils
 
 import (
 	"io"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -107,4 +108,52 @@ func TestDownloadFileSendsOnlyInternalAgentToken(t *testing.T) {
 
 	target := t.TempDir() + "/target"
 	require.NoError(t, DownloadFile(strings.TrimPrefix(server.URL, "http://"), "session", "attachment", target))
+}
+
+func TestDownloadFileBoundedRejectsOversizedResponseWithoutWritingDestination(t *testing.T) {
+	t.Setenv("AIG_AGENT_TOKEN", "bounded-download-token")
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		_, err := io.WriteString(writer, "oversized")
+		require.NoError(t, err)
+	}))
+	defer server.Close()
+
+	target := filepath.Join(t.TempDir(), "target")
+	err := DownloadFileBounded(strings.TrimPrefix(server.URL, "http://"), "session", "attachment", target, 3)
+	require.ErrorIs(t, err, ErrDownloadTooLarge)
+	assert.NoFileExists(t, target)
+}
+
+func TestDownloadFileBoundedDoesNotExposeErrorResponseBody(t *testing.T) {
+	t.Setenv("AIG_AGENT_TOKEN", "bounded-download-token")
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		writer.WriteHeader(http.StatusInternalServerError)
+		_, err := io.WriteString(writer, "private-download-error")
+		require.NoError(t, err)
+	}))
+	defer server.Close()
+
+	target := filepath.Join(t.TempDir(), "target")
+	err := DownloadFileBounded(strings.TrimPrefix(server.URL, "http://"), "session", "attachment", target, 3)
+	require.Error(t, err)
+	assert.NotContains(t, err.Error(), "private-download-error")
+	assert.NoFileExists(t, target)
+}
+
+func TestDownloadFileBoundedRejectsUnrepresentableLimitBeforeRequest(t *testing.T) {
+	t.Setenv("AIG_AGENT_TOKEN", "bounded-download-token")
+	var requests atomic.Int64
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		requests.Add(1)
+		writer.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	target := filepath.Join(t.TempDir(), "target")
+	err := DownloadFileBounded(
+		strings.TrimPrefix(server.URL, "http://"), "session", "attachment", target, math.MaxInt64,
+	)
+	require.Error(t, err)
+	assert.Zero(t, requests.Load())
+	assert.NoFileExists(t, target)
 }

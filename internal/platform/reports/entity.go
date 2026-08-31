@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"time"
 
+	"github.com/Juneoww/AIG_Custom/common/portscan"
 	"github.com/Juneoww/AIG_Custom/internal/platform/brand"
 )
 
@@ -58,6 +59,8 @@ type RenderModel struct {
 	CompletedAt       time.Time          `json:"completed_at"`
 	TaskID            string             `json:"task_id"`
 	TaskType          string             `json:"task_type"`
+	PortScanMode      string             `json:"port_scan_mode,omitempty"`
+	PortSpec          string             `json:"port_spec,omitempty"`
 	ProductName       string             `json:"product_name"`
 	PrimaryColor      string             `json:"primary_color"`
 	Watermark         string             `json:"watermark"`
@@ -108,4 +111,36 @@ type TrendPoint struct {
 	High      int       `json:"high"`
 	Medium    int       `json:"medium"`
 	Low       int       `json:"low"`
+}
+
+// trustedInfrastructurePortScan accepts exactly the two platform-owned mode
+// and TCP-port combinations. It returns only the approved port expression.
+func trustedInfrastructurePortScan(taskType string, mode portscan.Mode, spec string) (portscan.Mode, string, bool) {
+	if taskType != "ai_infra_scan" {
+		return "", "", false
+	}
+	expected := portscan.PortSpec(mode)
+	if expected == "" || spec != expected {
+		return "", "", false
+	}
+	return mode, expected, true
+}
+
+func sanitizeRenderInfrastructurePortScan(taskType string, render *RenderModel) {
+	if render == nil {
+		return
+	}
+	if render.TaskType != taskType {
+		render.PortScanMode = ""
+		render.PortSpec = ""
+		return
+	}
+	mode, spec, valid := trustedInfrastructurePortScan(taskType, portscan.Mode(render.PortScanMode), render.PortSpec)
+	if !valid {
+		render.PortScanMode = ""
+		render.PortSpec = ""
+		return
+	}
+	render.PortScanMode = string(mode)
+	render.PortSpec = spec
 }

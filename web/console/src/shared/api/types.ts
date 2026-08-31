@@ -50,6 +50,8 @@ export type TaskType =
   | 'agent_scan'
   | 'unknown'
 
+export type InfrastructurePortScanMode = 'fixed_ai' | 'full_tcp'
+
 export type TaskStatus =
   | 'pending'
   | 'dispatching'
@@ -75,6 +77,7 @@ export interface TaskInputSummary {
   timeout?: number
   target_count?: number
   num_prompts?: number
+  port_scan_mode?: InfrastructurePortScanMode
 }
 
 export interface TaskDetail extends TaskSummary {
@@ -97,6 +100,7 @@ export interface TaskCreateRequest {
     agent_id?: string
     thread?: number
     timeout?: number
+    port_scan_mode?: InfrastructurePortScanMode
     dataset?: { numPrompts: number; randomSeed?: number; promptColumn?: string }
     techniques?: string[]
   }

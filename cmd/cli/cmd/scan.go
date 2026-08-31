@@ -93,8 +93,8 @@ func init() {
 	rootCmd.AddCommand(scanCmd)
 
 	// 设置scan子命令的标志
-	scanCmd.Flags().StringArrayVarP(&scanTargets, "target", "t", []string{}, "目标URL，可以指定多个目标，例如: --target xx.com --target aa.com")
-	scanCmd.Flags().StringVarP(&scanTargetFile, "file", "f", "", "包含目标URL的文件路径")
+	scanCmd.Flags().StringArrayVarP(&scanTargets, "target", "t", []string{}, "授权目标，可多次指定；支持IPv4 CIDR、闭区间(如104.147.75.1-104.147.75.10)和尾部通配符(如22.2.10.*)")
+	scanCmd.Flags().StringVarP(&scanTargetFile, "file", "f", "", "授权目标文件路径；文件可包含多个目标，支持IPv4 CIDR、闭区间(如104.147.75.1-104.147.75.10)和尾部通配符(如22.2.10.*)")
 	scanCmd.Flags().StringVarP(&scanOutputFile, "output", "o", "", "输出文件路径")
 	scanCmd.Flags().IntVar(&scanTimeOut, "timeout", 5, "请求超时时间(秒)")
 	scanCmd.Flags().StringVar(&scanProxyURL, "proxy-url", "", "代理服务器URL")

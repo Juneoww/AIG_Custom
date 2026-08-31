@@ -19,11 +19,208 @@
 package runner
 
 import (
+	"fmt"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+func TestParseTargets_ExpandsIPv4RangeInOrder(t *testing.T) {
+	got, err := ParseTargets([]string{" 192.168.10.2-192.168.10.10 "})
+	require.NoError(t, err)
+	require.Len(t, got, 9)
+	assert.Equal(t, "192.168.10.2", got[0])
+	assert.Equal(t, "192.168.10.10", got[8])
+}
+
+func TestParseTargets_PastedRangesYield100Targets(t *testing.T) {
+	lines := []string{
+		"104.147.75.1-104.147.75.10", "104.147.75.12-104.147.75.13",
+		"104.147.75.15-104.147.75.30", "104.147.75.32-104.147.75.34",
+		"104.147.75.37-104.147.75.39", "104.147.75.41-104.147.75.102",
+		"104.147.75.104-104.147.75.107",
+	}
+	got, err := ParseTargets(lines)
+	require.NoError(t, err)
+	assert.Len(t, got, 100)
+}
+
+func TestParseTargets_WildcardsMatchCIDR(t *testing.T) {
+	wildcard, err := ParseTargets([]string{"22.2.*.*", "22.2.10.*"})
+	require.NoError(t, err)
+	cidr, err := ParseTargets([]string{"22.2.0.0/16", "22.2.10.0/24"})
+	require.NoError(t, err)
+	assert.Equal(t, cidr, wildcard)
+}
+
+func TestParseTargets_PreservesSingleIPv4(t *testing.T) {
+	got, err := ParseTargets([]string{"10.0.0.1"})
+	require.NoError(t, err)
+	assert.Equal(t, []string{"10.0.0.1"}, got)
+}
+
+func TestParseTargets_RejectsIPv4PortRangeExpressions(t *testing.T) {
+	for _, input := range []string{
+		"192.168.10.2:80-192.168.10.10:80",
+		"192.168.10.2:80-90",
+		"192.168.10.2:80-192.168.10.10:443",
+		"192.168.10.2:99999-192.168.10.10:99999",
+		"192.168.10.2:99999-90",
+	} {
+		_, err := ParseTargets([]string{input})
+		assert.Error(t, err, input)
+	}
+}
+
+func TestParseTargets_RejectsIPv6RangeExpressions(t *testing.T) {
+	for _, input := range []string{
+		"2001:db8::1-2001:db8::2",
+		"[2001:db8::1]:80-[2001:db8::2]:80",
+		"[2001:db8::1]:99999-[2001:db8::2]:99999",
+	} {
+		_, err := ParseTargets([]string{input})
+		assert.Error(t, err, input)
+	}
+}
+
+func TestParseTargets_PreservesSingleIPv4Port(t *testing.T) {
+	got, err := ParseTargets([]string{"1.2.3.4:80"})
+	require.NoError(t, err)
+	assert.Equal(t, []string{"1.2.3.4:80"}, got)
+}
+
+func TestParseTargets_PreservesHTTPURLsWithWildcardAndTilde(t *testing.T) {
+	inputs := []string{
+		"https://ai.example.com/~health",
+		"https://ai.example.com/search?q=*",
+		"https://[2001:db8::1]:443/path-with-hyphen",
+	}
+	got, err := ParseTargets(inputs)
+	require.NoError(t, err)
+	assert.Equal(t, inputs, got)
+}
+
+func TestParseTargets_RejectsWhitespaceSeparatedURLs(t *testing.T) {
+	for _, input := range []string{
+		"https://a.example.test https://b.example.test",
+		"https://a.example.test\u00a0https://b.example.test",
+	} {
+		_, err := ParseTargets([]string{input})
+		assert.Error(t, err, input)
+	}
+}
+
+func TestParseTargets_RejectsSingleBracketedIPv6Port(t *testing.T) {
+	_, err := ParseTargets([]string{"[2001:db8::1]:443"})
+	assert.Error(t, err)
+}
+
+func TestParseTargets_PreservesHyphenatedHostnameEndingInIPv4(t *testing.T) {
+	got, err := ParseTargets([]string{"api-192.168.10.2"})
+	require.NoError(t, err)
+	assert.Equal(t, []string{"api-192.168.10.2"}, got)
+}
+
+func TestParseTargets_RejectsDomainHostnameEndingInIPv4RangeShape(t *testing.T) {
+	_, err := ParseTargets([]string{"example.com-10.0.0.1"})
+	assert.Error(t, err)
+}
+
+func TestParseTargets_RejectsUnicodeWhitespace(t *testing.T) {
+	_, err := ParseTargets([]string{"192.168.10.2\u00a0192.168.10.3"})
+	assert.Error(t, err)
+}
+
+func TestParseTargets_DeduplicatesEquivalentMaximumIPv4Expressions(t *testing.T) {
+	got, err := ParseTargets([]string{
+		"22.2.*.*",
+		"22.2.0.0/16",
+		"22.2.0.0-22.2.255.255",
+	})
+	require.NoError(t, err)
+	assert.Len(t, got, maxTargetExpressions)
+	assert.Equal(t, "22.2.0.0", got[0])
+	assert.Equal(t, "22.2.255.255", got[len(got)-1])
+}
+
+func TestParseTargets_DeduplicatesPartiallyCoveredIPv4Ranges(t *testing.T) {
+	got, err := ParseTargets([]string{
+		"10.0.0.1",
+		"10.0.0.0-10.0.0.2",
+		"10.0.0.0/30",
+	})
+	require.NoError(t, err)
+	assert.Equal(t, []string{"10.0.0.1", "10.0.0.0", "10.0.0.2", "10.0.0.3"}, got)
+}
+
+func TestUncoveredIPv4IntervalsSkipsCoveredSections(t *testing.T) {
+	covered := []ipv4Interval{{start: 0x0A000001, count: 1}}
+	got := uncoveredIPv4Intervals(covered, ipv4Interval{start: 0x0A000000, count: 3})
+	assert.Equal(t, []ipv4Interval{
+		{start: 0x0A000000, count: 1},
+		{start: 0x0A000002, count: 1},
+	}, got)
+}
+
+func TestIPv4CoverageDoesNotTrackSparseSingleAddresses(t *testing.T) {
+	coverage := newIPv4Coverage()
+	for offset := uint32(0); offset < MaxTargetExpressions; offset++ {
+		coverage.add(ipv4Interval{start: 0x0A000000 + (MaxTargetExpressions - 1 - offset), count: 1})
+	}
+	assert.Empty(t, coverage.intervals)
+}
+
+func TestParseTargetsSkipsFullyCoveredLargeSubranges(t *testing.T) {
+	expressions := []string{"22.2.0.0/16"}
+	coverage := newIPv4Coverage()
+	coverage.add(ipv4Interval{start: 0x16020000, count: MaxTargetExpressions})
+	for offset := 0; offset < MaxTargetExpressions; offset += 64 {
+		start := 0x16020000 + offset
+		assert.Empty(t, uncoveredIPv4Intervals(coverage.intervals, ipv4Interval{start: uint32(start), count: 64}))
+		expressions = append(expressions, fmt.Sprintf("22.2.%d.%d-22.2.%d.%d", offset>>8, offset&0xff, offset>>8, (offset&0xff)+63))
+	}
+	assert.Len(t, coverage.intervals, 1)
+
+	got, err := ParseTargets(expressions)
+	require.NoError(t, err)
+	assert.Len(t, got, MaxTargetExpressions)
+}
+
+func TestAppendUncoveredIPv4TargetsDoesNotMergeFullyCoveredLargeRange(t *testing.T) {
+	coverage := newIPv4Coverage()
+	first := ipv4Interval{start: 0x0A000000, count: 64}
+	coverage.add(first)
+	coverage.add(ipv4Interval{start: 0x0A000080, count: 64})
+	before := &coverage.intervals[0]
+	seen := make(map[string]struct{})
+	result := []string{}
+	for range 10 {
+		var err error
+		result, err = appendUncoveredIPv4Targets(result, seen, coverage, first)
+		require.NoError(t, err)
+		assert.Len(t, coverage.intervals, 2)
+		assert.Same(t, before, &coverage.intervals[0])
+	}
+}
+
+func TestParseTargets_DeduplicatesAcrossBatch(t *testing.T) {
+	got, err := ParseTargets([]string{"10.0.0.1", "10.0.0.0/30", "10.0.0.1-10.0.0.2", "  "})
+	require.NoError(t, err)
+	assert.Equal(t, []string{"10.0.0.1", "10.0.0.0", "10.0.0.2", "10.0.0.3"}, got)
+}
+
+func TestParseTargets_RejectsInvalidExpressions(t *testing.T) {
+	for _, input := range []string{"10.0.0.2-10.0.0.1", "10.*.1.*", `104.147.75.1\~104.147.75.10`, "2001:db8::/64", "2001:db8::1", "10.0.0.1-10.0.0", "10.0.0.1-example.com", "example.com-10.0.0.1", "10.0.0.1-10.0.0.2-extra"} {
+		_, err := ParseTargets([]string{input})
+		assert.Error(t, err, input)
+	}
+}
+
+func TestParseTargets_RejectsBatchOver65536(t *testing.T) {
+	_, err := ParseTargets([]string{"10.0.0.0/15"})
+	assert.Error(t, err)
+}
 
 // collectTargets 将 chan string 收集为 []string，便于断言
 func collectTargets(ch chan string) []string {
@@ -42,12 +239,11 @@ func TestTargets_WithSpace(t *testing.T) {
 	assert.Empty(t, result, "包含空格的目标应返回空结果")
 }
 
-// TestTargets_WithStar 测试包含星号的目标返回空 channel
+// TestTargets_WithStar 测试尾部通配符展开
 func TestTargets_WithStar(t *testing.T) {
 	ch := Targets("192.168.1.*")
 	result := collectTargets(ch)
-	// 包含 * 时应返回空
-	assert.Empty(t, result, "包含 * 的目标应返回空结果")
+	assert.Len(t, result, 256, "尾部通配符应展开为 256 个结果")
 }
 
 // TestTargets_SingleIP 测试单个 IP 直接返回该 IP
@@ -66,6 +262,25 @@ func TestTargets_Hostname(t *testing.T) {
 	// 非 CIDR、无特殊字符时应直接返回
 	require.Len(t, result, 1, "主机名应返回一个结果")
 	assert.Equal(t, "example.com", result[0], "返回的主机名应与输入一致")
+}
+
+func TestTargets_HyphenatedHostname(t *testing.T) {
+	result := collectTargets(Targets("api-prod.example.com"))
+	require.Equal(t, []string{"api-prod.example.com"}, result)
+}
+
+func TestParseTargets_PreservesDigitBearingHostnamesAndURLs(t *testing.T) {
+	got, err := ParseTargets([]string{
+		"api1-prod2.example.com",
+		"https://api1-prod2.example.com/path",
+		"https://192.168.10.2:80/path-with-hyphen",
+	})
+	require.NoError(t, err)
+	assert.Equal(t, []string{
+		"api1-prod2.example.com",
+		"https://api1-prod2.example.com/path",
+		"https://192.168.10.2:80/path-with-hyphen",
+	}, got)
 }
 
 // TestTargets_CIDR_Small 测试 /30 CIDR 展开 4 个 IP

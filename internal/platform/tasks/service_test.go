@@ -283,6 +283,195 @@ func TestCompletedResultRecoveryProcessesAtMostOneKeysetBatchPerPass(t *testing.
 
 func (engine *recordingEngine) CancelTask(context.Context, string) error { return nil }
 
+func TestCreateAIInfraTargetRangeSucceeds(t *testing.T) {
+	repository := NewMemoryRepository()
+	engine := &recordingEngine{}
+	service := NewService(repository, engine, audit.NewService(audit.NewMemoryRepository()))
+	owner := identity.Subject{UserID: "target-range-owner", Username: "alice", Role: identity.RoleUser}
+
+	created, err := service.Create(context.Background(), owner, CreateInput{
+		IdempotencyKey: "target-range", TaskType: "ai_infra_scan", Content: "192.168.10.2-192.168.10.10",
+	})
+	require.NoError(t, err)
+	assert.Equal(t, "192.168.10.2-192.168.10.10", created.Content)
+	assert.Equal(t, int64(1), engine.submits.Load())
+}
+
+func TestCreateAIInfraTargetValidationRejectsInvalidWildcardAndExpansionLimit(t *testing.T) {
+	tests := []struct {
+		name    string
+		content string
+	}{
+		{name: "partial wildcard", content: "22.*.10.*"},
+		{name: "ipv4 port range", content: "192.168.10.2:80-192.168.10.10:80"},
+		{name: "invalid ipv4 port range", content: "192.168.10.2:99999-192.168.10.10:99999"},
+		{name: "ipv6 range", content: "2001:db8::1-2001:db8::2"},
+		{name: "bracketed ipv6 port range", content: "[2001:db8::1]:80-[2001:db8::2]:80"},
+		{name: "single bracketed ipv6 port", content: "[2001:db8::1]:443"},
+		{name: "unicode whitespace", content: "192.168.10.2\u00a0192.168.10.3"},
+		{name: "whitespace separated urls", content: "https://a.example.test https://b.example.test"},
+		{name: "too many expanded targets", content: "22.2.*.*\n1.1.1.1"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			repository := NewMemoryRepository()
+			engine := &recordingEngine{}
+			service := NewService(repository, engine, audit.NewService(audit.NewMemoryRepository()))
+			owner := identity.Subject{UserID: "target-reject-owner", Username: "alice", Role: identity.RoleUser}
+
+			_, err := service.Create(context.Background(), owner, CreateInput{
+				IdempotencyKey: "target-reject-" + strings.ReplaceAll(test.name, " ", "-"),
+				TaskType:       "ai_infra_scan",
+				Content:        test.content,
+			})
+			require.ErrorIs(t, err, ErrInvalid)
+			stored, listErr := repository.List(context.Background())
+			require.NoError(t, listErr)
+			assert.Empty(t, stored)
+			assert.Zero(t, engine.submits.Load())
+		})
+	}
+}
+
+func TestCreateAIInfraTargetValidationPreservesHTTPURLSpecialCharacters(t *testing.T) {
+	repository := NewMemoryRepository()
+	engine := &recordingEngine{}
+	service := NewService(repository, engine, audit.NewService(audit.NewMemoryRepository()))
+	owner := identity.Subject{UserID: "target-url-owner", Username: "alice", Role: identity.RoleUser}
+	content := "https://ai.example.com/~health\nhttps://ai.example.com/search?q=*"
+
+	created, err := service.Create(context.Background(), owner, CreateInput{
+		IdempotencyKey: "target-url-special-characters", TaskType: "ai_infra_scan", Content: content,
+	})
+	require.NoError(t, err)
+	assert.Equal(t, content, created.Content)
+	assert.Equal(t, int64(1), engine.submits.Load())
+}
+
+func TestCreateAIInfraTargetAttachmentExpressionsCombineWithBody(t *testing.T) {
+	repository := NewMemoryRepository()
+	audits := audit.NewService(audit.NewMemoryRepository())
+	attachments, err := NewAttachmentService(repository, AttachmentConfig{
+		UploadDir: t.TempDir(), MaxFileBytes: 2 << 20, MaxChunkBytes: 1 << 20,
+	}, audits)
+	require.NoError(t, err)
+	owner := identity.Subject{UserID: "target-attachment-owner", Username: "alice", Role: identity.RoleUser}
+	attachment, err := attachments.Upload(context.Background(), owner, "targets.txt", strings.NewReader("192.168.10.4-192.168.10.5\n"))
+	require.NoError(t, err)
+	engine := &recordingEngine{}
+	service := NewService(repository, engine, audits)
+	service.SetAttachmentService(attachments)
+
+	created, err := service.Create(context.Background(), owner, CreateInput{
+		IdempotencyKey: "target-attachment", TaskType: "ai_infra_scan", Content: "192.168.10.2-192.168.10.3",
+		AttachmentIDs: []string{attachment.ID},
+	})
+	require.NoError(t, err)
+	assert.Equal(t, "192.168.10.2-192.168.10.3", created.Content, "audit and persisted content retain the raw user expression")
+	assert.Equal(t, int64(1), engine.submits.Load())
+}
+
+func TestCreateAIInfraTargetValidationRejectsTooManyAttachmentExpressions(t *testing.T) {
+	repository := NewMemoryRepository()
+	audits := audit.NewService(audit.NewMemoryRepository())
+	attachments, err := NewAttachmentService(repository, AttachmentConfig{
+		UploadDir: t.TempDir(), MaxFileBytes: 2 << 20, MaxChunkBytes: 1 << 20,
+	}, audits)
+	require.NoError(t, err)
+	owner := identity.Subject{UserID: "target-expression-limit-owner", Username: "alice", Role: identity.RoleUser}
+	attachment, err := attachments.Upload(context.Background(), owner, "targets.txt", strings.NewReader(strings.Repeat("example.com\n", 65537)))
+	require.NoError(t, err)
+	engine := &recordingEngine{}
+	service := NewService(repository, engine, audits)
+	service.SetAttachmentService(attachments)
+
+	_, err = service.Create(context.Background(), owner, CreateInput{
+		IdempotencyKey: "too-many-target-expressions", TaskType: "ai_infra_scan", Content: "192.168.10.1",
+		AttachmentIDs: []string{attachment.ID},
+	})
+	require.ErrorIs(t, err, ErrInvalid)
+	stored, listErr := repository.List(context.Background())
+	require.NoError(t, listErr)
+	assert.Empty(t, stored)
+	assert.Zero(t, engine.submits.Load())
+}
+
+func TestCreateAIInfraTargetAttachmentValidationRejectsUnsafeLists(t *testing.T) {
+	tests := []struct {
+		name       string
+		content    string
+		attachment string
+	}{
+		{name: "invalid wildcard", content: "192.168.10.1", attachment: "22.*.10.*"},
+		{name: "combined expansion limit", content: "22.2.*.*", attachment: "1.1.1.1"},
+		{name: "oversized text list", content: "192.168.10.1", attachment: strings.Repeat("x", (1<<20)+1)},
+		{name: "non utf8 text list", content: "192.168.10.1", attachment: string([]byte{0xff, 0xfe})},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			repository := NewMemoryRepository()
+			audits := audit.NewService(audit.NewMemoryRepository())
+			attachments, err := NewAttachmentService(repository, AttachmentConfig{
+				UploadDir: t.TempDir(), MaxFileBytes: 2 << 20, MaxChunkBytes: 1 << 20,
+			}, audits)
+			require.NoError(t, err)
+			owner := identity.Subject{UserID: "target-unsafe-owner", Username: "alice", Role: identity.RoleUser}
+			attachment, err := attachments.Upload(context.Background(), owner, "targets.txt", strings.NewReader(test.attachment))
+			require.NoError(t, err)
+			engine := &recordingEngine{}
+			service := NewService(repository, engine, audits)
+			service.SetAttachmentService(attachments)
+
+			_, err = service.Create(context.Background(), owner, CreateInput{
+				IdempotencyKey: "target-unsafe-" + strings.ReplaceAll(test.name, " ", "-"),
+				TaskType:       "ai_infra_scan",
+				Content:        test.content,
+				AttachmentIDs:  []string{attachment.ID},
+			})
+			require.ErrorIs(t, err, ErrInvalid)
+			stored, listErr := repository.List(context.Background())
+			require.NoError(t, listErr)
+			assert.Empty(t, stored)
+			assert.Zero(t, engine.submits.Load())
+		})
+	}
+}
+
+func TestCreateAIInfraTargetAttachmentValidationRejectsSymlink(t *testing.T) {
+	repository := NewMemoryRepository()
+	audits := audit.NewService(audit.NewMemoryRepository())
+	attachments, err := NewAttachmentService(repository, AttachmentConfig{
+		UploadDir: t.TempDir(), MaxFileBytes: 2 << 20, MaxChunkBytes: 1 << 20,
+	}, audits)
+	require.NoError(t, err)
+	owner := identity.Subject{UserID: "target-symlink-owner", Username: "alice", Role: identity.RoleUser}
+	attachment, err := attachments.Upload(context.Background(), owner, "targets.txt", strings.NewReader("192.168.10.2"))
+	require.NoError(t, err)
+	storedAttachment, err := repository.GetAttachment(context.Background(), attachment.ID)
+	require.NoError(t, err)
+	storagePath, err := attachments.storagePath(storedAttachment.StorageName)
+	require.NoError(t, err)
+	replacementPath := filepath.Join(t.TempDir(), "replacement.txt")
+	require.NoError(t, os.WriteFile(replacementPath, []byte("192.168.10.3"), 0600))
+	require.NoError(t, os.Remove(storagePath))
+	if err := os.Symlink(replacementPath, storagePath); err != nil {
+		t.Skipf("symlink creation is unavailable: %v", err)
+	}
+
+	engine := &recordingEngine{}
+	service := NewService(repository, engine, audits)
+	service.SetAttachmentService(attachments)
+	_, err = service.Create(context.Background(), owner, CreateInput{
+		IdempotencyKey: "target-symlink", TaskType: "ai_infra_scan", Content: "192.168.10.1",
+		AttachmentIDs: []string{attachment.ID},
+	})
+	require.ErrorIs(t, err, ErrInvalid)
+	storedTasks, listErr := repository.List(context.Background())
+	require.NoError(t, listErr)
+	assert.Empty(t, storedTasks)
+	assert.Zero(t, engine.submits.Load())
+}
+
 func TestCancelCannotOverwriteConcurrentTerminalEngineState(t *testing.T) {
 	repository := NewMemoryRepository()
 	engine := &blockingCancelEngine{cancelEntered: make(chan struct{}), releaseCancel: make(chan struct{})}
@@ -396,6 +585,132 @@ func TestIdempotentCreateReturnsPersistedTaskWhenLiveReferencesBecomeUnavailable
 			assert.Equal(t, created.ID, retried.ID)
 			assert.Equal(t, int64(1), engine.referenceCalls.Load(), "已持久化的同载荷重试不得再次读取实时引用")
 			assert.Equal(t, int64(1), engine.submits.Load(), "幂等重试不得重复分发任务")
+		})
+	}
+}
+
+func TestLegacyAIInfrastructureTaskRetriesNormalizePortScanMode(t *testing.T) {
+	tests := []struct {
+		name           string
+		legacyParams   json.RawMessage
+		omittedParams  json.RawMessage
+		explicitParams json.RawMessage
+	}{
+		{
+			name:           "model and timeout",
+			legacyParams:   json.RawMessage(`{"model_id":"model-1","timeout":30}`),
+			omittedParams:  json.RawMessage(`{"model_id":"model-1","timeout":30}`),
+			explicitParams: json.RawMessage(`{"model_id":"model-1","timeout":30,"port_scan_mode":"fixed_ai"}`),
+		},
+		{
+			name:           "empty params",
+			legacyParams:   json.RawMessage(`{}`),
+			omittedParams:  nil,
+			explicitParams: json.RawMessage(`{"port_scan_mode":"fixed_ai"}`),
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			repository := NewMemoryRepository()
+			engine := &recordingEngine{}
+			service := NewService(repository, engine, audit.NewService(audit.NewMemoryRepository()))
+			subject := identity.Subject{UserID: "legacy-owner", Username: "alice", Role: identity.RoleUser}
+			idempotencyKey := "legacy-idempotency-" + strings.ReplaceAll(test.name, " ", "-")
+			taskID := uuid.NewSHA1(taskIDNamespace, []byte(subject.UserID+"\x00"+idempotencyKey)).String()
+			now := time.Now().UTC()
+			_, created, err := repository.CreateOrGet(context.Background(), &Task{
+				ID: taskID, OwnerUserID: subject.UserID, OwnerUsername: subject.Username,
+				IdempotencyKey: idempotencyKey, EngineSessionID: taskID, TaskType: "ai_infra_scan",
+				Content: "127.0.0.1", Params: append(json.RawMessage(nil), test.legacyParams...), AttachmentRefs: json.RawMessage(`[]`),
+				Status: StatusRunning, CreatedAt: now, UpdatedAt: now,
+			})
+			require.NoError(t, err)
+			require.True(t, created)
+
+			for _, params := range []json.RawMessage{test.omittedParams, test.explicitParams} {
+				view, createErr := service.Create(context.Background(), subject, CreateInput{
+					IdempotencyKey: idempotencyKey, TaskType: "ai_infra_scan", Content: "127.0.0.1", Params: params,
+				})
+				require.NoError(t, createErr)
+				assert.Equal(t, taskID, view.ID)
+			}
+
+			stored, err := repository.Get(context.Background(), taskID)
+			require.NoError(t, err)
+			assert.JSONEq(t, string(test.legacyParams), string(stored.Params), "legacy task parameters must not be rewritten")
+			assert.Zero(t, engine.submits.Load())
+		})
+	}
+}
+
+func TestLegacyAIInfrastructureTaskDispatchNormalizesPortScanMode(t *testing.T) {
+	repository := NewMemoryRepository()
+	engine := &recordingEngine{}
+	service := NewService(repository, engine, audit.NewService(audit.NewMemoryRepository()))
+	subject := identity.Subject{UserID: "legacy-dispatch-owner", Username: "alice", Role: identity.RoleUser}
+	idempotencyKey := "legacy-dispatch"
+	taskID := uuid.NewSHA1(taskIDNamespace, []byte(subject.UserID+"\x00"+idempotencyKey)).String()
+	legacyParams := json.RawMessage(`{"model_id":"model-1","timeout":30}`)
+	now := time.Now().UTC()
+	_, created, err := repository.CreateOrGet(context.Background(), &Task{
+		ID: taskID, OwnerUserID: subject.UserID, OwnerUsername: subject.Username,
+		IdempotencyKey: idempotencyKey, EngineSessionID: taskID, TaskType: "ai_infra_scan",
+		Content: "127.0.0.1", Params: legacyParams, AttachmentRefs: json.RawMessage(`[]`),
+		Status: StatusPending, CreatedAt: now, UpdatedAt: now,
+	})
+	require.NoError(t, err)
+	require.True(t, created)
+
+	view, err := service.Create(context.Background(), subject, CreateInput{
+		IdempotencyKey: idempotencyKey, TaskType: "ai_infra_scan", Content: "127.0.0.1", Params: legacyParams,
+	})
+	require.NoError(t, err)
+	assert.Equal(t, StatusRunning, view.Status)
+	assert.Equal(t, int64(1), engine.submits.Load())
+
+	engine.mu.Lock()
+	dispatchedParams := append(json.RawMessage(nil), engine.last.Params...)
+	engine.mu.Unlock()
+	var dispatched map[string]any
+	require.NoError(t, json.Unmarshal(dispatchedParams, &dispatched))
+	assert.Equal(t, "fixed_ai", dispatched["port_scan_mode"])
+	assert.Equal(t, "model-1", dispatched["model_id"])
+	assert.Equal(t, float64(30), dispatched["timeout"])
+
+	stored, err := repository.Get(context.Background(), taskID)
+	require.NoError(t, err)
+	assert.JSONEq(t, string(legacyParams), string(stored.Params), "dispatch must not rewrite legacy task parameters")
+}
+
+func TestMalformedLegacyAIInfrastructureTaskDoesNotDispatch(t *testing.T) {
+	for name, params := range map[string]json.RawMessage{
+		"unknown mode":  json.RawMessage(`{"port_scan_mode":"not-approved"}`),
+		"explicit null": json.RawMessage(`{"port_scan_mode":null}`),
+		"empty string":  json.RawMessage(`{"port_scan_mode":""}`),
+	} {
+		t.Run(name, func(t *testing.T) {
+			repository := NewMemoryRepository()
+			engine := &recordingEngine{}
+			service := NewService(repository, engine, audit.NewService(audit.NewMemoryRepository()))
+			now := time.Now().UTC()
+			taskID := "malformed-legacy-ai-" + strings.ReplaceAll(name, " ", "-")
+			task := &Task{
+				ID: taskID, OwnerUserID: "legacy-owner", OwnerUsername: "alice",
+				IdempotencyKey: taskID, EngineSessionID: taskID, TaskType: "ai_infra_scan",
+				Content: "127.0.0.1", Params: params, AttachmentRefs: json.RawMessage(`[]`),
+				Status: StatusPending, CreatedAt: now, UpdatedAt: now,
+			}
+			_, created, err := repository.CreateOrGet(context.Background(), task)
+			require.NoError(t, err)
+			require.True(t, created)
+			claim, claimed, err := repository.ClaimDispatch(context.Background(), task.ID, now, now.Add(dispatchLeaseDuration))
+			require.NoError(t, err)
+			require.True(t, claimed)
+
+			_, err = service.dispatch(context.Background(), identity.Subject{UserID: task.OwnerUserID, Username: task.OwnerUsername, Role: identity.RoleUser}, task, claim)
+			require.ErrorIs(t, err, ErrInvalid)
+			assert.Zero(t, engine.submits.Load())
 		})
 	}
 }
@@ -630,6 +945,225 @@ func TestCreateUsesExactPerTaskParameterSchemas(t *testing.T) {
 		require.NoError(t, err, input.TaskType)
 	}
 	assert.Equal(t, int64(len(valid)), engine.submits.Load())
+}
+
+func TestCreateAIInfrastructureNormalizesPortScanMode(t *testing.T) {
+	tests := []struct {
+		name   string
+		params string
+		want   string
+	}{
+		{name: "omitted defaults to fixed AI", params: `{"model_id":"model-1","timeout":30}`, want: "fixed_ai"},
+		{name: "full TCP is preserved", params: `{"model_id":"model-1","timeout":30,"port_scan_mode":"full_tcp"}`, want: "full_tcp"},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			repository := NewMemoryRepository()
+			engine := &recordingEngine{}
+			service := NewService(repository, engine, audit.NewService(audit.NewMemoryRepository()))
+			subject := identity.Subject{UserID: "user-1", Username: "alice", Role: identity.RoleUser}
+
+			created, err := service.Create(context.Background(), subject, CreateInput{
+				IdempotencyKey: "port-scan-" + test.want, TaskType: "ai_infra_scan", Content: "127.0.0.1",
+				Params: json.RawMessage(test.params),
+			})
+			require.NoError(t, err)
+
+			var viewParams map[string]any
+			require.NoError(t, json.Unmarshal(created.Params, &viewParams))
+			assert.Equal(t, test.want, viewParams["port_scan_mode"])
+			assert.Equal(t, "model-1", viewParams["model_id"])
+			assert.Equal(t, float64(30), viewParams["timeout"])
+
+			stored, err := repository.Get(context.Background(), created.ID)
+			require.NoError(t, err)
+			var storedParams map[string]any
+			require.NoError(t, json.Unmarshal(stored.Params, &storedParams))
+			assert.Equal(t, test.want, storedParams["port_scan_mode"])
+
+			engine.mu.Lock()
+			dispatchedParams := append(json.RawMessage(nil), engine.last.Params...)
+			engine.mu.Unlock()
+			var dispatched map[string]any
+			require.NoError(t, json.Unmarshal(dispatchedParams, &dispatched))
+			assert.Equal(t, test.want, dispatched["port_scan_mode"])
+
+			detail, err := service.BrowserGet(context.Background(), subject, created.ID)
+			require.NoError(t, err)
+			assert.Equal(t, test.want, detail.InputSummary.PortScanMode)
+		})
+	}
+}
+
+func TestCreateAIInfrastructureRejectsInvalidPortScanModeBeforeMutation(t *testing.T) {
+	repository := NewMemoryRepository()
+	engine := &controlledReferenceEngine{}
+	audits := audit.NewMemoryRepository()
+	service := NewService(repository, engine, audit.NewService(audits))
+	subject := identity.Subject{UserID: "user-1", Username: "alice", Role: identity.RoleUser}
+
+	for name, params := range map[string]string{
+		"unknown string":        `{"port_scan_mode":"full"}`,
+		"value case variant":    `{"port_scan_mode":"FULL_TCP"}`,
+		"uppercase field name":  `{"PORT_SCAN_MODE":"full_tcp"}`,
+		"mixed case field name": `{"PoRt_ScAn_MoDe":"full_tcp"}`,
+		"explicit null":         `{"port_scan_mode":null}`,
+		"empty string":          `{"port_scan_mode":""}`,
+		"whitespace string":     `{"port_scan_mode":" "}`,
+		"array":                 `{"port_scan_mode":["fixed_ai"]}`,
+		"number":                `{"port_scan_mode":1}`,
+		"unknown field":         `{"port_scan_mode":"fixed_ai","unexpected":true}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			_, err := service.Create(context.Background(), subject, CreateInput{
+				IdempotencyKey: "invalid-port-scan-" + strings.ReplaceAll(name, " ", "-"),
+				TaskType:       "ai_infra_scan",
+				Content:        "127.0.0.1",
+				Params:         json.RawMessage(params),
+			})
+			require.ErrorIs(t, err, ErrInvalid)
+		})
+	}
+
+	tasks, err := repository.List(context.Background())
+	require.NoError(t, err)
+	assert.Empty(t, tasks)
+	assert.Zero(t, engine.referenceCalls.Load())
+	assert.Zero(t, engine.submits.Load())
+	events, err := audits.List(context.Background(), audit.Filter{Action: audit.Action("task.created")})
+	require.NoError(t, err)
+	assert.Empty(t, events)
+}
+
+func TestCreateRejectsCaseVariantTaskParameterFieldNames(t *testing.T) {
+	repository := NewMemoryRepository()
+	engine := &recordingEngine{}
+	service := NewService(repository, engine, audit.NewService(audit.NewMemoryRepository()))
+	subject := identity.Subject{UserID: "user-1", Username: "alice", Role: identity.RoleUser}
+
+	for _, test := range []CreateInput{
+		{IdempotencyKey: "case-mcp", TaskType: "mcp_scan", Content: "scan", Params: json.RawMessage(`{"MODEL_ID":"model-1","thread":4}`)},
+		{IdempotencyKey: "case-redteam", TaskType: "model_redteam_report", Content: "scan", Params: json.RawMessage(`{"MODEL_ID":["model-1"],"eval_model_id":"model-2"}`)},
+		{IdempotencyKey: "case-agent", TaskType: "agent_scan", Content: "scan", Params: json.RawMessage(`{"AGENT_ID":"agent-1","eval_model_id":"model-2"}`)},
+	} {
+		_, err := service.Create(context.Background(), subject, test)
+		require.ErrorIs(t, err, ErrInvalid, test.TaskType)
+	}
+
+	tasks, err := repository.List(context.Background())
+	require.NoError(t, err)
+	assert.Empty(t, tasks)
+	assert.Zero(t, engine.submits.Load())
+}
+
+func TestCreateAIInfrastructureTreatsOmittedAndExplicitFixedPortScanModeAsSameRequest(t *testing.T) {
+	repository := NewMemoryRepository()
+	engine := &recordingEngine{}
+	service := NewService(repository, engine, audit.NewService(audit.NewMemoryRepository()))
+	subject := identity.Subject{UserID: "user-1", Username: "alice", Role: identity.RoleUser}
+
+	created, err := service.Create(context.Background(), subject, CreateInput{
+		IdempotencyKey: "same-port-scan-mode", TaskType: "ai_infra_scan", Content: "127.0.0.1",
+		Params: json.RawMessage(`{"model_id":"model-1","timeout":30}`),
+	})
+	require.NoError(t, err)
+	retried, err := service.Create(context.Background(), subject, CreateInput{
+		IdempotencyKey: "same-port-scan-mode", TaskType: "ai_infra_scan", Content: "127.0.0.1",
+		Params: json.RawMessage(`{"model_id":"model-1","timeout":30,"port_scan_mode":"fixed_ai"}`),
+	})
+	require.NoError(t, err)
+	assert.Equal(t, created.ID, retried.ID)
+	assert.Equal(t, int64(1), engine.submits.Load())
+
+	var params map[string]any
+	require.NoError(t, json.Unmarshal(retried.Params, &params))
+	assert.Equal(t, "fixed_ai", params["port_scan_mode"])
+}
+
+func TestTaskInputSummaryOnlyProjectsNormalizedInfrastructurePortScanMode(t *testing.T) {
+	trusted := taskDetailOf(&Task{
+		TaskType: "ai_infra_scan", Content: "127.0.0.1",
+		Params: json.RawMessage(`{"model_id":"model-1","timeout":30,"port_scan_mode":"full_tcp"}`),
+	})
+	assert.Equal(t, "full_tcp", trusted.InputSummary.PortScanMode)
+
+	for _, raw := range []json.RawMessage{
+		json.RawMessage(`{"port_scan_mode":"FULL_TCP"}`),
+		json.RawMessage(`{"port_scan_mode":"fixed_ai","unexpected":"do-not-project"}`),
+		json.RawMessage(`{"port_scan_mode":""}`),
+		json.RawMessage(`{}`),
+	} {
+		detail := taskDetailOf(&Task{TaskType: "ai_infra_scan", Content: "https://secret.example.com", Params: raw})
+		assert.Empty(t, detail.InputSummary.PortScanMode)
+		encoded, err := json.Marshal(detail)
+		require.NoError(t, err)
+		assert.NotContains(t, string(encoded), "do-not-project")
+		assert.NotContains(t, string(encoded), "secret.example.com")
+	}
+}
+
+func TestCreateAuditUsesOnlyNormalizedInfrastructurePortScanModeMetadata(t *testing.T) {
+	repository := NewMemoryRepository()
+	engine := &recordingEngine{}
+	audits := audit.NewMemoryRepository()
+	service := NewService(repository, engine, audit.NewService(audits))
+	subject := identity.Subject{UserID: "user-1", Username: "alice", Role: identity.RoleUser}
+
+	infrastructure, err := service.Create(context.Background(), subject, CreateInput{
+		IdempotencyKey: "audited-full-tcp", TaskType: "ai_infra_scan", Content: "https://ai.example.com/private-target",
+		Params: json.RawMessage(`{"model_id":"model-private","port_scan_mode":"full_tcp"}`),
+	})
+	require.NoError(t, err)
+	mcp, err := service.Create(context.Background(), subject, CreateInput{
+		IdempotencyKey: "audited-mcp", TaskType: "mcp_scan", Content: "scan",
+	})
+	require.NoError(t, err)
+
+	metadataFor := func(taskID string) map[audit.Outcome]map[string]any {
+		t.Helper()
+		events, listErr := audits.List(context.Background(), audit.Filter{ResourceID: taskID, Action: audit.Action("task.created")})
+		require.NoError(t, listErr)
+		metadataByOutcome := make(map[audit.Outcome]map[string]any, len(events))
+		for _, event := range events {
+			metadata := map[string]any{}
+			require.NoError(t, json.Unmarshal(event.Metadata, &metadata))
+			metadataByOutcome[event.Outcome] = metadata
+		}
+		return metadataByOutcome
+	}
+
+	infrastructureMetadata := metadataFor(infrastructure.ID)
+	for outcome, phase := range map[audit.Outcome]string{
+		audit.OutcomePending: "requested",
+		audit.OutcomeSuccess: "succeeded",
+	} {
+		metadata, exists := infrastructureMetadata[outcome]
+		require.True(t, exists, outcome)
+		assert.ElementsMatch(t, []string{"task_type", "port_scan_mode", "port_spec", "phase"}, mapKeys(metadata))
+		assert.Equal(t, "ai_infra_scan", metadata["task_type"])
+		assert.Equal(t, "full_tcp", metadata["port_scan_mode"])
+		assert.Equal(t, "1-65535", metadata["port_spec"])
+		assert.Equal(t, phase, metadata["phase"])
+		serializedMetadata, marshalErr := json.Marshal(metadata)
+		require.NoError(t, marshalErr)
+		assert.NotContains(t, string(serializedMetadata), "private-target")
+		assert.NotContains(t, string(serializedMetadata), "model-private")
+	}
+
+	mcpMetadata := metadataFor(mcp.ID)
+	for outcome, phase := range map[audit.Outcome]string{
+		audit.OutcomePending: "requested",
+		audit.OutcomeSuccess: "succeeded",
+	} {
+		metadata, exists := mcpMetadata[outcome]
+		require.True(t, exists, outcome)
+		assert.ElementsMatch(t, []string{"task_type", "phase"}, mapKeys(metadata))
+		assert.Equal(t, "mcp_scan", metadata["task_type"])
+		assert.Equal(t, phase, metadata["phase"])
+		assert.NotContains(t, metadata, "port_scan_mode")
+		assert.NotContains(t, metadata, "port_spec")
+	}
 }
 
 func TestCreateRejectsUnboundedOrNonCanonicalInputBeforeAttachmentReads(t *testing.T) {

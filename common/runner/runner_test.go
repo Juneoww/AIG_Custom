@@ -15,8 +15,14 @@
 package runner
 
 import (
+	"errors"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"runtime"
+	"strings"
+	"sync"
 	"testing"
 
 	"github.com/Juneoww/AIG_Custom/internal/gologger"
@@ -40,6 +46,92 @@ func baseOptions(targets []string) *options.Options {
 	}
 }
 
+func repositoryDataPath(t *testing.T, name string) string {
+	t.Helper()
+	_, file, _, ok := runtime.Caller(0)
+	require.True(t, ok)
+	return filepath.Join(filepath.Dir(file), "..", "..", "data", name)
+}
+
+func TestParseTargetsExpandsAndDeduplicatesAcrossSources(t *testing.T) {
+	targetFile := filepath.Join(t.TempDir(), "targets.txt")
+	require.NoError(t, os.WriteFile(targetFile, []byte("10.0.0.2\n22.2.10.*\n"), 0600))
+
+	r := &Runner{Options: &options.Options{
+		Target:     []string{"10.0.0.1-10.0.0.2"},
+		TargetFile: targetFile,
+	}}
+	targets, err := r.parseTargets()
+	require.NoError(t, err)
+	assert.Len(t, targets, 258)
+	assert.Equal(t, "10.0.0.1", targets[0])
+	assert.Equal(t, "10.0.0.2", targets[1])
+	assert.Equal(t, "22.2.10.0", targets[2])
+	assert.Equal(t, "22.2.10.255", targets[257])
+}
+
+func TestParseTargetsRejectsTooManyTargetFileExpressions(t *testing.T) {
+	targetFile := filepath.Join(t.TempDir(), "targets.txt")
+	require.NoError(t, os.WriteFile(targetFile, []byte(strings.Repeat("example.test\n", MaxTargetExpressions+1)), 0600))
+
+	r := &Runner{Options: &options.Options{TargetFile: targetFile}}
+	_, err := r.parseTargets()
+	require.ErrorIs(t, err, ErrTooManyTargets)
+}
+
+func TestParseTargetsKeepsPreparedPortDiscoveryBeyondExpressionLimit(t *testing.T) {
+	rawTargets, err := ParseTargets([]string{"22.2.*.*"})
+	require.NoError(t, err)
+	preparedTargets := append(rawTargets, "22.2.0.0:11434")
+
+	r := &Runner{Options: &options.Options{Target: preparedTargets, PreExpandedTargets: true}}
+	targets, err := r.parseTargets()
+	require.NoError(t, err)
+	assert.Len(t, targets, maxTargetExpressions+1)
+	assert.Equal(t, "22.2.0.0:11434", targets[len(targets)-1])
+}
+
+func TestProcessTargetsReturnsRequestedFileError(t *testing.T) {
+	r, err := New(&options.Options{TargetFile: filepath.Join(t.TempDir(), "missing.txt")})
+
+	require.Error(t, err)
+	assert.Nil(t, r)
+	assert.ErrorIs(t, err, os.ErrNotExist)
+}
+
+func TestNewReturnsTargetFileReadError(t *testing.T) {
+	r, err := New(&options.Options{TargetFile: t.TempDir()})
+
+	require.Error(t, err)
+	assert.Nil(t, r)
+}
+
+func TestProcessTargetsRejectsInvalidAndOversizedExpressions(t *testing.T) {
+	cases := []struct {
+		name    string
+		targets []string
+		wantErr error
+	}{
+		{name: "invalid range", targets: []string{"10.0.0.1-not-an-ip"}},
+		{name: "oversized CIDR", targets: []string{"10.0.0.0/15"}, wantErr: ErrTooManyTargets},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			r, err := New(&options.Options{
+				Target:       tc.targets,
+				FPTemplates:  filepath.Join(t.TempDir(), "missing-fingerprints"),
+				AdvTemplates: filepath.Join(t.TempDir(), "missing-vulnerabilities"),
+			})
+			require.Error(t, err)
+			assert.Nil(t, r)
+			if tc.wantErr != nil {
+				assert.True(t, errors.Is(err, tc.wantErr))
+			}
+		})
+	}
+}
+
 // ---------------------------------------------------------------------------
 // Original integration test (kept for regression)
 // ---------------------------------------------------------------------------
@@ -55,8 +147,8 @@ func TestRunner_RunEnumeration(t *testing.T) {
 		TimeOut:      10,
 		JSON:         false,
 		RateLimit:    10,
-		FPTemplates:  "data/fingerprints",
-		AdvTemplates: "data/advisories",
+		FPTemplates:  repositoryDataPath(t, "fingerprints"),
+		AdvTemplates: repositoryDataPath(t, "vuln"),
 	}
 	r, err := New(parseOptions)
 	if err != nil {
@@ -64,6 +156,31 @@ func TestRunner_RunEnumeration(t *testing.T) {
 	}
 	defer r.Close()
 	r.RunEnumeration()
+}
+
+func TestRunnerRunEnumerationRecognizesUppercaseHTTPURLs(t *testing.T) {
+	targets := []string{"HTTP://example.test", "HTTPS://example.test"}
+	r, err := New(baseOptions(targets))
+	require.NoError(t, err)
+	defer r.Close()
+	var hostRequests, domainRequests []string
+	var requestsMu sync.Mutex
+	r.runHostRequestFunc = func(target string) error {
+		requestsMu.Lock()
+		defer requestsMu.Unlock()
+		hostRequests = append(hostRequests, target)
+		return nil
+	}
+	r.runDomainRequestFunc = func(target string) error {
+		requestsMu.Lock()
+		defer requestsMu.Unlock()
+		domainRequests = append(domainRequests, target)
+		return nil
+	}
+
+	r.RunEnumeration()
+	assert.Empty(t, hostRequests)
+	assert.ElementsMatch(t, targets, domainRequests)
 }
 
 // ---------------------------------------------------------------------------
@@ -138,6 +255,30 @@ func TestRunner_Close_Idempotent(t *testing.T) {
 	require.NoError(t, err)
 	// Calling Close twice should not panic
 	r.Close()
+}
+
+func TestRunner_CloseHandlesEmptyAndPartialRunners(t *testing.T) {
+	assert.NotPanics(t, func() {
+		(&Runner{}).Close()
+	})
+
+	var r *Runner
+	assert.NotPanics(t, func() {
+		r.Close()
+	})
+}
+
+func TestNewCleansUpAfterStorageWhenComponentsFail(t *testing.T) {
+	opts := baseOptions([]string{"127.0.0.1"})
+	opts.ProxyURL = "http://[::1"
+
+	var r *Runner
+	var err error
+	assert.NotPanics(t, func() {
+		r, err = New(opts)
+	})
+	require.Error(t, err)
+	assert.Nil(t, r)
 }
 
 // ---------------------------------------------------------------------------

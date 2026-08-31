@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Juneoww/AIG_Custom/common/portscan"
 	"github.com/Juneoww/AIG_Custom/internal/platform/audit"
 	"github.com/Juneoww/AIG_Custom/internal/platform/reports"
 	"github.com/stretchr/testify/assert"
@@ -86,6 +87,47 @@ func TestCompletedTaskSourceHidesEngineErrorsAndUsesFixedMissingTaskError(t *tes
 	require.Error(t, err)
 	assert.NotContains(t, err.Error(), "token")
 	assert.NotContains(t, err.Error(), "secret")
+}
+
+func TestCompletedTaskSourceDerivesInfrastructurePortScanOnlyFromTrustedTaskParams(t *testing.T) {
+	ctx := context.Background()
+	repository := NewMemoryRepository()
+	engine := &recordingEngine{results: map[string]json.RawMessage{}}
+	service := NewService(repository, engine, audit.NewService(audit.NewMemoryRepository()))
+	completedAt := time.Date(2026, 8, 10, 9, 30, 0, 0, time.UTC)
+
+	for _, testCase := range []struct {
+		name     string
+		taskType string
+		params   string
+		wantMode portscan.Mode
+		wantSpec string
+	}{
+		{name: "fixed mode", taskType: "ai_infra_scan", params: `{"port_scan_mode":"fixed_ai"}`, wantMode: portscan.FixedAI, wantSpec: portscan.FixedAIPortSpec},
+		{name: "full mode", taskType: "ai_infra_scan", params: `{"port_scan_mode":"full_tcp"}`, wantMode: portscan.FullTCP, wantSpec: portscan.FullTCPPortSpec},
+		{name: "legacy omitted mode", taskType: "ai_infra_scan", params: `{}`, wantMode: portscan.FixedAI, wantSpec: portscan.FixedAIPortSpec},
+		{name: "unknown mode omitted", taskType: "ai_infra_scan", params: `{"port_scan_mode":"agent-supplied"}`},
+		{name: "duplicate canonical mode omitted", taskType: "ai_infra_scan", params: `{"port_scan_mode":"agent-supplied","port_scan_mode":"full_tcp"}`},
+		{name: "malformed params omitted", taskType: "ai_infra_scan", params: `{"port_scan_mode":["full_tcp"]}`},
+		{name: "non infrastructure omitted", taskType: "mcp_scan", params: `{"port_scan_mode":"full_tcp"}`},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			id := "source-" + testCase.name
+			_, _, err := repository.CreateOrGet(ctx, &Task{ID: id, OwnerUserID: "owner", OwnerUsername: "owner", IdempotencyKey: id,
+				EngineSessionID: "engine-" + id, TaskType: testCase.taskType, Content: "scan", Params: json.RawMessage(testCase.params), AttachmentRefs: json.RawMessage(`[]`),
+				Status: StatusSucceeded, CreatedAt: completedAt.Add(-time.Minute), UpdatedAt: completedAt})
+			require.NoError(t, err)
+			setEngineResult(engine, "engine-"+id, json.RawMessage(`{"port_scan_mode":"agent-supplied","port_spec":"1-65535","findings":[]}`))
+			engine.mu.Lock()
+			engine.status["engine-"+id] = EngineStatus{State: EngineStateSucceeded, CompletedAt: completedAt}
+			engine.mu.Unlock()
+
+			completed, err := service.GetCompletedTask(ctx, id)
+			require.NoError(t, err)
+			assert.Equal(t, testCase.wantMode, completed.PortScanMode)
+			assert.Equal(t, testCase.wantSpec, completed.PortSpec)
+		})
+	}
 }
 
 func putCompletedSourceTask(t *testing.T, repository *MemoryRepository, id string, status Status, updatedAt time.Time) {

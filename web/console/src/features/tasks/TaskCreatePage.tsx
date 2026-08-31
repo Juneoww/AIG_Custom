@@ -17,14 +17,16 @@ import {
   makeStyles,
   tokens,
 } from '@fluentui/react-components'
-import { useEffect, useRef, useState, type FormEvent } from 'react'
+import { useEffect, useMemo, useRef, useState, type FormEvent } from 'react'
 import { useNavigate } from 'react-router-dom'
 
 import { useSession } from '../auth/session'
-import type { AttachmentView, TaskCreateRequest } from '../../shared/api/types'
+import { ApiError } from '../../shared/api/errors'
+import type { AttachmentView, InfrastructurePortScanMode, TaskCreateRequest } from '../../shared/api/types'
 import { PageHeader } from '../../shared/components/PageHeader'
 import { downloadAttachment, preflightAttachments, uploadAttachment } from './attachments'
 import { createTaskSubmission, type TaskSubmission } from './api'
+import { previewTargetExpressions } from './targetExpressionPreview'
 
 const useStyles = makeStyles({
   page: { display: 'flex', flexDirection: 'column', gap: tokens.spacingVerticalL },
@@ -33,6 +35,17 @@ const useStyles = makeStyles({
   fields: { display: 'grid', gridTemplateColumns: 'repeat(2, minmax(0, 1fr))', gap: tokens.spacingHorizontalL },
   actions: { display: 'flex', justifyContent: 'flex-end', gap: tokens.spacingHorizontalM },
   attachment: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: tokens.spacingHorizontalM },
+  targetGuidance: {
+    display: 'flex',
+    flexDirection: 'column',
+    gap: tokens.spacingVerticalXS,
+    padding: tokens.spacingVerticalM,
+    borderLeft: `3px solid ${tokens.colorBrandStroke1}`,
+    borderRadius: tokens.borderRadiusSmall,
+    backgroundColor: tokens.colorNeutralBackground2,
+  },
+  targetExamples: { display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: tokens.spacingHorizontalS },
+  portScanMode: { display: 'flex', flexDirection: 'column', gap: tokens.spacingVerticalXS, gridColumn: '1 / -1' },
 })
 
 export function TaskCreatePage() {
@@ -48,6 +61,7 @@ export function TaskCreatePage() {
   const [agentID, setAgentID] = useState('')
   const [thread, setThread] = useState('4')
   const [timeout, setTimeoutValue] = useState('300')
+  const [portScanMode, setPortScanMode] = useState<InfrastructurePortScanMode>('fixed_ai')
   const [numPrompts, setNumPrompts] = useState('100')
   const [files, setFiles] = useState<File[]>([])
   const [attachments, setAttachments] = useState<AttachmentView[]>([])
@@ -58,6 +72,10 @@ export function TaskCreatePage() {
   const mutexRef = useRef(false)
   const mountedRef = useRef(true)
   const controllerRef = useRef<AbortController | null>(null)
+  const targetPreview = useMemo(
+    () => (taskType === 'ai_infra_scan' ? previewTargetExpressions(content) : null),
+    [content, taskType],
+  )
 
   useEffect(() => {
     mountedRef.current = true
@@ -106,6 +124,10 @@ export function TaskCreatePage() {
       setError('请先完成已选择附件的上传。')
       return
     }
+    if (taskType === 'ai_infra_scan' && targetPreview && !targetPreview.ok) {
+      setError(targetPreview.error)
+      return
+    }
     if (mutexRef.current) return
     mutexRef.current = true
     setSubmitting(true)
@@ -127,6 +149,7 @@ export function TaskCreatePage() {
         const parsed = Number(timeout)
         if (!Number.isInteger(parsed) || parsed < 1 || parsed > 86_400) throw new Error('请填写有效的超时秒数。')
         params.timeout = parsed
+        params.port_scan_mode = portScanMode
       }
       if (taskType === 'model_redteam_report') {
         const modelIDs = modelID.split(',').map((value) => value.trim()).filter(Boolean)
@@ -148,7 +171,7 @@ export function TaskCreatePage() {
       }
       const input: TaskCreateRequest = {
         task_type: taskType,
-        content: content.trim(),
+        content,
         params,
         attachment_ids: attachments.map((item) => item.id),
         country_iso_code: language,
@@ -158,7 +181,11 @@ export function TaskCreatePage() {
       navigate(`/tasks/${encodeURIComponent(created.id)}`, { replace: true })
     } catch (caught) {
       if (mountedRef.current && !controller.signal.aborted) {
-        setError(caught instanceof Error && caught.message.startsWith('请填写') ? caught.message : '任务创建未确认，显式重试将复用同一幂等键。')
+        if (caught instanceof ApiError && caught.kind === 'bad-request') {
+          setError(caught.message)
+        } else {
+          setError(caught instanceof Error && caught.message.startsWith('请填写') ? caught.message : '任务创建未确认，显式重试将复用同一幂等键。')
+        }
       }
     } finally {
       if (controllerRef.current === controller) controllerRef.current = null
@@ -200,8 +227,33 @@ export function TaskCreatePage() {
         <fieldset className={styles.step} aria-label="第二步：参数">
           <Text weight="semibold">第二步：参数</Text>
           <Field label="扫描目标或任务说明" required>
-            <Textarea value={content} onChange={(_, data) => { setContent(data.value); invalidateSubmission() }} resize="vertical" />
+            <Textarea
+              value={content}
+              onChange={(_, data) => { setContent(data.value); invalidateSubmission() }}
+              resize="vertical"
+              aria-invalid={taskType === 'ai_infra_scan' && targetPreview && !targetPreview.ok ? true : undefined}
+              aria-describedby={taskType === 'ai_infra_scan' ? 'ai-infra-target-guidance ai-infra-target-preview' : undefined}
+            />
           </Field>
+          {taskType === 'ai_infra_scan' && targetPreview ? (
+            <aside id="ai-infra-target-guidance" className={styles.targetGuidance} aria-label="AI 基础设施扫描目标格式">
+              <Text weight="semibold">AI 基础设施扫描目标格式</Text>
+              <Text size={200}>每行一条目标，可直接一次粘贴多行。支持单个 URL、域名、IPv4、IPv4 CIDR、闭区间范围和末尾通配符。</Text>
+              <div className={styles.targetExamples} aria-label="目标格式示例">
+                <code>192.168.10.2-192.168.10.10</code>
+                <code>104.147.75.1-104.147.75.10</code>
+                <code>22.2.10.*</code>
+              </div>
+              <Text size={200}>无效示例：<code>104.147.75.1\~104.147.75.10</code>；范围必须使用标准连字符 <code>-</code>。</Text>
+              <Text size={200}>最多 65,536 个展开后的唯一目标。大网段或通配符会显著增加扫描耗时和网络压力，请仅扫描已获授权的范围。</Text>
+              <Text size={200}>附件会在服务端按 UTF-8 目标清单校验（每个不超过 1 MiB）；正文与附件合并后的最终数量以服务端判定为准。</Text>
+              {targetPreview.ok ? (
+                <Text id="ai-infra-target-preview" role="status" aria-live="polite" weight="semibold">已识别 {targetPreview.count.toLocaleString('zh-CN')} 个目标</Text>
+              ) : (
+                <Text id="ai-infra-target-preview" role="alert" aria-live="assertive" weight="semibold">{targetPreview.error}</Text>
+              )}
+            </aside>
+          ) : null}
           <div className={styles.fields}>
             <Field label="语言">
               <Select value={language} onChange={(_, data) => { setLanguage(data.value as 'zh_CN' | 'en'); invalidateSubmission() }}>
@@ -230,6 +282,26 @@ export function TaskCreatePage() {
             ) : null}
             {taskType === 'mcp_scan' ? <Field label="并发数"><Input type="number" min={1} max={1024} value={thread} onChange={(_, data) => { setThread(data.value); invalidateSubmission() }} /></Field> : null}
             {taskType === 'ai_infra_scan' ? <Field label="超时秒数"><Input type="number" min={1} max={86400} value={timeout} onChange={(_, data) => { setTimeoutValue(data.value); invalidateSubmission() }} /></Field> : null}
+            {taskType === 'ai_infra_scan' ? (
+              <div className={styles.portScanMode}>
+                <Field label="端口扫描模式">
+                  <Select value={portScanMode} onChange={(_, data) => { setPortScanMode(data.value as InfrastructurePortScanMode); invalidateSubmission() }}>
+                    <option value="fixed_ai">固定 AI 端口及范围</option>
+                    <option value="full_tcp">全量 TCP（1–65535）</option>
+                  </Select>
+                </Field>
+                {portScanMode === 'fixed_ai' ? (
+                  <Text size={200}>固定 AI 端口：11434、1337、7000–9000、18789（共 2,004 个端口）。</Text>
+                ) : (
+                  <MessageBar intent="warning">
+                    <MessageBarBody>
+                      <Text weight="semibold">全量 TCP 1–65535</Text>
+                      <Text size={200}>仅对裸 IPv4 执行 TCP 1–65535；会显著增加扫描耗时和网络压力，请仅扫描已获授权的目标。URL 和域名继续沿用现有 Web 扫描路径。</Text>
+                    </MessageBarBody>
+                  </MessageBar>
+                )}
+              </div>
+            ) : null}
             {taskType === 'model_redteam_report' ? <Field label="提示词数量"><Input type="number" min={1} max={1000000} value={numPrompts} onChange={(_, data) => { setNumPrompts(data.value); invalidateSubmission() }} /></Field> : null}
           </div>
         </fieldset>

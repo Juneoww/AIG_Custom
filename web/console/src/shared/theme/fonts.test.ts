@@ -79,7 +79,15 @@ async function runPrepare(cwd = root): Promise<void> {
 }
 
 async function digest(path: string): Promise<string> {
-  return createHash('sha256').update(await readFile(path)).digest('hex')
+  return digestContent(await readFile(path))
+}
+
+function digestContent(content: Uint8Array): string {
+  return createHash('sha256').update(content).digest('hex')
+}
+
+function normalizeIbmPlexLicenseLineEndings(content: Buffer): Buffer {
+  return Buffer.from(content.toString('utf8').replace(/\r\n/g, '\n'), 'utf8')
 }
 
 describe('offline font assets', () => {
@@ -96,10 +104,11 @@ describe('offline font assets', () => {
 
   it('ships the complete IBM Plex OFL attribution', async () => {
     const licensePath = resolve(root, 'assets/fonts/IBM_PLEX_LICENSE.txt')
-    const license = await readFile(licensePath, 'utf8')
+    const licenseBytes = normalizeIbmPlexLicenseLineEndings(await readFile(licensePath))
+    const license = licenseBytes.toString('utf8')
 
-    await expect(stat(licensePath)).resolves.toMatchObject({ size: 4_362 })
-    await expect(digest(licensePath)).resolves.toBe(
+    expect(licenseBytes.length).toBe(4_362)
+    expect(digestContent(licenseBytes)).toBe(
       'd741e57d5f865e294df801f96b7b5161a88b211df65887e4358d271c9fc5fb4f',
     )
     expect(license.length).toBeGreaterThan(4_000)
@@ -110,8 +119,12 @@ describe('offline font assets', () => {
   })
 
   it.each(expectedLicenses)('pins the published $name bytes and SHA-256', async (license) => {
-    await expect(stat(license.source)).resolves.toMatchObject({ size: license.bytes })
-    await expect(digest(license.source)).resolves.toBe(license.sha256)
+    const source = await readFile(license.source)
+    const canonicalSource = license.name === 'IBM_PLEX_LICENSE.txt'
+      ? normalizeIbmPlexLicenseLineEndings(source)
+      : source
+    expect(canonicalSource.length).toBe(license.bytes)
+    expect(digestContent(canonicalSource)).toBe(license.sha256)
     await expect(stat(resolve(root, '.generated/licenses', license.name))).resolves.toMatchObject({
       size: license.bytes,
     })
@@ -131,6 +144,50 @@ describe('offline font assets', () => {
     expect(droidLicense).toContain('License: Apache License, Version 2.0')
     expect(apacheLicense).toContain('Apache License')
     expect(apacheLicense).toContain('END OF TERMS AND CONDITIONS')
+  })
+
+  it('normalizes a CRLF IBM license source before strict publication', async () => {
+    const fixtureRoot = await mkdtemp(join(tmpdir(), 'aig-font-fixture-'))
+
+    try {
+      await mkdir(resolve(fixtureRoot, 'scripts'), { recursive: true })
+      await mkdir(resolve(fixtureRoot, 'assets/fonts'), { recursive: true })
+      await copyFile(resolve(root, 'scripts/prepare-fonts.mjs'), resolve(fixtureRoot, 'scripts/prepare-fonts.mjs'))
+      for (const asset of expectedAssets.filter((asset) => asset.name.startsWith('IBMPlex'))) {
+        await copyFile(asset.source, resolve(fixtureRoot, 'assets/fonts', asset.name))
+      }
+
+      const canonicalLicense = normalizeIbmPlexLicenseLineEndings(
+        await readFile(resolve(root, 'assets/fonts/IBM_PLEX_LICENSE.txt')),
+      )
+      const crlfLicense = Buffer.from(canonicalLicense.toString('utf8').replace(/\n/g, '\r\n'), 'utf8')
+      await writeFile(resolve(fixtureRoot, 'assets/fonts/IBM_PLEX_LICENSE.txt'), crlfLicense)
+
+      expect(crlfLicense).not.toEqual(canonicalLicense)
+      await expect(runPrepare(fixtureRoot)).resolves.toBeUndefined()
+
+      const generatedLicense = await readFile(
+        resolve(fixtureRoot, '.generated/licenses/IBM_PLEX_LICENSE.txt'),
+      )
+      expect(generatedLicense).toEqual(canonicalLicense)
+      expect(generatedLicense.length).toBe(4_362)
+      expect(createHash('sha256').update(generatedLicense).digest('hex')).toBe(
+        'd741e57d5f865e294df801f96b7b5161a88b211df65887e4358d271c9fc5fb4f',
+      )
+
+      const tamperedLicense = Buffer.from(crlfLicense)
+      const copyrightIndex = tamperedLicense.indexOf(Buffer.from('Copyright', 'utf8'))
+      expect(copyrightIndex).toBeGreaterThanOrEqual(0)
+      tamperedLicense[copyrightIndex] = 'X'.charCodeAt(0)
+      await writeFile(resolve(fixtureRoot, 'assets/fonts/IBM_PLEX_LICENSE.txt'), tamperedLicense)
+
+      await expect(runPrepare(fixtureRoot)).rejects.toThrow('字体资产校验失败：IBM_PLEX_LICENSE.txt')
+      await expect(readFile(resolve(fixtureRoot, '.generated/licenses/IBM_PLEX_LICENSE.txt'))).resolves.toEqual(
+        canonicalLicense,
+      )
+    } finally {
+      await rm(fixtureRoot, { recursive: true, force: true })
+    }
   })
 
   it('replaces stale generated content with the fixed publication whitelist', async () => {

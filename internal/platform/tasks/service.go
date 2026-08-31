@@ -10,12 +10,16 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"reflect"
 	"sort"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
+	"github.com/Juneoww/AIG_Custom/common/portscan"
+	"github.com/Juneoww/AIG_Custom/common/runner"
 	"github.com/Juneoww/AIG_Custom/internal/platform/audit"
 	"github.com/Juneoww/AIG_Custom/internal/platform/identity"
 	"github.com/Juneoww/AIG_Custom/internal/platform/reports"
@@ -26,13 +30,14 @@ import (
 )
 
 const (
-	MaxIdempotencyKeyLength = 128
-	MaxDispatchAttempts     = 3
-	MaxTaskContentLength    = 32 << 10
-	MaxTaskParamsLength     = 64 << 10
-	MaxTaskAttachmentCount  = 10
-	MaxTaskReferenceLength  = 128
-	dispatchLeaseDuration   = 30 * time.Second
+	MaxIdempotencyKeyLength                      = 128
+	MaxDispatchAttempts                          = 3
+	MaxTaskContentLength                         = 32 << 10
+	MaxTaskParamsLength                          = 64 << 10
+	MaxTaskAttachmentCount                       = 10
+	MaxTaskReferenceLength                       = 128
+	maxInfrastructureTargetAttachmentBytes int64 = 1 << 20
+	dispatchLeaseDuration                        = 30 * time.Second
 )
 
 var (
@@ -137,7 +142,11 @@ func (service *Service) Create(ctx context.Context, subject identity.Subject, in
 	if len(params) == 0 {
 		params = json.RawMessage(`{}`)
 	}
-	if len(params) > MaxTaskParamsLength || !validTaskParams(input.TaskType, params) {
+	if len(params) > MaxTaskParamsLength {
+		return View{}, ErrInvalid
+	}
+	params, valid := normalizeTaskParams(input.TaskType, params)
+	if !valid {
 		return View{}, ErrInvalid
 	}
 	attachmentRefs, err := json.Marshal(input.AttachmentIDs)
@@ -211,10 +220,16 @@ func (service *Service) createLocked(
 				return nil, resolveErr
 			}
 		}
+		if input.TaskType == "ai_infra_scan" {
+			if validateErr := service.validateInfrastructureTargets(ctx, subject.UserID, input.Content, input.AttachmentIDs); validateErr != nil {
+				return nil, validateErr
+			}
+		}
 	}
 
+	metadata := taskCreatedAuditMetadata(input.TaskType, params)
 	mutation, err := audit.BeginMutation(ctx, service.audits, subject, audit.EventInput{
-		Action: audit.Action("task.created"), ResourceType: "task", ResourceID: taskID,
+		Action: audit.Action("task.created"), ResourceType: "task", ResourceID: taskID, Metadata: metadata,
 	})
 	if err != nil {
 		return nil, err
@@ -222,7 +237,7 @@ func (service *Service) createLocked(
 	var persisted *Task
 	var created bool
 	var repositoryErr error
-	err = mutation.Run(ctx, taskID, map[string]any{"task_type": input.TaskType}, func(transactionContext context.Context) error {
+	err = mutation.Run(ctx, taskID, metadata, func(transactionContext context.Context) error {
 		persisted, created, repositoryErr = service.repository.CreateOrGet(transactionContext, candidate)
 		if repositoryErr == nil && !sameCreateRequest(persisted, candidate) {
 			repositoryErr = ErrInvalid
@@ -243,14 +258,44 @@ func (service *Service) createLocked(
 	return persisted, nil
 }
 
+func (service *Service) validateInfrastructureTargets(ctx context.Context, ownerUserID, content string, attachmentIDs []string) error {
+	expressions, err := runner.AppendTargetExpressionLines(nil, content)
+	if err != nil {
+		return ErrInvalid
+	}
+	if len(attachmentIDs) > 0 {
+		if service.attachments == nil {
+			return ErrInvalid
+		}
+		attachmentExpressions, err := service.attachments.ReadReadyTargetExpressions(ctx, ownerUserID, attachmentIDs, expressions)
+		if err != nil {
+			return ErrInvalid
+		}
+		expressions = attachmentExpressions
+	}
+	if _, err := runner.ParseTargets(expressions); err != nil {
+		return ErrInvalid
+	}
+	return nil
+}
+
 func sameCreateRequest(persisted, candidate *Task) bool {
 	if persisted == nil || candidate == nil || persisted.OwnerUserID != candidate.OwnerUserID ||
 		persisted.IdempotencyKey != candidate.IdempotencyKey || persisted.TaskType != candidate.TaskType ||
 		persisted.Content != candidate.Content || persisted.CountryIsoCode != candidate.CountryIsoCode {
 		return false
 	}
-	persistedParams, persistedParamsOK := canonicalJSON(persisted.Params)
-	candidateParams, candidateParamsOK := canonicalJSON(candidate.Params)
+	persistedRaw, candidateRaw := persisted.Params, candidate.Params
+	if persisted.TaskType == "ai_infra_scan" {
+		var persistedValid, candidateValid bool
+		persistedRaw, persistedValid = normalizeInfrastructureTaskParams(persistedRaw)
+		candidateRaw, candidateValid = normalizeInfrastructureTaskParams(candidateRaw)
+		if !persistedValid || !candidateValid {
+			return false
+		}
+	}
+	persistedParams, persistedParamsOK := canonicalJSON(persistedRaw)
+	candidateParams, candidateParamsOK := canonicalJSON(candidateRaw)
 	return persistedParamsOK && candidateParamsOK && bytes.Equal(persistedParams, candidateParams) &&
 		sameAttachmentRefs(persisted.AttachmentRefs, candidate.AttachmentRefs)
 }
@@ -289,8 +334,9 @@ type mcpTaskParams struct {
 }
 
 type infrastructureTaskParams struct {
-	ModelID string `json:"model_id"`
-	Timeout *int   `json:"timeout"`
+	ModelID      string `json:"model_id,omitempty"`
+	Timeout      *int   `json:"timeout,omitempty"`
+	PortScanMode string `json:"port_scan_mode"`
 }
 
 type redteamDatasetParams struct {
@@ -322,9 +368,8 @@ func validTaskParams(taskType string, raw json.RawMessage) bool {
 		return decodeExactJSON(raw, &params) && validOptionalReference(fields, "model_id", params.ModelID) &&
 			(params.Thread == nil || *params.Thread >= 1 && *params.Thread <= 1_024)
 	case "ai_infra_scan":
-		var params infrastructureTaskParams
-		return decodeExactJSON(raw, &params) && validOptionalReference(fields, "model_id", params.ModelID) &&
-			(params.Timeout == nil || *params.Timeout >= 1 && *params.Timeout <= 86_400)
+		_, valid := normalizeInfrastructureTaskParams(raw)
+		return valid
 	case "model_redteam_report":
 		var params redteamTaskParams
 		if !decodeExactJSON(raw, &params) || !validReferences(params.ModelIDs, 10) || !validReference(params.EvalModelID) ||
@@ -342,13 +387,171 @@ func validTaskParams(taskType string, raw json.RawMessage) bool {
 	}
 }
 
+func normalizeTaskParams(taskType string, raw json.RawMessage) (json.RawMessage, bool) {
+	if taskType == "ai_infra_scan" {
+		return normalizeInfrastructureTaskParams(raw)
+	}
+	if !validTaskParams(taskType, raw) {
+		return nil, false
+	}
+	return append(json.RawMessage(nil), raw...), true
+}
+
+func normalizeInfrastructureTaskParams(raw json.RawMessage) (json.RawMessage, bool) {
+	params, fields, valid := decodeInfrastructureTaskParams(raw)
+	if !valid {
+		return nil, false
+	}
+	mode, valid := normalizedInfrastructurePortScanModeField(fields)
+	if !valid {
+		return nil, false
+	}
+	params.PortScanMode = string(mode)
+	normalized, err := json.Marshal(params)
+	if err != nil {
+		return nil, false
+	}
+	return json.RawMessage(normalized), true
+}
+
+func normalizedInfrastructurePortScanMode(raw json.RawMessage) (portscan.Mode, bool) {
+	_, fields, valid := decodeInfrastructureTaskParams(raw)
+	if !valid {
+		return "", false
+	}
+	if _, exists := fields["port_scan_mode"]; !exists {
+		return "", false
+	}
+	mode, valid := normalizedInfrastructurePortScanModeField(fields)
+	if !valid || portscan.PortSpec(mode) == "" {
+		return "", false
+	}
+	return mode, true
+}
+
+func decodeInfrastructureTaskParams(raw json.RawMessage) (infrastructureTaskParams, map[string]json.RawMessage, bool) {
+	var fields map[string]json.RawMessage
+	if json.Unmarshal(raw, &fields) != nil || fields == nil {
+		return infrastructureTaskParams{}, nil, false
+	}
+	var params infrastructureTaskParams
+	if !decodeExactJSON(raw, &params) || !validOptionalReference(fields, "model_id", params.ModelID) ||
+		params.Timeout != nil && (*params.Timeout < 1 || *params.Timeout > 86_400) {
+		return infrastructureTaskParams{}, nil, false
+	}
+	return params, fields, true
+}
+
+func normalizedInfrastructurePortScanModeField(fields map[string]json.RawMessage) (portscan.Mode, bool) {
+	raw, exists := fields["port_scan_mode"]
+	if !exists {
+		return portscan.DefaultMode, true
+	}
+	var value *string
+	if json.Unmarshal(raw, &value) != nil || value == nil || strings.TrimSpace(*value) == "" {
+		return "", false
+	}
+	mode, err := portscan.Normalize(*value)
+	if err != nil {
+		return "", false
+	}
+	return mode, true
+}
+
+func taskCreatedAuditMetadata(taskType string, params json.RawMessage) map[string]any {
+	metadata := map[string]any{"task_type": taskType}
+	if taskType != "ai_infra_scan" {
+		return metadata
+	}
+	mode, valid := normalizedInfrastructurePortScanMode(params)
+	if !valid {
+		return metadata
+	}
+	metadata["port_scan_mode"] = string(mode)
+	metadata["port_spec"] = portscan.PortSpec(mode)
+	return metadata
+}
+
 func decodeExactJSON(raw json.RawMessage, target any) bool {
+	var decoded any
 	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder.UseNumber()
+	if decoder.Decode(&decoded) != nil || decoder.Decode(&struct{}{}) != io.EOF || !hasExactJSONFieldNames(decoded, reflect.TypeOf(target)) {
+		return false
+	}
+
+	decoder = json.NewDecoder(bytes.NewReader(raw))
 	decoder.DisallowUnknownFields()
 	if decoder.Decode(target) != nil {
 		return false
 	}
 	return decoder.Decode(&struct{}{}) == io.EOF
+}
+
+func hasExactJSONFieldNames(value any, targetType reflect.Type) bool {
+	if value == nil {
+		return true
+	}
+	for targetType.Kind() == reflect.Pointer {
+		targetType = targetType.Elem()
+	}
+	switch targetType.Kind() {
+	case reflect.Struct:
+		object, ok := value.(map[string]any)
+		if !ok {
+			return false
+		}
+		fields := exactJSONStructFields(targetType)
+		for name, child := range object {
+			fieldType, exists := fields[name]
+			if !exists || !hasExactJSONFieldNames(child, fieldType) {
+				return false
+			}
+		}
+	case reflect.Slice, reflect.Array:
+		items, ok := value.([]any)
+		if !ok {
+			return false
+		}
+		for _, item := range items {
+			if !hasExactJSONFieldNames(item, targetType.Elem()) {
+				return false
+			}
+		}
+	case reflect.Map:
+		object, ok := value.(map[string]any)
+		if !ok {
+			return false
+		}
+		for _, child := range object {
+			if !hasExactJSONFieldNames(child, targetType.Elem()) {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+func exactJSONStructFields(targetType reflect.Type) map[string]reflect.Type {
+	fields := make(map[string]reflect.Type, targetType.NumField())
+	for index := 0; index < targetType.NumField(); index++ {
+		field := targetType.Field(index)
+		if field.PkgPath != "" {
+			continue
+		}
+		name := field.Tag.Get("json")
+		if comma := strings.IndexByte(name, ','); comma >= 0 {
+			name = name[:comma]
+		}
+		if name == "-" {
+			continue
+		}
+		if name == "" {
+			name = field.Name
+		}
+		fields[name] = field.Type
+	}
+	return fields
 }
 
 func validTaskCountry(country string) bool {
@@ -412,9 +615,17 @@ func validBoundedString(value string, maximum int) bool {
 }
 
 func (service *Service) dispatch(ctx context.Context, subject identity.Subject, task *Task, claim string) (*Task, error) {
+	params := append(json.RawMessage(nil), task.Params...)
+	if task.TaskType == "ai_infra_scan" {
+		var valid bool
+		params, valid = normalizeInfrastructureTaskParams(params)
+		if !valid {
+			return task, ErrInvalid
+		}
+	}
 	engineTask := EngineTask{
 		PlatformTaskID: task.ID, OwnerUsername: task.OwnerUsername, TaskType: task.TaskType,
-		Content: task.Content, Params: append(json.RawMessage(nil), task.Params...), CountryIsoCode: task.CountryIsoCode,
+		Content: task.Content, Params: params, CountryIsoCode: task.CountryIsoCode,
 	}
 	var attachmentIDs []string
 	_ = json.Unmarshal(task.AttachmentRefs, &attachmentIDs)
@@ -836,10 +1047,7 @@ func (service *Service) RecordEngineEvent(ctx context.Context, engineSessionID s
 		if resultErr != nil {
 			return errors.New("无法生成任务报告快照")
 		}
-		snapshot, resultErr = service.reportSnapshots.Prepare(ctx, reports.CompletedTask{
-			TaskID: task.ID, OwnerUserID: task.OwnerUserID, TaskType: task.TaskType,
-			RawResult: rawResult, CompletedAt: completedAt,
-		})
+		snapshot, resultErr = service.reportSnapshots.Prepare(ctx, completedTaskForReport(task, rawResult, completedAt))
 		if resultErr != nil {
 			return errors.New("无法生成任务报告快照")
 		}
@@ -960,8 +1168,76 @@ func (service *Service) GetCompletedTask(ctx context.Context, taskID string) (re
 	if err != nil {
 		return reports.CompletedTask{}, errors.New("无法读取任务结果")
 	}
-	return reports.CompletedTask{TaskID: task.ID, OwnerUserID: task.OwnerUserID, TaskType: task.TaskType,
-		RawResult: append(json.RawMessage(nil), rawResult...), CompletedAt: engineStatus.CompletedAt.UTC()}, nil
+	return completedTaskForReport(task, rawResult, engineStatus.CompletedAt.UTC()), nil
+}
+
+func completedTaskForReport(task *Task, rawResult json.RawMessage, completedAt time.Time) reports.CompletedTask {
+	completed := reports.CompletedTask{
+		TaskID: task.ID, OwnerUserID: task.OwnerUserID, TaskType: task.TaskType,
+		RawResult: append(json.RawMessage(nil), rawResult...), CompletedAt: completedAt.UTC(),
+	}
+	mode, spec, valid := trustedReportInfrastructurePortScan(task.TaskType, task.Params)
+	if valid {
+		completed.PortScanMode = mode
+		completed.PortSpec = spec
+	}
+	return completed
+}
+
+func trustedReportInfrastructurePortScan(taskType string, raw json.RawMessage) (portscan.Mode, string, bool) {
+	if taskType != "ai_infra_scan" || !hasUniqueJSONObjectKeys(raw) {
+		return "", "", false
+	}
+	_, fields, valid := decodeInfrastructureTaskParams(raw)
+	if !valid {
+		return "", "", false
+	}
+	mode, valid := normalizedInfrastructurePortScanModeField(fields)
+	if !valid {
+		return "", "", false
+	}
+	spec := portscan.PortSpec(mode)
+	if spec == "" {
+		return "", "", false
+	}
+	return mode, spec, true
+}
+
+func hasUniqueJSONObjectKeys(raw json.RawMessage) bool {
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	token, err := decoder.Token()
+	if err != nil {
+		return false
+	}
+	start, ok := token.(json.Delim)
+	if !ok || start != '{' {
+		return false
+	}
+
+	keys := make(map[string]struct{})
+	for decoder.More() {
+		token, err = decoder.Token()
+		key, ok := token.(string)
+		if err != nil || !ok {
+			return false
+		}
+		if _, exists := keys[key]; exists {
+			return false
+		}
+		keys[key] = struct{}{}
+
+		var value json.RawMessage
+		if decoder.Decode(&value) != nil {
+			return false
+		}
+	}
+
+	token, err = decoder.Token()
+	end, ok := token.(json.Delim)
+	if err != nil || !ok || end != '}' {
+		return false
+	}
+	return decoder.Decode(&struct{}{}) == io.EOF
 }
 
 func sanitizeEngineFailureReason(reason string) string {
@@ -1917,6 +2193,70 @@ func (service *AttachmentService) ResolveReady(ctx context.Context, ownerUserID 
 
 func (service *AttachmentService) ResolveAttached(ctx context.Context, ownerUserID string, ids []string) ([]string, error) {
 	return service.resolveWithState(ctx, ownerUserID, ids, AttachmentStateAttached)
+}
+
+// ReadReadyTargetExpressions reads ready, owner-scoped target-list attachments without exposing storage paths.
+func (service *AttachmentService) ReadReadyTargetExpressions(ctx context.Context, ownerUserID string, ids []string, expressions []string) ([]string, error) {
+	if _, err := service.ResolveReady(ctx, ownerUserID, ids); err != nil {
+		return nil, err
+	}
+	for _, id := range ids {
+		attachment, err := service.repository.GetAttachment(ctx, id)
+		if err != nil {
+			return nil, err
+		}
+		if attachment.OwnerUserID != ownerUserID {
+			return nil, ErrForbidden
+		}
+		if attachment.State != AttachmentStateReady {
+			return nil, ErrAttachmentNotReady
+		}
+		if attachment.Size > maxInfrastructureTargetAttachmentBytes {
+			return nil, ErrAttachmentTooLarge
+		}
+		path, err := service.storagePath(attachment.StorageName)
+		if err != nil {
+			return nil, err
+		}
+		preOpenInfo, err := os.Lstat(path)
+		if err != nil {
+			return nil, classifyAttachmentStorageError(err)
+		}
+		if !preOpenInfo.Mode().IsRegular() {
+			return nil, ErrAttachmentStorage
+		}
+		file, err := service.openFile(path)
+		if err != nil {
+			return nil, classifyAttachmentStorageError(err)
+		}
+		postOpenInfo, statErr := file.Stat()
+		if statErr != nil || !postOpenInfo.Mode().IsRegular() || !os.SameFile(preOpenInfo, postOpenInfo) {
+			_ = file.Close()
+			if statErr != nil {
+				return nil, classifyAttachmentStorageError(statErr)
+			}
+			return nil, ErrAttachmentStorage
+		}
+		contents, readErr := io.ReadAll(io.LimitReader(file, maxInfrastructureTargetAttachmentBytes+1))
+		closeErr := file.Close()
+		if readErr != nil || closeErr != nil {
+			return nil, ErrAttachmentStorage
+		}
+		if int64(len(contents)) > maxInfrastructureTargetAttachmentBytes {
+			return nil, ErrAttachmentTooLarge
+		}
+		if int64(len(contents)) != attachment.Size {
+			return nil, ErrAttachmentStorage
+		}
+		if !utf8.Valid(contents) {
+			return nil, ErrInvalid
+		}
+		expressions, err = runner.AppendTargetExpressionLines(expressions, string(contents))
+		if err != nil {
+			return nil, ErrInvalid
+		}
+	}
+	return expressions, nil
 }
 
 func (service *AttachmentService) resolveWithState(ctx context.Context, ownerUserID string, ids []string, state AttachmentState) ([]string, error) {
