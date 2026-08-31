@@ -25,6 +25,7 @@ import {
 } from '@fluentui/react-components'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { useEffect, useMemo, useRef, useState } from 'react'
+import { flushSync } from 'react-dom'
 
 import { ApiError } from '../../shared/api/errors'
 import { DataTable, type DataTableColumn } from '../../shared/components/DataTable'
@@ -44,7 +45,7 @@ import {
   type AgentTemplateField,
 } from './api'
 import { AgentConfigurationBrief } from './components/AgentConfigurationBrief'
-import { StructuredEditor, type StructuredValidationResult } from './components/StructuredEditor'
+import { StructuredEditor, type StructuredValidationResult, validateStructuredText } from './components/StructuredEditor'
 
 const useStyles = makeStyles({
   page: { display: 'flex', flexDirection: 'column', gap: tokens.spacingVerticalL, minWidth: 0, maxWidth: '100%' },
@@ -134,6 +135,10 @@ export function AgentConfigPage() {
   const epochRef = useRef(0)
   const configEpochRef = useRef(0)
   const mutexRef = useRef(false)
+  const contentRef = useRef('')
+  const validRef = useRef(false)
+  const existingReadyRef = useRef(false)
+  const workbenchReadyRef = useRef(false)
   const downloadURLsRef = useRef(new Set<string>())
   const downloadTimersRef = useRef(new Set<number>())
   const [configState, setConfigState] = useState<'idle' | 'loading' | 'ready' | 'error'>('idle')
@@ -142,6 +147,22 @@ export function AgentConfigPage() {
   const existingReady = selectedName !== null && configState === 'ready'
   const createReady = creating && templates !== null && templates.length > 0 && selectedTemplate !== undefined
   const workbenchReady = existingReady || createReady
+  existingReadyRef.current = existingReady
+  workbenchReadyRef.current = workbenchReady
+
+  const replaceContent = (nextContent: string, clearActionResult = false) => {
+    contentRef.current = nextContent
+    validRef.current = false
+    setContent(nextContent)
+    setValid(false)
+    if (clearActionResult) setActionResult('')
+  }
+
+  const updateContentValidation = (result: StructuredValidationResult) => {
+    if (validateStructuredText('yaml', contentRef.current).valid !== result.valid) return
+    validRef.current = result.valid
+    setValid(result.valid)
+  }
 
   useEffect(() => {
     mountedRef.current = true
@@ -163,23 +184,29 @@ export function AgentConfigPage() {
     configControllerRef.current = null
     configEpochRef.current += 1
     if (!selectedName) {
+      existingReadyRef.current = false
+      workbenchReadyRef.current = false
       setConfigState('idle')
       return
     }
-    setValid(false)
-    setContent('')
+    existingReadyRef.current = false
+    workbenchReadyRef.current = false
+    replaceContent('')
     const controller = new AbortController()
     const epoch = configEpochRef.current
     configControllerRef.current = controller
     setConfigState('loading')
     void fetchAgentConfig(selectedName, controller.signal).then((config) => {
       if (!mountedRef.current || controller.signal.aborted || configEpochRef.current !== epoch || config.name !== selectedName) return
-      setContent(config.content)
+      replaceContent(config.content)
+      existingReadyRef.current = true
+      workbenchReadyRef.current = true
       setConfigState('ready')
     }).catch(() => {
       if (!mountedRef.current || controller.signal.aborted || configEpochRef.current !== epoch) return
-      setContent('')
-      setValid(false)
+      replaceContent('')
+      existingReadyRef.current = false
+      workbenchReadyRef.current = false
       setConfigState('error')
     }).finally(() => {
       if (configControllerRef.current === controller) configControllerRef.current = null
@@ -191,10 +218,9 @@ export function AgentConfigPage() {
     if (!creating || !templates?.length || selectedTemplate) return
     const template = templates[0]
     const values = initialTemplateValues(template)
-    setValid(false)
     setTemplateID(template.id)
     setTemplateValues(values)
-    setContent(buildTemplateContent(template, values) ?? '')
+    replaceContent(buildTemplateContent(template, values) ?? '')
   }, [creating, selectedTemplate, templates])
 
   const invalidateStage = () => {
@@ -215,11 +241,15 @@ export function AgentConfigPage() {
     configControllerRef.current?.abort()
     configControllerRef.current = null
     configEpochRef.current += 1
-    setCreating(false)
-    setDraftName(name)
-    setContent('')
-    setValid(false)
-    setSelectedName(name)
+    existingReadyRef.current = false
+    workbenchReadyRef.current = false
+    flushSync(() => {
+      setCreating(false)
+      setConfigState('loading')
+      setDraftName(name)
+      replaceContent('')
+      setSelectedName(name)
+    })
   }
 
   const openCreate = () => {
@@ -227,15 +257,17 @@ export function AgentConfigPage() {
     configControllerRef.current?.abort()
     configControllerRef.current = null
     configEpochRef.current += 1
+    existingReadyRef.current = false
+    workbenchReadyRef.current = false
     setSelectedName(null)
     setCreating(true)
     setDraftName('')
-    setValid(false)
+    setConfigState('idle')
     const template = templates?.[0]
     setTemplateID(template?.id ?? '')
     const values = initialTemplateValues(template)
     setTemplateValues(values)
-    setContent(template ? buildTemplateContent(template, values) ?? '' : '')
+    replaceContent(template ? buildTemplateContent(template, values) ?? '' : '')
   }
 
   const closeEditor = () => {
@@ -243,36 +275,35 @@ export function AgentConfigPage() {
     configControllerRef.current?.abort()
     configControllerRef.current = null
     configEpochRef.current += 1
+    existingReadyRef.current = false
+    workbenchReadyRef.current = false
     setSelectedName(null)
     setCreating(false)
     setDraftName('')
     setTemplateID('')
     setTemplateValues({})
-    setContent('')
-    setValid(false)
+    replaceContent('')
     setConfigState('idle')
   }
 
   const changeTemplate = (id: string) => {
     const template = templates?.find((item) => item.id === id)
     const values = initialTemplateValues(template)
-    setValid(false)
     setTemplateID(id)
     setTemplateValues(values)
-    setContent(template ? buildTemplateContent(template, values) ?? '' : '')
+    replaceContent(template ? buildTemplateContent(template, values) ?? '' : '', true)
   }
 
   const changeTemplateField = (field: string, value: string) => {
     if (!selectedTemplate) return
     const values = { ...templateValues, [field]: value }
-    setValid(false)
     setTemplateValues(values)
-    setContent(buildTemplateContent(selectedTemplate, values) ?? '')
+    replaceContent(buildTemplateContent(selectedTemplate, values) ?? '', true)
   }
 
   const downloadTemplate = () => {
     if (!selectedTemplate) return
-    const templateContent = content || JSON.stringify({ type: selectedTemplate.id }, null, 2)
+    const templateContent = contentRef.current || JSON.stringify({ type: selectedTemplate.id }, null, 2)
     const url = URL.createObjectURL(new Blob([templateContent], { type: 'text/yaml;charset=utf-8' }))
     downloadURLsRef.current.add(url)
     const link = document.createElement('a')
@@ -287,11 +318,21 @@ export function AgentConfigPage() {
     downloadTimersRef.current.add(timer)
   }
 
+  const openSaveConfirmation = () => {
+    if (!admin || !workbenchReadyRef.current || !validRef.current || mutexRef.current || !isSafeKnowledgeID(draftName)) return
+    setConfirmSave(true)
+  }
+
+  const openDeleteConfirmation = () => {
+    if (!admin || !workbenchReadyRef.current || !existingReadyRef.current || mutexRef.current || !isSafeKnowledgeID(draftName)) return
+    setConfirmDelete(true)
+  }
+
   const runAction = async (kind: 'save' | 'delete' | 'connect' | 'prompt') => {
     const actionReady = kind === 'delete'
-      ? existingReady && !creating
-      : valid && (kind !== 'prompt' || Boolean(prompt.trim()))
-    if (!admin || !workbenchReady || !actionReady || mutexRef.current || !isSafeKnowledgeID(draftName)) return
+      ? existingReadyRef.current
+      : validRef.current && (kind !== 'prompt' || Boolean(prompt.trim()))
+    if (!admin || !workbenchReadyRef.current || !actionReady || mutexRef.current || !isSafeKnowledgeID(draftName)) return
     mutexRef.current = true
     setSubmitting(true)
     setActionError('')
@@ -300,19 +341,21 @@ export function AgentConfigPage() {
     const controller = new AbortController()
     controllerRef.current?.abort()
     controllerRef.current = controller
+    const currentContent = contentRef.current
     try {
-      if (kind === 'save') await saveAgentConfig(draftName, content, controller.signal)
+      if (kind === 'save') await saveAgentConfig(draftName, currentContent, controller.signal)
       if (kind === 'delete') await deleteAgentConfig(draftName, controller.signal)
-      if (kind === 'connect') await testAgentConnection(content, controller.signal)
-      const output = kind === 'prompt' ? await testAgentPrompt(content, prompt, controller.signal) : ''
+      if (kind === 'connect') await testAgentConnection(currentContent, controller.signal)
+      const output = kind === 'prompt' ? await testAgentPrompt(currentContent, prompt, controller.signal) : ''
       if (!mountedRef.current || controller.signal.aborted || epochRef.current !== epoch) return
       setConfirmSave(false)
       setConfirmDelete(false)
       if (kind === 'save' || kind === 'delete') {
-        setContent('')
+        existingReadyRef.current = false
+        workbenchReadyRef.current = false
+        replaceContent('')
         setTemplateValues({})
         setPrompt('')
-        setValid(false)
         setCreating(false)
         setSelectedName(null)
         setDraftName('')
@@ -320,11 +363,10 @@ export function AgentConfigPage() {
       } else setActionResult(kind === 'connect' ? '连通性测试通过。' : `Prompt 测试完成：${output}`)
     } catch {
       if (mountedRef.current && !controller.signal.aborted && epochRef.current === epoch) {
-        setContent('')
+        replaceContent('')
         setTemplateValues({})
         setPrompt('')
         setActionResult('')
-        setValid(false)
         setConfirmSave(false)
         setConfirmDelete(false)
         setActionError(`${kind === 'delete' ? 'Agent 配置删除' : kind === 'save' ? 'Agent 配置保存' : 'Agent 测试'}失败，请显式重试。`)
@@ -374,12 +416,12 @@ export function AgentConfigPage() {
           {selectedTemplate.fields.filter((field) => field.required).map((field) => <TemplateField key={field.field} field={field} value={templateValues[field.field] ?? ''} disabled={submitting} onChange={(value) => changeTemplateField(field.field, value)} />)}
           {selectedTemplate.fields.some((field) => !field.required) ? <details className={styles.advanced}><summary>高级设置</summary><div className={styles.form}>{selectedTemplate.fields.filter((field) => !field.required).map((field) => <TemplateField key={field.field} field={field} value={templateValues[field.field] ?? ''} disabled={submitting} onChange={(value) => changeTemplateField(field.field, value)} />)}</div></details> : null}
         </div> : null}
-        <StructuredEditor format="yaml" label="Agent 配置原文" value={content} disabled={!admin || submitting} onChange={setContent} onValidationChange={(result: StructuredValidationResult) => setValid(result.valid)} />
+        <StructuredEditor format="yaml" label="Agent 配置原文" value={content} disabled={!admin || submitting} onChange={(value) => replaceContent(value, true)} onValidationChange={updateContentValidation} />
         {admin ? <div className={styles.actions}>
-          <Button appearance="primary" disabled={submitting || !valid || !isSafeKnowledgeID(draftName)} onClick={() => setConfirmSave(true)}>保存 Agent 配置</Button>
-          {existingReady ? <Button disabled={submitting} onClick={() => setConfirmDelete(true)}>删除 Agent 配置</Button> : null}
+          <Button appearance="primary" disabled={submitting || !valid || !isSafeKnowledgeID(draftName)} onClick={openSaveConfirmation}>保存 Agent 配置</Button>
+          {existingReady ? <Button disabled={submitting} onClick={openDeleteConfirmation}>删除 Agent 配置</Button> : null}
           <Button disabled={submitting || !valid} onClick={() => void runAction('connect')}>测试连通性</Button>
-          <Field label="测试 Prompt"><Textarea value={prompt} disabled={submitting} maxLength={16_384} onChange={(_, data) => setPrompt(data.value)} /></Field>
+          <Field label="测试 Prompt"><Textarea value={prompt} disabled={submitting} maxLength={16_384} onChange={(_, data) => { setPrompt(data.value); setActionResult('') }} /></Field>
           <Button disabled={submitting || !valid || !prompt.trim()} onClick={() => void runAction('prompt')}>Prompt 测试</Button>
         </div> : null}
       </> : <>
