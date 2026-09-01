@@ -166,7 +166,11 @@ describe('Sidebar', () => {
     fireEvent.click(screen.getByRole('button', { name: '前往 MCP 扫描' }))
     expect(screen.getByRole('button', { name: '收起扫描任务子菜单' })).toHaveAttribute('aria-expanded', 'true')
 
+    fireEvent.click(screen.getByRole('button', { name: '收起扫描任务子菜单' }))
+    expect(screen.getByRole('button', { name: '展开扫描任务子菜单' })).toHaveAttribute('aria-expanded', 'false')
+
     fireEvent.click(screen.getByRole('button', { name: '前往 Agent 扫描' }))
+    expect(screen.getByRole('button', { name: '收起扫描任务子菜单' })).toHaveAttribute('aria-expanded', 'true')
     expect(screen.getByRole('link', { name: 'Agent 工作流扫描' })).toHaveAttribute('aria-current', 'page')
 
     fireEvent.click(screen.getByRole('button', { name: '前往模型配置' }))
