@@ -7,9 +7,9 @@
  */
 import { describe, expect, it } from 'vitest'
 
-import { navigationItems, visibleNavigationFor } from './navigation'
+import { navigationItems, secondaryNavigationFor, visibleNavigationFor } from './navigation'
 
-const common = ['治理总览', '扫描任务', '安全报告', '模型与凭据', '规则与知识库']
+const common = ['治理总览', '扫描任务', '安全报告', '凭证配置', '规则与知识库']
 
 describe('role navigation', () => {
   it('keeps the approved route order and unique paths', () => {
@@ -40,6 +40,16 @@ describe('role navigation', () => {
       '审计日志',
       '品牌设置',
       '系统信息',
+    ])
+  })
+
+  it('exposes grouped scan navigation for regular users', () => {
+    expect(visibleNavigationFor('user').map((item) => item.label)).toContain('凭证配置')
+    expect(secondaryNavigationFor('tasks', 'user')).toEqual([
+      expect.objectContaining({ label: 'MCP 扫描', path: '/tasks/new?scan=mcp' }),
+      expect.objectContaining({ label: 'Skills 扫描', path: '/tasks/new?scan=skills' }),
+      expect.objectContaining({ label: 'AI 基础设施扫描', path: '/tasks/new?scan=ai-infra' }),
+      expect.objectContaining({ label: 'Agent 工作流扫描', path: '/tasks/new?scan=agent-workflow' }),
     ])
   })
 })

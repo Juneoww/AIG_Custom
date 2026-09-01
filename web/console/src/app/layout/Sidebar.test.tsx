@@ -15,11 +15,11 @@ import { ThemeProvider } from '../../shared/theme/ThemeProvider'
 import { createAppQueryClient } from '../providers/AppProviders'
 import { Sidebar } from './Sidebar'
 
-function renderSidebar() {
+function renderSidebar(initialEntry = '/reports') {
   return render(
     <ThemeProvider initialMode="light">
       <QueryClientProvider client={createAppQueryClient()}>
-        <MemoryRouter initialEntries={['/reports']}>
+        <MemoryRouter initialEntries={[initialEntry]}>
           <PublicBrandProvider
             initialConfig={{ product_name: '超长的企业人工智能安全治理平台名称', primary_color: '#005a9e', logo_data_url: '' }}
           >
@@ -39,7 +39,7 @@ describe('Sidebar', () => {
       '治理总览',
       '扫描任务',
       '安全报告',
-      '模型与凭据',
+      '凭证配置',
       '规则与知识库',
     ])
     expect(screen.getByRole('link', { name: '安全报告' })).toHaveAttribute('aria-current', 'page')
@@ -56,5 +56,68 @@ describe('Sidebar', () => {
     expect(screen.getByRole('button', { name: '展开导航' })).toBeInTheDocument()
     expect(screen.getByRole('link', { name: '治理总览' })).toBeInTheDocument()
     expect(screen.getByRole('link', { name: '安全报告' })).toHaveAttribute('aria-current', 'page')
+  })
+
+  it('expands scan tasks independently with exact child links', () => {
+    renderSidebar()
+
+    fireEvent.click(screen.getByRole('button', { name: '展开扫描任务子菜单' }))
+
+    expect(screen.getByRole('link', { name: 'MCP 扫描' })).toHaveAttribute('href', '/tasks/new?scan=mcp')
+    expect(screen.getByRole('link', { name: 'Skills 扫描' })).toHaveAttribute('href', '/tasks/new?scan=skills')
+    expect(screen.getByRole('link', { name: 'AI 基础设施扫描' })).toHaveAttribute(
+      'href',
+      '/tasks/new?scan=ai-infra',
+    )
+    expect(screen.getByRole('link', { name: 'Agent 工作流扫描' })).toHaveAttribute(
+      'href',
+      '/tasks/new?scan=agent-workflow',
+    )
+
+    fireEvent.click(screen.getByRole('button', { name: '展开凭证配置子菜单' }))
+
+    expect(screen.getByRole('link', { name: '模型配置' })).toBeInTheDocument()
+    expect(screen.getByRole('link', { name: 'Skills 扫描' })).toBeInTheDocument()
+  })
+
+  it('exposes accessible expansion controls with independent aria state', () => {
+    renderSidebar()
+
+    const scanToggle = screen.getByRole('button', { name: '展开扫描任务子菜单' })
+    const credentialsToggle = screen.getByRole('button', { name: '展开凭证配置子菜单' })
+    expect(scanToggle).toHaveAttribute('aria-expanded', 'false')
+    expect(credentialsToggle).toHaveAttribute('aria-expanded', 'false')
+
+    fireEvent.click(scanToggle)
+
+    expect(screen.getByRole('button', { name: '收起扫描任务子菜单' })).toHaveAttribute('aria-expanded', 'true')
+    expect(screen.getByRole('button', { name: '展开凭证配置子菜单' })).toHaveAttribute('aria-expanded', 'false')
+  })
+
+  it('expands from the route and activates only the exact scan child', () => {
+    renderSidebar('/tasks/new?scan=agent-workflow')
+
+    expect(screen.getByRole('button', { name: '收起扫描任务子菜单' })).toHaveAttribute('aria-expanded', 'true')
+    expect(screen.getByRole('link', { name: 'Agent 工作流扫描' })).toHaveAttribute('aria-current', 'page')
+    expect(screen.getByRole('link', { name: 'MCP 扫描' })).not.toHaveAttribute('aria-current', 'page')
+    expect(screen.getByRole('link', { name: 'Skills 扫描' })).not.toHaveAttribute('aria-current', 'page')
+    expect(screen.getByRole('link', { name: 'AI 基础设施扫描' })).not.toHaveAttribute('aria-current', 'page')
+  })
+
+  it('activates credentials without activating the rules group', () => {
+    renderSidebar('/knowledge/agents')
+
+    expect(screen.getByRole('button', { name: '凭证配置' })).toHaveAttribute('aria-current', 'page')
+    expect(screen.getByRole('link', { name: '规则与知识库' })).not.toHaveAttribute('aria-current', 'page')
+  })
+
+  it('removes secondary links when the full sidebar is collapsed', () => {
+    renderSidebar()
+    fireEvent.click(screen.getByRole('button', { name: '展开扫描任务子菜单' }))
+    expect(screen.getByRole('link', { name: 'Skills 扫描' })).toBeInTheDocument()
+
+    fireEvent.click(screen.getByRole('button', { name: '收起导航' }))
+
+    expect(screen.queryByRole('link', { name: 'Skills 扫描' })).not.toBeInTheDocument()
   })
 })
