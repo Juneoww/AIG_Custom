@@ -5,10 +5,9 @@
  * 输出：精确的分组导航集合、活动子项和折叠后的可访问链接。
  * 依赖：Testing Library、MemoryRouter、主题与公共品牌 Provider。
  */
-import { fireEvent, render, screen } from '@testing-library/react'
+import { fireEvent, render, screen, within } from '@testing-library/react'
 import { QueryClientProvider } from '@tanstack/react-query'
 import { MemoryRouter, useNavigate } from 'react-router-dom'
-import { within } from '@testing-library/react'
 import { describe, expect, it } from 'vitest'
 
 import { PublicBrandProvider } from '../../shared/brand/PublicBrandProvider'
