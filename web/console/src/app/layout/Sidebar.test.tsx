@@ -91,6 +91,7 @@ describe('Sidebar', () => {
     fireEvent.click(screen.getByRole('button', { name: '展开凭证配置子菜单' }))
 
     const credentialToggle = screen.getByRole('button', { name: '收起凭证配置子菜单' })
+    expect(credentialToggle).toHaveAttribute('aria-expanded', 'true')
     const credentialSubmenu = document.getElementById(credentialToggle.getAttribute('aria-controls') ?? '')
     expect(credentialSubmenu).toBeInTheDocument()
     expect(within(credentialSubmenu!).getAllByRole('link').map((link) => link.textContent?.trim())).toEqual([
@@ -176,6 +177,8 @@ describe('Sidebar', () => {
 
     fireEvent.click(screen.getByRole('button', { name: '前往模型配置' }))
     expect(screen.getByRole('button', { name: '收起凭证配置子菜单' })).toHaveAttribute('aria-expanded', 'true')
+    expect(screen.getByRole('link', { name: '模型配置' })).toHaveAttribute('aria-current', 'page')
+    expect(screen.getByRole('link', { name: '智能体配置' })).not.toHaveAttribute('aria-current', 'page')
   })
 
   it('activates credentials without activating the rules group', () => {
@@ -184,6 +187,7 @@ describe('Sidebar', () => {
     expect(screen.getByRole('link', { name: '凭证配置' })).toHaveAttribute('aria-current', 'page')
     expect(screen.getByRole('button', { name: '收起凭证配置子菜单' })).toHaveAttribute('aria-expanded', 'true')
     expect(screen.getByRole('link', { name: '智能体配置' })).toHaveAttribute('aria-current', 'page')
+    expect(screen.getByRole('link', { name: '模型配置' })).not.toHaveAttribute('aria-current', 'page')
     expect(screen.getByRole('link', { name: '规则与知识库' })).not.toHaveAttribute('aria-current', 'page')
   })
 
@@ -197,11 +201,15 @@ describe('Sidebar', () => {
   it('removes secondary links when the full sidebar is collapsed', () => {
     renderSidebar()
     fireEvent.click(screen.getByRole('button', { name: '展开扫描任务子菜单' }))
+    fireEvent.click(screen.getByRole('button', { name: '展开凭证配置子菜单' }))
     expect(screen.getByRole('link', { name: 'Skills 扫描' })).toBeInTheDocument()
+    expect(screen.getByRole('link', { name: '模型配置' })).toBeInTheDocument()
 
     fireEvent.click(screen.getByRole('button', { name: '收起导航' }))
 
-    expect(screen.queryByRole('link', { name: 'Skills 扫描' })).not.toBeInTheDocument()
+    for (const label of ['MCP 扫描', 'Skills 扫描', 'AI 基础设施扫描', 'Agent 工作流扫描', '模型配置', '智能体配置']) {
+      expect(screen.queryByRole('link', { name: label })).not.toBeInTheDocument()
+    }
     expect(screen.getByRole('link', { name: '扫描任务' })).toBeInTheDocument()
     expect(screen.getByRole('link', { name: '凭证配置' })).toBeInTheDocument()
     expect(screen.getByRole('button', { name: '展开扫描任务子菜单' })).toBeInTheDocument()
