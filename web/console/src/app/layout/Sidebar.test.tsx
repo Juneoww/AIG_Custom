@@ -107,7 +107,7 @@ describe('Sidebar', () => {
   it('activates credentials without activating the rules group', () => {
     renderSidebar('/knowledge/agents')
 
-    expect(screen.getByRole('button', { name: '凭证配置' })).toHaveAttribute('aria-current', 'page')
+    expect(screen.getByRole('link', { name: '凭证配置' })).toHaveAttribute('aria-current', 'page')
     expect(screen.getByRole('link', { name: '规则与知识库' })).not.toHaveAttribute('aria-current', 'page')
   })
 
