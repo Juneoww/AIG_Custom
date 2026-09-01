@@ -21,6 +21,8 @@ function RouteDriver() {
     <div>
       <button onClick={() => navigate('/tasks')}>前往任务列表</button>
       <button onClick={() => navigate('/tasks/new')}>前往新建任务</button>
+      <button onClick={() => navigate('/tasks/new?scan=mcp')}>前往 MCP 扫描</button>
+      <button onClick={() => navigate('/tasks/new?scan=agent-workflow')}>前往 Agent 扫描</button>
       <button onClick={() => navigate('/models')}>前往模型配置</button>
     </div>
   )
@@ -101,6 +103,13 @@ describe('Sidebar', () => {
       '/knowledge/agents',
     )
     expect(screen.getByRole('link', { name: 'Skills 扫描' })).toBeInTheDocument()
+
+    fireEvent.click(screen.getByRole('button', { name: '收起扫描任务子菜单' }))
+
+    expect(screen.queryByRole('link', { name: 'Skills 扫描' })).not.toBeInTheDocument()
+    expect(screen.getByRole('button', { name: '展开扫描任务子菜单' })).toHaveAttribute('aria-expanded', 'false')
+    expect(screen.getByRole('button', { name: '展开扫描任务子菜单' })).not.toHaveAttribute('aria-controls')
+    expect(screen.getByRole('link', { name: '模型配置' })).toBeInTheDocument()
   })
 
   it('exposes accessible expansion controls with independent aria state', () => {
@@ -148,8 +157,17 @@ describe('Sidebar', () => {
     fireEvent.click(screen.getByRole('button', { name: '前往任务列表' }))
     expect(screen.getByRole('button', { name: '收起扫描任务子菜单' })).toHaveAttribute('aria-expanded', 'true')
 
+    fireEvent.click(screen.getByRole('button', { name: '收起扫描任务子菜单' }))
+    expect(screen.getByRole('button', { name: '展开扫描任务子菜单' })).toHaveAttribute('aria-expanded', 'false')
+
     fireEvent.click(screen.getByRole('button', { name: '前往新建任务' }))
     expect(screen.getByRole('button', { name: '收起扫描任务子菜单' })).toHaveAttribute('aria-expanded', 'true')
+
+    fireEvent.click(screen.getByRole('button', { name: '前往 MCP 扫描' }))
+    expect(screen.getByRole('button', { name: '收起扫描任务子菜单' })).toHaveAttribute('aria-expanded', 'true')
+
+    fireEvent.click(screen.getByRole('button', { name: '前往 Agent 扫描' }))
+    expect(screen.getByRole('link', { name: 'Agent 工作流扫描' })).toHaveAttribute('aria-current', 'page')
 
     fireEvent.click(screen.getByRole('button', { name: '前往模型配置' }))
     expect(screen.getByRole('button', { name: '收起凭证配置子菜单' })).toHaveAttribute('aria-expanded', 'true')
