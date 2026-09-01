@@ -51,5 +51,9 @@ describe('role navigation', () => {
       expect.objectContaining({ label: 'AI 基础设施扫描', path: '/tasks/new?scan=ai-infra' }),
       expect.objectContaining({ label: 'Agent 工作流扫描', path: '/tasks/new?scan=agent-workflow' }),
     ])
+    expect(secondaryNavigationFor('credentials', 'user')).toEqual([
+      expect.objectContaining({ label: '模型配置', path: '/models' }),
+      expect.objectContaining({ label: '智能体配置', path: '/knowledge/agents' }),
+    ])
   })
 })
