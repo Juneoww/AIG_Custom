@@ -209,10 +209,16 @@ describe('Sidebar', () => {
 
     for (const label of ['MCP 扫描', 'Skills 扫描', 'AI 基础设施扫描', 'Agent 工作流扫描', '模型配置', '智能体配置']) {
       expect(screen.queryByRole('link', { name: label })).not.toBeInTheDocument()
+      expect(screen.queryByText(label, { exact: true })).not.toBeInTheDocument()
     }
     expect(screen.getByRole('link', { name: '扫描任务' })).toBeInTheDocument()
     expect(screen.getByRole('link', { name: '凭证配置' })).toBeInTheDocument()
     expect(screen.getByRole('button', { name: '展开扫描任务子菜单' })).toBeInTheDocument()
     expect(screen.getByRole('button', { name: '展开凭证配置子菜单' })).toBeInTheDocument()
+
+    fireEvent.click(screen.getByRole('button', { name: '展开扫描任务子菜单' }))
+    for (const label of ['MCP 扫描', 'Skills 扫描', 'AI 基础设施扫描', 'Agent 工作流扫描']) {
+      expect(screen.queryByText(label, { exact: true })).not.toBeInTheDocument()
+    }
   })
 })
