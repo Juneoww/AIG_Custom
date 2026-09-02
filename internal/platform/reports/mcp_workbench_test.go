@@ -66,6 +66,7 @@ func TestMCPWorkbenchProjectionScopesUTCDayWindowSortsAndCapsWithoutRawResult(t 
 
 	projection, err := service.MCPWorkbench(ctx, identity.Subject{UserID: "alice", Role: identity.RoleUser}, now)
 	require.NoError(t, err)
+	assert.Equal(t, 6, projection.Completed30d)
 	assert.Equal(t, 6, projection.HighRisk)
 	require.Len(t, projection.Highlights, 5)
 	assert.Equal(t, []string{"high-new", "high-tie-b", "high-tie-a", "medium-new", "low-new"}, mcpHighlightReportIDs(projection.Highlights))
@@ -84,6 +85,7 @@ func TestMCPWorkbenchProjectionScopesUTCDayWindowSortsAndCapsWithoutRawResult(t 
 
 	global, err := service.MCPWorkbench(ctx, identity.Subject{Role: identity.RoleAuditor}, now)
 	require.NoError(t, err)
+	assert.Equal(t, 7, global.Completed30d)
 	assert.Equal(t, 106, global.HighRisk)
 	assert.Contains(t, mcpHighlightReportIDs(global.Highlights), "bob")
 	admin, err := service.MCPWorkbench(ctx, identity.Subject{Role: identity.RoleAdmin}, now)
@@ -92,6 +94,26 @@ func TestMCPWorkbenchProjectionScopesUTCDayWindowSortsAndCapsWithoutRawResult(t 
 
 	_, err = service.MCPWorkbench(ctx, identity.Subject{}, now)
 	assert.ErrorIs(t, err, ErrForbidden)
+}
+
+func TestMCPWorkbenchProjectionCountsOnlyReportsCompletedInsideWindow(t *testing.T) {
+	ctx := context.Background()
+	now := time.Date(2026, 8, 17, 12, 0, 0, 0, time.UTC)
+	lower, upper := mcpWorkbenchWindow(now)
+	repository := NewMemoryRepository()
+	inside := mcpWorkbenchSnapshot(t, "completed-inside", "task-inside", "alice", "mcp_scan", lower, RiskSummary{}, nil, "report-render-v2")
+	inside.CreatedAt = lower.AddDate(-1, 0, 0)
+	outside := mcpWorkbenchSnapshot(t, "completed-outside", "task-outside", "alice", "mcp_scan", lower.Add(-time.Nanosecond), RiskSummary{}, nil, "report-render-v2")
+	outside.CreatedAt = upper.Add(time.Hour)
+	for _, snapshot := range []*Snapshot{inside, outside} {
+		require.NoError(t, repository.Create(ctx, snapshot))
+	}
+
+	projection, err := NewService(repository, nil).MCPWorkbench(ctx, identity.Subject{UserID: "alice", Role: identity.RoleUser}, now)
+	require.NoError(t, err)
+	assert.Equal(t, 1, projection.Completed30d)
+	assert.Zero(t, projection.HighRisk)
+	assert.Empty(t, projection.Highlights)
 }
 
 func TestMCPWorkbenchProjectionUsesRiskOnlyFallbackForLegacyAndBadRenderData(t *testing.T) {
@@ -411,7 +433,7 @@ func assertMCPWorkbenchWireShape(t *testing.T, encoded []byte) {
 	t.Helper()
 	var projection map[string]json.RawMessage
 	require.NoError(t, json.Unmarshal(encoded, &projection))
-	assert.ElementsMatch(t, []string{"high_risk", "highlights"}, mapJSONKeys(projection))
+	assert.ElementsMatch(t, []string{"completed_30d", "high_risk", "highlights"}, mapJSONKeys(projection))
 	var highlights []map[string]json.RawMessage
 	require.NoError(t, json.Unmarshal(projection["highlights"], &highlights))
 	for _, item := range highlights {

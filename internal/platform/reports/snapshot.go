@@ -750,9 +750,7 @@ func newMCPWorkbenchAccumulator() *mcpWorkbenchAccumulator {
 
 func (accumulator *mcpWorkbenchAccumulator) addRecord(record mcpWorkbenchRecord) error {
 	var risk RiskSummary
-	if json.Unmarshal(record.RiskSummary, &risk) != nil {
-		return nil
-	}
+	_ = json.Unmarshal(record.RiskSummary, &risk)
 	return accumulator.add(mcpWorkbenchReport{
 		ReportID: record.ReportID, TaskID: record.TaskID, TaskType: record.TaskType,
 		CompletedAt: record.CompletedAt, Risk: risk, RenderData: record.RenderData,
@@ -760,7 +758,13 @@ func (accumulator *mcpWorkbenchAccumulator) addRecord(record mcpWorkbenchRecord)
 }
 
 func (accumulator *mcpWorkbenchAccumulator) add(report mcpWorkbenchReport) error {
-	if !isMCPTaskType(report.TaskType) || !validMCPWorkbenchRisk(report.Risk) {
+	if !isMCPTaskType(report.TaskType) {
+		return nil
+	}
+	if err := dashboardAccumulate(&accumulator.projection.Completed30d, 1); err != nil {
+		return err
+	}
+	if !validMCPWorkbenchRisk(report.Risk) {
 		return nil
 	}
 	if err := dashboardAccumulate(&accumulator.projection.HighRisk, report.Risk.High); err != nil {

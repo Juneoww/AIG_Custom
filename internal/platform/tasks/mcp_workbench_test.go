@@ -42,7 +42,6 @@ func TestMCPWorkbenchUsesCreatedAtWindowOwnerScopeAndSafeTaskFields(t *testing.T
 	require.NoError(t, err)
 	assert.Equal(t, 2, projection.Running)
 	assert.Equal(t, 2, projection.Pending)
-	assert.Equal(t, 1, projection.Completed30d)
 	require.Len(t, projection.ActiveTasks, 5)
 	assert.Equal(t, []string{"running-repository", "dispatching-service", "pending-legacy", "unknown", "dispatch-failed-still-active"}, mcpWorkbenchTaskIDs(projection.ActiveTasks))
 	assert.Equal(t, []string{"repository", "service", "legacy_unknown", "repository", "service"}, mcpWorkbenchTaskSourceKinds(projection.ActiveTasks))
@@ -111,11 +110,10 @@ func TestGormMCPWorkbenchUsesScopedCountsAndNarrowActiveTaskProjection(t *testin
 	require.NoError(t, err)
 	assert.Equal(t, 1, projection.Running)
 	assert.Equal(t, 2, projection.Pending)
-	assert.Equal(t, 1, projection.Completed30d)
 	require.Len(t, projection.ActiveTasks, 3)
 	assert.Equal(t, []string{"alice-running", "alice-pending", "alice-legacy"}, mcpWorkbenchTaskIDs(projection.ActiveTasks))
 	assert.Equal(t, []string{"repository", "service", "legacy_unknown"}, mcpWorkbenchTaskSourceKinds(projection.ActiveTasks))
-	require.Len(t, capture.statements, 4)
+	require.Len(t, capture.statements, 3)
 	activeSQL := capture.statements[len(capture.statements)-1]
 	projectionSQL := strings.SplitN(activeSQL, " from ", 2)[0]
 	assert.Contains(t, activeSQL, "owner_user_id = 'alice'")

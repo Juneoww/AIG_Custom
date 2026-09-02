@@ -55,7 +55,7 @@ func (service *Service) Get(ctx context.Context, subject identity.Subject) (View
 			Running:      nonNegative(taskProjection.Running),
 			Pending:      nonNegative(taskProjection.Pending),
 			HighRisk:     nonNegative(reportProjection.HighRisk),
-			Completed30d: nonNegative(taskProjection.Completed30d),
+			Completed30d: nonNegative(reportProjection.Completed30d),
 		},
 		ActiveTasks: activeTasks(taskProjection.ActiveTasks),
 		RecentRisks: recentRisks(reportProjection.Highlights),

@@ -70,10 +70,10 @@ func TestHandlerReusesPlatformAuthenticationPasswordAndSafeMethodCSRFGuards(t *t
 func TestHandlerReturnsStrictSafeDTOAndFixedError(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	now := time.Date(2026, 8, 17, 12, 0, 0, 0, time.UTC)
-	reportReader := &recordingReportReader{projection: reports.MCPWorkbenchProjection{HighRisk: 2, Highlights: []reports.MCPRiskHighlight{{
+	reportReader := &recordingReportReader{projection: reports.MCPWorkbenchProjection{Completed30d: 3, HighRisk: 2, Highlights: []reports.MCPRiskHighlight{{
 		ReportID: "report", TaskID: "task", Severity: "high", Category: "other", Summary: "MCP 安全发现。", CompletedAt: now,
 	}}}}
-	taskReader := &recordingTaskReader{projection: tasks.MCPWorkbenchProjection{Running: 1, Pending: 2, Completed30d: 3, ActiveTasks: []tasks.MCPWorkbenchTask{{
+	taskReader := &recordingTaskReader{projection: tasks.MCPWorkbenchProjection{Running: 1, Pending: 2, ActiveTasks: []tasks.MCPWorkbenchTask{{
 		TaskID: "12345678-90ab-cdef-1234-567890abcdef", SourceKind: "service", Status: tasks.StatusRunning, UpdatedAt: now,
 	}}}}
 	service := NewService(reportReader, taskReader)

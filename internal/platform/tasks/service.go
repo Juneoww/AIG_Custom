@@ -114,10 +114,9 @@ type MCPWorkbenchTask struct {
 // MCPWorkbenchProjection is the narrow task-domain contribution to the
 // workbench. The combined browser DTO is owned by the mcpworkbench package.
 type MCPWorkbenchProjection struct {
-	Running      int                `json:"-"`
-	Pending      int                `json:"-"`
-	Completed30d int                `json:"-"`
-	ActiveTasks  []MCPWorkbenchTask `json:"-"`
+	Running     int                `json:"-"`
+	Pending     int                `json:"-"`
+	ActiveTasks []MCPWorkbenchTask `json:"-"`
 }
 
 // MCPWorkbenchRepository is an optional bounded task read model. Writers do
@@ -1771,9 +1770,6 @@ func (repository *GormRepository) MCPWorkbench(ctx context.Context, query MCPWor
 	if projection.Pending, err = count([]Status{StatusPending, StatusDispatchUnknown}); err != nil {
 		return MCPWorkbenchProjection{}, err
 	}
-	if projection.Completed30d, err = count([]Status{StatusSucceeded}); err != nil {
-		return MCPWorkbenchProjection{}, err
-	}
 	active := base.Session(&gorm.Session{}).
 		Where("status NOT IN ?", []Status{StatusCancelled, StatusSucceeded, StatusEngineFailed}).
 		Select(
@@ -2912,8 +2908,6 @@ func (repository *MemoryRepository) MCPWorkbench(_ context.Context, query MCPWor
 			projection.Running++
 		case StatusPending, StatusDispatchUnknown:
 			projection.Pending++
-		case StatusSucceeded:
-			projection.Completed30d++
 		}
 		if !isTerminalStatus(task.Status) {
 			projection.ActiveTasks = append(projection.ActiveTasks, MCPWorkbenchTask{

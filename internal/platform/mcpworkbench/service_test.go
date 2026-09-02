@@ -43,14 +43,14 @@ func (reader *recordingReportReader) MCPWorkbench(_ context.Context, subject ide
 func TestServiceCombinesOnlyWhitelistedMCPWorkbenchFields(t *testing.T) {
 	now := time.Date(2026, 8, 17, 23, 45, 0, 0, time.FixedZone("CST", 8*60*60))
 	tasksReader := &recordingTaskReader{projection: tasks.MCPWorkbenchProjection{
-		Running: 2, Pending: 3, Completed30d: 4,
+		Running: 2, Pending: 3,
 		ActiveTasks: []tasks.MCPWorkbenchTask{
 			{TaskID: "12345678-90ab-cdef-1234-567890abcdef", SourceKind: "repository", Status: tasks.StatusRunning, UpdatedAt: now},
 			{TaskID: "abcdef01", SourceKind: "unsafe-value", Status: tasks.StatusDispatchUnknown, UpdatedAt: now.Add(-time.Minute)},
 		},
 	}}
 	reportsReader := &recordingReportReader{projection: reports.MCPWorkbenchProjection{
-		HighRisk: 5,
+		Completed30d: 9, HighRisk: 5,
 		Highlights: []reports.MCPRiskHighlight{
 			{ReportID: "report-1", TaskID: "task-1", Severity: "high", Category: "dangerous_tool", Summary: "检测到高风险危险工具调用。", CompletedAt: now},
 			{ReportID: "report-2", TaskID: "task-2", Severity: "unknown", Category: "dangerous_tool", Summary: "must-not-appear", CompletedAt: now},
@@ -62,7 +62,7 @@ func TestServiceCombinesOnlyWhitelistedMCPWorkbenchFields(t *testing.T) {
 
 	view, err := service.Get(context.Background(), subject)
 	require.NoError(t, err)
-	assert.Equal(t, Metrics{Running: 2, Pending: 3, HighRisk: 5, Completed30d: 4}, view.Metrics)
+	assert.Equal(t, Metrics{Running: 2, Pending: 3, HighRisk: 5, Completed30d: 9}, view.Metrics)
 	require.Len(t, view.ActiveTasks, 2)
 	assert.Equal(t, "12345678-90ab-cdef-1234-567890abcdef", view.ActiveTasks[0].TaskID)
 	assert.Equal(t, "MCP 扫描 · 12345678", view.ActiveTasks[0].Label)

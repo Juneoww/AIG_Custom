@@ -98,8 +98,9 @@ type TechnicalFinding struct {
 // MCPWorkbenchProjection is the intentionally narrow report read model used
 // by the MCP workbench. It must never grow into a report or render-data DTO.
 type MCPWorkbenchProjection struct {
-	HighRisk   int                `json:"high_risk"`
-	Highlights []MCPRiskHighlight `json:"highlights"`
+	Completed30d int                `json:"completed_30d"`
+	HighRisk     int                `json:"high_risk"`
+	Highlights   []MCPRiskHighlight `json:"highlights"`
 }
 
 // MCPRiskHighlight contains only server-derived, safe-to-display MCP risk
