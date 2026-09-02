@@ -41,6 +41,7 @@ import (
 	platformdashboard "github.com/Juneoww/AIG_Custom/internal/platform/dashboard"
 	"github.com/Juneoww/AIG_Custom/internal/platform/identity"
 	platformknowledge "github.com/Juneoww/AIG_Custom/internal/platform/knowledge"
+	platformmcpworkbench "github.com/Juneoww/AIG_Custom/internal/platform/mcpworkbench"
 	platformmodels "github.com/Juneoww/AIG_Custom/internal/platform/models"
 	platformreports "github.com/Juneoww/AIG_Custom/internal/platform/reports"
 	platformtasks "github.com/Juneoww/AIG_Custom/internal/platform/tasks"
@@ -232,6 +233,7 @@ func RunWebServer(options *version.Options) {
 	platformTaskHandler := platformtasks.NewHandler(platformTaskService, attachmentService)
 	reportHandler := platformreports.NewHandler(reportService)
 	dashboardHandler := platformdashboard.NewHandler(platformdashboard.NewService(reportService, platformTaskService))
+	mcpWorkbenchHandler := platformmcpworkbench.NewHandler(platformmcpworkbench.NewService(reportService, platformTaskService))
 	brandHandler := platformbrand.NewHandler(brandService)
 	err = taskManager.taskStore.ResetRunningTasks()
 	if err != nil {
@@ -251,6 +253,7 @@ func RunWebServer(options *version.Options) {
 		platformGroup := v1.Group("/platform")
 		registerPlatformGovernanceRoutes(platformGroup, identityService, identityPolicy, adminHandler, platformModelService, platformTaskHandler)
 		registerPlatformDashboardRoutes(platformGroup, dashboardHandler)
+		registerPlatformMCPWorkbenchRoutes(platformGroup, mcpWorkbenchHandler)
 		registerPlatformReportRoutes(platformGroup, reportHandler, brandHandler)
 		// 1. 知识库模块
 		knowledge := v1.Group("/knowledge")
@@ -407,6 +410,12 @@ func registerPlatformGovernanceRoutes(
 }
 
 func registerPlatformDashboardRoutes(group *gin.RouterGroup, handler *platformdashboard.Handler) {
+	if handler != nil {
+		handler.Register(group)
+	}
+}
+
+func registerPlatformMCPWorkbenchRoutes(group *gin.RouterGroup, handler *platformmcpworkbench.Handler) {
 	if handler != nil {
 		handler.Register(group)
 	}

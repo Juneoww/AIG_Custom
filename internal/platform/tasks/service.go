@@ -93,6 +93,41 @@ type RecentRepository interface {
 	ListRecent(context.Context, TaskListQuery) ([]Task, error)
 }
 
+// MCPWorkbenchQuery defines the scoped, fixed-clock task read used by the
+// MCP workbench. It is deliberately separate from the browser task list so
+// it cannot grow a raw task payload by accident.
+type MCPWorkbenchQuery struct {
+	OwnerUserID string
+	Now         time.Time
+}
+
+// MCPWorkbenchTask contains the only task fields the MCP workbench may use.
+// In particular, source kind is a server-decoded enum, not the stored params
+// JSON that may contain private repository or service configuration.
+type MCPWorkbenchTask struct {
+	TaskID     string    `json:"task_id" gorm:"column:task_id"`
+	SourceKind string    `json:"source_kind" gorm:"column:source_kind"`
+	Status     Status    `json:"status" gorm:"column:status"`
+	UpdatedAt  time.Time `json:"updated_at" gorm:"column:updated_at"`
+}
+
+// MCPWorkbenchProjection is the narrow task-domain contribution to the
+// workbench. The combined browser DTO is owned by the mcpworkbench package.
+type MCPWorkbenchProjection struct {
+	Running      int                `json:"-"`
+	Pending      int                `json:"-"`
+	Completed30d int                `json:"-"`
+	ActiveTasks  []MCPWorkbenchTask `json:"-"`
+}
+
+// MCPWorkbenchRepository is an optional bounded task read model. Writers do
+// not need workbench-specific persistence behavior.
+type MCPWorkbenchRepository interface {
+	MCPWorkbench(context.Context, MCPWorkbenchQuery) (MCPWorkbenchProjection, error)
+}
+
+const mcpWorkbenchMaxActiveTasks = 10
+
 type dashboardTaskStatusRepository interface {
 	DashboardTaskSucceeded(context.Context, string, string) (bool, error)
 }
@@ -991,6 +1026,24 @@ func (service *Service) Recent(ctx context.Context, subject identity.Subject, li
 	return items, nil
 }
 
+// MCPWorkbench returns only task metrics and active task metadata that are
+// safe to combine with the reports-domain projection. The caller supplies the
+// clock so every workbench component shares one UTC-day window.
+func (service *Service) MCPWorkbench(ctx context.Context, subject identity.Subject, now time.Time) (MCPWorkbenchProjection, error) {
+	query, err := taskListQueryFor(subject)
+	if err != nil {
+		return MCPWorkbenchProjection{}, err
+	}
+	if service == nil || service.repository == nil || now.IsZero() {
+		return MCPWorkbenchProjection{}, ErrInvalid
+	}
+	repository, ok := service.repository.(MCPWorkbenchRepository)
+	if !ok {
+		return MCPWorkbenchProjection{}, ErrInvalid
+	}
+	return repository.MCPWorkbench(ctx, MCPWorkbenchQuery{OwnerUserID: query.OwnerUserID, Now: now})
+}
+
 func (service *Service) DashboardTaskSucceeded(ctx context.Context, taskID, ownerUserID string) (bool, error) {
 	if taskID == "" || ownerUserID == "" {
 		return false, nil
@@ -1030,6 +1083,16 @@ func taskListQueryFor(subject identity.Subject) (TaskListQuery, error) {
 	default:
 		return TaskListQuery{}, ErrForbidden
 	}
+}
+
+func validMCPWorkbenchQuery(query MCPWorkbenchQuery) bool {
+	return !query.Now.IsZero()
+}
+
+func mcpWorkbenchWindow(now time.Time) (time.Time, time.Time) {
+	today := now.UTC()
+	today = time.Date(today.Year(), today.Month(), today.Day(), 0, 0, 0, 0, time.UTC)
+	return today.AddDate(0, 0, -29), today.AddDate(0, 0, 1)
 }
 
 func (service *Service) Result(ctx context.Context, subject identity.Subject, id string) (json.RawMessage, error) {
@@ -1680,6 +1743,51 @@ func (repository *GormRepository) ListRecent(ctx context.Context, query TaskList
 		return nil, err
 	}
 	return recent, nil
+}
+
+func (repository *GormRepository) MCPWorkbench(ctx context.Context, query MCPWorkbenchQuery) (MCPWorkbenchProjection, error) {
+	if !validMCPWorkbenchQuery(query) {
+		return MCPWorkbenchProjection{}, ErrInvalid
+	}
+	lowerBound, upperBound := mcpWorkbenchWindow(query.Now)
+	base := txcontext.Gorm(ctx, repository.db).Model(&Task{}).
+		Where("task_type IN ?", browserStoredTaskTypes("mcp_scan")).
+		Where("created_at >= ? AND created_at < ?", lowerBound, upperBound)
+	if query.OwnerUserID != "" {
+		base = base.Where("owner_user_id = ?", query.OwnerUserID)
+	}
+	projection := MCPWorkbenchProjection{ActiveTasks: make([]MCPWorkbenchTask, 0, mcpWorkbenchMaxActiveTasks)}
+	count := func(statuses []Status) (int, error) {
+		var value int64
+		if err := base.Session(&gorm.Session{}).Where("status IN ?", statuses).Count(&value).Error; err != nil {
+			return 0, err
+		}
+		return int(value), nil
+	}
+	var err error
+	if projection.Running, err = count([]Status{StatusDispatching, StatusRunning}); err != nil {
+		return MCPWorkbenchProjection{}, err
+	}
+	if projection.Pending, err = count([]Status{StatusPending, StatusDispatchUnknown}); err != nil {
+		return MCPWorkbenchProjection{}, err
+	}
+	if projection.Completed30d, err = count([]Status{StatusSucceeded}); err != nil {
+		return MCPWorkbenchProjection{}, err
+	}
+	active := base.Session(&gorm.Session{}).
+		Where("status NOT IN ?", []Status{StatusCancelled, StatusSucceeded, StatusEngineFailed}).
+		Select(
+			"id AS task_id",
+			"status",
+			"updated_at",
+			"CASE WHEN params ->> 'source_kind' IN ('repository', 'service') THEN params ->> 'source_kind' ELSE 'legacy_unknown' END AS source_kind",
+		).
+		Order("updated_at DESC, id DESC").
+		Limit(mcpWorkbenchMaxActiveTasks)
+	if err := active.Scan(&projection.ActiveTasks).Error; err != nil {
+		return MCPWorkbenchProjection{}, err
+	}
+	return projection, nil
 }
 
 func (repository *GormRepository) ListRecoverable(ctx context.Context, afterID string, limit int) ([]Task, error) {
@@ -2783,6 +2891,46 @@ func (repository *MemoryRepository) ListRecent(_ context.Context, query TaskList
 		recent = recent[:query.Limit]
 	}
 	return recent, nil
+}
+
+func (repository *MemoryRepository) MCPWorkbench(_ context.Context, query MCPWorkbenchQuery) (MCPWorkbenchProjection, error) {
+	if !validMCPWorkbenchQuery(query) {
+		return MCPWorkbenchProjection{}, ErrInvalid
+	}
+	lowerBound, upperBound := mcpWorkbenchWindow(query.Now)
+	repository.mu.Lock()
+	defer repository.mu.Unlock()
+	projection := MCPWorkbenchProjection{ActiveTasks: make([]MCPWorkbenchTask, 0, mcpWorkbenchMaxActiveTasks)}
+	for _, task := range repository.tasks {
+		if query.OwnerUserID != "" && task.OwnerUserID != query.OwnerUserID ||
+			canonicalTaskType(task.TaskType) != "mcp_scan" ||
+			task.CreatedAt.Before(lowerBound) || !task.CreatedAt.Before(upperBound) {
+			continue
+		}
+		switch task.Status {
+		case StatusDispatching, StatusRunning:
+			projection.Running++
+		case StatusPending, StatusDispatchUnknown:
+			projection.Pending++
+		case StatusSucceeded:
+			projection.Completed30d++
+		}
+		if !isTerminalStatus(task.Status) {
+			projection.ActiveTasks = append(projection.ActiveTasks, MCPWorkbenchTask{
+				TaskID: task.ID, SourceKind: safeMCPSourceKind(task.Params), Status: task.Status, UpdatedAt: task.UpdatedAt,
+			})
+		}
+	}
+	sort.Slice(projection.ActiveTasks, func(left, right int) bool {
+		if projection.ActiveTasks[left].UpdatedAt.Equal(projection.ActiveTasks[right].UpdatedAt) {
+			return projection.ActiveTasks[left].TaskID > projection.ActiveTasks[right].TaskID
+		}
+		return projection.ActiveTasks[left].UpdatedAt.After(projection.ActiveTasks[right].UpdatedAt)
+	})
+	if len(projection.ActiveTasks) > mcpWorkbenchMaxActiveTasks {
+		projection.ActiveTasks = projection.ActiveTasks[:mcpWorkbenchMaxActiveTasks]
+	}
+	return projection, nil
 }
 
 func (repository *MemoryRepository) DashboardTaskSucceeded(_ context.Context, taskID, ownerUserID string) (bool, error) {
