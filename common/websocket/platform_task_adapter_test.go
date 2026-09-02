@@ -39,7 +39,7 @@ func TestPlatformTaskTypesMapToExactLegacyEngineAliases(t *testing.T) {
 	assert.False(t, ok)
 }
 
-func TestTaskManagerPlatformSubmitPreservesLegacyEnginePayloadAndPrivateSession(t *testing.T) {
+func TestPlatformTaskAdapterForwardsMcpSourceKindAndPreservesLegacyEnginePayload(t *testing.T) {
 	taskManager, cleanup := newTestTaskManager(t)
 	defer cleanup()
 	serverConnection := websocketConnectionPair(t)
@@ -50,7 +50,7 @@ func TestTaskManagerPlatformSubmitPreservesLegacyEnginePayloadAndPrivateSession(
 
 	request := platformtasks.EngineTask{
 		PlatformTaskID: "platform-task-submit", OwnerUsername: "alice", TaskType: "mcp_scan",
-		Content: "scan this", Params: json.RawMessage(`{"thread":4}`),
+		Params:      json.RawMessage(`{"source_kind":"repository","thread":4}`),
 		Attachments: []string{"internal-ref-1"}, CountryIsoCode: "en",
 	}
 	sessionID, err := taskManager.SubmitTask(context.Background(), request)
@@ -69,6 +69,7 @@ func TestTaskManagerPlatformSubmitPreservesLegacyEnginePayloadAndPrivateSession(
 	assert.Equal(t, "Mcp-Scan", content.TaskType)
 	assert.Equal(t, request.Content, content.Content)
 	assert.Equal(t, request.Attachments, content.Attachments)
+	assert.Equal(t, "repository", content.Params["source_kind"])
 	assert.Equal(t, float64(4), content.Params["thread"])
 	assert.Equal(t, request.CountryIsoCode, content.CountryIsoCode)
 
@@ -157,7 +158,9 @@ func TestPlatformDispatchWithoutAgentRetriesExistingUnassignedTodoBeforeFailing(
 	subject := identity.Subject{UserID: "retry-owner-id", Username: "retry-owner", Role: identity.RoleUser}
 
 	view, err := service.Create(context.Background(), subject, platformtasks.CreateInput{
-		IdempotencyKey: "retry-without-agent", TaskType: "mcp_scan", Content: "scan",
+		IdempotencyKey: "retry-without-agent", TaskType: "mcp_scan",
+		Content: "https://git.example.test/platform/mcp-server.git",
+		Params:  json.RawMessage(`{"source_kind":"repository"}`),
 	})
 	require.ErrorIs(t, err, platformtasks.ErrDispatchFailed)
 	assert.Equal(t, platformtasks.StatusDispatchFailed, view.Status)

@@ -23,6 +23,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -35,6 +36,123 @@ import (
 
 type McpTask struct {
 	Server string
+}
+
+type mcpExecutionPlan struct {
+	transport  string
+	taskTitles []string
+}
+
+func planMcpExecution(rawParams json.RawMessage, content string, attachments []string) (mcpExecutionPlan, error) {
+	var fields map[string]json.RawMessage
+	if len(rawParams) > 0 {
+		if err := json.Unmarshal(rawParams, &fields); err != nil || fields == nil {
+			return mcpExecutionPlan{}, errors.New("invalid MCP task parameters")
+		}
+	} else {
+		fields = map[string]json.RawMessage{}
+	}
+
+	rawSourceKind, explicitSourceKind := fields["source_kind"]
+	if !explicitSourceKind {
+		if len(attachments) > 0 || strings.Contains(content, "github.com") {
+			return mcpCodeExecutionPlan(), nil
+		}
+		return mcpServiceExecutionPlan(), nil
+	}
+
+	var sourceKind string
+	if err := json.Unmarshal(rawSourceKind, &sourceKind); err != nil || sourceKind == "" {
+		return mcpExecutionPlan{}, errors.New("invalid MCP source kind")
+	}
+	switch sourceKind {
+	case "repository":
+		if len(attachments) > 0 {
+			if content != "" {
+				return mcpExecutionPlan{}, errors.New("MCP repository source cannot include both content and attachments")
+			}
+			return mcpCodeExecutionPlan(), nil
+		}
+		if !validMcpRepositoryReference(content) {
+			return mcpExecutionPlan{}, errors.New("MCP repository source requires a Git repository reference")
+		}
+		return mcpCodeExecutionPlan(), nil
+	case "service":
+		if len(attachments) > 0 || !validMcpServiceEndpoint(content) {
+			return mcpExecutionPlan{}, errors.New("MCP service source requires a service endpoint without attachments")
+		}
+		return mcpServiceExecutionPlan(), nil
+	default:
+		return mcpExecutionPlan{}, errors.New("unknown MCP source kind")
+	}
+}
+
+func mcpCodeExecutionPlan() mcpExecutionPlan {
+	return mcpExecutionPlan{
+		transport: "code",
+		taskTitles: []string{
+			"Info Collection",
+			"Code Audit",
+			"Vulnerability Review",
+		},
+	}
+}
+
+func mcpServiceExecutionPlan() mcpExecutionPlan {
+	return mcpExecutionPlan{
+		transport: "url",
+		taskTitles: []string{
+			"Info Collection",
+			"Malicious Testing",
+			"Vulnerability Testing",
+			"Vulnerability Review",
+		},
+	}
+}
+
+func validMcpRepositoryReference(value string) bool {
+	if value == "" || value != strings.TrimSpace(value) || strings.ContainsAny(value, "?#") {
+		return false
+	}
+	if parsed, err := url.ParseRequestURI(value); err == nil && parsed.Hostname() != "" &&
+		strings.Trim(parsed.Path, "/") != "" && parsed.RawQuery == "" && parsed.Fragment == "" {
+		switch strings.ToLower(parsed.Scheme) {
+		case "http", "https":
+			return parsed.User == nil
+		case "ssh":
+			if parsed.User == nil || parsed.User.Username() != "git" {
+				return false
+			}
+			_, hasPassword := parsed.User.Password()
+			return !hasPassword
+		}
+	}
+	return validMcpRepositorySCPReference(value)
+}
+
+func validMcpRepositorySCPReference(value string) bool {
+	if !strings.HasPrefix(value, "git@") || strings.ContainsAny(value, " \t\r\n?#") {
+		return false
+	}
+	hostAndPath := strings.TrimPrefix(value, "git@")
+	separator := strings.IndexByte(hostAndPath, ':')
+	if separator <= 0 || separator == len(hostAndPath)-1 {
+		return false
+	}
+	host, path := hostAndPath[:separator], hostAndPath[separator+1:]
+	return !strings.ContainsAny(host, "/@") && strings.Trim(path, "/") != ""
+}
+
+func validMcpServiceEndpoint(value string) bool {
+	if value == "" || value != strings.TrimSpace(value) {
+		return false
+	}
+	parsed, err := url.ParseRequestURI(value)
+	if err != nil || parsed.Hostname() == "" || parsed.User != nil || parsed.RawQuery != "" || parsed.ForceQuery || parsed.Fragment != "" || strings.Contains(value, "#") {
+		return false
+	}
+	scheme := strings.ToLower(parsed.Scheme)
+	return scheme == "http" || scheme == "https"
 }
 
 func (m *McpTask) GetName() string {
@@ -58,12 +176,11 @@ func (m *McpTask) Execute(ctx context.Context, request TaskRequest, callbacks Ta
 	}
 	params.Content = request.Content
 	files := request.Attachments
-	transport := "code" // code or url
-	if len(files) > 0 || strings.Contains(request.Content, "github.com") {
-		transport = "code"
-	} else {
-		transport = "url"
+	plan, err := planMcpExecution(request.Params, request.Content, files)
+	if err != nil {
+		return err
 	}
+	transport := plan.transport
 	language := request.Language
 	if language == "" {
 		language = "zh"
@@ -145,22 +262,11 @@ func (m *McpTask) Execute(ctx context.Context, request TaskRequest, callbacks Ta
 		}
 	}
 
-	var taskTitles []string
+	taskTitles := plan.taskTitles
 	if transport == "code" {
 		argv = append(argv, "--repo", folder)
-		taskTitles = []string{
-			"Info Collection",
-			"Code Audit",
-			"Vulnerability Review",
-		}
 	} else if transport == "url" {
 		argv = append(argv, "--server_url", serverUrl)
-		taskTitles = []string{
-			"Info Collection",
-			"Malicious Testing",
-			"Vulnerability Testing",
-			"Vulnerability Review",
-		}
 	}
 
 	var tasks []SubTask
