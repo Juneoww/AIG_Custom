@@ -56,6 +56,11 @@ type countingAttachmentRepository struct {
 	reads atomic.Int64
 }
 
+type claimCountingRepository struct {
+	*MemoryRepository
+	claims atomic.Int64
+}
+
 type rejectingReferenceEngine struct{ recordingEngine }
 
 func (*rejectingReferenceEngine) ValidateTaskReferences(context.Context, EngineTask) error {
@@ -120,6 +125,11 @@ type createResult struct {
 func (repository *countingAttachmentRepository) GetAttachment(ctx context.Context, id string) (*Attachment, error) {
 	repository.reads.Add(1)
 	return repository.MemoryRepository.GetAttachment(ctx, id)
+}
+
+func (repository *claimCountingRepository) ClaimDispatch(ctx context.Context, id string, now, leaseUntil time.Time) (string, bool, error) {
+	repository.claims.Add(1)
+	return repository.MemoryRepository.ClaimDispatch(ctx, id, now, leaseUntil)
 }
 
 func (engine *recordingEngine) SubmitTask(_ context.Context, task EngineTask) (string, error) {
@@ -653,8 +663,9 @@ func TestLegacyAIInfrastructureTaskRetriesNormalizePortScanMode(t *testing.T) {
 }
 
 func TestLegacyMCPTaskRetryReturnsEquivalentPersistedTaskWithoutMutation(t *testing.T) {
-	repository := NewMemoryRepository()
+	repository := &claimCountingRepository{MemoryRepository: NewMemoryRepository()}
 	engine := &controlledReferenceEngine{}
+	engine.err = errors.New("legacy retry must not submit to the engine")
 	auditRepository := audit.NewMemoryRepository()
 	service := NewService(repository, engine, audit.NewService(auditRepository))
 	subject := identity.Subject{UserID: "legacy-mcp-owner", Username: "alice", Role: identity.RoleUser}
@@ -665,7 +676,7 @@ func TestLegacyMCPTaskRetryReturnsEquivalentPersistedTaskWithoutMutation(t *test
 		ID: taskID, OwnerUserID: subject.UserID, OwnerUsername: subject.Username,
 		IdempotencyKey: idempotencyKey, EngineSessionID: taskID, TaskType: "mcp_scan",
 		Content: "https://github.com/example/mcp-server.git", Params: json.RawMessage(`{}`), AttachmentRefs: json.RawMessage(`[]`),
-		Status: StatusRunning, CreatedAt: now, UpdatedAt: now,
+		Status: StatusPending, CreatedAt: now, UpdatedAt: now,
 	}
 	_, created, err := repository.CreateOrGet(context.Background(), legacy)
 	require.NoError(t, err)
@@ -674,15 +685,17 @@ func TestLegacyMCPTaskRetryReturnsEquivalentPersistedTaskWithoutMutation(t *test
 	view, err := service.Create(context.Background(), subject, CreateInput{
 		IdempotencyKey: idempotencyKey, TaskType: "mcp_scan", Content: legacy.Content, Params: json.RawMessage(`{}`),
 	})
-	require.NoError(t, err)
+	assert.NoError(t, err)
 	assert.Equal(t, taskID, view.ID)
-	assert.Equal(t, StatusRunning, view.Status)
+	assert.Equal(t, StatusPending, view.Status)
+	assert.Zero(t, repository.claims.Load(), "legacy compatibility retry must not claim dispatch")
 	assert.Zero(t, engine.referenceCalls.Load(), "legacy idempotent retry must not revalidate live references")
 	assert.Zero(t, engine.submits.Load(), "legacy idempotent retry must not dispatch again")
 
 	stored, err := repository.Get(context.Background(), taskID)
 	require.NoError(t, err)
 	assert.JSONEq(t, `{}`, string(stored.Params), "legacy params must not be inferred or rewritten")
+	assert.Equal(t, StatusPending, stored.Status)
 	assert.Equal(t, now, stored.CreatedAt)
 	assert.Equal(t, now, stored.UpdatedAt)
 	tasks, err := repository.List(context.Background())
@@ -690,7 +703,7 @@ func TestLegacyMCPTaskRetryReturnsEquivalentPersistedTaskWithoutMutation(t *test
 	assert.Len(t, tasks, 1, "legacy retry must not persist another task")
 	events, err := auditRepository.List(context.Background(), audit.Filter{ResourceID: taskID})
 	require.NoError(t, err)
-	assert.Empty(t, events, "legacy retry must not append creation audit records")
+	assert.Empty(t, events, "legacy retry must not append audit records")
 }
 
 func TestLegacyMCPTaskRetryDoesNotBypassValidationOrConflictSemantics(t *testing.T) {

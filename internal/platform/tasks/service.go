@@ -152,11 +152,13 @@ func (service *Service) Create(ctx context.Context, subject identity.Subject, in
 	}
 	taskID := uuid.NewSHA1(taskIDNamespace, []byte(subject.UserID+"\x00"+input.IdempotencyKey)).String()
 	var persisted *Task
+	var legacyMCPRetry bool
 	err = service.repository.WithinCreateKeyLock(ctx, subject.UserID, input.IdempotencyKey, func(lockContext context.Context) error {
 		if input.TaskType == "mcp_scan" && mcpParamsOmitSourceKind(rawParams) {
 			existing, getErr := service.repository.Get(lockContext, taskID)
 			if getErr == nil && sameLegacyMCPRetry(existing, subject, input, rawParams, attachmentRefs, taskID) {
 				persisted = existing
+				legacyMCPRetry = true
 				return nil
 			}
 			if getErr != nil && !errors.Is(getErr, ErrNotFound) {
@@ -176,6 +178,9 @@ func (service *Service) Create(ctx context.Context, subject identity.Subject, in
 	})
 	if err != nil {
 		return View{}, err
+	}
+	if legacyMCPRetry {
+		return viewOf(persisted), nil
 	}
 	now := service.now()
 	claim, claimed, err := service.repository.ClaimDispatch(ctx, persisted.ID, now, now.Add(dispatchLeaseDuration))
