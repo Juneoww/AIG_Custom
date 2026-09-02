@@ -31,6 +31,12 @@ const portScanModeLabels = {
   full_tcp: '全量 TCP 1–65535',
 } as const
 
+const mcpSourceKindLabels = {
+  repository: '代码仓库或代码压缩包',
+  service: '受控运行服务',
+  legacy_unknown: '历史任务（来源未知）',
+} as const
+
 export function TaskDetailPage() {
   const styles = useStyles()
   const queryClient = useQueryClient()
@@ -90,6 +96,7 @@ export function TaskDetailPage() {
             <div className={styles.fact}><Text className={styles.label}>创建时间</Text><Text>{formatTaskTime(query.data.created_at)}</Text></div>
             <div className={styles.fact}><Text className={styles.label}>最后更新时间</Text><Text>{formatTaskTime(query.data.updated_at)}</Text></div>
             {query.data.input_summary.language ? <div className={styles.fact}><Text className={styles.label}>语言</Text><Text>{query.data.input_summary.language === 'zh' ? '中文' : '英文'}</Text></div> : null}
+            {query.data.task_type === 'mcp_scan' && query.data.input_summary.source_kind ? <div className={styles.fact}><Text className={styles.label}>MCP 扫描对象</Text><Text>{mcpSourceKindLabels[query.data.input_summary.source_kind]}</Text></div> : null}
             {query.data.input_summary.thread ? <div className={styles.fact}><Text className={styles.label}>并发数</Text><Text>{query.data.input_summary.thread}</Text></div> : null}
             {query.data.input_summary.timeout ? <div className={styles.fact}><Text className={styles.label}>超时秒数</Text><Text>{query.data.input_summary.timeout}</Text></div> : null}
             {query.data.input_summary.port_scan_mode ? <div className={styles.fact}><Text className={styles.label}>端口扫描模式</Text><Text>{portScanModeLabels[query.data.input_summary.port_scan_mode]}</Text></div> : null}

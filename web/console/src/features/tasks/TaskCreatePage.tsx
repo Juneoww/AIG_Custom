@@ -1,12 +1,13 @@
 /**
  * 功能：提供分步任务创建、附件上传与同逻辑提交幂等重试。
- * 实现：表单只收安全参数和模型ID，附件先换取opaque ID；失败重试复用原Submission。
+ * 实现：表单只收安全参数和模型ID，MCP 来源由白名单预设控制；附件先换取opaque ID；失败重试复用原Submission。
  * 输入：任务类型、目标/说明、安全参数和本地 File。
  * 输出：202 后导航到任务详情；错误时保留可核对表单但不自动重放写请求。
  * 依赖：Fluent UI、React Router、Session、任务及附件 API。
  */
 import {
   Button,
+  Checkbox,
   Field,
   Input,
   MessageBar,
@@ -18,11 +19,11 @@ import {
   tokens,
 } from '@fluentui/react-components'
 import { useEffect, useMemo, useRef, useState, type FormEvent } from 'react'
-import { useNavigate } from 'react-router-dom'
+import { useLocation, useNavigate } from 'react-router-dom'
 
 import { useSession } from '../auth/session'
 import { ApiError } from '../../shared/api/errors'
-import type { AttachmentView, InfrastructurePortScanMode, TaskCreateRequest } from '../../shared/api/types'
+import type { AttachmentView, InfrastructurePortScanMode, MCPSourceKind, TaskCreateRequest } from '../../shared/api/types'
 import { PageHeader } from '../../shared/components/PageHeader'
 import { downloadAttachment, preflightAttachments, uploadAttachment } from './attachments'
 import { createTaskSubmission, type TaskSubmission } from './api'
@@ -48,12 +49,27 @@ const useStyles = makeStyles({
   portScanMode: { display: 'flex', flexDirection: 'column', gap: tokens.spacingVerticalXS, gridColumn: '1 / -1' },
 })
 
+type MCPCreateSourceKind = Extract<MCPSourceKind, 'repository' | 'service'>
+
+function mcpCreatePreset(search: string): { taskType: TaskCreateRequest['task_type']; sourceKind: MCPCreateSourceKind } {
+  const query = new URLSearchParams(search)
+  if (query.get('task_type') !== 'mcp_scan') return { taskType: 'mcp_scan', sourceKind: 'repository' }
+  return {
+    taskType: 'mcp_scan',
+    sourceKind: query.get('source_kind') === 'service' ? 'service' : 'repository',
+  }
+}
+
 export function TaskCreatePage() {
   const styles = useStyles()
   const navigate = useNavigate()
+  const location = useLocation()
   const { state } = useSession()
   const role = state.status === 'authenticated' ? state.subject.role : 'auditor'
-  const [taskType, setTaskType] = useState<TaskCreateRequest['task_type']>('mcp_scan')
+  const preset = useMemo(() => mcpCreatePreset(location.search), [location.search])
+  const [taskType, setTaskType] = useState<TaskCreateRequest['task_type']>(() => preset.taskType)
+  const [mcpSourceKind, setMCPSourceKind] = useState<MCPCreateSourceKind>(() => preset.sourceKind)
+  const [authorizationConfirmed, setAuthorizationConfirmed] = useState(false)
   const [content, setContent] = useState('')
   const [language, setLanguage] = useState<'zh_CN' | 'en'>('zh_CN')
   const [modelID, setModelID] = useState('')
@@ -85,11 +101,41 @@ export function TaskCreatePage() {
     }
   }, [])
 
+  useEffect(() => {
+    setTaskType(preset.taskType)
+    setMCPSourceKind(preset.sourceKind)
+    setAuthorizationConfirmed(false)
+    submissionRef.current = null
+    if (preset.sourceKind === 'service') {
+      controllerRef.current?.abort()
+      setFiles([])
+      setAttachments([])
+      setUploading(false)
+    }
+  }, [preset.sourceKind, preset.taskType])
+
   const invalidateSubmission = () => {
     submissionRef.current = null
   }
 
+  const chooseMCPSource = (value: string) => {
+    const sourceKind: MCPCreateSourceKind = value === 'service' ? 'service' : 'repository'
+    setMCPSourceKind(sourceKind)
+    setAuthorizationConfirmed(false)
+    if (sourceKind === 'service') {
+      controllerRef.current?.abort()
+      setFiles([])
+      setAttachments([])
+      setUploading(false)
+    }
+    invalidateSubmission()
+  }
+
   const handleUpload = async () => {
+    if (taskType === 'mcp_scan' && mcpSourceKind === 'service') {
+      setError('服务扫描不能携带代码附件。')
+      return
+    }
     if (uploading || files.length === 0) return
     setError('')
     try {
@@ -120,6 +166,15 @@ export function TaskCreatePage() {
 
   const submit = async (event: FormEvent) => {
     event.preventDefault()
+    const serviceScan = taskType === 'mcp_scan' && mcpSourceKind === 'service'
+    if (serviceScan && (files.length > 0 || attachments.length > 0)) {
+      setError('服务扫描不能携带代码附件。')
+      return
+    }
+    if (serviceScan && !authorizationConfirmed) {
+      setError('请确认已获得该目标的安全测试授权。')
+      return
+    }
     if (uploading || files.length > 0) {
       setError('请先完成已选择附件的上传。')
       return
@@ -139,6 +194,8 @@ export function TaskCreatePage() {
       if (!content.trim()) throw new Error('请填写扫描目标或任务说明。')
       const params: TaskCreateRequest['params'] = {}
       if (taskType === 'mcp_scan') {
+        params.source_kind = mcpSourceKind
+        if (mcpSourceKind === 'service') params.authorization_confirmed = true
         if (modelID.trim()) params.model_id = modelID.trim()
         const parsed = Number(thread)
         if (!Number.isInteger(parsed) || parsed < 1 || parsed > 1_024) throw new Error('请填写有效的并发数。')
@@ -173,7 +230,7 @@ export function TaskCreatePage() {
         task_type: taskType,
         content,
         params,
-        attachment_ids: attachments.map((item) => item.id),
+        attachment_ids: serviceScan ? [] : attachments.map((item) => item.id),
         country_iso_code: language,
       }
       submissionRef.current ??= createTaskSubmission(input)
@@ -260,6 +317,14 @@ export function TaskCreatePage() {
                 <option value="zh_CN">中文</option><option value="en">英文</option>
               </Select>
             </Field>
+            {taskType === 'mcp_scan' ? (
+              <Field label="MCP 扫描对象">
+                <Select value={mcpSourceKind} onChange={(_, data) => chooseMCPSource(data.value)}>
+                  <option value="repository">代码仓库或代码压缩包扫描</option>
+                  <option value="service">受控运行服务扫描</option>
+                </Select>
+              </Field>
+            ) : null}
             {taskType === 'mcp_scan' || taskType === 'ai_infra_scan' ? (
               <Field label="模型 ID" hint="仅填写平台模型 ID，不填写密钥。">
                 <Input value={modelID} onChange={(_, data) => { setModelID(data.value); invalidateSubmission() }} autoComplete="off" />
@@ -281,6 +346,17 @@ export function TaskCreatePage() {
               </Field>
             ) : null}
             {taskType === 'mcp_scan' ? <Field label="并发数"><Input type="number" min={1} max={1024} value={thread} onChange={(_, data) => { setThread(data.value); invalidateSubmission() }} /></Field> : null}
+            {taskType === 'mcp_scan' && mcpSourceKind === 'service' ? (
+              <div className={styles.portScanMode}>
+                <Text weight="semibold">服务扫描授权声明</Text>
+                <Checkbox
+                  label="我确认已获得该目标的安全测试授权"
+                  aria-required="true"
+                  checked={authorizationConfirmed}
+                  onChange={(_, data) => { setAuthorizationConfirmed(data.checked === true); invalidateSubmission() }}
+                />
+              </div>
+            ) : null}
             {taskType === 'ai_infra_scan' ? <Field label="超时秒数"><Input type="number" min={1} max={86400} value={timeout} onChange={(_, data) => { setTimeoutValue(data.value); invalidateSubmission() }} /></Field> : null}
             {taskType === 'ai_infra_scan' ? (
               <div className={styles.portScanMode}>
@@ -305,19 +381,21 @@ export function TaskCreatePage() {
             {taskType === 'model_redteam_report' ? <Field label="提示词数量"><Input type="number" min={1} max={1000000} value={numPrompts} onChange={(_, data) => { setNumPrompts(data.value); invalidateSubmission() }} /></Field> : null}
           </div>
         </fieldset>
-        <fieldset className={styles.step} aria-label="第三步：附件">
-          <Text weight="semibold">第三步：附件</Text>
-          <Field label="选择附件" hint="单文件最大 50 MiB，超过 5 MiB 时自动分片。">
-            <input type="file" multiple disabled={uploading || submitting} onChange={(event) => setFiles(Array.from(event.currentTarget.files ?? []))} />
-          </Field>
-          <Button type="button" appearance="secondary" disabled={uploading || files.length === 0} onClick={() => void handleUpload()}>{uploading ? '正在上传' : '上传附件'}</Button>
-          {attachments.map((attachment) => (
-            <div className={styles.attachment} key={attachment.id}>
-              <Text>{attachment.filename}（{attachment.size} 字节）</Text>
-              {role !== 'auditor' ? <Button type="button" appearance="subtle" disabled={uploading || submitting} onClick={() => void handleDownload(attachment.id)}>下载附件 {attachment.filename}</Button> : null}
-            </div>
-          ))}
-        </fieldset>
+        {!(taskType === 'mcp_scan' && mcpSourceKind === 'service') ? (
+          <fieldset className={styles.step} aria-label="第三步：附件">
+            <Text weight="semibold">第三步：附件</Text>
+            <Field label="选择附件" hint="单文件最大 50 MiB，超过 5 MiB 时自动分片。">
+              <input type="file" multiple disabled={uploading || submitting} onChange={(event) => { setFiles(Array.from(event.currentTarget.files ?? [])); invalidateSubmission() }} />
+            </Field>
+            <Button type="button" appearance="secondary" disabled={uploading || files.length === 0} onClick={() => void handleUpload()}>{uploading ? '正在上传' : '上传附件'}</Button>
+            {attachments.map((attachment) => (
+              <div className={styles.attachment} key={attachment.id}>
+                <Text>{attachment.filename}（{attachment.size} 字节）</Text>
+                {role !== 'auditor' ? <Button type="button" appearance="subtle" disabled={uploading || submitting} onClick={() => void handleDownload(attachment.id)}>下载附件 {attachment.filename}</Button> : null}
+              </div>
+            ))}
+          </fieldset>
+        ) : null}
         <fieldset className={styles.step} aria-label="第四步：确认">
           <Text weight="semibold">第四步：确认</Text>
           <Text>提交后将创建真实扫描任务；网络失败不会自动创建第二个任务。</Text>

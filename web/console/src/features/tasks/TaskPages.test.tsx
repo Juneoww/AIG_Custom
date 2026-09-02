@@ -288,6 +288,28 @@ describe('任务页面', () => {
     expect(await screen.findByRole('button', { name: '取消任务' })).toBeInTheDocument()
   })
 
+  it('MCP 详情只展示白名单来源类别，不展示目标或授权材料', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(jsonResponse({
+      ...task,
+      input_summary: {
+        source_kind: 'service',
+        endpoint: 'https://private.example/mcp',
+        authorization_confirmed: true,
+      },
+    })))
+    renderPage(
+      <TaskDetailPage />,
+      { id: 'user-1', username: 'alice', role: 'user', must_change_password: false },
+      '/tasks/task-opaque-1',
+      '/tasks/:taskId',
+    )
+
+    expect(await screen.findByText('MCP 扫描对象')).toBeInTheDocument()
+    expect(screen.getByText('受控运行服务')).toBeInTheDocument()
+    expect(screen.queryByText('https://private.example/mcp')).not.toBeInTheDocument()
+    expect(screen.queryByText('authorization_confirmed')).not.toBeInTheDocument()
+  })
+
   it('取消写入不确定时复用确认详情且不触发第三次读取', async () => {
     const cancelled = { ...task, status: 'cancelled', updated_at: '2026-08-18T01:02:00Z' }
     const fetchMock = vi
@@ -353,6 +375,98 @@ describe('任务页面', () => {
     expect(screen.queryByLabelText(/密钥|Token|API Key/i)).not.toBeInTheDocument()
   })
 
+  it('MCP 服务预设要求明确授权后才提交安全来源参数', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(jsonResponse(task))
+    vi.stubGlobal('fetch', fetchMock)
+    renderPage(
+      <TaskCreatePage />,
+      { id: 'user-1', username: 'alice', role: 'user', must_change_password: false },
+      '/tasks/new?task_type=mcp_scan&source_kind=service',
+    )
+
+    expect(screen.getByRole('combobox', { name: '扫描类型' })).toHaveValue('mcp_scan')
+    expect(screen.getByRole('combobox', { name: 'MCP 扫描对象' })).toHaveValue('service')
+    expect(screen.getByText('受控运行服务扫描')).toBeInTheDocument()
+    expect(screen.queryByRole('group', { name: '第三步：附件' })).not.toBeInTheDocument()
+
+    fireEvent.change(screen.getByRole('textbox', { name: '扫描目标或任务说明' }), { target: { value: 'https://mcp.example.test/sse' } })
+    screen.getByRole('button', { name: '创建任务' }).click()
+
+    expect(await screen.findByText('请确认已获得该目标的安全测试授权。')).toBeInTheDocument()
+    expect(fetchMock).not.toHaveBeenCalled()
+
+    fireEvent.click(screen.getByRole('checkbox', { name: '我确认已获得该目标的安全测试授权' }))
+    screen.getByRole('button', { name: '创建任务' }).click()
+
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1))
+    const body = JSON.parse(String((fetchMock.mock.calls[0]?.[1] as RequestInit).body))
+    expect(body).toEqual(expect.objectContaining({
+      task_type: 'mcp_scan',
+      params: { source_kind: 'service', authorization_confirmed: true, thread: 4 },
+      attachment_ids: [],
+    }))
+  })
+
+  it('切换到 MCP 服务会清空已上传附件，并在提交时不携带它们', async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(jsonResponse({
+        id: 'attachment-opaque-1',
+        filename: 'source.zip',
+        size: 6,
+        state: 'ready',
+        created_at: '2026-09-02T01:00:00Z',
+      }))
+      .mockResolvedValueOnce(jsonResponse(task))
+    vi.stubGlobal('fetch', fetchMock)
+    renderPage(
+      <TaskCreatePage />,
+      { id: 'user-1', username: 'alice', role: 'user', must_change_password: false },
+      '/tasks/new?task_type=mcp_scan&source_kind=repository',
+    )
+
+    fireEvent.change(document.querySelector('input[type="file"]') as HTMLInputElement, {
+      target: { files: [new File(['source'], 'source.zip')] },
+    })
+    screen.getByRole('button', { name: '上传附件' }).click()
+    expect(await screen.findByText('source.zip（6 字节）')).toBeInTheDocument()
+
+    fireEvent.change(screen.getByRole('combobox', { name: 'MCP 扫描对象' }), { target: { value: 'service' } })
+
+    expect(screen.queryByRole('group', { name: '第三步：附件' })).not.toBeInTheDocument()
+    expect(screen.queryByText('source.zip（6 字节）')).not.toBeInTheDocument()
+    fireEvent.change(screen.getByRole('textbox', { name: '扫描目标或任务说明' }), { target: { value: 'https://mcp.example.test/sse' } })
+    fireEvent.click(screen.getByRole('checkbox', { name: '我确认已获得该目标的安全测试授权' }))
+    screen.getByRole('button', { name: '创建任务' }).click()
+
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2))
+    const body = JSON.parse(String((fetchMock.mock.calls[1]?.[1] as RequestInit).body))
+    expect(body).toEqual(expect.objectContaining({
+      params: { source_kind: 'service', authorization_confirmed: true, thread: 4 },
+      attachment_ids: [],
+    }))
+  })
+
+  it('MCP 仓库预设不携带服务授权，非法查询安全回退到仓库默认值', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(jsonResponse(task))
+    vi.stubGlobal('fetch', fetchMock)
+    renderPage(
+      <TaskCreatePage />,
+      { id: 'user-1', username: 'alice', role: 'user', must_change_password: false },
+      '/tasks/new?task_type=constructor&source_kind=service',
+    )
+
+    expect(screen.getByRole('combobox', { name: '扫描类型' })).toHaveValue('mcp_scan')
+    expect(screen.getByRole('combobox', { name: 'MCP 扫描对象' })).toHaveValue('repository')
+    fireEvent.change(screen.getByRole('textbox', { name: '扫描目标或任务说明' }), { target: { value: 'https://git.example.test/group/repository.git' } })
+    screen.getByRole('button', { name: '创建任务' }).click()
+
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1))
+    const body = JSON.parse(String((fetchMock.mock.calls[0]?.[1] as RequestInit).body))
+    expect(body.params).toEqual({ source_kind: 'repository', thread: 4 })
+    expect(body.params).not.toHaveProperty('authorization_confirmed')
+  })
+
   it.each(['fixed_ai', 'full_tcp'] as const)('AI 基础设施扫描提交显式发送端口扫描模式 %s', async (portScanMode) => {
     const fetchMock = vi.fn().mockResolvedValue(jsonResponse(task))
     vi.stubGlobal('fetch', fetchMock)
@@ -392,7 +506,7 @@ describe('任务页面', () => {
 
     await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1))
     const body = JSON.parse(String((fetchMock.mock.calls[0]?.[1] as RequestInit).body))
-    expect(body.params).toEqual({ thread: 4 })
+    expect(body.params).toEqual({ source_kind: 'repository', thread: 4 })
     expect(body.params).not.toHaveProperty('port_scan_mode')
   })
 
@@ -400,7 +514,7 @@ describe('任务页面', () => {
     {
       taskType: 'mcp_scan',
       fields: [] as Array<[string, string]>,
-      params: { thread: 4 },
+      params: { source_kind: 'repository', thread: 4 },
     },
     {
       taskType: 'model_redteam_report',
