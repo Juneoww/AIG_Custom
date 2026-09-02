@@ -13,6 +13,7 @@ import {
   TableHeaderCell,
   TableRow,
   makeStyles,
+  mergeClasses,
   tokens,
 } from '@fluentui/react-components'
 import type { Key, ReactNode } from 'react'
@@ -28,6 +29,7 @@ interface DataTableProps<T> {
   columns: readonly DataTableColumn<T>[]
   rows: readonly T[]
   getRowKey: (row: T) => Key
+  className?: string
 }
 
 const useStyles = makeStyles({
@@ -48,7 +50,7 @@ const useStyles = makeStyles({
   },
 })
 
-export function DataTable<T>({ caption, columns, rows, getRowKey }: DataTableProps<T>) {
+export function DataTable<T>({ caption, columns, rows, getRowKey, className }: DataTableProps<T>) {
   const styles = useStyles()
   const columnIds = new Set(columns.map((column) => column.id))
   if (columnIds.size !== columns.length) {
@@ -56,7 +58,7 @@ export function DataTable<T>({ caption, columns, rows, getRowKey }: DataTablePro
   }
 
   return (
-    <Table className={styles.table}>
+    <Table className={mergeClasses(styles.table, className)}>
       <caption className={styles.caption}>{caption}</caption>
       <TableHeader>
         <TableRow>

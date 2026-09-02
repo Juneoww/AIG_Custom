@@ -6,7 +6,7 @@
  * 依赖：Vitest、Testing Library、React Router、Fluent UI 与 MCP 工作台客户端。
  */
 import { fireEvent, render, screen, waitFor } from '@testing-library/react'
-import { MemoryRouter } from 'react-router-dom'
+import { MemoryRouter, useLocation } from 'react-router-dom'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import { AppProviders, createAppQueryClient } from '../../app/providers/AppProviders'
@@ -48,7 +48,12 @@ function workbenchResponse(overrides: Record<string, unknown> = {}) {
   }
 }
 
-function renderWorkbench(role: SubjectRole = 'user') {
+function LocationProbe() {
+  const location = useLocation()
+  return <output aria-label="当前工作台路由">{`${location.pathname}${location.search}${location.hash}`}</output>
+}
+
+function renderWorkbench(role: SubjectRole = 'user', initialPath = '/tasks/mcp') {
   return render(
     <ThemeProvider initialMode="light">
       <AppProviders
@@ -58,8 +63,9 @@ function renderWorkbench(role: SubjectRole = 'user') {
           subject: { id: `${role}-1`, username: `${role}-operator`, role, must_change_password: false },
         }}
       >
-        <MemoryRouter>
+        <MemoryRouter initialEntries={[initialPath]}>
           <MCPWorkbenchPage />
+          <LocationProbe />
         </MemoryRouter>
       </AppProviders>
     </ThemeProvider>,
@@ -79,6 +85,18 @@ describe('MCPWorkbenchPage', () => {
 
     expect(screen.getByRole('heading', { name: 'MCP 安全扫描' })).toBeInTheDocument()
     expect(screen.getByRole('progressbar', { name: '正在加载 MCP 安全扫描工作台' })).toBeInTheDocument()
+  })
+
+  it('keeps header navigation inside the current router', () => {
+    vi.stubGlobal('fetch', vi.fn(() => new Promise<Response>(() => undefined)))
+
+    renderWorkbench()
+
+    fireEvent.click(screen.getByRole('link', { name: '新建 MCP 扫描' }))
+    expect(screen.getByLabelText('当前工作台路由')).toHaveTextContent('/tasks/new?task_type=mcp_scan&source_kind=repository')
+
+    fireEvent.click(screen.getByRole('link', { name: '扫描任务' }))
+    expect(screen.getByLabelText('当前工作台路由')).toHaveTextContent('/tasks')
   })
 
   it('renders metrics, governed entry points, active work and risks from the safe projection only', async () => {
@@ -132,6 +150,18 @@ describe('MCPWorkbenchPage', () => {
     expect(screen.getByRole('link', { name: '查看 MCP 扫描历史' })).toHaveAttribute('href', '/tasks?task_type=mcp_scan')
     expect(screen.getByRole('link', { name: '查看 MCP 知识库' })).toHaveAttribute('href', '/knowledge/mcp')
     expect(document.body).not.toHaveTextContent(/ENDPOINT-SENTINEL|RAW-RESULT-SENTINEL|MODEL-SENTINEL|TOKEN-SENTINEL|RISK-RAW-SENTINEL/)
+  })
+
+  it('provides a labelled horizontal viewport for the active task table', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(jsonResponse(workbenchResponse())))
+
+    renderWorkbench()
+
+    const table = await screen.findByRole('table', { name: '进行中的 MCP 扫描' })
+    const viewport = screen.getByRole('region', { name: '进行中的 MCP 扫描表格' })
+    expect(viewport).toHaveAttribute('tabindex', '0')
+    expect(getComputedStyle(viewport).overflowX).toBe('auto')
+    expect(getComputedStyle(table).minWidth).toBe('680px')
   })
 
   it('keeps the auditor workbench read-only while preserving safe operational visibility', async () => {

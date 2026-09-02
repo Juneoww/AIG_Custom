@@ -196,11 +196,17 @@ describe('Sidebar', () => {
     expect(screen.getByRole('link', { name: 'AI 基础设施扫描' })).not.toHaveAttribute('aria-current')
   })
 
-  it('keeps a task classification active when its query is a subset of the current URL', () => {
+  it('keeps a task classification active when its query is a subset of the current task URL', () => {
     renderSidebar('/tasks?task_type=ai_infra_scan&status=running&page=2')
 
     expect(screen.getByRole('link', { name: 'AI 基础设施扫描' })).toHaveAttribute('aria-current', 'page')
     expect(screen.getByRole('link', { name: '模型红队评测' })).not.toHaveAttribute('aria-current')
     expect(screen.getByRole('link', { name: 'Agent 工作流扫描' })).not.toHaveAttribute('aria-current')
+  })
+
+  it('requires an exact pathname for a child without target query parameters', () => {
+    renderSidebar('/tasks/mcp/history')
+
+    expect(screen.getByRole('link', { name: 'MCP 安全扫描' })).not.toHaveAttribute('aria-current')
   })
 })

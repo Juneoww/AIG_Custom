@@ -18,7 +18,7 @@ import {
   tokens,
 } from '@fluentui/react-components'
 import { useQuery } from '@tanstack/react-query'
-import { Link } from 'react-router-dom'
+import { Link, useHref, useLinkClickHandler } from 'react-router-dom'
 
 import { useSession } from '../auth/session'
 import { ApiError } from '../../shared/api/errors'
@@ -112,6 +112,13 @@ const useStyles = makeStyles({
     padding: tokens.spacingVerticalL,
     borderRadius: tokens.borderRadiusMedium,
     boxShadow: 'none',
+  },
+  activeTaskViewport: {
+    maxWidth: '100%',
+    overflowX: 'auto',
+  },
+  activeTaskTable: {
+    minWidth: '680px',
   },
   sectionTitle: {
     margin: `0 0 ${tokens.spacingVerticalL} 0`,
@@ -246,7 +253,17 @@ function ActiveTaskTable({ tasks }: { tasks: readonly MCPWorkbenchActiveTask[] }
     { id: 'updated', header: '更新时间', render: (task) => formatDateTime(task.updated_at) },
   ]
 
-  return <DataTable caption="进行中的 MCP 扫描" columns={columns} rows={tasks} getRowKey={(task) => task.task_id} />
+  return (
+    <div className={styles.activeTaskViewport} role="region" aria-label="进行中的 MCP 扫描表格" tabIndex={0}>
+      <DataTable
+        caption="进行中的 MCP 扫描"
+        className={styles.activeTaskTable}
+        columns={columns}
+        rows={tasks}
+        getRowKey={(task) => task.task_id}
+      />
+    </div>
+  )
 }
 
 function RecentRiskList({ risks }: { risks: readonly MCPWorkbenchRecentRisk[] }) {
@@ -302,10 +319,13 @@ function CreationEntries() {
 }
 
 function MCPWorkbenchBreadcrumb() {
+  const href = useHref('/tasks')
+  const onClick = useLinkClickHandler('/tasks')
+
   return (
     <Breadcrumb aria-label="页面路径" size="small">
       <BreadcrumbItem>
-        <BreadcrumbButton as="a" href="/tasks">扫描任务</BreadcrumbButton>
+        <BreadcrumbButton as="a" href={href} onClick={onClick}>扫描任务</BreadcrumbButton>
       </BreadcrumbItem>
       <BreadcrumbDivider />
       <BreadcrumbItem>
@@ -313,6 +333,14 @@ function MCPWorkbenchBreadcrumb() {
       </BreadcrumbItem>
     </Breadcrumb>
   )
+}
+
+function NewMCPScanAction() {
+  const to = '/tasks/new?task_type=mcp_scan&source_kind=repository'
+  const href = useHref(to)
+  const onClick = useLinkClickHandler(to)
+
+  return <Button as="a" appearance="primary" href={href} onClick={onClick}>新建 MCP 扫描</Button>
 }
 
 function WorkbenchContent({
@@ -381,7 +409,7 @@ export function MCPWorkbenchPage() {
         breadcrumb={<MCPWorkbenchBreadcrumb />}
         description="在同一工作台创建受控扫描、跟踪执行状态，并查看已脱敏的风险摘要。"
       >
-        {canCreate ? <Button as="a" appearance="primary" href="/tasks/new?task_type=mcp_scan&source_kind=repository">新建 MCP 扫描</Button> : null}
+        {canCreate ? <NewMCPScanAction /> : null}
       </PageHeader>
       {query.isPending ? <StatePanel state="loading" title="正在加载 MCP 安全扫描工作台" /> : null}
       {query.isError && query.error instanceof ApiError && query.error.kind === 'forbidden' ? (
