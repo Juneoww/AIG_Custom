@@ -1188,16 +1188,22 @@ func TestCreateMCPServiceSourceRequiresEndpointAndAuthorization(t *testing.T) {
 		attachmentIDs []string
 		wantErr       bool
 	}{
-		{name: "valid service", content: "https://mcp.example.test/rpc?version=1", params: `{"source_kind":"service","authorization_confirmed":true,"model_id":"model-1","thread":2}`},
+		{name: "valid service", content: "https://mcp.example.test/rpc", params: `{"source_kind":"service","authorization_confirmed":true,"model_id":"model-1","thread":2}`},
 		{name: "missing confirmation", content: "https://mcp.example.test/rpc", params: `{"source_kind":"service"}`, wantErr: true},
 		{name: "false confirmation", content: "https://mcp.example.test/rpc", params: `{"source_kind":"service","authorization_confirmed":false}`, wantErr: true},
 		{name: "invalid endpoint", content: "git@git.example.test:group/mcp-server", params: `{"source_kind":"service","authorization_confirmed":true}`, wantErr: true},
+		{name: "userinfo is forbidden", content: "https://user:secret@mcp.example.test/sse", params: `{"source_kind":"service","authorization_confirmed":true}`, wantErr: true},
+		{name: "credential query is forbidden", content: "https://mcp.example.test/sse?token=secret", params: `{"source_kind":"service","authorization_confirmed":true}`, wantErr: true},
+		{name: "query is forbidden", content: "https://mcp.example.test/sse?version=1", params: `{"source_kind":"service","authorization_confirmed":true}`, wantErr: true},
+		{name: "force query is forbidden", content: "https://mcp.example.test/sse?", params: `{"source_kind":"service","authorization_confirmed":true}`, wantErr: true},
+		{name: "fragment is forbidden", content: "https://mcp.example.test/sse#private", params: `{"source_kind":"service","authorization_confirmed":true}`, wantErr: true},
 		{name: "attachments are forbidden", content: "https://mcp.example.test/rpc", params: `{"source_kind":"service","authorization_confirmed":true}`, attachmentIDs: []string{"attachment-1"}, wantErr: true},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			repository := NewMemoryRepository()
 			engine := &recordingEngine{}
-			service := NewService(repository, engine, audit.NewService(audit.NewMemoryRepository()))
+			auditRepository := audit.NewMemoryRepository()
+			service := NewService(repository, engine, audit.NewService(auditRepository))
 
 			_, err := service.Create(context.Background(), subject, CreateInput{
 				IdempotencyKey: "service-source-" + strings.ReplaceAll(test.name, " ", "-"),
@@ -1213,6 +1219,9 @@ func TestCreateMCPServiceSourceRequiresEndpointAndAuthorization(t *testing.T) {
 				require.NoError(t, listErr)
 				assert.Empty(t, tasks)
 				assert.Zero(t, engine.submits.Load())
+				events, listErr := auditRepository.List(context.Background(), audit.Filter{Action: audit.Action("task.created")})
+				require.NoError(t, listErr)
+				assert.Empty(t, events)
 				return
 			}
 			require.NoError(t, err)
@@ -1272,7 +1281,7 @@ func TestCreateMCPSourceAuditMetadataIsSafeAndLinked(t *testing.T) {
 		wantAuthorization bool
 	}{
 		{name: "repository", content: "https://github.com/example/mcp-server.git", params: `{"source_kind":"repository","model_id":"private-model"}`, wantSourceKind: "repository"},
-		{name: "service", content: "https://mcp.example.test/rpc?private=token", params: `{"source_kind":"service","authorization_confirmed":true,"model_id":"private-model"}`, wantSourceKind: "service", wantAuthorization: true},
+		{name: "service", content: "https://private-mcp.example.test/private-sse", params: `{"source_kind":"service","authorization_confirmed":true,"model_id":"private-model"}`, wantSourceKind: "service", wantAuthorization: true},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			repository := NewMemoryRepository()
@@ -1302,7 +1311,7 @@ func TestCreateMCPSourceAuditMetadataIsSafeAndLinked(t *testing.T) {
 				assert.Equal(t, test.wantAuthorization, metadata["authorization_confirmed"])
 				serialized, marshalErr := json.Marshal(metadata)
 				require.NoError(t, marshalErr)
-				for _, secret := range []string{"mcp.example.test", "private=token", "mcp-server.git", "private-model"} {
+				for _, secret := range []string{"private-mcp.example.test", "private-sse", "mcp-server.git", "private-model"} {
 					assert.NotContains(t, string(serialized), secret)
 				}
 			}

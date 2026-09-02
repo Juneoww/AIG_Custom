@@ -399,7 +399,7 @@ func validMCPServiceEndpoint(value string) bool {
 		return false
 	}
 	parsed, err := url.ParseRequestURI(value)
-	if err != nil || parsed.Hostname() == "" {
+	if err != nil || parsed.Hostname() == "" || parsed.User != nil || parsed.RawQuery != "" || parsed.ForceQuery || parsed.Fragment != "" || strings.Contains(value, "#") {
 		return false
 	}
 	scheme := strings.ToLower(parsed.Scheme)
