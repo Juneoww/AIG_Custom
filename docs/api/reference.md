@@ -74,7 +74,7 @@ AIG Custom Platform 是基于 Tencent Zhuque Lab AI-Infra-Guard（https://github
 
 ### 受治理的 MCP 扫描创建
 
-当 `POST /api/v1/platform/tasks` 的 `task_type="mcp_scan"` 时，`params.source_kind` 必填且只能是 `repository` 或 `service`。`repository` 扫描只能二选一使用合法 Git 仓库引用或 owner 范围内 ready 的代码附件，且不得携带 `authorization_confirmed`。`service` 扫描使用受控 HTTP(S) 服务端点，不能携带代码附件，并要求 `params.authorization_confirmed=true`。服务端拒绝未知 MCP 参数字段和嵌套凭据。任务创建审计元数据仅记录来源类别与布尔授权确认，不记录也不返回仓库引用、服务端点、凭据或授权材料。历史已持久化但缺少 `source_kind` 的 MCP 任务仍可读，只显示为 `legacy_unknown`。
+当 `POST /api/v1/platform/tasks` 的 `task_type="mcp_scan"` 时，`params.source_kind` 必填且只能是 `repository` 或 `service`。`repository` 扫描只能二选一使用合法 Git 仓库引用或 owner 范围内 ready 的代码附件，且不得携带 `authorization_confirmed`。`service` 扫描使用受控 HTTP(S) 服务端点，不能携带代码附件，并要求 `params.authorization_confirmed=true`。服务端拒绝未知 MCP 参数字段和嵌套凭据。来源相关审计元数据包含 source kind 与布尔授权确认；通用任务审计流程可保留安全的 phase 元数据。它不记录也不返回仓库引用、服务端点、凭据或授权材料。历史已持久化但缺少 `source_kind` 的 MCP 任务仍可读，只显示为 `legacy_unknown`。
 
 ### MCP 安全扫描工作台
 
@@ -103,7 +103,7 @@ AIG Custom Platform 是基于 Tencent Zhuque Lab AI-Infra-Guard（https://github
 
 浏览器任务执行只能使用上文受保护的平台任务 API。原 `/api/v1/app/taskapi*` 和 `/api/v1/app/tasks*` 浏览器路由族仅是历史名称，不是可调用的兼容 API；只有通过正常会话、首次改密与 CSRF 校验后才返回 `410 Gone`（CSRF 适用于变更请求）。它们不能用于创建任务、上传、查询状态、获取结果、流式更新，也不能在连接中断后作为回退。
 
-平台任务创建 JSON body 最大 256 KiB，`content` 最大 32 KiB，最多引用 10 个不重复且不超过 128 字节的 opaque 附件 ID；只接受 canonical `mcp_scan`、`ai_infra_scan`、`model_redteam_report`、`agent_scan`，服务端在私有 Adapter 边界分别映射为真实 Agent Alias。参数采用逐类型白名单：MCP 仅 `model_id`/`thread`；基础设施仅 `model_id`/`timeout`/`port_scan_mode`；模型红队要求 `model_id` 字符串数组和 `eval_model_id`，可带 `dataset.numPrompts/randomSeed/promptColumn` 与 `techniques`；Agent 扫描要求 `agent_id` 与 `eval_model_id`。`ai_infra_scan.params.port_scan_mode` 只能精确为 `fixed_ai` 或 `full_tcp`，省略时规范化为 `fixed_ai`；前者对裸 IPv4 发现 `11434,1337,7000-9000,18789`（2,004 个）TCP 端口，后者发现全部 `1-65535` TCP 端口。它不接受自定义端口、UDP 或版本识别选项，且 URL、域名、带端口 IP、IPv6 不触发该端口发现步骤。安全 `TaskDetail.input_summary.port_scan_mode` 仅在可验证时返回上述规范化枚举值，绝不返回原始参数。所有 `model_id`/`eval_model_id` 必须在持久化任务前通过受治理模型解析器验证，`agent_id` 必须解析到该用户或公共只读 Agent 配置；未知或不可见引用固定拒绝且不写入任务。未知字段、嵌套凭据对象、明文模型凭据、旧 model 对象和任务 Alias 均被拒绝。浏览器附件只使用 opaque 附件 ID，并按 owner 隔离。内部 Agent WebSocket 与旧形状制品传输属于独立的 internal-token 边界，不是浏览器 API。
+平台任务创建 JSON body 最大 256 KiB，`content` 最大 32 KiB，最多引用 10 个不重复且不超过 128 字节的 opaque 附件 ID；只接受 canonical `mcp_scan`、`ai_infra_scan`、`model_redteam_report`、`agent_scan`，服务端在私有 Adapter 边界分别映射为真实 Agent Alias。参数采用逐类型白名单：MCP 要求 `source_kind` 精确为 `repository` 或 `service`；`repository` 支持严格 Git 引用或 ready 代码附件，且拒绝 `authorization_confirmed`；`service` 要求 `authorization_confirmed=true` 且不允许附件，并使用上文已说明的受控 HTTP(S) 服务端点输入；两种 MCP 来源均可带可选 `model_id` 与 `thread`。来源相关审计元数据包含 source kind 与布尔授权确认；通用任务审计流程可保留安全的 phase 元数据。基础设施仅 `model_id`/`timeout`/`port_scan_mode`；模型红队要求 `model_id` 字符串数组和 `eval_model_id`，可带 `dataset.numPrompts/randomSeed/promptColumn` 与 `techniques`；Agent 扫描要求 `agent_id` 与 `eval_model_id`。`ai_infra_scan.params.port_scan_mode` 只能精确为 `fixed_ai` 或 `full_tcp`，省略时规范化为 `fixed_ai`；前者对裸 IPv4 发现 `11434,1337,7000-9000,18789`（2,004 个）TCP 端口，后者发现全部 `1-65535` TCP 端口。它不接受自定义端口、UDP 或版本识别选项，且 URL、域名、带端口 IP、IPv6 不触发该端口发现步骤。安全 `TaskDetail.input_summary.port_scan_mode` 仅在可验证时返回上述规范化枚举值，绝不返回原始参数。所有 `model_id`/`eval_model_id` 必须在持久化任务前通过受治理模型解析器验证，`agent_id` 必须解析到该用户或公共只读 Agent 配置；未知或不可见引用固定拒绝且不写入任务。未知字段、嵌套凭据对象、明文模型凭据、旧 model 对象和任务 Alias 均被拒绝。浏览器附件只使用 opaque 附件 ID，并按 owner 隔离。内部 Agent WebSocket 与旧形状制品传输属于独立的 internal-token 边界，不是浏览器 API。
 
 ### 受保护平台边界
 

@@ -702,7 +702,7 @@ func TestSwaggerDocumentsGovernedMCPCreateAndWorkbenchContract(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			const createPath = "/api/v1/platform/tasks"
 			createDescription := strings.ToLower(swaggerValue(t, document, "paths", createPath, "post", "description").(string))
-			for _, term := range []string{"mcp_scan", "source_kind", "repository", "service", "authorization_confirmed", "audit"} {
+			for _, term := range []string{"mcp_scan", "source_kind", "repository", "service", "authorization_confirmed", "audit", "source-related audit metadata", "safe phase metadata"} {
 				if !strings.Contains(createDescription, term) {
 					t.Errorf("governed MCP create description lacks %q", term)
 				}
@@ -746,6 +746,11 @@ func TestSwaggerDocumentsGovernedMCPCreateAndWorkbenchContract(t *testing.T) {
 			if got := swaggerValue(t, document, "definitions", "mcpworkbench.RecentRisk", "properties", "summary", "maxLength"); got != float64(160) && got != 160 {
 				t.Errorf("MCP workbench summary maxLength = %v, want 160", got)
 			}
+			for field, limit := range map[string]int{"active_tasks": 10, "recent_risks": 5} {
+				if got := swaggerValue(t, document, "definitions", "mcpworkbench.View", "properties", field, "maxItems"); got != float64(limit) && got != limit {
+					t.Errorf("MCP workbench %s maxItems = %v, want %d", field, got, limit)
+				}
+			}
 			if got := swaggerValue(t, document, "definitions", "mcpworkbench.ActiveTask", "properties", "phase", "x-nullable"); got != true {
 				t.Errorf("MCP workbench phase x-nullable = %v, want true", got)
 			}
@@ -762,8 +767,8 @@ func TestSwaggerDocumentsGovernedMCPCreateAndWorkbenchContract(t *testing.T) {
 	}
 
 	for _, guide := range []struct {
-		path     string
-		required []string
+		path                string
+		required, forbidden []string
 	}{
 		{
 			path: "../../docs/api/reference.en.md",
@@ -771,7 +776,10 @@ func TestSwaggerDocumentsGovernedMCPCreateAndWorkbenchContract(t *testing.T) {
 				"GET /api/v1/platform/mcp-workbench", "source_kind", "authorization_confirmed", "fixed 30 UTC-day window",
 				"created_at", "completed_at", "legacy_unknown", "other", "at most 10", "at most 5", "read-only",
 				"raw result", "endpoint", "model ID", "headers",
+				"MCP requires `source_kind`", "strict Git reference or ready code attachment", "`service` requires `authorization_confirmed=true` and permits no attachment",
+				"Source-related audit metadata contains source kind and the Boolean authorization confirmation", "safe phase metadata",
 			},
+			forbidden: []string{"MCP permits `model_id`/`thread`"},
 		},
 		{
 			path: "../../docs/api/reference.md",
@@ -779,7 +787,10 @@ func TestSwaggerDocumentsGovernedMCPCreateAndWorkbenchContract(t *testing.T) {
 				"GET /api/v1/platform/mcp-workbench", "source_kind", "authorization_confirmed", "固定 30 个 UTC 日窗口",
 				"created_at", "completed_at", "legacy_unknown", "other", "最多 10", "最多 5", "只读",
 				"原始结果", "端点", "模型 ID", "headers",
+				"MCP 要求 `source_kind`", "严格 Git 引用或 ready 代码附件", "`service` 要求 `authorization_confirmed=true` 且不允许附件",
+				"来源相关审计元数据包含 source kind 与布尔授权确认", "安全的 phase 元数据",
 			},
+			forbidden: []string{"MCP 仅 `model_id`/`thread`"},
 		},
 	} {
 		contents, err := os.ReadFile(guide.path)
@@ -789,6 +800,11 @@ func TestSwaggerDocumentsGovernedMCPCreateAndWorkbenchContract(t *testing.T) {
 		for _, required := range guide.required {
 			if !strings.Contains(string(contents), required) {
 				t.Errorf("%s does not document %q", guide.path, required)
+			}
+		}
+		for _, forbidden := range guide.forbidden {
+			if strings.Contains(string(contents), forbidden) {
+				t.Errorf("%s retains obsolete MCP whitelist %q", guide.path, forbidden)
 			}
 		}
 	}
