@@ -110,6 +110,12 @@ describe('MCPWorkbenchPage', () => {
     expect(screen.getByRole('group', { name: '等待执行' })).toHaveTextContent('1')
     expect(screen.getByRole('group', { name: '高风险' })).toHaveTextContent('3')
     expect(screen.getByRole('group', { name: '30 日已完成' })).toHaveTextContent('12')
+    expect(screen.getByRole('navigation', { name: '页面路径' })).toBeInTheDocument()
+    expect(screen.getByRole('link', { name: '扫描任务' })).toHaveAttribute('href', '/tasks')
+    expect(screen.getByRole('link', { name: '新建 MCP 扫描' })).toHaveAttribute(
+      'href',
+      '/tasks/new?task_type=mcp_scan&source_kind=repository',
+    )
     expect(screen.getByRole('link', { name: '创建仓库 MCP 扫描' })).toHaveAttribute(
       'href',
       '/tasks/new?task_type=mcp_scan&source_kind=repository',
@@ -119,8 +125,10 @@ describe('MCPWorkbenchPage', () => {
       '/tasks/new?task_type=mcp_scan&source_kind=service',
     )
     expect(screen.getByRole('table', { name: '进行中的 MCP 扫描' })).toBeInTheDocument()
+    expect(screen.getByRole('link', { name: '查看任务 MCP 扫描 · task-opa' })).toHaveAttribute('href', '/tasks/task-opaque-1')
     expect(screen.getByText('阶段未提供')).toBeInTheDocument()
     expect(screen.getByRole('region', { name: '最近风险' })).toHaveTextContent('危险工具调用')
+    expect(screen.getByRole('link', { name: '查看安全报告 report-opaque-1' })).toHaveAttribute('href', '/reports/report-opaque-1')
     expect(screen.getByRole('link', { name: '查看 MCP 扫描历史' })).toHaveAttribute('href', '/tasks?task_type=mcp_scan')
     expect(screen.getByRole('link', { name: '查看 MCP 知识库' })).toHaveAttribute('href', '/knowledge/mcp')
     expect(document.body).not.toHaveTextContent(/ENDPOINT-SENTINEL|RAW-RESULT-SENTINEL|MODEL-SENTINEL|TOKEN-SENTINEL|RISK-RAW-SENTINEL/)
@@ -132,6 +140,9 @@ describe('MCPWorkbenchPage', () => {
     renderWorkbench('auditor')
 
     expect(await screen.findByRole('table', { name: '进行中的 MCP 扫描' })).toBeInTheDocument()
+    expect(screen.getByRole('navigation', { name: '页面路径' })).toBeInTheDocument()
+    expect(screen.getByRole('link', { name: '扫描任务' })).toHaveAttribute('href', '/tasks')
+    expect(screen.queryByRole('link', { name: '新建 MCP 扫描' })).not.toBeInTheDocument()
     expect(screen.queryByRole('link', { name: '创建仓库 MCP 扫描' })).not.toBeInTheDocument()
     expect(screen.queryByRole('link', { name: '创建受控服务 MCP 扫描' })).not.toBeInTheDocument()
   })
@@ -152,6 +163,29 @@ describe('MCPWorkbenchPage', () => {
 
     expect(await screen.findByText('无权查看 MCP 安全扫描工作台')).toBeInTheDocument()
     expect(document.body).not.toHaveTextContent('PRIVATE-SENTINEL')
+  })
+
+  it('rejects a non-null phase value without exposing endpoint or log text', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue(
+        jsonResponse(
+          workbenchResponse({
+            active_tasks: [{
+              ...workbenchResponse().active_tasks[0],
+              phase: 'https://private.example/mcp?log=PHASE-SENTINEL',
+              endpoint: 'ENDPOINT-SENTINEL',
+              raw_result: 'RAW-LOG-SENTINEL',
+            }],
+          }),
+        ),
+      ),
+    )
+
+    renderWorkbench()
+
+    expect(await screen.findByRole('alert')).toHaveTextContent('暂时无法加载 MCP 安全扫描工作台')
+    expect(document.body).not.toHaveTextContent(/PHASE-SENTINEL|ENDPOINT-SENTINEL|RAW-LOG-SENTINEL|private\.example/)
   })
 
   it('offers an explicit retry after a service error without auto-replay', async () => {

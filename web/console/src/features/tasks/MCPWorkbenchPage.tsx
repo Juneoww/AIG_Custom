@@ -5,7 +5,18 @@
  * 输出：MCP 扫描入口、指标、活动任务和最近风险，不渲染目标、原始结果或凭据。
  * 依赖：React Query、React Router、Fluent UI、共享台账组件和 MCP 工作台 API。
  */
-import { Card, Text, makeStyles, mergeClasses, tokens } from '@fluentui/react-components'
+import {
+  Breadcrumb,
+  BreadcrumbButton,
+  BreadcrumbDivider,
+  BreadcrumbItem,
+  Button,
+  Card,
+  Text,
+  makeStyles,
+  mergeClasses,
+  tokens,
+} from '@fluentui/react-components'
 import { useQuery } from '@tanstack/react-query'
 import { Link } from 'react-router-dom'
 
@@ -141,9 +152,19 @@ const useStyles = makeStyles({
     color: tokens.colorNeutralForeground2,
     fontSize: tokens.fontSizeBase200,
   },
-  riskSummary: {
-    color: tokens.colorNeutralForeground1,
+  detailLink: {
+    color: tokens.colorBrandForegroundLink,
     lineHeight: tokens.lineHeightBase400,
+    textDecorationLine: 'none',
+    ':hover': {
+      textDecorationLine: 'underline',
+    },
+    ':focus-visible': {
+      outlineColor: tokens.colorStrokeFocus2,
+      outlineStyle: 'solid',
+      outlineWidth: '2px',
+      outlineOffset: '2px',
+    },
   },
   completedAt: {
     color: tokens.colorNeutralForeground2,
@@ -208,8 +229,17 @@ function formatDateTime(value: string): string {
 }
 
 function ActiveTaskTable({ tasks }: { tasks: readonly MCPWorkbenchActiveTask[] }) {
+  const styles = useStyles()
   const columns: readonly DataTableColumn<MCPWorkbenchActiveTask>[] = [
-    { id: 'label', header: '任务', render: (task) => task.label },
+    {
+      id: 'label',
+      header: '任务',
+      render: (task) => (
+        <Link className={styles.detailLink} to={`/tasks/${encodeURIComponent(task.task_id)}`} aria-label={`查看任务 ${task.label}`}>
+          {task.label}
+        </Link>
+      ),
+    },
     { id: 'source', header: '扫描对象', render: (task) => sourceKindLabels[task.source_kind] },
     { id: 'status', header: '状态', render: (task) => taskStatusLabels[task.status] },
     { id: 'phase', header: '阶段', render: (task) => task.phase ?? '阶段未提供' },
@@ -232,7 +262,9 @@ function RecentRiskList({ risks }: { risks: readonly MCPWorkbenchRecentRisk[] })
             <Text className={severityClass(risk.severity)}>{severityLabels[risk.severity]}</Text>
             <Text className={styles.category}>{categoryLabels[risk.category]}</Text>
           </div>
-          <Text className={styles.riskSummary}>{risk.summary}</Text>
+          <Link className={styles.detailLink} to={`/reports/${encodeURIComponent(risk.report_id)}`} aria-label={`查看安全报告 ${risk.report_id}`}>
+            {risk.summary}
+          </Link>
           <Text className={styles.completedAt}>{formatDateTime(risk.completed_at)}</Text>
         </li>
       ))}
@@ -266,6 +298,20 @@ function CreationEntries() {
         </Link>
       </div>
     </section>
+  )
+}
+
+function MCPWorkbenchBreadcrumb() {
+  return (
+    <Breadcrumb aria-label="页面路径" size="small">
+      <BreadcrumbItem>
+        <BreadcrumbButton as="a" href="/tasks">扫描任务</BreadcrumbButton>
+      </BreadcrumbItem>
+      <BreadcrumbDivider />
+      <BreadcrumbItem>
+        <BreadcrumbButton current>MCP 安全扫描</BreadcrumbButton>
+      </BreadcrumbItem>
+    </Breadcrumb>
   )
 }
 
@@ -330,7 +376,13 @@ export function MCPWorkbenchPage() {
 
   return (
     <section className={styles.page}>
-      <PageHeader title="MCP 安全扫描" description="在同一工作台创建受控扫描、跟踪执行状态，并查看已脱敏的风险摘要。" />
+      <PageHeader
+        title="MCP 安全扫描"
+        breadcrumb={<MCPWorkbenchBreadcrumb />}
+        description="在同一工作台创建受控扫描、跟踪执行状态，并查看已脱敏的风险摘要。"
+      >
+        {canCreate ? <Button as="a" appearance="primary" href="/tasks/new?task_type=mcp_scan&source_kind=repository">新建 MCP 扫描</Button> : null}
+      </PageHeader>
       {query.isPending ? <StatePanel state="loading" title="正在加载 MCP 安全扫描工作台" /> : null}
       {query.isError && query.error instanceof ApiError && query.error.kind === 'forbidden' ? (
         <StatePanel state="forbidden" title="无权查看 MCP 安全扫描工作台" description="当前身份没有该工作台的数据权限。" />

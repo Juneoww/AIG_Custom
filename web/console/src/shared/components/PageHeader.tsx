@@ -1,7 +1,7 @@
 /**
  * 功能：提供监管台账页面统一的标题、说明和操作区。
  * 实现：使用语义 h1 与 Fluent 排版令牌构建紧凑、可响应的页头。
- * 输入：标题、可选说明和操作子节点。
+ * 输入：标题、可选面包屑、说明和操作子节点。
  * 输出：带单一一级标题的页头区域。
  * 依赖：React 与 Fluent UI v9。
  */
@@ -10,6 +10,7 @@ import type { ReactNode } from 'react'
 
 interface PageHeaderProps {
   title: string
+  breadcrumb?: ReactNode
   description?: string
   children?: ReactNode
 }
@@ -28,6 +29,9 @@ const useStyles = makeStyles({
   },
   copy: {
     minWidth: 0,
+  },
+  breadcrumb: {
+    marginBottom: tokens.spacingVerticalS,
   },
   title: {
     margin: 0,
@@ -51,12 +55,13 @@ const useStyles = makeStyles({
   },
 })
 
-export function PageHeader({ title, description, children }: PageHeaderProps) {
+export function PageHeader({ title, breadcrumb, description, children }: PageHeaderProps) {
   const styles = useStyles()
 
   return (
     <header className={styles.root}>
       <div className={styles.copy}>
+        {breadcrumb ? <div className={styles.breadcrumb}>{breadcrumb}</div> : null}
         <h1 className={styles.title}>{title}</h1>
         {description ? <Text className={styles.description}>{description}</Text> : null}
       </div>

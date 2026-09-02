@@ -96,7 +96,7 @@ function parseActiveTask(value: unknown): MCPWorkbenchActiveTask | undefined {
   const taskID = boundedString(source?.task_id, 256)
   const label = boundedString(source?.label, 160)
   const sourceKind = boundedString(source?.source_kind, 32) as MCPSourceKind | undefined
-  const phase = source?.phase === null ? null : boundedString(source?.phase, 128)
+  const phase = source?.phase === null ? null : undefined
   const status = boundedString(source?.status, 32) as TaskStatus | undefined
   const updatedAt = rfc3339(source?.updated_at)
   if (!taskID || !label || !sourceKind || !MCP_SOURCE_KINDS.has(sourceKind) || phase === undefined || !status || !ACTIVE_TASK_STATUSES.has(status) || !updatedAt) {

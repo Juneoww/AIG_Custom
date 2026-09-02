@@ -74,6 +74,7 @@ describe('MCP 工作台安全响应合同', () => {
     ['超过风险摘要上限', workbenchView({ recent_risks: Array.from({ length: 6 }, () => recentRisk) })],
     ['未知来源枚举', workbenchView({ active_tasks: [{ ...activeTask, source_kind: 'endpoint' }] })],
     ['未知风险类别', workbenchView({ recent_risks: [{ ...recentRisk, category: 'scanner_title' }] })],
+    ['未受信任的阶段文本', workbenchView({ active_tasks: [{ ...activeTask, phase: 'https://private.example/mcp?log=PHASE-SENTINEL' }] })],
     ['非法时间戳', workbenchView({ active_tasks: [{ ...activeTask, updated_at: 'not-a-date' }] })],
     ['溢出日历日期', workbenchView({ active_tasks: [{ ...activeTask, updated_at: '2026-02-31T01:00:00Z' }] })],
     ['过长风险摘要', workbenchView({ recent_risks: [{ ...recentRisk, summary: '高'.repeat(161) }] })],
