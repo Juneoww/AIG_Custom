@@ -49,8 +49,17 @@ function isSecondaryActive(item: SecondaryNavigationItem, pathname: string, sear
   }
 
   const targetSearch = new URLSearchParams(targetQuery)
-  const currentSearch = new URLSearchParams(search)
-  return currentSearch.get('scan') === targetSearch.get('scan')
+  const unmatchedCurrentParameters = Array.from(new URLSearchParams(search).entries())
+  return Array.from(targetSearch.entries()).every(([targetName, targetValue]) => {
+    const matchIndex = unmatchedCurrentParameters.findIndex(
+      ([currentName, currentValue]) => currentName === targetName && currentValue === targetValue,
+    )
+    if (matchIndex === -1) {
+      return false
+    }
+    unmatchedCurrentParameters.splice(matchIndex, 1)
+    return true
+  })
 }
 
 const useStyles = makeStyles({
@@ -225,6 +234,43 @@ const useStyles = makeStyles({
   compactGlyph: {
     width: '24px',
     textAlign: 'center',
+  },
+  childNav: {
+    display: 'flex',
+    flexDirection: 'column',
+    gap: '2px',
+    marginLeft: tokens.spacingHorizontalL,
+    paddingLeft: tokens.spacingHorizontalS,
+    borderLeft: `1px solid ${tokens.colorNeutralStroke1}`,
+  },
+  compactChildNav: {
+    marginLeft: 0,
+    paddingLeft: 0,
+    borderLeft: 0,
+  },
+  childLink: {
+    minHeight: '34px',
+    display: 'flex',
+    alignItems: 'center',
+    padding: `0 ${tokens.spacingHorizontalS}`,
+    borderRadius: tokens.borderRadiusSmall,
+    color: tokens.colorNeutralForeground2,
+    fontSize: tokens.fontSizeBase200,
+    textDecorationLine: 'none',
+    ':hover': {
+      backgroundColor: tokens.colorNeutralBackground1Hover,
+      color: tokens.colorNeutralForeground1,
+    },
+    ':focus-visible': {
+      outlineColor: tokens.colorStrokeFocus2,
+      outlineStyle: 'solid',
+      outlineWidth: '2px',
+      outlineOffset: '2px',
+    },
+  },
+  compactChildLink: {
+    justifyContent: 'center',
+    padding: 0,
   },
   controls: {
     marginTop: 'auto',

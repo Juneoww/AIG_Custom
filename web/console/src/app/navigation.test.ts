@@ -27,6 +27,17 @@ describe('role navigation', () => {
     expect(new Set(navigationItems.map(({ path }) => path)).size).toBe(navigationItems.length)
   })
 
+  it('keeps the four ordered scan-task classifications beneath the shared task entry', () => {
+    const scanTasks = navigationItems.find((item) => item.id === 'tasks')
+
+    expect(scanTasks?.children?.map(({ label, path }) => ({ label, path }))).toEqual([
+      { label: 'MCP 安全扫描', path: '/tasks/mcp' },
+      { label: 'AI 基础设施扫描', path: '/tasks?task_type=ai_infra_scan' },
+      { label: '模型红队评测', path: '/tasks?task_type=model_redteam_report' },
+      { label: 'Agent 工作流扫描', path: '/tasks?task_type=agent_scan' },
+    ])
+  })
+
   it('shows the exact approved items for each role', () => {
     expect(visibleNavigationFor('user').map(({ label }) => label)).toEqual(common)
     expect(visibleNavigationFor('auditor').map(({ label }) => label)).toEqual([

@@ -177,6 +177,23 @@ describe('production routes', () => {
     expect(screen.queryByRole('heading', { name: '页面不存在' })).not.toBeInTheDocument()
   })
 
+  it.each(['user', 'auditor', 'admin'] as const)('routes %s to the MCP workbench before the task-detail matcher', (role) => {
+    vi.stubGlobal('fetch', vi.fn(() => new Promise<Response>(() => undefined)))
+    renderRoute(subjectState(role), '/tasks/mcp')
+
+    expect(screen.getByRole('heading', { name: 'MCP 安全扫描' })).toBeInTheDocument()
+    expect(screen.getByRole('progressbar', { name: '正在加载 MCP 安全扫描工作台' })).toBeInTheDocument()
+    expect(screen.queryByRole('heading', { name: '任务详情' })).not.toBeInTheDocument()
+  })
+
+  it('keeps the MCP workbench read-only for auditors', () => {
+    vi.stubGlobal('fetch', vi.fn(() => new Promise<Response>(() => undefined)))
+    renderRoute(subjectState('auditor'), '/tasks/mcp')
+
+    expect(screen.queryByRole('link', { name: '创建仓库 MCP 扫描' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('link', { name: '创建受控服务 MCP 扫描' })).not.toBeInTheDocument()
+  })
+
   it.each(['user', 'auditor', 'admin'] as const)('让%s角色读取真实报告列表与详情路由', (role) => {
     vi.stubGlobal('fetch', vi.fn(() => new Promise<Response>(() => undefined)))
     const list = renderRoute(subjectState(role), '/reports')

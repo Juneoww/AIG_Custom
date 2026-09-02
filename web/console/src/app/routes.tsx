@@ -32,6 +32,7 @@ import { ReportListPage } from '../features/reports/ReportListPage'
 import { TaskCreatePage } from '../features/tasks/TaskCreatePage'
 import { TaskDetailPage } from '../features/tasks/TaskDetailPage'
 import { TaskListPage } from '../features/tasks/TaskListPage'
+import { MCPWorkbenchPage } from '../features/tasks/MCPWorkbenchPage'
 import type { SubjectRole } from '../shared/api/types'
 import { PageHeader } from '../shared/components/PageHeader'
 import { StatePanel } from '../shared/components/StatePanel'
@@ -227,6 +228,14 @@ export const appRoutes: RouteObject[] = [
             element: (
               <RequireRole allowedRoles={['user', 'admin']}>
                 <TaskCreatePage />
+              </RequireRole>
+            ),
+          },
+          {
+            path: 'tasks/mcp',
+            element: (
+              <RequireRole allowedRoles={['user', 'auditor', 'admin']}>
+                <MCPWorkbenchPage />
               </RequireRole>
             ),
           },
