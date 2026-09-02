@@ -46,10 +46,11 @@ type mcpExecutionPlan struct {
 func planMcpExecution(rawParams json.RawMessage, content string, attachments []string) (mcpExecutionPlan, error) {
 	var fields map[string]json.RawMessage
 	if len(rawParams) > 0 {
-		if err := json.Unmarshal(rawParams, &fields); err != nil || fields == nil {
+		if err := json.Unmarshal(rawParams, &fields); err != nil {
 			return mcpExecutionPlan{}, errors.New("invalid MCP task parameters")
 		}
-	} else {
+	}
+	if fields == nil {
 		fields = map[string]json.RawMessage{}
 	}
 

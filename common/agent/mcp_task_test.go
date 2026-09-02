@@ -140,3 +140,38 @@ func TestMcpExecutionPlanPreservesLegacyHeuristicWithoutSourceKind(t *testing.T)
 		})
 	}
 }
+
+func TestMcpExecutionPlanPreservesLegacyHeuristicForNullParams(t *testing.T) {
+	tests := []struct {
+		name        string
+		content     string
+		attachments []string
+		transport   string
+	}{
+		{
+			name:      "GitHub repository content uses code flow",
+			content:   "https://github.com/example/mcp-server.git",
+			transport: "code",
+		},
+		{
+			name:        "attachment uses code flow",
+			content:     "legacy scan request",
+			attachments: []string{"mcp-server.zip"},
+			transport:   "code",
+		},
+		{
+			name:      "service endpoint uses service flow",
+			content:   "https://mcp.example.test/rpc",
+			transport: "url",
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			plan, err := planMcpExecution(json.RawMessage(`null`), test.content, test.attachments)
+
+			require.NoError(t, err)
+			assert.Equal(t, test.transport, plan.transport)
+		})
+	}
+}
