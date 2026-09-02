@@ -652,6 +652,92 @@ func TestLegacyAIInfrastructureTaskRetriesNormalizePortScanMode(t *testing.T) {
 	}
 }
 
+func TestLegacyMCPTaskRetryReturnsEquivalentPersistedTaskWithoutMutation(t *testing.T) {
+	repository := NewMemoryRepository()
+	engine := &controlledReferenceEngine{}
+	auditRepository := audit.NewMemoryRepository()
+	service := NewService(repository, engine, audit.NewService(auditRepository))
+	subject := identity.Subject{UserID: "legacy-mcp-owner", Username: "alice", Role: identity.RoleUser}
+	idempotencyKey := "legacy-mcp-idempotency"
+	taskID := uuid.NewSHA1(taskIDNamespace, []byte(subject.UserID+"\x00"+idempotencyKey)).String()
+	now := time.Now().UTC()
+	legacy := &Task{
+		ID: taskID, OwnerUserID: subject.UserID, OwnerUsername: subject.Username,
+		IdempotencyKey: idempotencyKey, EngineSessionID: taskID, TaskType: "mcp_scan",
+		Content: "https://github.com/example/mcp-server.git", Params: json.RawMessage(`{}`), AttachmentRefs: json.RawMessage(`[]`),
+		Status: StatusRunning, CreatedAt: now, UpdatedAt: now,
+	}
+	_, created, err := repository.CreateOrGet(context.Background(), legacy)
+	require.NoError(t, err)
+	require.True(t, created)
+
+	view, err := service.Create(context.Background(), subject, CreateInput{
+		IdempotencyKey: idempotencyKey, TaskType: "mcp_scan", Content: legacy.Content, Params: json.RawMessage(`{}`),
+	})
+	require.NoError(t, err)
+	assert.Equal(t, taskID, view.ID)
+	assert.Equal(t, StatusRunning, view.Status)
+	assert.Zero(t, engine.referenceCalls.Load(), "legacy idempotent retry must not revalidate live references")
+	assert.Zero(t, engine.submits.Load(), "legacy idempotent retry must not dispatch again")
+
+	stored, err := repository.Get(context.Background(), taskID)
+	require.NoError(t, err)
+	assert.JSONEq(t, `{}`, string(stored.Params), "legacy params must not be inferred or rewritten")
+	assert.Equal(t, now, stored.CreatedAt)
+	assert.Equal(t, now, stored.UpdatedAt)
+	tasks, err := repository.List(context.Background())
+	require.NoError(t, err)
+	assert.Len(t, tasks, 1, "legacy retry must not persist another task")
+	events, err := auditRepository.List(context.Background(), audit.Filter{ResourceID: taskID})
+	require.NoError(t, err)
+	assert.Empty(t, events, "legacy retry must not append creation audit records")
+}
+
+func TestLegacyMCPTaskRetryDoesNotBypassValidationOrConflictSemantics(t *testing.T) {
+	repository := NewMemoryRepository()
+	engine := &controlledReferenceEngine{}
+	auditRepository := audit.NewMemoryRepository()
+	service := NewService(repository, engine, audit.NewService(auditRepository))
+	subject := identity.Subject{UserID: "legacy-mcp-owner", Username: "alice", Role: identity.RoleUser}
+	idempotencyKey := "legacy-mcp-conflict"
+	taskID := uuid.NewSHA1(taskIDNamespace, []byte(subject.UserID+"\x00"+idempotencyKey)).String()
+	now := time.Now().UTC()
+	legacy := &Task{
+		ID: taskID, OwnerUserID: subject.UserID, OwnerUsername: subject.Username,
+		IdempotencyKey: idempotencyKey, EngineSessionID: taskID, TaskType: "mcp_scan",
+		Content: "https://github.com/example/mcp-server.git", Params: json.RawMessage(`{}`), AttachmentRefs: json.RawMessage(`[]`),
+		Status: StatusRunning, CreatedAt: now, UpdatedAt: now,
+	}
+	_, created, err := repository.CreateOrGet(context.Background(), legacy)
+	require.NoError(t, err)
+	require.True(t, created)
+
+	_, err = service.Create(context.Background(), subject, CreateInput{
+		IdempotencyKey: idempotencyKey, TaskType: "mcp_scan", Content: legacy.Content,
+		Params: json.RawMessage(`{"source_kind":"repository"}`),
+	})
+	require.ErrorIs(t, err, ErrInvalid, "a changed modern payload must use the normal idempotency conflict path")
+
+	otherSubject := identity.Subject{UserID: "other-owner", Username: "bob", Role: identity.RoleUser}
+	_, err = service.Create(context.Background(), otherSubject, CreateInput{
+		IdempotencyKey: idempotencyKey, TaskType: "mcp_scan", Content: legacy.Content, Params: json.RawMessage(`{}`),
+	})
+	require.ErrorIs(t, err, ErrInvalid, "a legacy task owned by someone else must not bypass new-request validation")
+
+	stored, err := repository.Get(context.Background(), taskID)
+	require.NoError(t, err)
+	assert.JSONEq(t, `{}`, string(stored.Params))
+	assert.Equal(t, now, stored.UpdatedAt)
+	tasks, err := repository.List(context.Background())
+	require.NoError(t, err)
+	assert.Len(t, tasks, 1)
+	assert.Zero(t, engine.referenceCalls.Load())
+	assert.Zero(t, engine.submits.Load())
+	events, err := auditRepository.List(context.Background(), audit.Filter{ResourceID: taskID})
+	require.NoError(t, err)
+	assert.Empty(t, events)
+}
+
 func TestLegacyAIInfrastructureTaskDispatchNormalizesPortScanMode(t *testing.T) {
 	repository := NewMemoryRepository()
 	engine := &recordingEngine{}

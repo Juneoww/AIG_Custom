@@ -139,18 +139,11 @@ func (service *Service) Create(ctx context.Context, subject identity.Subject, in
 		!validTaskCountry(input.CountryIsoCode) || !validTaskAttachmentIDs(input.AttachmentIDs) {
 		return View{}, ErrInvalid
 	}
-	params := input.Params
-	if len(params) == 0 {
-		params = json.RawMessage(`{}`)
+	rawParams := input.Params
+	if len(rawParams) == 0 {
+		rawParams = json.RawMessage(`{}`)
 	}
-	if len(params) > MaxTaskParamsLength {
-		return View{}, ErrInvalid
-	}
-	params, valid := normalizeTaskParams(input.TaskType, params)
-	if !valid {
-		return View{}, ErrInvalid
-	}
-	if input.TaskType == "mcp_scan" && !validMCPCreateSource(input, params) {
+	if len(rawParams) > MaxTaskParamsLength {
 		return View{}, ErrInvalid
 	}
 	attachmentRefs, err := json.Marshal(input.AttachmentIDs)
@@ -160,6 +153,23 @@ func (service *Service) Create(ctx context.Context, subject identity.Subject, in
 	taskID := uuid.NewSHA1(taskIDNamespace, []byte(subject.UserID+"\x00"+input.IdempotencyKey)).String()
 	var persisted *Task
 	err = service.repository.WithinCreateKeyLock(ctx, subject.UserID, input.IdempotencyKey, func(lockContext context.Context) error {
+		if input.TaskType == "mcp_scan" && mcpParamsOmitSourceKind(rawParams) {
+			existing, getErr := service.repository.Get(lockContext, taskID)
+			if getErr == nil && sameLegacyMCPRetry(existing, subject, input, rawParams, attachmentRefs, taskID) {
+				persisted = existing
+				return nil
+			}
+			if getErr != nil && !errors.Is(getErr, ErrNotFound) {
+				return getErr
+			}
+		}
+		params, valid := normalizeTaskParams(input.TaskType, rawParams)
+		if !valid {
+			return ErrInvalid
+		}
+		if input.TaskType == "mcp_scan" && !validMCPCreateSource(input, params) {
+			return ErrInvalid
+		}
 		var createErr error
 		persisted, createErr = service.createLocked(lockContext, subject, input, params, attachmentRefs, taskID)
 		return createErr
@@ -302,6 +312,36 @@ func sameCreateRequest(persisted, candidate *Task) bool {
 	candidateParams, candidateParamsOK := canonicalJSON(candidateRaw)
 	return persistedParamsOK && candidateParamsOK && bytes.Equal(persistedParams, candidateParams) &&
 		sameAttachmentRefs(persisted.AttachmentRefs, candidate.AttachmentRefs)
+}
+
+func sameLegacyMCPRetry(
+	persisted *Task,
+	subject identity.Subject,
+	input CreateInput,
+	rawParams json.RawMessage,
+	attachmentRefs json.RawMessage,
+	taskID string,
+) bool {
+	if persisted == nil || input.TaskType != "mcp_scan" || persisted.TaskType != "mcp_scan" ||
+		!mcpParamsOmitSourceKind(rawParams) || !mcpParamsOmitSourceKind(persisted.Params) {
+		return false
+	}
+	candidate := &Task{
+		ID: taskID, OwnerUserID: subject.UserID, OwnerUsername: subject.Username,
+		IdempotencyKey: input.IdempotencyKey, EngineSessionID: taskID, TaskType: input.TaskType,
+		Content: input.Content, Params: append(json.RawMessage(nil), rawParams...), AttachmentRefs: attachmentRefs,
+		CountryIsoCode: input.CountryIsoCode,
+	}
+	return sameCreateRequest(persisted, candidate)
+}
+
+func mcpParamsOmitSourceKind(raw json.RawMessage) bool {
+	var fields map[string]json.RawMessage
+	if json.Unmarshal(raw, &fields) != nil || fields == nil {
+		return false
+	}
+	_, provided := fields["source_kind"]
+	return !provided
 }
 
 func sameAttachmentRefs(persisted, candidate json.RawMessage) bool {
