@@ -3,6 +3,7 @@ package tasks
 import (
 	"bytes"
 	"context"
+	"database/sql"
 	"database/sql/driver"
 	"encoding/json"
 	"errors"
@@ -126,6 +127,14 @@ type MCPWorkbenchRepository interface {
 }
 
 const mcpWorkbenchMaxActiveTasks = 10
+
+var mcpWorkbenchActiveStatuses = [...]Status{
+	StatusDispatching,
+	StatusPending,
+	StatusRunning,
+	StatusDispatchFailed,
+	StatusDispatchUnknown,
+}
 
 type dashboardTaskStatusRepository interface {
 	DashboardTaskSucceeded(context.Context, string, string) (bool, error)
@@ -1088,6 +1097,17 @@ func validMCPWorkbenchQuery(query MCPWorkbenchQuery) bool {
 	return !query.Now.IsZero()
 }
 
+// IsMCPWorkbenchActiveStatus reports whether a persisted task status is safe
+// and meaningful to show in the MCP workbench active-task list.
+func IsMCPWorkbenchActiveStatus(status Status) bool {
+	for _, allowed := range mcpWorkbenchActiveStatuses {
+		if status == allowed {
+			return true
+		}
+	}
+	return false
+}
+
 func mcpWorkbenchWindow(now time.Time) (time.Time, time.Time) {
 	today := now.UTC()
 	today = time.Date(today.Year(), today.Month(), today.Day(), 0, 0, 0, 0, time.UTC)
@@ -1748,8 +1768,24 @@ func (repository *GormRepository) MCPWorkbench(ctx context.Context, query MCPWor
 	if !validMCPWorkbenchQuery(query) {
 		return MCPWorkbenchProjection{}, ErrInvalid
 	}
+	if transaction, ok := txcontext.FromGorm(ctx); ok {
+		return repository.mcpWorkbenchWithDB(transaction.WithContext(ctx), query)
+	}
+	var projection MCPWorkbenchProjection
+	err := repository.db.WithContext(ctx).Transaction(func(transaction *gorm.DB) error {
+		var transactionErr error
+		projection, transactionErr = repository.mcpWorkbenchWithDB(transaction, query)
+		return transactionErr
+	}, &sql.TxOptions{Isolation: sql.LevelRepeatableRead, ReadOnly: true})
+	if err != nil {
+		return MCPWorkbenchProjection{}, err
+	}
+	return projection, nil
+}
+
+func (repository *GormRepository) mcpWorkbenchWithDB(db *gorm.DB, query MCPWorkbenchQuery) (MCPWorkbenchProjection, error) {
 	lowerBound, upperBound := mcpWorkbenchWindow(query.Now)
-	base := txcontext.Gorm(ctx, repository.db).Model(&Task{}).
+	base := db.Model(&Task{}).
 		Where("task_type IN ?", browserStoredTaskTypes("mcp_scan")).
 		Where("created_at >= ? AND created_at < ?", lowerBound, upperBound)
 	if query.OwnerUserID != "" {
@@ -1771,7 +1807,7 @@ func (repository *GormRepository) MCPWorkbench(ctx context.Context, query MCPWor
 		return MCPWorkbenchProjection{}, err
 	}
 	active := base.Session(&gorm.Session{}).
-		Where("status NOT IN ?", []Status{StatusCancelled, StatusSucceeded, StatusEngineFailed}).
+		Where("status IN ?", mcpWorkbenchActiveStatuses[:]).
 		Select(
 			"id AS task_id",
 			"status",
@@ -2909,7 +2945,7 @@ func (repository *MemoryRepository) MCPWorkbench(_ context.Context, query MCPWor
 		case StatusPending, StatusDispatchUnknown:
 			projection.Pending++
 		}
-		if !isTerminalStatus(task.Status) {
+		if IsMCPWorkbenchActiveStatus(task.Status) {
 			projection.ActiveTasks = append(projection.ActiveTasks, MCPWorkbenchTask{
 				TaskID: task.ID, SourceKind: safeMCPSourceKind(task.Params), Status: task.Status, UpdatedAt: task.UpdatedAt,
 			})

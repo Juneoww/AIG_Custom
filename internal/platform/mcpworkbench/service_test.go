@@ -47,6 +47,7 @@ func TestServiceCombinesOnlyWhitelistedMCPWorkbenchFields(t *testing.T) {
 		ActiveTasks: []tasks.MCPWorkbenchTask{
 			{TaskID: "12345678-90ab-cdef-1234-567890abcdef", SourceKind: "repository", Status: tasks.StatusRunning, UpdatedAt: now},
 			{TaskID: "abcdef01", SourceKind: "unsafe-value", Status: tasks.StatusDispatchUnknown, UpdatedAt: now.Add(-time.Minute)},
+			{TaskID: "unsafe-status", SourceKind: "service", Status: tasks.Status("unsafe-persisted-status"), UpdatedAt: now},
 		},
 	}}
 	reportsReader := &recordingReportReader{projection: reports.MCPWorkbenchProjection{
@@ -88,7 +89,7 @@ func TestServiceCombinesOnlyWhitelistedMCPWorkbenchFields(t *testing.T) {
 	assert.ElementsMatch(t, []string{"running", "pending", "high_risk", "completed_30d"}, mapKeys(wire["metrics"].(map[string]any)))
 	assert.ElementsMatch(t, []string{"task_id", "label", "source_kind", "phase", "status", "updated_at"}, mapKeys(wire["active_tasks"].([]any)[0].(map[string]any)))
 	assert.ElementsMatch(t, []string{"report_id", "task_id", "severity", "category", "summary", "completed_at"}, mapKeys(wire["recent_risks"].([]any)[0].(map[string]any)))
-	for _, forbidden := range []string{"must-not-appear", "content", "endpoint", "raw_result", "model_id", "headers", "authorization", "attachment", "log"} {
+	for _, forbidden := range []string{"must-not-appear", "unsafe-persisted-status", "content", "endpoint", "raw_result", "model_id", "headers", "authorization", "attachment", "log"} {
 		assert.NotContains(t, string(encoded), forbidden)
 	}
 }

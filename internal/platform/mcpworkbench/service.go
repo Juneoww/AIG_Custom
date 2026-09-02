@@ -72,6 +72,9 @@ func mapScopeError(err error) error {
 func activeTasks(input []tasks.MCPWorkbenchTask) []ActiveTask {
 	items := make([]ActiveTask, 0, min(len(input), maxActiveTasks))
 	for _, task := range input {
+		if !tasks.IsMCPWorkbenchActiveStatus(task.Status) {
+			continue
+		}
 		if len(items) == maxActiveTasks {
 			break
 		}

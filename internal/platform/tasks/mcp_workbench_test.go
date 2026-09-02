@@ -5,13 +5,39 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/Juneoww/AIG_Custom/internal/platform/identity"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"gorm.io/gorm"
+	"gorm.io/gorm/logger"
 )
+
+type mcpWorkbenchTaskBarrierLogger struct {
+	logger.Interface
+	firstCount chan struct{}
+	resume     chan struct{}
+	once       sync.Once
+}
+
+func (barrier *mcpWorkbenchTaskBarrierLogger) Trace(ctx context.Context, begin time.Time, fc func() (string, int64), err error) {
+	statement, rows := fc()
+	wait := false
+	lowerStatement := strings.ToLower(statement)
+	if strings.Contains(lowerStatement, "count(") && strings.Contains(lowerStatement, "'dispatching'") && strings.Contains(lowerStatement, "'running'") {
+		barrier.once.Do(func() {
+			close(barrier.firstCount)
+			wait = true
+		})
+	}
+	if wait {
+		<-barrier.resume
+	}
+	barrier.Interface.Trace(ctx, begin, func() (string, int64) { return statement, rows }, err)
+}
 
 func TestMCPWorkbenchUsesCreatedAtWindowOwnerScopeAndSafeTaskFields(t *testing.T) {
 	ctx := context.Background()
@@ -26,6 +52,7 @@ func TestMCPWorkbenchUsesCreatedAtWindowOwnerScopeAndSafeTaskFields(t *testing.T
 		mcpWorkbenchTask("dispatching-service", "alice", "Mcp-Scan", StatusDispatching, upper.Add(-2*time.Hour), upper.Add(-2*time.Hour), json.RawMessage(`{"source_kind":"service","authorization_confirmed":true}`)),
 		mcpWorkbenchTask("pending-legacy", "alice", "mcp_scan", StatusPending, upper.Add(-3*time.Hour), upper.Add(-3*time.Hour), json.RawMessage(`{"model_id":"private-model"}`)),
 		mcpWorkbenchTask("unknown", "alice", "mcp_scan", StatusDispatchUnknown, upper.Add(-4*time.Hour), upper.Add(-4*time.Hour), json.RawMessage(`{"source_kind":"repository"}`)),
+		mcpWorkbenchTask("unknown-persisted-status", "alice", "mcp_scan", Status("unsafe-persisted-status"), upper.Add(-30*time.Minute), upper.Add(-30*time.Second), json.RawMessage(`{"source_kind":"service"}`)),
 		mcpWorkbenchTask("completed", "alice", "mcp_scan", StatusSucceeded, upper.Add(-5*time.Hour), upper.Add(-5*time.Hour), json.RawMessage(`{"source_kind":"service"}`)),
 		mcpWorkbenchTask("dispatch-failed-still-active", "alice", "mcp_scan", StatusDispatchFailed, upper.Add(-6*time.Hour), upper.Add(-6*time.Hour), json.RawMessage(`{"source_kind":"service"}`)),
 		mcpWorkbenchTask("before-window", "alice", "mcp_scan", StatusRunning, lower.Add(-time.Nanosecond), upper, json.RawMessage(`{"source_kind":"repository"}`)),
@@ -97,6 +124,7 @@ func TestGormMCPWorkbenchUsesScopedCountsAndNarrowActiveTaskProjection(t *testin
 		mcpWorkbenchTask("alice-pending", "alice", "Mcp-Scan", StatusPending, now, now.Add(-time.Minute), json.RawMessage(`{"source_kind":"service"}`)),
 		mcpWorkbenchTask("alice-completed", "alice", "mcp_scan", StatusSucceeded, now, now.Add(-2*time.Minute), json.RawMessage(`{"source_kind":"repository"}`)),
 		mcpWorkbenchTask("alice-legacy", "alice", "mcp_scan", StatusDispatchUnknown, now, now.Add(-3*time.Minute), json.RawMessage(`{"model_id":"private-model"}`)),
+		mcpWorkbenchTask("alice-unsafe-status", "alice", "mcp_scan", Status("unsafe-persisted-status"), now, now.Add(time.Minute), json.RawMessage(`{"source_kind":"service"}`)),
 		mcpWorkbenchTask("bob-running", "bob", "mcp_scan", StatusRunning, now, now, json.RawMessage(`{"source_kind":"service"}`)),
 		mcpWorkbenchTask("agent-running", "alice", "agent_scan", StatusRunning, now, now, json.RawMessage(`{"source_kind":"service"}`)),
 	} {
@@ -126,6 +154,78 @@ func TestGormMCPWorkbenchUsesScopedCountsAndNarrowActiveTaskProjection(t *testin
 	for _, forbidden := range []string{"content", "attachment_refs", "engine_session_id", "dispatch_error", "dispatch_claim_token", "dispatch_lease_until", "private", "private-model"} {
 		assert.NotContains(t, projectionSQL, forbidden)
 	}
+}
+
+func TestGormMCPWorkbenchUsesOneReadOnlyRepeatableReadSnapshot(t *testing.T) {
+	ctx := context.Background()
+	db := openTaskSnapshotPostgresDB(t)
+	now := time.Date(2026, 8, 17, 12, 0, 0, 0, time.UTC)
+	existing := mcpWorkbenchTask("tx-existing", "alice", "mcp_scan", StatusRunning, now, now, json.RawMessage(`{"source_kind":"repository"}`))
+	_, _, err := NewGormRepository(db).CreateOrGet(ctx, existing)
+	require.NoError(t, err)
+
+	barrier := &mcpWorkbenchTaskBarrierLogger{
+		Interface: logger.Default.LogMode(logger.Silent), firstCount: make(chan struct{}), resume: make(chan struct{}),
+	}
+	defer func() {
+		select {
+		case <-barrier.resume:
+		default:
+			close(barrier.resume)
+		}
+	}()
+	readDB := db.Session(&gorm.Session{Logger: barrier})
+	var settings struct {
+		isolation string
+		readOnly  string
+		err       error
+	}
+	var settingsOnce sync.Once
+	captureSettings := func(queryDB *gorm.DB) {
+		settingsOnce.Do(func() {
+			settings.err = queryDB.Statement.ConnPool.QueryRowContext(queryDB.Statement.Context, "SHOW transaction_isolation").Scan(&settings.isolation)
+			if settings.err == nil {
+				settings.err = queryDB.Statement.ConnPool.QueryRowContext(queryDB.Statement.Context, "SHOW transaction_read_only").Scan(&settings.readOnly)
+			}
+		})
+	}
+	require.NoError(t, readDB.Callback().Query().Before("gorm:query").Register("test:mcp_workbench_task_transaction_settings", captureSettings))
+
+	type workbenchResult struct {
+		projection MCPWorkbenchProjection
+		err        error
+	}
+	result := make(chan workbenchResult, 1)
+	query := MCPWorkbenchQuery{OwnerUserID: "alice", Now: now}
+	go func() {
+		projection, workbenchErr := NewGormRepository(readDB).MCPWorkbench(ctx, query)
+		result <- workbenchResult{projection: projection, err: workbenchErr}
+	}()
+	select {
+	case <-barrier.firstCount:
+	case completed := <-result:
+		require.NoError(t, completed.err)
+		t.Fatal("MCP workbench completed before running-count barrier")
+	}
+
+	concurrent := mcpWorkbenchTask("tx-concurrent", "alice", "mcp_scan", StatusRunning, now, now.Add(time.Minute), json.RawMessage(`{"source_kind":"service"}`))
+	writerDB := db.Session(&gorm.Session{Logger: logger.Default.LogMode(logger.Silent)})
+	_, _, err = NewGormRepository(writerDB).CreateOrGet(ctx, concurrent)
+	require.NoError(t, err)
+	close(barrier.resume)
+
+	completed := <-result
+	require.NoError(t, completed.err)
+	require.NoError(t, settings.err)
+	assert.Equal(t, "repeatable read", settings.isolation)
+	assert.Equal(t, "on", settings.readOnly)
+	assert.Equal(t, 1, completed.projection.Running)
+	assert.Equal(t, []string{existing.ID}, mcpWorkbenchTaskIDs(completed.projection.ActiveTasks))
+
+	next, err := NewGormRepository(writerDB).MCPWorkbench(ctx, query)
+	require.NoError(t, err)
+	assert.Equal(t, 2, next.Running)
+	assert.Contains(t, mcpWorkbenchTaskIDs(next.ActiveTasks), concurrent.ID)
 }
 
 func mcpWorkbenchTask(id, owner, taskType string, status Status, createdAt, updatedAt time.Time, params json.RawMessage) *Task {
