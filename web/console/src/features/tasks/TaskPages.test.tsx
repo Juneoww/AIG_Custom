@@ -408,6 +408,38 @@ describe('任务页面', () => {
     }))
   })
 
+  it('受控 MCP 服务目标变更会撤销此前的授权确认', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(jsonResponse(task))
+    vi.stubGlobal('fetch', fetchMock)
+    renderPage(
+      <TaskCreatePage />,
+      { id: 'user-1', username: 'alice', role: 'user', must_change_password: false },
+      '/tasks/new?task_type=mcp_scan&source_kind=service',
+    )
+
+    const target = screen.getByRole('textbox', { name: '扫描目标或任务说明' })
+    const authorization = screen.getByRole('checkbox', { name: '我确认已获得该目标的安全测试授权' })
+    fireEvent.change(target, { target: { value: 'https://mcp.example.test/target-a' } })
+    fireEvent.click(authorization)
+    expect(authorization).toBeChecked()
+
+    fireEvent.change(target, { target: { value: 'https://mcp.example.test/target-b' } })
+    expect(authorization).not.toBeChecked()
+    screen.getByRole('button', { name: '创建任务' }).click()
+
+    expect(await screen.findByText('请确认已获得该目标的安全测试授权。')).toBeInTheDocument()
+    expect(fetchMock).not.toHaveBeenCalled()
+
+    fireEvent.click(authorization)
+    screen.getByRole('button', { name: '创建任务' }).click()
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1))
+    const body = JSON.parse(String((fetchMock.mock.calls[0]?.[1] as RequestInit).body))
+    expect(body).toEqual(expect.objectContaining({
+      content: 'https://mcp.example.test/target-b',
+      params: { source_kind: 'service', authorization_confirmed: true, thread: 4 },
+    }))
+  })
+
   it('切换到 MCP 服务会清空已上传附件，并在提交时不携带它们', async () => {
     const fetchMock = vi
       .fn()
@@ -485,6 +517,59 @@ describe('任务页面', () => {
     }))
   })
 
+  it('MCP 仓库代码附件就绪时会清空已有正文以保持输入互斥', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(jsonResponse({
+      id: 'attachment-opaque-clear-content',
+      filename: 'source.zip',
+      size: 6,
+      state: 'ready',
+      created_at: '2026-09-02T01:00:00Z',
+    }))
+    vi.stubGlobal('fetch', fetchMock)
+    renderPage(
+      <TaskCreatePage />,
+      { id: 'user-1', username: 'alice', role: 'user', must_change_password: false },
+      '/tasks/new?task_type=mcp_scan&source_kind=repository',
+    )
+
+    const target = screen.getByRole('textbox', { name: '扫描目标或任务说明' })
+    fireEvent.change(target, { target: { value: 'https://git.example.test/group/repository.git' } })
+    fireEvent.change(document.querySelector('input[type="file"]') as HTMLInputElement, {
+      target: { files: [new File(['source'], 'source.zip')] },
+    })
+    screen.getByRole('button', { name: '上传附件' }).click()
+
+    expect(await screen.findByText('source.zip（6 字节）')).toBeInTheDocument()
+    expect(target).toHaveValue('')
+  })
+
+  it.each(['https://git.example.test/group/repository.git', '   '])('MCP 仓库附件与正文严格互斥：%j 不会提交到后端', async (content) => {
+    const fetchMock = vi.fn().mockResolvedValue(jsonResponse({
+      id: 'attachment-opaque-exclusive',
+      filename: 'source.zip',
+      size: 6,
+      state: 'ready',
+      created_at: '2026-09-02T01:00:00Z',
+    }))
+    vi.stubGlobal('fetch', fetchMock)
+    renderPage(
+      <TaskCreatePage />,
+      { id: 'user-1', username: 'alice', role: 'user', must_change_password: false },
+      '/tasks/new?task_type=mcp_scan&source_kind=repository',
+    )
+
+    fireEvent.change(document.querySelector('input[type="file"]') as HTMLInputElement, {
+      target: { files: [new File(['source'], 'source.zip')] },
+    })
+    screen.getByRole('button', { name: '上传附件' }).click()
+    expect(await screen.findByText('source.zip（6 字节）')).toBeInTheDocument()
+    fireEvent.change(screen.getByRole('textbox', { name: '扫描目标或任务说明' }), { target: { value: content } })
+    screen.getByRole('button', { name: '创建任务' }).click()
+
+    expect(await screen.findByText('代码附件扫描不能同时填写扫描目标或任务说明。')).toBeInTheDocument()
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+  })
+
   it('MCP 仓库扫描在没有代码附件时仍要求填写目标', () => {
     const fetchMock = vi.fn()
     vi.stubGlobal('fetch', fetchMock)
@@ -497,6 +582,68 @@ describe('任务页面', () => {
     expect(screen.getByRole('textbox', { name: '扫描目标或任务说明' })).toHaveAttribute('required')
     screen.getByRole('button', { name: '创建任务' }).click()
     expect(fetchMock).not.toHaveBeenCalled()
+  })
+
+  it('从其他任务类型回到 MCP 服务时会中断上传并清空隐藏附件', async () => {
+    let uploadSignal: AbortSignal | undefined
+    const fetchMock = vi.fn((_url: string, init?: RequestInit) => {
+      uploadSignal = init?.signal ?? undefined
+      return new Promise<Response>(() => undefined)
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    renderPage(
+      <TaskCreatePage />,
+      { id: 'user-1', username: 'alice', role: 'user', must_change_password: false },
+      '/tasks/new?task_type=mcp_scan&source_kind=service',
+    )
+
+    fireEvent.change(screen.getByRole('combobox', { name: '扫描类型' }), { target: { value: 'ai_infra_scan' } })
+    expect(screen.getByRole('group', { name: '第三步：附件' })).toBeInTheDocument()
+    fireEvent.change(document.querySelector('input[type="file"]') as HTMLInputElement, {
+      target: { files: [new File(['source'], 'source.zip')] },
+    })
+    screen.getByRole('button', { name: '上传附件' }).click()
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1))
+
+    fireEvent.change(screen.getByRole('combobox', { name: '扫描类型' }), { target: { value: 'mcp_scan' } })
+
+    expect(screen.getByRole('combobox', { name: 'MCP 扫描对象' })).toHaveValue('service')
+    expect(screen.queryByRole('group', { name: '第三步：附件' })).not.toBeInTheDocument()
+    expect(uploadSignal?.aborted).toBe(true)
+  })
+
+  it('MCP 提交进行中禁止切换类型或来源，并保留当前请求控制器', async () => {
+    let requestSignal: AbortSignal | undefined
+    const fetchMock = vi.fn((_url: string, init?: RequestInit) => {
+      requestSignal = init?.signal ?? undefined
+      return new Promise<Response>(() => undefined)
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    const view = renderPage(
+      <TaskCreatePage />,
+      { id: 'user-1', username: 'alice', role: 'user', must_change_password: false },
+      '/tasks/new?task_type=mcp_scan&source_kind=repository',
+    )
+
+    fireEvent.change(screen.getByRole('textbox', { name: '扫描目标或任务说明' }), { target: { value: 'https://git.example.test/group/repository.git' } })
+    screen.getByRole('button', { name: '创建任务' }).click()
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1))
+
+    const typeSelect = screen.getByRole('combobox', { name: '扫描类型' })
+    const sourceSelect = screen.getByRole('combobox', { name: 'MCP 扫描对象' })
+    expect(typeSelect).toBeDisabled()
+    expect(sourceSelect).toBeDisabled()
+    expect(screen.getByRole('textbox', { name: '扫描目标或任务说明' })).toBeDisabled()
+    fireEvent.change(sourceSelect, { target: { value: 'service' } })
+    fireEvent.change(typeSelect, { target: { value: 'ai_infra_scan' } })
+
+    expect(typeSelect).toHaveValue('mcp_scan')
+    expect(sourceSelect).toHaveValue('repository')
+    expect(requestSignal?.aborted).toBe(false)
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+
+    view.unmount()
+    expect(requestSignal?.aborted).toBe(true)
   })
 
   it('MCP 仓库预设不携带服务授权，非法查询安全回退到仓库默认值', async () => {

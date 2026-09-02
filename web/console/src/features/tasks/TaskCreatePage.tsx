@@ -18,7 +18,7 @@ import {
   makeStyles,
   tokens,
 } from '@fluentui/react-components'
-import { useEffect, useMemo, useRef, useState, type FormEvent } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from 'react'
 import { useLocation, useNavigate } from 'react-router-dom'
 
 import { useSession } from '../auth/session'
@@ -60,6 +60,10 @@ function mcpCreatePreset(search: string): { taskType: TaskCreateRequest['task_ty
   }
 }
 
+function isMCPServiceTarget(taskType: TaskCreateRequest['task_type'], sourceKind: MCPCreateSourceKind): boolean {
+  return taskType === 'mcp_scan' && sourceKind === 'service'
+}
+
 export function TaskCreatePage() {
   const styles = useStyles()
   const navigate = useNavigate()
@@ -87,7 +91,9 @@ export function TaskCreatePage() {
   const submissionRef = useRef<TaskSubmission | null>(null)
   const mutexRef = useRef(false)
   const mountedRef = useRef(true)
-  const controllerRef = useRef<AbortController | null>(null)
+  const uploadControllerRef = useRef<AbortController | null>(null)
+  const submitControllerRef = useRef<AbortController | null>(null)
+  const downloadControllerRef = useRef<AbortController | null>(null)
   const hasMCPRepositoryAttachment = taskType === 'mcp_scan' && mcpSourceKind === 'repository' && attachments.length > 0
   const contentRequired = !hasMCPRepositoryAttachment
   const targetPreview = useMemo(
@@ -95,42 +101,60 @@ export function TaskCreatePage() {
     [content, taskType],
   )
 
+  const invalidateSubmission = () => {
+    if (!mutexRef.current) submissionRef.current = null
+  }
+
+  const clearMCPServiceAttachments = useCallback(() => {
+    uploadControllerRef.current?.abort()
+    uploadControllerRef.current = null
+    setFiles([])
+    setAttachments([])
+    setUploading(false)
+  }, [])
+
+  const transitionMCPConfiguration = (
+    nextTaskType: TaskCreateRequest['task_type'],
+    nextSourceKind: MCPCreateSourceKind,
+  ) => {
+    if (submitting) return
+    const configurationChanged = nextTaskType !== taskType || nextSourceKind !== mcpSourceKind
+    if (isMCPServiceTarget(nextTaskType, nextSourceKind)) clearMCPServiceAttachments()
+    if (!configurationChanged) return
+    setTaskType(nextTaskType)
+    setMCPSourceKind(nextSourceKind)
+    setAuthorizationConfirmed(false)
+    invalidateSubmission()
+  }
+
+  const handleContentChange = (value: string) => {
+    if (isMCPServiceTarget(taskType, mcpSourceKind) && value !== content) setAuthorizationConfirmed(false)
+    setContent(value)
+    invalidateSubmission()
+  }
+
   useEffect(() => {
     mountedRef.current = true
     return () => {
       mountedRef.current = false
-      controllerRef.current?.abort()
+      uploadControllerRef.current?.abort()
+      submitControllerRef.current?.abort()
+      downloadControllerRef.current?.abort()
     }
   }, [])
 
   useEffect(() => {
+    if (mutexRef.current) return
     setTaskType(preset.taskType)
     setMCPSourceKind(preset.sourceKind)
     setAuthorizationConfirmed(false)
     submissionRef.current = null
-    if (preset.sourceKind === 'service') {
-      controllerRef.current?.abort()
-      setFiles([])
-      setAttachments([])
-      setUploading(false)
-    }
-  }, [preset.sourceKind, preset.taskType])
-
-  const invalidateSubmission = () => {
-    submissionRef.current = null
-  }
+    if (isMCPServiceTarget(preset.taskType, preset.sourceKind)) clearMCPServiceAttachments()
+  }, [clearMCPServiceAttachments, preset.sourceKind, preset.taskType])
 
   const chooseMCPSource = (value: string) => {
     const sourceKind: MCPCreateSourceKind = value === 'service' ? 'service' : 'repository'
-    setMCPSourceKind(sourceKind)
-    setAuthorizationConfirmed(false)
-    if (sourceKind === 'service') {
-      controllerRef.current?.abort()
-      setFiles([])
-      setAttachments([])
-      setUploading(false)
-    }
-    invalidateSubmission()
+    transitionMCPConfiguration(taskType, sourceKind)
   }
 
   const handleUpload = async () => {
@@ -138,7 +162,7 @@ export function TaskCreatePage() {
       setError('服务扫描不能携带代码附件。')
       return
     }
-    if (uploading || files.length === 0) return
+    if (uploading || submitting || files.length === 0) return
     setError('')
     try {
       preflightAttachments([...attachments.map((item) => new File(['x'], item.filename)), ...files])
@@ -147,22 +171,25 @@ export function TaskCreatePage() {
       return
     }
     const controller = new AbortController()
-    controllerRef.current?.abort()
-    controllerRef.current = controller
+    uploadControllerRef.current?.abort()
+    uploadControllerRef.current = controller
     setUploading(true)
     try {
       for (const file of files) {
         const uploaded = await uploadAttachment(file, controller.signal)
         if (!mountedRef.current || controller.signal.aborted) return
         setAttachments((current) => [...current, uploaded])
+        if (taskType === 'mcp_scan' && mcpSourceKind === 'repository') setContent('')
         setFiles((current) => current.filter((candidate) => candidate !== file))
         invalidateSubmission()
       }
     } catch {
       if (mountedRef.current && !controller.signal.aborted) setError('附件上传失败，请核对后显式重试。')
     } finally {
-      if (controllerRef.current === controller) controllerRef.current = null
-      if (mountedRef.current) setUploading(false)
+      if (uploadControllerRef.current === controller) {
+        uploadControllerRef.current = null
+        if (mountedRef.current) setUploading(false)
+      }
     }
   }
 
@@ -178,6 +205,10 @@ export function TaskCreatePage() {
       setError('请确认已获得该目标的安全测试授权。')
       return
     }
+    if (repositoryAttachmentScan && content !== '') {
+      setError('代码附件扫描不能同时填写扫描目标或任务说明。')
+      return
+    }
     if (uploading || files.length > 0) {
       setError('请先完成已选择附件的上传。')
       return
@@ -186,15 +217,17 @@ export function TaskCreatePage() {
       setError(targetPreview.error)
       return
     }
+    if (!content.trim() && !repositoryAttachmentScan) {
+      setError('请填写扫描目标或任务说明。')
+      return
+    }
     if (mutexRef.current) return
     mutexRef.current = true
     setSubmitting(true)
     setError('')
     const controller = new AbortController()
-    controllerRef.current?.abort()
-    controllerRef.current = controller
+    submitControllerRef.current = controller
     try {
-      if (!content.trim() && !repositoryAttachmentScan) throw new Error('请填写扫描目标或任务说明。')
       const params: TaskCreateRequest['params'] = {}
       if (taskType === 'mcp_scan') {
         params.source_kind = mcpSourceKind
@@ -248,7 +281,7 @@ export function TaskCreatePage() {
         }
       }
     } finally {
-      if (controllerRef.current === controller) controllerRef.current = null
+      if (submitControllerRef.current === controller) submitControllerRef.current = null
       mutexRef.current = false
       if (mountedRef.current) setSubmitting(false)
     }
@@ -256,15 +289,15 @@ export function TaskCreatePage() {
 
   const handleDownload = async (attachmentID: string) => {
     const controller = new AbortController()
-    controllerRef.current?.abort()
-    controllerRef.current = controller
+    downloadControllerRef.current?.abort()
+    downloadControllerRef.current = controller
     setError('')
     try {
       await downloadAttachment(attachmentID, role, controller.signal)
     } catch {
       if (mountedRef.current && !controller.signal.aborted) setError('附件下载失败，请稍后重试。')
     } finally {
-      if (controllerRef.current === controller) controllerRef.current = null
+      if (downloadControllerRef.current === controller) downloadControllerRef.current = null
     }
   }
 
@@ -273,10 +306,10 @@ export function TaskCreatePage() {
       <PageHeader title="创建扫描任务" description="按类型、参数、附件和确认顺序提交；浏览器不接收模型密钥。" />
       {error ? <MessageBar intent="error"><MessageBarBody>{error}</MessageBarBody></MessageBar> : null}
       <form className={styles.form} onSubmit={submit}>
-        <fieldset className={styles.step} aria-label="第一步：任务类型">
+        <fieldset className={styles.step} aria-label="第一步：任务类型" disabled={submitting}>
           <Text weight="semibold">第一步：任务类型</Text>
           <Field label="扫描类型">
-            <Select value={taskType} onChange={(_, data) => { setTaskType(data.value as TaskCreateRequest['task_type']); invalidateSubmission() }}>
+            <Select value={taskType} disabled={submitting} onChange={(_, data) => transitionMCPConfiguration(data.value as TaskCreateRequest['task_type'], mcpSourceKind)}>
               <option value="mcp_scan">MCP 扫描</option>
               <option value="ai_infra_scan">AI 基础设施扫描</option>
               <option value="model_redteam_report">模型红队评测</option>
@@ -284,12 +317,12 @@ export function TaskCreatePage() {
             </Select>
           </Field>
         </fieldset>
-        <fieldset className={styles.step} aria-label="第二步：参数">
+        <fieldset className={styles.step} aria-label="第二步：参数" disabled={submitting}>
           <Text weight="semibold">第二步：参数</Text>
           <Field label="扫描目标或任务说明" required={contentRequired}>
             <Textarea
               value={content}
-              onChange={(_, data) => { setContent(data.value); invalidateSubmission() }}
+              onChange={(_, data) => handleContentChange(data.value)}
               resize="vertical"
               aria-invalid={taskType === 'ai_infra_scan' && targetPreview && !targetPreview.ok ? true : undefined}
               aria-describedby={taskType === 'ai_infra_scan' ? 'ai-infra-target-guidance ai-infra-target-preview' : undefined}
@@ -322,7 +355,7 @@ export function TaskCreatePage() {
             </Field>
             {taskType === 'mcp_scan' ? (
               <Field label="MCP 扫描对象">
-                <Select value={mcpSourceKind} onChange={(_, data) => chooseMCPSource(data.value)}>
+                <Select value={mcpSourceKind} disabled={submitting} onChange={(_, data) => chooseMCPSource(data.value)}>
                   <option value="repository">代码仓库或代码压缩包扫描</option>
                   <option value="service">受控运行服务扫描</option>
                 </Select>
@@ -390,7 +423,7 @@ export function TaskCreatePage() {
             <Field label="选择附件" hint="单文件最大 50 MiB，超过 5 MiB 时自动分片。">
               <input type="file" multiple disabled={uploading || submitting} onChange={(event) => { setFiles(Array.from(event.currentTarget.files ?? [])); invalidateSubmission() }} />
             </Field>
-            <Button type="button" appearance="secondary" disabled={uploading || files.length === 0} onClick={() => void handleUpload()}>{uploading ? '正在上传' : '上传附件'}</Button>
+            <Button type="button" appearance="secondary" disabled={uploading || submitting || files.length === 0} onClick={() => void handleUpload()}>{uploading ? '正在上传' : '上传附件'}</Button>
             {attachments.map((attachment) => (
               <div className={styles.attachment} key={attachment.id}>
                 <Text>{attachment.filename}（{attachment.size} 字节）</Text>
