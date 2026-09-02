@@ -106,7 +106,7 @@ export function TaskCreatePage() {
     if (!mutexRef.current) submissionRef.current = null
   }
 
-  const clearMCPServiceAttachments = useCallback(() => {
+  const clearAttachmentContext = useCallback(() => {
     uploadControllerRef.current?.abort()
     uploadControllerRef.current = null
     setFiles([])
@@ -120,8 +120,12 @@ export function TaskCreatePage() {
   ) => {
     if (submitting) return
     const configurationChanged = nextTaskType !== taskType || nextSourceKind !== mcpSourceKind
-    if (configurationChanged) configurationVersionRef.current += 1
-    if (isMCPServiceTarget(nextTaskType, nextSourceKind)) clearMCPServiceAttachments()
+    if (configurationChanged) {
+      configurationVersionRef.current += 1
+      clearAttachmentContext()
+    } else if (isMCPServiceTarget(nextTaskType, nextSourceKind)) {
+      clearAttachmentContext()
+    }
     if (!configurationChanged) return
     setTaskType(nextTaskType)
     setMCPSourceKind(nextSourceKind)
@@ -152,8 +156,8 @@ export function TaskCreatePage() {
     setMCPSourceKind(preset.sourceKind)
     setAuthorizationConfirmed(false)
     submissionRef.current = null
-    if (isMCPServiceTarget(preset.taskType, preset.sourceKind)) clearMCPServiceAttachments()
-  }, [clearMCPServiceAttachments, preset.sourceKind, preset.taskType])
+    clearAttachmentContext()
+  }, [clearAttachmentContext, preset.sourceKind, preset.taskType])
 
   const chooseMCPSource = (value: string) => {
     const sourceKind: MCPCreateSourceKind = value === 'service' ? 'service' : 'repository'

@@ -613,12 +613,16 @@ describe('任务页面', () => {
   })
 
   it.each([
-    ['ai_infra_scan', '198.51.100.7'],
-    ['model_redteam_report', '新的红队任务说明'],
-  ] as const)('延迟完成的 MCP 仓库上传不会覆盖已切换到 %s 的新表单', async (nextTaskType, nextContent) => {
+    ['ai_infra_scan', '198.51.100.7', 'success'],
+    ['model_redteam_report', '新的红队任务说明', 'error'],
+  ] as const)('切换到 %s 会取消旧 MCP 仓库上传并隔离其延迟 %s', async (nextTaskType, nextContent, completion) => {
+    let uploadSignal: AbortSignal | undefined
     let resolveUpload: (response: Response) => void = () => { throw new Error('上传请求未进入等待状态') }
-    const fetchMock = vi.fn(() => new Promise<Response>((resolve) => {
+    let rejectUpload: (reason?: unknown) => void = () => { throw new Error('上传请求未进入等待状态') }
+    const fetchMock = vi.fn((_url: string, init?: RequestInit) => new Promise<Response>((resolve, reject) => {
+      uploadSignal = init?.signal ?? undefined
       resolveUpload = resolve
+      rejectUpload = reject
     }))
     vi.stubGlobal('fetch', fetchMock)
     renderPage(
@@ -636,19 +640,32 @@ describe('任务页面', () => {
     fireEvent.change(screen.getByRole('combobox', { name: '扫描类型' }), { target: { value: nextTaskType } })
     const target = screen.getByRole('textbox', { name: '扫描目标或任务说明' })
     fireEvent.change(target, { target: { value: nextContent } })
-    resolveUpload(jsonResponse({
-      id: 'attachment-opaque-stale-context',
-      filename: 'source.zip',
-      size: 6,
-      state: 'ready',
-      created_at: '2026-09-02T01:00:00Z',
-    }))
 
-    await waitFor(() => {
-      expect(screen.getByRole('button', { name: '上传附件' })).toBeEnabled()
-      expect(target).toHaveValue(nextContent)
-      expect(screen.queryByText('source.zip（6 字节）')).not.toBeInTheDocument()
+    expect(uploadSignal?.aborted).toBe(true)
+    expect(screen.getByRole('button', { name: '上传附件' })).toBeDisabled()
+    expect(screen.getByRole('button', { name: '创建任务' })).toBeEnabled()
+    expect(screen.queryByText('source.zip（6 字节）')).not.toBeInTheDocument()
+
+    await act(async () => {
+      if (completion === 'success') {
+        resolveUpload(jsonResponse({
+          id: 'attachment-opaque-stale-context',
+          filename: 'source.zip',
+          size: 6,
+          state: 'ready',
+          created_at: '2026-09-02T01:00:00Z',
+        }))
+      } else {
+        rejectUpload(new Error('late upload failure'))
+      }
+      await Promise.resolve()
+      await Promise.resolve()
+      await Promise.resolve()
     })
+
+    expect(target).toHaveValue(nextContent)
+    expect(screen.queryByText('source.zip（6 字节）')).not.toBeInTheDocument()
+    expect(screen.queryByText('附件上传失败，请核对后显式重试。')).not.toBeInTheDocument()
   })
 
   it('MCP 提交进行中禁止切换类型或来源，并保留当前请求控制器', async () => {
