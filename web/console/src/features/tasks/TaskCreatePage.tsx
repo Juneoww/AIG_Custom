@@ -94,6 +94,7 @@ export function TaskCreatePage() {
   const uploadControllerRef = useRef<AbortController | null>(null)
   const submitControllerRef = useRef<AbortController | null>(null)
   const downloadControllerRef = useRef<AbortController | null>(null)
+  const configurationVersionRef = useRef(0)
   const hasMCPRepositoryAttachment = taskType === 'mcp_scan' && mcpSourceKind === 'repository' && attachments.length > 0
   const contentRequired = !hasMCPRepositoryAttachment
   const targetPreview = useMemo(
@@ -119,6 +120,7 @@ export function TaskCreatePage() {
   ) => {
     if (submitting) return
     const configurationChanged = nextTaskType !== taskType || nextSourceKind !== mcpSourceKind
+    if (configurationChanged) configurationVersionRef.current += 1
     if (isMCPServiceTarget(nextTaskType, nextSourceKind)) clearMCPServiceAttachments()
     if (!configurationChanged) return
     setTaskType(nextTaskType)
@@ -145,6 +147,7 @@ export function TaskCreatePage() {
 
   useEffect(() => {
     if (mutexRef.current) return
+    configurationVersionRef.current += 1
     setTaskType(preset.taskType)
     setMCPSourceKind(preset.sourceKind)
     setAuthorizationConfirmed(false)
@@ -170,6 +173,8 @@ export function TaskCreatePage() {
       setError(caught instanceof Error ? caught.message : '附件校验失败。')
       return
     }
+    const uploadConfigurationVersion = configurationVersionRef.current
+    const repositoryUpload = taskType === 'mcp_scan' && mcpSourceKind === 'repository'
     const controller = new AbortController()
     uploadControllerRef.current?.abort()
     uploadControllerRef.current = controller
@@ -177,14 +182,16 @@ export function TaskCreatePage() {
     try {
       for (const file of files) {
         const uploaded = await uploadAttachment(file, controller.signal)
-        if (!mountedRef.current || controller.signal.aborted) return
+        if (!mountedRef.current || controller.signal.aborted || configurationVersionRef.current !== uploadConfigurationVersion) return
         setAttachments((current) => [...current, uploaded])
-        if (taskType === 'mcp_scan' && mcpSourceKind === 'repository') setContent('')
+        if (repositoryUpload) setContent('')
         setFiles((current) => current.filter((candidate) => candidate !== file))
         invalidateSubmission()
       }
     } catch {
-      if (mountedRef.current && !controller.signal.aborted) setError('附件上传失败，请核对后显式重试。')
+      if (mountedRef.current && !controller.signal.aborted && configurationVersionRef.current === uploadConfigurationVersion) {
+        setError('附件上传失败，请核对后显式重试。')
+      }
     } finally {
       if (uploadControllerRef.current === controller) {
         uploadControllerRef.current = null

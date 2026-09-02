@@ -612,6 +612,45 @@ describe('任务页面', () => {
     expect(uploadSignal?.aborted).toBe(true)
   })
 
+  it.each([
+    ['ai_infra_scan', '198.51.100.7'],
+    ['model_redteam_report', '新的红队任务说明'],
+  ] as const)('延迟完成的 MCP 仓库上传不会覆盖已切换到 %s 的新表单', async (nextTaskType, nextContent) => {
+    let resolveUpload: (response: Response) => void = () => { throw new Error('上传请求未进入等待状态') }
+    const fetchMock = vi.fn(() => new Promise<Response>((resolve) => {
+      resolveUpload = resolve
+    }))
+    vi.stubGlobal('fetch', fetchMock)
+    renderPage(
+      <TaskCreatePage />,
+      { id: 'user-1', username: 'alice', role: 'user', must_change_password: false },
+      '/tasks/new?task_type=mcp_scan&source_kind=repository',
+    )
+
+    fireEvent.change(document.querySelector('input[type="file"]') as HTMLInputElement, {
+      target: { files: [new File(['source'], 'source.zip')] },
+    })
+    screen.getByRole('button', { name: '上传附件' }).click()
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1))
+
+    fireEvent.change(screen.getByRole('combobox', { name: '扫描类型' }), { target: { value: nextTaskType } })
+    const target = screen.getByRole('textbox', { name: '扫描目标或任务说明' })
+    fireEvent.change(target, { target: { value: nextContent } })
+    resolveUpload(jsonResponse({
+      id: 'attachment-opaque-stale-context',
+      filename: 'source.zip',
+      size: 6,
+      state: 'ready',
+      created_at: '2026-09-02T01:00:00Z',
+    }))
+
+    await waitFor(() => {
+      expect(screen.getByRole('button', { name: '上传附件' })).toBeEnabled()
+      expect(target).toHaveValue(nextContent)
+      expect(screen.queryByText('source.zip（6 字节）')).not.toBeInTheDocument()
+    })
+  })
+
   it('MCP 提交进行中禁止切换类型或来源，并保留当前请求控制器', async () => {
     let requestSignal: AbortSignal | undefined
     const fetchMock = vi.fn((_url: string, init?: RequestInit) => {
