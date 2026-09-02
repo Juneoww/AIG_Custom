@@ -202,7 +202,7 @@ func TestTrustedSuccessKeepsTaskRunningWhenSnapshotPersistenceFails(t *testing.T
 
 func createRunningTask(t *testing.T, service *Service, owner identity.Subject, key string) View {
 	t.Helper()
-	created, err := service.Create(context.Background(), owner, CreateInput{IdempotencyKey: key, TaskType: "mcp_scan", Content: "scan"})
+	created, err := service.Create(context.Background(), owner, mcpRepositoryCreateInput(key))
 	require.NoError(t, err)
 	require.Equal(t, StatusRunning, created.Status)
 	return created

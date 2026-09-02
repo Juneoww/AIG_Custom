@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/url"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -147,6 +148,9 @@ func (service *Service) Create(ctx context.Context, subject identity.Subject, in
 	}
 	params, valid := normalizeTaskParams(input.TaskType, params)
 	if !valid {
+		return View{}, ErrInvalid
+	}
+	if input.TaskType == "mcp_scan" && !validMCPCreateSource(input, params) {
 		return View{}, ErrInvalid
 	}
 	attachmentRefs, err := json.Marshal(input.AttachmentIDs)
@@ -329,8 +333,107 @@ func canonicalJSON(raw json.RawMessage) ([]byte, bool) {
 }
 
 type mcpTaskParams struct {
-	ModelID string `json:"model_id"`
-	Thread  *int   `json:"thread"`
+	SourceKind             string `json:"source_kind"`
+	ModelID                string `json:"model_id,omitempty"`
+	Thread                 *int   `json:"thread,omitempty"`
+	AuthorizationConfirmed *bool  `json:"authorization_confirmed,omitempty"`
+}
+
+func mcpTaskSourceKind(raw json.RawMessage) string {
+	var params mcpTaskParams
+	if json.Unmarshal(raw, &params) != nil {
+		return ""
+	}
+	return params.SourceKind
+}
+
+func validMCPCreateSource(input CreateInput, raw json.RawMessage) bool {
+	switch mcpTaskSourceKind(raw) {
+	case "repository":
+		if len(input.AttachmentIDs) > 0 {
+			return input.Content == ""
+		}
+		return validMCPRepositoryReference(input.Content)
+	case "service":
+		return len(input.AttachmentIDs) == 0 && validMCPServiceEndpoint(input.Content)
+	default:
+		return false
+	}
+}
+
+func validMCPRepositoryReference(value string) bool {
+	if value == "" || value != strings.TrimSpace(value) || strings.ContainsAny(value, "?#") {
+		return false
+	}
+	if parsed, err := url.ParseRequestURI(value); err == nil && parsed.Hostname() != "" &&
+		strings.Trim(parsed.Path, "/") != "" && parsed.RawQuery == "" && parsed.Fragment == "" {
+		switch strings.ToLower(parsed.Scheme) {
+		case "http", "https":
+			return parsed.User == nil
+		case "ssh":
+			if parsed.User == nil || parsed.User.Username() != "git" {
+				return false
+			}
+			_, hasPassword := parsed.User.Password()
+			return !hasPassword
+		}
+	}
+	return validMCPRepositorySCPReference(value)
+}
+
+func validMCPRepositorySCPReference(value string) bool {
+	if !strings.HasPrefix(value, "git@") || strings.ContainsAny(value, " \t\r\n?#") {
+		return false
+	}
+	hostAndPath := strings.TrimPrefix(value, "git@")
+	separator := strings.IndexByte(hostAndPath, ':')
+	if separator <= 0 || separator == len(hostAndPath)-1 {
+		return false
+	}
+	host, path := hostAndPath[:separator], hostAndPath[separator+1:]
+	return !strings.ContainsAny(host, "/@") && strings.Trim(path, "/") != ""
+}
+
+func validMCPServiceEndpoint(value string) bool {
+	if value == "" || value != strings.TrimSpace(value) {
+		return false
+	}
+	parsed, err := url.ParseRequestURI(value)
+	if err != nil || parsed.Hostname() == "" {
+		return false
+	}
+	scheme := strings.ToLower(parsed.Scheme)
+	return scheme == "http" || scheme == "https"
+}
+
+func decodeMCPTaskParams(raw json.RawMessage) (mcpTaskParams, bool) {
+	var fields map[string]json.RawMessage
+	if json.Unmarshal(raw, &fields) != nil || fields == nil {
+		return mcpTaskParams{}, false
+	}
+	var params mcpTaskParams
+	if !decodeExactJSON(raw, &params) || (params.SourceKind != "repository" && params.SourceKind != "service") ||
+		!validOptionalReference(fields, "model_id", params.ModelID) ||
+		(params.Thread != nil && (*params.Thread < 1 || *params.Thread > 1_024)) {
+		return mcpTaskParams{}, false
+	}
+	if params.SourceKind == "repository" {
+		_, authorizationSupplied := fields["authorization_confirmed"]
+		return params, !authorizationSupplied
+	}
+	return params, params.AuthorizationConfirmed != nil && *params.AuthorizationConfirmed
+}
+
+func normalizeMCPTaskParams(raw json.RawMessage) (json.RawMessage, bool) {
+	params, valid := decodeMCPTaskParams(raw)
+	if !valid {
+		return nil, false
+	}
+	normalized, err := json.Marshal(params)
+	if err != nil {
+		return nil, false
+	}
+	return json.RawMessage(normalized), true
 }
 
 type infrastructureTaskParams struct {
@@ -364,9 +467,8 @@ func validTaskParams(taskType string, raw json.RawMessage) bool {
 	}
 	switch taskType {
 	case "mcp_scan":
-		var params mcpTaskParams
-		return decodeExactJSON(raw, &params) && validOptionalReference(fields, "model_id", params.ModelID) &&
-			(params.Thread == nil || *params.Thread >= 1 && *params.Thread <= 1_024)
+		_, valid := decodeMCPTaskParams(raw)
+		return valid
 	case "ai_infra_scan":
 		_, valid := normalizeInfrastructureTaskParams(raw)
 		return valid
@@ -388,6 +490,9 @@ func validTaskParams(taskType string, raw json.RawMessage) bool {
 }
 
 func normalizeTaskParams(taskType string, raw json.RawMessage) (json.RawMessage, bool) {
+	if taskType == "mcp_scan" {
+		return normalizeMCPTaskParams(raw)
+	}
 	if taskType == "ai_infra_scan" {
 		return normalizeInfrastructureTaskParams(raw)
 	}
@@ -459,6 +564,15 @@ func normalizedInfrastructurePortScanModeField(fields map[string]json.RawMessage
 }
 
 func taskCreatedAuditMetadata(taskType string, params json.RawMessage) map[string]any {
+	if taskType == "mcp_scan" {
+		mcpParams, valid := decodeMCPTaskParams(params)
+		if valid {
+			return map[string]any{
+				"source_kind":             mcpParams.SourceKind,
+				"authorization_confirmed": mcpParams.AuthorizationConfirmed != nil && *mcpParams.AuthorizationConfirmed,
+			}
+		}
+	}
 	metadata := map[string]any{"task_type": taskType}
 	if taskType != "ai_infra_scan" {
 		return metadata

@@ -42,6 +42,15 @@ func (callback readerCallback) Read(buffer []byte) (int, error) { return callbac
 
 func (*recordingEngine) ValidateTaskReferences(context.Context, EngineTask) error { return nil }
 
+func mcpRepositoryCreateInput(idempotencyKey string) CreateInput {
+	return CreateInput{
+		IdempotencyKey: idempotencyKey,
+		TaskType:       "mcp_scan",
+		Content:        "https://github.com/example/mcp-server.git",
+		Params:         json.RawMessage(`{"source_kind":"repository"}`),
+	}
+}
+
 type countingAttachmentRepository struct {
 	*MemoryRepository
 	reads atomic.Int64
@@ -520,7 +529,8 @@ func TestConcurrentIdempotentCreatePersistsOneTaskAndSubmitsOnce(t *testing.T) {
 	auditRepository := audit.NewMemoryRepository()
 	service := NewService(repository, engine, audit.NewService(auditRepository))
 	subject := identity.Subject{UserID: "user-1", Username: "alice", Role: identity.RoleUser}
-	input := CreateInput{IdempotencyKey: "same-key", TaskType: "mcp_scan", Content: "scan", Params: json.RawMessage(`{"model_id":"model-1"}`)}
+	input := mcpRepositoryCreateInput("same-key")
+	input.Params = json.RawMessage(`{"source_kind":"repository","model_id":"model-1"}`)
 
 	start := make(chan struct{})
 	results := make(chan View, 12)
@@ -571,10 +581,8 @@ func TestIdempotentCreateReturnsPersistedTaskWhenLiveReferencesBecomeUnavailable
 			engine := &controlledReferenceEngine{}
 			service := NewService(repository, engine, audit.NewService(audit.NewMemoryRepository()))
 			subject := identity.Subject{UserID: "user-1", Username: "alice", Role: identity.RoleUser}
-			input := CreateInput{
-				IdempotencyKey: "stable-retry", TaskType: "mcp_scan", Content: "scan",
-				Params: json.RawMessage(`{"model_id":"model-1"}`),
-			}
+			input := mcpRepositoryCreateInput("stable-retry")
+			input.Params = json.RawMessage(`{"source_kind":"repository","model_id":"model-1"}`)
 
 			created, err := service.Create(context.Background(), subject, input)
 			require.NoError(t, err)
@@ -721,7 +729,7 @@ func TestIdempotentRetryBypassesCreationAuditOutage(t *testing.T) {
 	auditRepository := &toggledTaskAuditRepository{MemoryRepository: audit.NewMemoryRepository()}
 	service := NewService(repository, engine, audit.NewService(auditRepository))
 	subject := identity.Subject{UserID: "audit-retry-owner", Username: "alice", Role: identity.RoleUser}
-	input := CreateInput{IdempotencyKey: "audit-retry", TaskType: "mcp_scan", Content: "scan"}
+	input := mcpRepositoryCreateInput("audit-retry")
 
 	created, err := service.Create(context.Background(), subject, input)
 	require.NoError(t, err)
@@ -747,13 +755,13 @@ func TestExistingPendingTaskRecoversDuringCreationAuditOutage(t *testing.T) {
 	}
 	service := NewService(repository, engine, audit.NewService(auditRepository))
 	subject := identity.Subject{UserID: "audit-recovery-owner", Username: "alice", Role: identity.RoleUser}
-	input := CreateInput{IdempotencyKey: "audit-recovery", TaskType: "mcp_scan", Content: "scan"}
+	input := mcpRepositoryCreateInput("audit-recovery")
 	taskID := uuid.NewSHA1(taskIDNamespace, []byte(subject.UserID+"\x00"+input.IdempotencyKey)).String()
 	now := time.Now().UTC()
 	_, created, err := repository.CreateOrGet(context.Background(), &Task{
 		ID: taskID, OwnerUserID: subject.UserID, OwnerUsername: subject.Username,
 		IdempotencyKey: input.IdempotencyKey, EngineSessionID: taskID, TaskType: input.TaskType,
-		Content: input.Content, Params: json.RawMessage(`{}`), AttachmentRefs: json.RawMessage(`[]`),
+		Content: input.Content, Params: append(json.RawMessage(nil), input.Params...), AttachmentRefs: json.RawMessage(`[]`),
 		Status: StatusPending, CreatedAt: now, UpdatedAt: now,
 	})
 	require.NoError(t, err)
@@ -772,17 +780,15 @@ func TestIdempotentCreateRejectsDifferentPersistedPayloadBeforeSideEffects(t *te
 	auditRepository := audit.NewMemoryRepository()
 	service := NewService(repository, engine, audit.NewService(auditRepository))
 	subject := identity.Subject{UserID: "user-1", Username: "alice", Role: identity.RoleUser}
-	input := CreateInput{
-		IdempotencyKey: "payload-mismatch", TaskType: "mcp_scan", Content: "scan",
-		Params: json.RawMessage(`{"model_id":"model-1"}`),
-	}
+	input := mcpRepositoryCreateInput("payload-mismatch")
+	input.Params = json.RawMessage(`{"source_kind":"repository","model_id":"model-1"}`)
 
 	created, err := service.Create(context.Background(), subject, input)
 	require.NoError(t, err)
 	eventsBefore, err := auditRepository.List(context.Background(), audit.Filter{ResourceID: created.ID})
 	require.NoError(t, err)
 	changed := input
-	changed.Content = "different scan"
+	changed.Content = "https://github.com/example/other-mcp-server.git"
 
 	_, err = service.Create(context.Background(), subject, changed)
 	require.ErrorIs(t, err, ErrInvalid)
@@ -804,7 +810,7 @@ func TestConcurrentIdempotentRetrySerializesBeforeLiveReferenceValidation(t *tes
 	}
 	service := NewService(repository, engine, audit.NewService(audit.NewMemoryRepository()))
 	subject := identity.Subject{UserID: "user-1", Username: "alice", Role: identity.RoleUser}
-	input := CreateInput{IdempotencyKey: "concurrent-stable", TaskType: "mcp_scan", Content: "scan"}
+	input := mcpRepositoryCreateInput("concurrent-stable")
 	firstDone := make(chan createResult, 1)
 	go func() {
 		view, err := service.Create(context.Background(), subject, input)
@@ -850,7 +856,7 @@ func TestConcurrentIdempotencyConflictHasNoValidatorAuditOrSubmitSideEffects(t *
 	auditRepository := audit.NewMemoryRepository()
 	service := NewService(repository, engine, audit.NewService(auditRepository))
 	subject := identity.Subject{UserID: "user-1", Username: "alice", Role: identity.RoleUser}
-	input := CreateInput{IdempotencyKey: "concurrent-conflict", TaskType: "mcp_scan", Content: "scan"}
+	input := mcpRepositoryCreateInput("concurrent-conflict")
 	firstDone := make(chan createResult, 1)
 	go func() {
 		view, err := service.Create(context.Background(), subject, input)
@@ -862,7 +868,7 @@ func TestConcurrentIdempotencyConflictHasNoValidatorAuditOrSubmitSideEffects(t *
 		t.Fatal("first create did not enter reference validation")
 	}
 	changed := input
-	changed.Content = "different scan"
+	changed.Content = "https://github.com/example/other-mcp-server.git"
 	secondStarted := make(chan struct{})
 	secondDone := make(chan createResult, 1)
 	go func() {
@@ -918,16 +924,16 @@ func TestCreateUsesExactPerTaskParameterSchemas(t *testing.T) {
 	subject := identity.Subject{UserID: "user-1", Username: "alice", Role: identity.RoleUser}
 
 	for name, params := range map[string]string{
-		"top-level token":    `{"token":"plain-secret"}`,
-		"nested api key":     `{"provider":{"api_key":"plain-secret"}}`,
-		"legacy model":       `{"model":{"token":"plain-secret","base_url":"https://model.invalid"}}`,
-		"access token alias": `{"access_token":"plain-secret"}`,
-		"nested credentials": `{"metadata":{"credentials":{"value":"plain-secret"}}}`,
-		"wrong type field":   `{"thread":"4"}`,
+		"top-level token":    `{"source_kind":"repository","token":"plain-secret"}`,
+		"nested api key":     `{"source_kind":"repository","provider":{"api_key":"plain-secret"}}`,
+		"legacy model":       `{"source_kind":"repository","model":{"token":"plain-secret","base_url":"https://model.invalid"}}`,
+		"access token alias": `{"source_kind":"repository","access_token":"plain-secret"}`,
+		"nested credentials": `{"source_kind":"repository","metadata":{"credentials":{"value":"plain-secret"}}}`,
+		"wrong type field":   `{"source_kind":"repository","thread":"4"}`,
 	} {
 		t.Run(name, func(t *testing.T) {
 			_, err := service.Create(context.Background(), subject, CreateInput{
-				IdempotencyKey: "secret-" + name, TaskType: "mcp_scan", Content: "scan", Params: json.RawMessage(params),
+				IdempotencyKey: "secret-" + name, TaskType: "mcp_scan", Content: "https://github.com/example/mcp-server.git", Params: json.RawMessage(params),
 			})
 			require.ErrorIs(t, err, ErrInvalid)
 		})
@@ -935,7 +941,7 @@ func TestCreateUsesExactPerTaskParameterSchemas(t *testing.T) {
 	assert.Zero(t, engine.submits.Load())
 
 	valid := []CreateInput{
-		{IdempotencyKey: "valid-mcp", TaskType: "mcp_scan", Content: "scan", Params: json.RawMessage(`{"model_id":"model-1","thread":4}`)},
+		{IdempotencyKey: "valid-mcp", TaskType: "mcp_scan", Content: "https://github.com/example/mcp-server.git", Params: json.RawMessage(`{"source_kind":"repository","model_id":"model-1","thread":4}`)},
 		{IdempotencyKey: "valid-infra", TaskType: "ai_infra_scan", Content: "target", Params: json.RawMessage(`{"model_id":"model-1","timeout":30}`)},
 		{IdempotencyKey: "valid-redteam", TaskType: "model_redteam_report", Content: "prompt", Params: json.RawMessage(`{"model_id":["model-1"],"eval_model_id":"model-2","dataset":{"numPrompts":10,"randomSeed":7,"promptColumn":"prompt"},"techniques":["BASE64"]}`)},
 		{IdempotencyKey: "valid-agent", TaskType: "agent_scan", Content: "scan", Params: json.RawMessage(`{"agent_id":"agent-1","eval_model_id":"model-2"}`)},
@@ -945,6 +951,363 @@ func TestCreateUsesExactPerTaskParameterSchemas(t *testing.T) {
 		require.NoError(t, err, input.TaskType)
 	}
 	assert.Equal(t, int64(len(valid)), engine.submits.Load())
+}
+
+func TestCreateMCPRejectsMissingSourceKindBeforeMutation(t *testing.T) {
+	repository := NewMemoryRepository()
+	engine := &recordingEngine{}
+	audits := audit.NewMemoryRepository()
+	service := NewService(repository, engine, audit.NewService(audits))
+	subject := identity.Subject{UserID: "user-1", Username: "alice", Role: identity.RoleUser}
+
+	_, err := service.Create(context.Background(), subject, CreateInput{
+		IdempotencyKey: "mcp-missing-source-kind",
+		TaskType:       "mcp_scan",
+		Content:        "https://github.com/example/mcp-server.git",
+		Params:         json.RawMessage(`{"model_id":"model-1","thread":4}`),
+	})
+
+	require.ErrorIs(t, err, ErrInvalid)
+	tasks, listErr := repository.List(context.Background())
+	require.NoError(t, listErr)
+	assert.Empty(t, tasks)
+	assert.Zero(t, engine.submits.Load())
+	events, listErr := audits.List(context.Background(), audit.Filter{Action: audit.Action("task.created")})
+	require.NoError(t, listErr)
+	assert.Empty(t, events)
+}
+
+func TestCreateMCPRejectsUnknownSourceKindBeforeMutation(t *testing.T) {
+	repository := NewMemoryRepository()
+	engine := &recordingEngine{}
+	audits := audit.NewMemoryRepository()
+	service := NewService(repository, engine, audit.NewService(audits))
+	subject := identity.Subject{UserID: "user-1", Username: "alice", Role: identity.RoleUser}
+
+	_, err := service.Create(context.Background(), subject, CreateInput{
+		IdempotencyKey: "mcp-unknown-source-kind",
+		TaskType:       "mcp_scan",
+		Content:        "https://github.com/example/mcp-server.git",
+		Params:         json.RawMessage(`{"source_kind":"filesystem","model_id":"model-1","thread":4}`),
+	})
+
+	require.ErrorIs(t, err, ErrInvalid)
+	tasks, listErr := repository.List(context.Background())
+	require.NoError(t, listErr)
+	assert.Empty(t, tasks)
+	assert.Zero(t, engine.submits.Load())
+	events, listErr := audits.List(context.Background(), audit.Filter{Action: audit.Action("task.created")})
+	require.NoError(t, listErr)
+	assert.Empty(t, events)
+}
+
+func TestMCPRepositoryReferenceSourceSyntax(t *testing.T) {
+	for _, test := range []struct {
+		value string
+		valid bool
+	}{
+		{value: "https://github.com/example/mcp-server.git", valid: true},
+		{value: "http://git.example.test/group/mcp-server", valid: true},
+		{value: "ssh://git@git.example.test:2222/group/mcp-server.git", valid: true},
+		{value: "git@git.example.test:group/mcp-server.git", valid: true},
+		{value: "https://git.example.test/", valid: false},
+		{value: "https://alice:secret@git.example.test/group/mcp-server", valid: false},
+		{value: "ssh://alice@git.example.test/group/mcp-server", valid: false},
+		{value: "ssh://git:secret@git.example.test/group/mcp-server", valid: false},
+		{value: "https://git.example.test/group/mcp-server?token=secret", valid: false},
+		{value: "https://git.example.test/group/mcp-server#private", valid: false},
+		{value: "git@@git.example.test:group/mcp-server", valid: false},
+		{value: "git@git.example.test:", valid: false},
+	} {
+		t.Run(test.value, func(t *testing.T) {
+			assert.Equal(t, test.valid, validMCPRepositoryReference(test.value))
+		})
+	}
+}
+
+func TestCreateMCPRepositorySourceAllowsReadyAttachmentWithEmptyContent(t *testing.T) {
+	repository := NewMemoryRepository()
+	auditService := audit.NewService(audit.NewMemoryRepository())
+	attachments, err := NewAttachmentService(repository, AttachmentConfig{
+		UploadDir: t.TempDir(), MaxFileBytes: 8, MaxChunkBytes: 4,
+	}, auditService)
+	require.NoError(t, err)
+	service := NewService(repository, &recordingEngine{}, auditService)
+	service.SetAttachmentService(attachments)
+	subject := identity.Subject{UserID: "user-1", Username: "alice", Role: identity.RoleUser}
+	attachment, err := attachments.Upload(context.Background(), subject, "unclassified-upload", strings.NewReader("code"))
+	require.NoError(t, err)
+
+	created, err := service.Create(context.Background(), subject, CreateInput{
+		IdempotencyKey: "repository-ready-attachment",
+		TaskType:       "mcp_scan",
+		Content:        "",
+		Params:         json.RawMessage(`{"source_kind":"repository"}`),
+		AttachmentIDs:  []string{attachment.ID},
+	})
+
+	require.NoError(t, err)
+	stored, err := repository.Get(context.Background(), created.ID)
+	require.NoError(t, err)
+	assert.JSONEq(t, fmt.Sprintf("[%q]", attachment.ID), string(stored.AttachmentRefs))
+}
+
+func TestCreateMCPRepositorySourceRejectsUngovernedContentWithAttachment(t *testing.T) {
+	repository := NewMemoryRepository()
+	auditService := audit.NewService(audit.NewMemoryRepository())
+	attachments, err := NewAttachmentService(repository, AttachmentConfig{
+		UploadDir: t.TempDir(), MaxFileBytes: 8, MaxChunkBytes: 4,
+	}, auditService)
+	require.NoError(t, err)
+	engine := &recordingEngine{}
+	service := NewService(repository, engine, auditService)
+	service.SetAttachmentService(attachments)
+	subject := identity.Subject{UserID: "user-1", Username: "alice", Role: identity.RoleUser}
+	attachment, err := attachments.Upload(context.Background(), subject, "unclassified-upload", strings.NewReader("code"))
+	require.NoError(t, err)
+
+	_, err = service.Create(context.Background(), subject, CreateInput{
+		IdempotencyKey: "repository-attachment-ungoverned-content",
+		TaskType:       "mcp_scan",
+		Content:        "https://user:credential@git.example.test/group/mcp-server",
+		Params:         json.RawMessage(`{"source_kind":"repository"}`),
+		AttachmentIDs:  []string{attachment.ID},
+	})
+
+	require.ErrorIs(t, err, ErrInvalid)
+	tasks, listErr := repository.List(context.Background())
+	require.NoError(t, listErr)
+	assert.Empty(t, tasks)
+	assert.Zero(t, engine.submits.Load())
+}
+
+func TestCreateMCPRepositorySourceRejectsReferenceAndAttachmentTogether(t *testing.T) {
+	repository := NewMemoryRepository()
+	auditService := audit.NewService(audit.NewMemoryRepository())
+	attachments, err := NewAttachmentService(repository, AttachmentConfig{
+		UploadDir: t.TempDir(), MaxFileBytes: 8, MaxChunkBytes: 4,
+	}, auditService)
+	require.NoError(t, err)
+	engine := &recordingEngine{}
+	service := NewService(repository, engine, auditService)
+	service.SetAttachmentService(attachments)
+	subject := identity.Subject{UserID: "user-1", Username: "alice", Role: identity.RoleUser}
+	attachment, err := attachments.Upload(context.Background(), subject, "unclassified-upload", strings.NewReader("code"))
+	require.NoError(t, err)
+
+	_, err = service.Create(context.Background(), subject, CreateInput{
+		IdempotencyKey: "repository-reference-and-attachment",
+		TaskType:       "mcp_scan",
+		Content:        "https://github.com/example/mcp-server.git",
+		Params:         json.RawMessage(`{"source_kind":"repository"}`),
+		AttachmentIDs:  []string{attachment.ID},
+	})
+
+	require.ErrorIs(t, err, ErrInvalid)
+	tasks, listErr := repository.List(context.Background())
+	require.NoError(t, listErr)
+	assert.Empty(t, tasks)
+	assert.Zero(t, engine.submits.Load())
+}
+
+func TestCreateMCPRepositorySourceValidation(t *testing.T) {
+	subject := identity.Subject{UserID: "user-1", Username: "alice", Role: identity.RoleUser}
+	for _, test := range []struct {
+		name    string
+		content string
+		wantErr bool
+	}{
+		{name: "https Git URL", content: "https://github.com/example/mcp-server.git"},
+		{name: "http Git URL without suffix", content: "http://git.example.test/group/mcp-server"},
+		{name: "ssh Git URL", content: "ssh://git@git.example.test:2222/group/mcp-server.git"},
+		{name: "SCP Git reference", content: "git@git.example.test:group/mcp-server.git"},
+		{name: "root URL", content: "https://git.example.test/", wantErr: true},
+		{name: "HTTP credentials", content: "https://alice:secret@git.example.test/group/mcp-server", wantErr: true},
+		{name: "SSH non Git user", content: "ssh://alice@git.example.test/group/mcp-server", wantErr: true},
+		{name: "SSH password", content: "ssh://git:secret@git.example.test/group/mcp-server", wantErr: true},
+		{name: "query", content: "https://git.example.test/group/mcp-server?token=secret", wantErr: true},
+		{name: "fragment", content: "https://git.example.test/group/mcp-server#private", wantErr: true},
+		{name: "not a Git reference", content: "scan this project", wantErr: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			repository := NewMemoryRepository()
+			engine := &recordingEngine{}
+			service := NewService(repository, engine, audit.NewService(audit.NewMemoryRepository()))
+
+			_, err := service.Create(context.Background(), subject, CreateInput{
+				IdempotencyKey: "repository-source-" + strings.ReplaceAll(test.name, " ", "-"),
+				TaskType:       "mcp_scan",
+				Content:        test.content,
+				Params:         json.RawMessage(`{"source_kind":"repository","model_id":"model-1","thread":4}`),
+			})
+
+			if test.wantErr {
+				require.ErrorIs(t, err, ErrInvalid)
+				tasks, listErr := repository.List(context.Background())
+				require.NoError(t, listErr)
+				assert.Empty(t, tasks)
+				assert.Zero(t, engine.submits.Load())
+				return
+			}
+			require.NoError(t, err)
+			assert.Equal(t, int64(1), engine.submits.Load())
+		})
+	}
+}
+
+func TestCreateMCPRepositorySourceRejectsAuthorizationConfirmation(t *testing.T) {
+	subject := identity.Subject{UserID: "user-1", Username: "alice", Role: identity.RoleUser}
+	for _, value := range []string{"true", "false", "null"} {
+		t.Run(value, func(t *testing.T) {
+			repository := NewMemoryRepository()
+			engine := &recordingEngine{}
+			service := NewService(repository, engine, audit.NewService(audit.NewMemoryRepository()))
+
+			_, err := service.Create(context.Background(), subject, CreateInput{
+				IdempotencyKey: "repository-authorization-" + value,
+				TaskType:       "mcp_scan",
+				Content:        "https://github.com/example/mcp-server.git",
+				Params:         json.RawMessage(`{"source_kind":"repository","authorization_confirmed":` + value + `}`),
+			})
+
+			require.ErrorIs(t, err, ErrInvalid)
+			tasks, listErr := repository.List(context.Background())
+			require.NoError(t, listErr)
+			assert.Empty(t, tasks)
+			assert.Zero(t, engine.submits.Load())
+		})
+	}
+}
+
+func TestCreateMCPServiceSourceRequiresEndpointAndAuthorization(t *testing.T) {
+	subject := identity.Subject{UserID: "user-1", Username: "alice", Role: identity.RoleUser}
+	for _, test := range []struct {
+		name          string
+		content       string
+		params        string
+		attachmentIDs []string
+		wantErr       bool
+	}{
+		{name: "valid service", content: "https://mcp.example.test/rpc?version=1", params: `{"source_kind":"service","authorization_confirmed":true,"model_id":"model-1","thread":2}`},
+		{name: "missing confirmation", content: "https://mcp.example.test/rpc", params: `{"source_kind":"service"}`, wantErr: true},
+		{name: "false confirmation", content: "https://mcp.example.test/rpc", params: `{"source_kind":"service","authorization_confirmed":false}`, wantErr: true},
+		{name: "invalid endpoint", content: "git@git.example.test:group/mcp-server", params: `{"source_kind":"service","authorization_confirmed":true}`, wantErr: true},
+		{name: "attachments are forbidden", content: "https://mcp.example.test/rpc", params: `{"source_kind":"service","authorization_confirmed":true}`, attachmentIDs: []string{"attachment-1"}, wantErr: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			repository := NewMemoryRepository()
+			engine := &recordingEngine{}
+			service := NewService(repository, engine, audit.NewService(audit.NewMemoryRepository()))
+
+			_, err := service.Create(context.Background(), subject, CreateInput{
+				IdempotencyKey: "service-source-" + strings.ReplaceAll(test.name, " ", "-"),
+				TaskType:       "mcp_scan",
+				Content:        test.content,
+				Params:         json.RawMessage(test.params),
+				AttachmentIDs:  test.attachmentIDs,
+			})
+
+			if test.wantErr {
+				require.ErrorIs(t, err, ErrInvalid)
+				tasks, listErr := repository.List(context.Background())
+				require.NoError(t, listErr)
+				assert.Empty(t, tasks)
+				assert.Zero(t, engine.submits.Load())
+				return
+			}
+			require.NoError(t, err)
+			assert.Equal(t, int64(1), engine.submits.Load())
+		})
+	}
+}
+
+func TestCreateMCPSourceNormalizesSafeParams(t *testing.T) {
+	repository := NewMemoryRepository()
+	engine := &recordingEngine{}
+	service := NewService(repository, engine, audit.NewService(audit.NewMemoryRepository()))
+	subject := identity.Subject{UserID: "user-1", Username: "alice", Role: identity.RoleUser}
+
+	created, err := service.Create(context.Background(), subject, CreateInput{
+		IdempotencyKey: "normalized-service-source",
+		TaskType:       "mcp_scan",
+		Content:        "https://mcp.example.test/rpc",
+		Params:         json.RawMessage(`{"thread":4,"source_kind":"service","authorization_confirmed":true,"model_id":"model-1"}`),
+	})
+	require.NoError(t, err)
+	const expected = `{"source_kind":"service","model_id":"model-1","thread":4,"authorization_confirmed":true}`
+	assert.Equal(t, expected, string(created.Params))
+
+	stored, err := repository.Get(context.Background(), created.ID)
+	require.NoError(t, err)
+	assert.Equal(t, expected, string(stored.Params))
+	engine.mu.Lock()
+	dispatched := append(json.RawMessage(nil), engine.last.Params...)
+	engine.mu.Unlock()
+	assert.Equal(t, expected, string(dispatched))
+
+	for name, params := range map[string]string{
+		"unknown field":       `{"source_kind":"service","authorization_confirmed":true,"unexpected":"drop-me"}`,
+		"nested credentials":  `{"source_kind":"service","authorization_confirmed":true,"provider":{"api_key":"secret"}}`,
+		"nested confirmation": `{"source_kind":"service","authorization_confirmed":{"value":true}}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			_, createErr := service.Create(context.Background(), subject, CreateInput{
+				IdempotencyKey: "invalid-normalized-" + strings.ReplaceAll(name, " ", "-"),
+				TaskType:       "mcp_scan",
+				Content:        "https://mcp.example.test/rpc",
+				Params:         json.RawMessage(params),
+			})
+			require.ErrorIs(t, createErr, ErrInvalid)
+		})
+	}
+}
+
+func TestCreateMCPSourceAuditMetadataIsSafeAndLinked(t *testing.T) {
+	subject := identity.Subject{UserID: "user-1", Username: "alice", Role: identity.RoleUser}
+	for _, test := range []struct {
+		name              string
+		content           string
+		params            string
+		wantSourceKind    string
+		wantAuthorization bool
+	}{
+		{name: "repository", content: "https://github.com/example/mcp-server.git", params: `{"source_kind":"repository","model_id":"private-model"}`, wantSourceKind: "repository"},
+		{name: "service", content: "https://mcp.example.test/rpc?private=token", params: `{"source_kind":"service","authorization_confirmed":true,"model_id":"private-model"}`, wantSourceKind: "service", wantAuthorization: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			repository := NewMemoryRepository()
+			auditRepository := audit.NewMemoryRepository()
+			service := NewService(repository, &recordingEngine{}, audit.NewService(auditRepository))
+
+			created, err := service.Create(context.Background(), subject, CreateInput{
+				IdempotencyKey: "mcp-source-audit-" + test.name,
+				TaskType:       "mcp_scan",
+				Content:        test.content,
+				Params:         json.RawMessage(test.params),
+			})
+			require.NoError(t, err)
+
+			events, listErr := auditRepository.List(context.Background(), audit.Filter{Action: audit.Action("task.created"), ResourceID: created.ID})
+			require.NoError(t, listErr)
+			require.Len(t, events, 2)
+			for _, event := range events {
+				assert.Equal(t, subject.UserID, event.ActorUserID)
+				assert.Equal(t, subject.Username, event.ActorUsername)
+				assert.Equal(t, created.ID, event.ResourceID)
+				assert.False(t, event.OccurredAt.IsZero())
+				metadata := map[string]any{}
+				require.NoError(t, json.Unmarshal(event.Metadata, &metadata))
+				assert.ElementsMatch(t, []string{"source_kind", "authorization_confirmed", "phase"}, mapKeys(metadata))
+				assert.Equal(t, test.wantSourceKind, metadata["source_kind"])
+				assert.Equal(t, test.wantAuthorization, metadata["authorization_confirmed"])
+				serialized, marshalErr := json.Marshal(metadata)
+				require.NoError(t, marshalErr)
+				for _, secret := range []string{"mcp.example.test", "private=token", "mcp-server.git", "private-model"} {
+					assert.NotContains(t, string(serialized), secret)
+				}
+			}
+		})
+	}
 }
 
 func TestCreateAIInfrastructureNormalizesPortScanMode(t *testing.T) {
@@ -1115,9 +1478,7 @@ func TestCreateAuditUsesOnlyNormalizedInfrastructurePortScanModeMetadata(t *test
 		Params: json.RawMessage(`{"model_id":"model-private","port_scan_mode":"full_tcp"}`),
 	})
 	require.NoError(t, err)
-	mcp, err := service.Create(context.Background(), subject, CreateInput{
-		IdempotencyKey: "audited-mcp", TaskType: "mcp_scan", Content: "scan",
-	})
+	mcp, err := service.Create(context.Background(), subject, mcpRepositoryCreateInput("audited-mcp"))
 	require.NoError(t, err)
 
 	metadataFor := func(taskID string) map[audit.Outcome]map[string]any {
@@ -1158,11 +1519,15 @@ func TestCreateAuditUsesOnlyNormalizedInfrastructurePortScanModeMetadata(t *test
 	} {
 		metadata, exists := mcpMetadata[outcome]
 		require.True(t, exists, outcome)
-		assert.ElementsMatch(t, []string{"task_type", "phase"}, mapKeys(metadata))
-		assert.Equal(t, "mcp_scan", metadata["task_type"])
+		assert.ElementsMatch(t, []string{"source_kind", "authorization_confirmed", "phase"}, mapKeys(metadata))
+		assert.Equal(t, "repository", metadata["source_kind"])
+		assert.Equal(t, false, metadata["authorization_confirmed"])
 		assert.Equal(t, phase, metadata["phase"])
 		assert.NotContains(t, metadata, "port_scan_mode")
 		assert.NotContains(t, metadata, "port_spec")
+		serializedMetadata, marshalErr := json.Marshal(metadata)
+		require.NoError(t, marshalErr)
+		assert.NotContains(t, string(serializedMetadata), "github.com")
 	}
 }
 
@@ -1179,11 +1544,11 @@ func TestCreateRejectsUnboundedOrNonCanonicalInputBeforeAttachmentReads(t *testi
 	tests := map[string]CreateInput{
 		"unknown task":          {IdempotencyKey: "unknown", TaskType: "future_task", Content: "scan"},
 		"legacy alias":          {IdempotencyKey: "alias", TaskType: "Mcp-Scan", Content: "scan"},
-		"large content":         {IdempotencyKey: "content", TaskType: "mcp_scan", Content: strings.Repeat("x", (32<<10)+1)},
-		"invalid country":       {IdempotencyKey: "country", TaskType: "mcp_scan", Content: "scan", CountryIsoCode: "zh_CN_extra"},
-		"too many attachments":  {IdempotencyKey: "many-attachments", TaskType: "mcp_scan", Content: "scan", AttachmentIDs: []string{"1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11"}},
-		"duplicate attachments": {IdempotencyKey: "duplicate-attachments", TaskType: "mcp_scan", Content: "scan", AttachmentIDs: []string{"opaque-1", "opaque-1"}},
-		"long attachment id":    {IdempotencyKey: "long-attachment", TaskType: "mcp_scan", Content: "scan", AttachmentIDs: []string{strings.Repeat("a", 129)}},
+		"large content":         {IdempotencyKey: "content", TaskType: "mcp_scan", Content: strings.Repeat("x", (32<<10)+1), Params: json.RawMessage(`{"source_kind":"repository"}`)},
+		"invalid country":       {IdempotencyKey: "country", TaskType: "mcp_scan", Content: "https://github.com/example/mcp-server.git", CountryIsoCode: "zh_CN_extra", Params: json.RawMessage(`{"source_kind":"repository"}`)},
+		"too many attachments":  {IdempotencyKey: "many-attachments", TaskType: "mcp_scan", Content: "https://github.com/example/mcp-server.git", Params: json.RawMessage(`{"source_kind":"repository"}`), AttachmentIDs: []string{"1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11"}},
+		"duplicate attachments": {IdempotencyKey: "duplicate-attachments", TaskType: "mcp_scan", Content: "https://github.com/example/mcp-server.git", Params: json.RawMessage(`{"source_kind":"repository"}`), AttachmentIDs: []string{"opaque-1", "opaque-1"}},
+		"long attachment id":    {IdempotencyKey: "long-attachment", TaskType: "mcp_scan", Content: "https://github.com/example/mcp-server.git", Params: json.RawMessage(`{"source_kind":"repository"}`), AttachmentIDs: []string{strings.Repeat("a", 129)}},
 	}
 	for name, input := range tests {
 		t.Run(name, func(t *testing.T) {
@@ -1220,9 +1585,7 @@ func TestDispatchFailureRetainsTaskAndRecordsSeparateStatus(t *testing.T) {
 	service := NewService(repository, engine, audit.NewService(audits))
 	subject := identity.Subject{UserID: "user-1", Username: "alice", Role: identity.RoleUser}
 
-	view, err := service.Create(context.Background(), subject, CreateInput{
-		IdempotencyKey: "dispatch-failure", TaskType: "mcp_scan", Content: "scan",
-	})
+	view, err := service.Create(context.Background(), subject, mcpRepositoryCreateInput("dispatch-failure"))
 	require.ErrorIs(t, err, ErrDispatchFailed)
 	assert.NotEmpty(t, view.ID)
 
@@ -1249,9 +1612,7 @@ func TestDispatchFailureNeverPersistsOrReturnsEngineSecrets(t *testing.T) {
 	service := NewService(repository, &recordingEngine{err: NewTransientDispatchError(errors.New("unavailable " + secret))}, audit.NewService(audit.NewMemoryRepository()))
 	subject := identity.Subject{UserID: "user-1", Username: "alice", Role: identity.RoleUser}
 
-	view, err := service.Create(context.Background(), subject, CreateInput{
-		IdempotencyKey: "safe-dispatch-error", TaskType: "mcp_scan", Content: "scan",
-	})
+	view, err := service.Create(context.Background(), subject, mcpRepositoryCreateInput("safe-dispatch-error"))
 	require.ErrorIs(t, err, ErrDispatchFailed)
 	assert.NotContains(t, view.DispatchError, secret)
 	stored, getErr := repository.Get(context.Background(), view.ID)
@@ -1263,7 +1624,7 @@ func TestTaskAuthorizationUsesOwnerUserIDAndRole(t *testing.T) {
 	repository := NewMemoryRepository()
 	service := NewService(repository, &recordingEngine{}, audit.NewService(audit.NewMemoryRepository()))
 	owner := identity.Subject{UserID: "user-1", Username: "alice", Role: identity.RoleUser}
-	task, err := service.Create(context.Background(), owner, CreateInput{IdempotencyKey: "owner-test", TaskType: "mcp_scan", Content: "scan"})
+	task, err := service.Create(context.Background(), owner, mcpRepositoryCreateInput("owner-test"))
 	require.NoError(t, err)
 
 	_, err = service.Get(context.Background(), identity.Subject{UserID: "user-2", Username: "alice", Role: identity.RoleUser}, task.ID)
@@ -1286,9 +1647,9 @@ func TestTaskListUsesOwnerUserIDAndGlobalReadRolesWithoutEnginePoll(t *testing.T
 	service := NewService(repository, engine, audit.NewService(audit.NewMemoryRepository()))
 	alice := identity.Subject{UserID: "list-alice", Username: "alice", Role: identity.RoleUser}
 	bob := identity.Subject{UserID: "list-bob", Username: "bob", Role: identity.RoleUser}
-	aliceTask, err := service.Create(context.Background(), alice, CreateInput{IdempotencyKey: "alice", TaskType: "mcp_scan", Content: "scan"})
+	aliceTask, err := service.Create(context.Background(), alice, mcpRepositoryCreateInput("alice"))
 	require.NoError(t, err)
-	bobTask, err := service.Create(context.Background(), bob, CreateInput{IdempotencyKey: "bob", TaskType: "mcp_scan", Content: "scan"})
+	bobTask, err := service.Create(context.Background(), bob, mcpRepositoryCreateInput("bob"))
 	require.NoError(t, err)
 	readsBefore := engine.statusReads.Load()
 
@@ -1420,7 +1781,7 @@ func TestPostgresCreateLockSerializesLiveValidationAcrossServiceInstances(t *tes
 	firstService := NewService(NewGormRepository(db), engine, audit.NewService(audit.NewMemoryRepository()))
 	secondService := NewService(NewGormRepository(db.Session(&gorm.Session{NewDB: true})), engine, audit.NewService(audit.NewMemoryRepository()))
 	subject := identity.Subject{UserID: "postgres-lock-owner", Username: "alice", Role: identity.RoleUser}
-	input := CreateInput{IdempotencyKey: "postgres-create-lock", TaskType: "mcp_scan", Content: "scan"}
+	input := mcpRepositoryCreateInput("postgres-create-lock")
 	firstDone := make(chan createResult, 1)
 	go func() {
 		view, createErr := firstService.Create(context.Background(), subject, input)
@@ -1467,7 +1828,7 @@ func TestExpiredPostgresDispatchClaimCannotOverwriteCurrentClaim(t *testing.T) {
 	repository := NewGormRepository(db)
 	engine := &leaseRaceEngine{firstEntered: make(chan struct{}), releaseFirst: make(chan struct{})}
 	owner := identity.Subject{UserID: "lease-owner", Username: "alice", Role: identity.RoleUser}
-	input := CreateInput{IdempotencyKey: "lease-race", TaskType: "mcp_scan", Content: "scan"}
+	input := mcpRepositoryCreateInput("lease-race")
 	base := time.Date(2026, 8, 12, 0, 0, 0, 0, time.UTC)
 	first := NewService(repository, engine, audit.NewService(audit.NewMemoryRepository()))
 	first.now = func() time.Time { return base }
@@ -1506,13 +1867,13 @@ func TestPostgresDispatchAttemptBudgetPersistsAcrossRecoveredLease(t *testing.T)
 	require.NoError(t, db.Exec("DELETE FROM platform_tasks").Error)
 	repository := NewGormRepository(db)
 	owner := identity.Subject{UserID: "attempt-owner", Username: "alice", Role: identity.RoleUser}
-	input := CreateInput{IdempotencyKey: "attempt-budget", TaskType: "mcp_scan", Content: "scan"}
+	input := mcpRepositoryCreateInput("attempt-budget")
 	taskID := uuid.NewSHA1(taskIDNamespace, []byte(owner.UserID+"\x00"+input.IdempotencyKey)).String()
 	base := time.Date(2026, 8, 12, 1, 0, 0, 0, time.UTC)
 	_, created, err := repository.CreateOrGet(context.Background(), &Task{
 		ID: taskID, OwnerUserID: owner.UserID, OwnerUsername: owner.Username,
 		IdempotencyKey: input.IdempotencyKey, EngineSessionID: taskID, TaskType: input.TaskType,
-		Content: input.Content, Params: json.RawMessage(`{}`), AttachmentRefs: json.RawMessage(`[]`),
+		Content: input.Content, Params: input.Params, AttachmentRefs: json.RawMessage(`[]`),
 		Status: StatusPending, DispatchAttempts: MaxDispatchAttempts - 1, CreatedAt: base, UpdatedAt: base,
 	})
 	require.NoError(t, err)
@@ -1535,7 +1896,7 @@ func TestAcknowledgementUnknownPendingStatusNeverResubmits(t *testing.T) {
 	engine.status[taskID] = EngineStatus{State: EngineStatePending}
 	service := NewService(repository, engine, audit.NewService(audit.NewMemoryRepository()))
 
-	view, err := service.Create(context.Background(), owner, CreateInput{IdempotencyKey: "ack-pending", TaskType: "mcp_scan", Content: "scan"})
+	view, err := service.Create(context.Background(), owner, mcpRepositoryCreateInput("ack-pending"))
 	require.ErrorIs(t, err, ErrDispatchFailed)
 	assert.Equal(t, StatusDispatchUnknown, view.Status)
 	assert.Equal(t, int64(1), engine.submits.Load(), "an uncertain acknowledgement must be read back, never submitted again")
@@ -1547,7 +1908,7 @@ func TestAuditorGetIsReadOnlyAndDoesNotPollEngine(t *testing.T) {
 	auditRepository := audit.NewMemoryRepository()
 	service := NewService(repository, engine, audit.NewService(auditRepository))
 	owner := identity.Subject{UserID: "read-owner", Username: "alice", Role: identity.RoleUser}
-	created, err := service.Create(context.Background(), owner, CreateInput{IdempotencyKey: "auditor-read", TaskType: "mcp_scan", Content: "scan"})
+	created, err := service.Create(context.Background(), owner, mcpRepositoryCreateInput("auditor-read"))
 	require.NoError(t, err)
 	engine.mu.Lock()
 	engine.status[created.EngineSessionID] = EngineStatus{State: EngineStateSucceeded}
@@ -1573,7 +1934,7 @@ func TestRunningTaskReconcilesOnlyThroughTrustedEngineEvent(t *testing.T) {
 	engine := &recordingEngine{}
 	service := NewService(repository, engine, audit.NewService(audit.NewMemoryRepository()))
 	owner := identity.Subject{UserID: "user-1", Username: "alice", Role: identity.RoleUser}
-	created, err := service.Create(context.Background(), owner, CreateInput{IdempotencyKey: "refresh", TaskType: "mcp_scan", Content: "scan"})
+	created, err := service.Create(context.Background(), owner, mcpRepositoryCreateInput("refresh"))
 	require.NoError(t, err)
 
 	engine.mu.Lock()
@@ -1599,7 +1960,7 @@ func TestPendingEngineReadbackDoesNotPretendSubmissionIsRunning(t *testing.T) {
 	taskID := uuid.NewSHA1(taskIDNamespace, []byte(owner.UserID+"\x00pending-readback")).String()
 	engine.status[taskID] = EngineStatus{State: EngineStatePending}
 
-	view, err := service.Create(context.Background(), owner, CreateInput{IdempotencyKey: "pending-readback", TaskType: "mcp_scan", Content: "scan"})
+	view, err := service.Create(context.Background(), owner, mcpRepositoryCreateInput("pending-readback"))
 	require.ErrorIs(t, err, ErrDispatchFailed)
 	assert.Equal(t, StatusDispatchFailed, view.Status)
 	assert.Equal(t, int64(MaxDispatchAttempts), engine.submits.Load())

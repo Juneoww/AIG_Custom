@@ -300,6 +300,44 @@ func TestTaskBrowserDetailUsesTaskTypeWhitelistAndDropsUnsafeFields(t *testing.T
 	}
 }
 
+func TestTaskDetailMCPBrowserSourceSummaryOnlyProjectsSafeEnum(t *testing.T) {
+	for _, test := range []struct {
+		name       string
+		params     json.RawMessage
+		wantSource string
+		wantThread bool
+	}{
+		{name: "repository", params: json.RawMessage(`{"source_kind":"repository","model_id":"private-model","thread":7}`), wantSource: "repository", wantThread: true},
+		{name: "service", params: json.RawMessage(`{"source_kind":"service","authorization_confirmed":true,"model_id":"private-model","thread":7}`), wantSource: "service", wantThread: true},
+		{name: "legacy missing source", params: json.RawMessage(`{"model_id":"private-model","thread":7}`), wantSource: "legacy_unknown", wantThread: true},
+		{name: "unknown source", params: json.RawMessage(`{"source_kind":"untrusted","thread":7}`), wantSource: "legacy_unknown", wantThread: true},
+		{name: "malformed params", params: json.RawMessage(`{`), wantSource: "legacy_unknown"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			detail := taskDetailOf(&Task{
+				ID: "mcp-browser-" + strings.ReplaceAll(test.name, " ", "-"), OwnerUsername: "alice", TaskType: "mcp_scan",
+				Content: "https://user:private-password@mcp.example.test/rpc?token=private-token", Params: test.params,
+				CountryIsoCode: "zh", Status: StatusRunning, CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC(),
+			})
+			encoded, err := json.Marshal(detail)
+			require.NoError(t, err)
+			var wire map[string]any
+			require.NoError(t, json.Unmarshal(encoded, &wire))
+			summary := wire["input_summary"].(map[string]any)
+			assert.Equal(t, test.wantSource, summary["source_kind"])
+			if test.wantThread {
+				assert.Equal(t, float64(7), summary["thread"])
+			} else {
+				assert.NotContains(t, summary, "thread")
+			}
+			assert.Equal(t, "zh", summary["language"])
+			for _, secret := range []string{"private-password", "private-token", "private-model", "authorization_confirmed", "https://user:"} {
+				assert.NotContains(t, string(encoded), secret)
+			}
+		})
+	}
+}
+
 func TestTaskAndViewDetailProjectionStayEquivalentAndSafe(t *testing.T) {
 	now := time.Date(2026, 8, 17, 10, 0, 0, 0, time.UTC)
 	task := &Task{

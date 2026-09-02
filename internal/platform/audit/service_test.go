@@ -144,6 +144,31 @@ func TestServiceRecordsQueryableSanitizedEvents(t *testing.T) {
 	assert.Contains(t, string(encoded), "typed-kept")
 }
 
+func TestSanitizedMetadataPreservesBooleanAuthorizationConfirmedOnly(t *testing.T) {
+	for _, test := range []struct {
+		name  string
+		key   string
+		input map[string]any
+		want  any
+	}{
+		{name: "true", key: "authorization_confirmed", input: map[string]any{"authorization_confirmed": true}, want: true},
+		{name: "false", key: "authorization_confirmed", input: map[string]any{"authorization_confirmed": false}, want: false},
+		{name: "string", key: "authorization_confirmed", input: map[string]any{"authorization_confirmed": "true"}, want: RedactedValue},
+		{name: "object", key: "authorization_confirmed", input: map[string]any{"authorization_confirmed": map[string]any{"value": true}}, want: RedactedValue},
+		{name: "array", key: "authorization_confirmed", input: map[string]any{"authorization_confirmed": []any{true}}, want: RedactedValue},
+		{name: "other authorization key", key: "authorization_status", input: map[string]any{"authorization_status": true}, want: RedactedValue},
+		{name: "case variant", key: "Authorization_Confirmed", input: map[string]any{"Authorization_Confirmed": true}, want: RedactedValue},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			metadata, err := sanitizedMetadata(test.input)
+			require.NoError(t, err)
+			decoded := map[string]any{}
+			require.NoError(t, json.Unmarshal(metadata, &decoded))
+			assert.Equal(t, test.want, decoded[test.key])
+		})
+	}
+}
+
 func TestAuditQueryIsReadOnlyForAdminAndAuditor(t *testing.T) {
 	service := NewService(NewMemoryRepository())
 	ctx := context.Background()

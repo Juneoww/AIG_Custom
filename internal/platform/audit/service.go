@@ -518,6 +518,12 @@ func sanitizeMap(input map[string]any) map[string]any {
 	}
 	out := make(map[string]any, len(input))
 	for key, value := range input {
+		if key == "authorization_confirmed" {
+			if confirmed, ok := value.(bool); ok {
+				out[key] = confirmed
+				continue
+			}
+		}
 		if sensitiveKey(key) {
 			out[key] = RedactedValue
 			continue
