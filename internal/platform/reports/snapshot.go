@@ -98,6 +98,7 @@ type DashboardTaskVerifier func(context.Context, string, string) (bool, error)
 const (
 	dashboardMaxRiskCount     = 1<<31 - 1
 	mcpWorkbenchMaxHighlights = 5
+	mcpWorkbenchBatchSize     = 64
 	mcpWorkbenchSummaryRunes  = 160
 	mcpWorkbenchSummaryBytes  = 512
 	// This is Unicode White_Space, the same character set used by strings.TrimSpace.
@@ -294,38 +295,52 @@ func (repository *GormRepository) MCPWorkbench(ctx context.Context, query MCPWor
 	if err := validateMCPWorkbenchQuery(query); err != nil {
 		return MCPWorkbenchProjection{}, err
 	}
-	lowerBound, upperBound := mcpWorkbenchWindow(query.Now)
-	type record struct {
-		ReportID    string          `gorm:"column:report_id"`
-		TaskID      string          `gorm:"column:task_id"`
-		TaskType    string          `gorm:"column:task_type"`
-		CompletedAt time.Time       `gorm:"column:completed_at"`
-		RiskSummary json.RawMessage `gorm:"column:risk_summary"`
-		RenderData  json.RawMessage `gorm:"column:render_data"`
+	if transaction, ok := txcontext.FromGorm(ctx); ok {
+		return repository.mcpWorkbenchWithDB(transaction.WithContext(ctx), query)
 	}
-	queryDB := txcontext.Gorm(ctx, repository.db).Table("report_snapshots AS reports").
-		Select("reports.id AS report_id, reports.task_id, reports.task_type, reports.completed_at, reports.risk_summary, reports.render_data").
-		Where("reports.task_type IN ?", mcpReportTaskTypes()).
-		Where("reports.completed_at >= ? AND reports.completed_at < ?", lowerBound, upperBound)
-	if query.OwnerUserID != "" {
-		queryDB = queryDB.Where("reports.owner_user_id = ?", query.OwnerUserID)
-	}
-	var records []record
-	if err := queryDB.Find(&records).Error; err != nil {
+	var projection MCPWorkbenchProjection
+	err := repository.db.WithContext(ctx).Transaction(func(transaction *gorm.DB) error {
+		var err error
+		projection, err = repository.mcpWorkbenchWithDB(transaction, query)
+		return err
+	}, &sql.TxOptions{Isolation: sql.LevelRepeatableRead, ReadOnly: true})
+	if err != nil {
 		return MCPWorkbenchProjection{}, err
 	}
-	reports := make([]mcpWorkbenchReport, 0, len(records))
-	for _, record := range records {
-		var risk RiskSummary
-		if json.Unmarshal(record.RiskSummary, &risk) != nil {
-			continue
-		}
-		reports = append(reports, mcpWorkbenchReport{
-			ReportID: record.ReportID, TaskID: record.TaskID, TaskType: record.TaskType,
-			CompletedAt: record.CompletedAt, Risk: risk, RenderData: append(json.RawMessage(nil), record.RenderData...),
-		})
+	return projection, nil
+}
+
+func (repository *GormRepository) mcpWorkbenchWithDB(db *gorm.DB, query MCPWorkbenchQuery) (MCPWorkbenchProjection, error) {
+	lowerBound, upperBound := mcpWorkbenchWindow(query.Now)
+	base := db.Table("report_snapshots AS reports").
+		Select("reports.id AS report_id, reports.task_id, reports.task_type, reports.completed_at, reports.risk_summary, reports.render_data").
+		Where("reports.task_type IN ?", mcpTaskTypeAliases()).
+		Where("reports.completed_at >= ? AND reports.completed_at < ?", lowerBound, upperBound)
+	if query.OwnerUserID != "" {
+		base = base.Where("reports.owner_user_id = ?", query.OwnerUserID)
 	}
-	return mcpWorkbenchProjectionOf(reports)
+	accumulator := newMCPWorkbenchAccumulator()
+	lastReportID := ""
+	for {
+		records := make([]mcpWorkbenchRecord, 0, mcpWorkbenchBatchSize)
+		batch := base.Session(&gorm.Session{}).Order("reports.id ASC").Limit(mcpWorkbenchBatchSize)
+		if lastReportID != "" {
+			batch = batch.Where("reports.id > ?", lastReportID)
+		}
+		if err := batch.Find(&records).Error; err != nil {
+			return MCPWorkbenchProjection{}, err
+		}
+		for index := range records {
+			if err := accumulator.addRecord(records[index]); err != nil {
+				return MCPWorkbenchProjection{}, err
+			}
+		}
+		if len(records) < mcpWorkbenchBatchSize {
+			break
+		}
+		lastReportID = records[len(records)-1].ReportID
+	}
+	return accumulator.result(), nil
 }
 
 func (repository *GormRepository) dashboardWithDB(db *gorm.DB, query DashboardQuery) (DashboardProjection, error) {
@@ -688,20 +703,32 @@ func (repository *MemoryRepository) MCPWorkbench(_ context.Context, query MCPWor
 	}
 	lowerBound, upperBound := mcpWorkbenchWindow(query.Now)
 	repository.mu.RLock()
-	reports := make([]mcpWorkbenchReport, 0, len(repository.byID))
+	accumulator := newMCPWorkbenchAccumulator()
 	for _, snapshot := range repository.byID {
-		if !isMCPReportTaskType(snapshot.TaskType) ||
+		if !isMCPTaskType(snapshot.TaskType) ||
 			query.OwnerUserID != "" && snapshot.OwnerUserID != query.OwnerUserID ||
 			snapshot.CompletedAt.Before(lowerBound) || !snapshot.CompletedAt.Before(upperBound) {
 			continue
 		}
-		reports = append(reports, mcpWorkbenchReport{
+		if err := accumulator.add(mcpWorkbenchReport{
 			ReportID: snapshot.ID, TaskID: snapshot.TaskID, TaskType: snapshot.TaskType,
-			CompletedAt: snapshot.CompletedAt, Risk: snapshot.Risk, RenderData: append(json.RawMessage(nil), snapshot.RenderData...),
-		})
+			CompletedAt: snapshot.CompletedAt, Risk: snapshot.Risk, RenderData: snapshot.RenderData,
+		}); err != nil {
+			repository.mu.RUnlock()
+			return MCPWorkbenchProjection{}, err
+		}
 	}
 	repository.mu.RUnlock()
-	return mcpWorkbenchProjectionOf(reports)
+	return accumulator.result(), nil
+}
+
+type mcpWorkbenchRecord struct {
+	ReportID    string          `gorm:"column:report_id"`
+	TaskID      string          `gorm:"column:task_id"`
+	TaskType    string          `gorm:"column:task_type"`
+	CompletedAt time.Time       `gorm:"column:completed_at"`
+	RiskSummary json.RawMessage `gorm:"column:risk_summary"`
+	RenderData  json.RawMessage `gorm:"column:render_data"`
 }
 
 type mcpWorkbenchReport struct {
@@ -713,19 +740,52 @@ type mcpWorkbenchReport struct {
 	RenderData  json.RawMessage
 }
 
-func mcpWorkbenchProjectionOf(reports []mcpWorkbenchReport) (MCPWorkbenchProjection, error) {
-	projection := MCPWorkbenchProjection{Highlights: make([]MCPRiskHighlight, 0)}
-	for _, report := range reports {
-		if !isMCPReportTaskType(report.TaskType) || !validMCPWorkbenchRisk(report.Risk) {
-			continue
-		}
-		if err := dashboardAccumulate(&projection.HighRisk, report.Risk.High); err != nil {
-			return MCPWorkbenchProjection{}, err
-		}
-		projection.Highlights = append(projection.Highlights, mcpWorkbenchHighlightsFor(report)...)
+type mcpWorkbenchAccumulator struct {
+	projection MCPWorkbenchProjection
+}
+
+func newMCPWorkbenchAccumulator() *mcpWorkbenchAccumulator {
+	return &mcpWorkbenchAccumulator{projection: MCPWorkbenchProjection{Highlights: make([]MCPRiskHighlight, 0, mcpWorkbenchMaxHighlights)}}
+}
+
+func (accumulator *mcpWorkbenchAccumulator) addRecord(record mcpWorkbenchRecord) error {
+	var risk RiskSummary
+	if json.Unmarshal(record.RiskSummary, &risk) != nil {
+		return nil
 	}
-	sort.SliceStable(projection.Highlights, func(left, right int) bool {
-		first, second := projection.Highlights[left], projection.Highlights[right]
+	return accumulator.add(mcpWorkbenchReport{
+		ReportID: record.ReportID, TaskID: record.TaskID, TaskType: record.TaskType,
+		CompletedAt: record.CompletedAt, Risk: risk, RenderData: record.RenderData,
+	})
+}
+
+func (accumulator *mcpWorkbenchAccumulator) add(report mcpWorkbenchReport) error {
+	if !isMCPTaskType(report.TaskType) || !validMCPWorkbenchRisk(report.Risk) {
+		return nil
+	}
+	if err := dashboardAccumulate(&accumulator.projection.HighRisk, report.Risk.High); err != nil {
+		return err
+	}
+	mcpWorkbenchVisitHighlights(report, accumulator.addHighlight)
+	return nil
+}
+
+func (accumulator *mcpWorkbenchAccumulator) addHighlight(highlight MCPRiskHighlight) {
+	accumulator.projection.Highlights = append(accumulator.projection.Highlights, highlight)
+	sortMCPWorkbenchHighlights(accumulator.projection.Highlights)
+	if len(accumulator.projection.Highlights) > mcpWorkbenchMaxHighlights {
+		accumulator.projection.Highlights = accumulator.projection.Highlights[:mcpWorkbenchMaxHighlights]
+	}
+}
+
+func (accumulator *mcpWorkbenchAccumulator) result() MCPWorkbenchProjection {
+	sortMCPWorkbenchHighlights(accumulator.projection.Highlights)
+	return accumulator.projection
+}
+
+func sortMCPWorkbenchHighlights(highlights []MCPRiskHighlight) {
+	sort.SliceStable(highlights, func(left, right int) bool {
+		first, second := highlights[left], highlights[right]
 		if mcpWorkbenchSeverityRank(first.Severity) != mcpWorkbenchSeverityRank(second.Severity) {
 			return mcpWorkbenchSeverityRank(first.Severity) < mcpWorkbenchSeverityRank(second.Severity)
 		}
@@ -737,35 +797,33 @@ func mcpWorkbenchProjectionOf(reports []mcpWorkbenchReport) (MCPWorkbenchProject
 		}
 		return first.Summary < second.Summary
 	})
-	if len(projection.Highlights) > mcpWorkbenchMaxHighlights {
-		projection.Highlights = projection.Highlights[:mcpWorkbenchMaxHighlights]
-	}
-	return projection, nil
 }
 
-func mcpWorkbenchHighlightsFor(report mcpWorkbenchReport) []MCPRiskHighlight {
+func mcpWorkbenchVisitHighlights(report mcpWorkbenchReport, visit func(MCPRiskHighlight)) {
 	var header mcpWorkbenchRenderHeader
 	if json.Unmarshal(report.RenderData, &header) == nil && validMCPWorkbenchRenderHeader(report, header) {
 		var safeRender mcpWorkbenchSafeRender
 		if json.Unmarshal(report.RenderData, &safeRender) != nil {
-			return genericMCPWorkbenchHighlights(report)
+			mcpWorkbenchVisitGenericHighlights(report, visit)
+			return
 		}
-		highlights := make([]MCPRiskHighlight, 0, len(safeRender.TechnicalFindings))
+		found := false
 		for _, finding := range safeRender.TechnicalFindings {
 			if !validMCPFindingCategory(finding.Category) || !validMCPFindingSeverity(finding.Severity) {
 				continue
 			}
-			highlights = append(highlights, MCPRiskHighlight{
+			found = true
+			visit(MCPRiskHighlight{
 				ReportID: report.ReportID, TaskID: report.TaskID, Severity: finding.Severity, Category: finding.Category,
 				Summary:     mcpWorkbenchFindingSummary(finding.Category, finding.Severity),
 				CompletedAt: report.CompletedAt.UTC(),
 			})
 		}
-		if len(highlights) > 0 {
-			return highlights
+		if found {
+			return
 		}
 	}
-	return genericMCPWorkbenchHighlights(report)
+	mcpWorkbenchVisitGenericHighlights(report, visit)
 }
 
 // mcpWorkbenchRenderHeader intentionally omits TechnicalFindings so legacy
@@ -792,8 +850,7 @@ func validMCPWorkbenchRenderHeader(report mcpWorkbenchReport, header mcpWorkbenc
 		header.CompletedAt.UTC().Equal(report.CompletedAt.UTC()) && header.Risk == report.Risk
 }
 
-func genericMCPWorkbenchHighlights(report mcpWorkbenchReport) []MCPRiskHighlight {
-	highlights := make([]MCPRiskHighlight, 0, 3)
+func mcpWorkbenchVisitGenericHighlights(report mcpWorkbenchReport, visit func(MCPRiskHighlight)) {
 	for _, item := range []struct {
 		severity string
 		count    int
@@ -806,13 +863,12 @@ func genericMCPWorkbenchHighlights(report mcpWorkbenchReport) []MCPRiskHighlight
 		if item.count == 0 {
 			continue
 		}
-		highlights = append(highlights, MCPRiskHighlight{
+		visit(MCPRiskHighlight{
 			ReportID: report.ReportID, TaskID: report.TaskID, Severity: item.severity, Category: "other",
 			Summary:     safeFindingText(fmt.Sprintf("该 MCP 报告包含 %d 项%s风险发现。", item.count, item.label), "MCP 安全发现", mcpWorkbenchSummaryRunes, mcpWorkbenchSummaryBytes),
 			CompletedAt: report.CompletedAt.UTC(),
 		})
 	}
-	return highlights
 }
 
 func mcpWorkbenchFindingSummary(category, severity string) string {
@@ -872,15 +928,6 @@ func mcpWorkbenchSeverityRank(value string) int {
 
 func validMCPWorkbenchRisk(risk RiskSummary) bool {
 	return risk.High >= 0 && risk.Medium >= 0 && risk.Low >= 0
-}
-
-func isMCPReportTaskType(taskType string) bool {
-	kind, ok := riskTaskType(taskType)
-	return ok && kind == "mcp"
-}
-
-func mcpReportTaskTypes() []string {
-	return []string{"Mcp-Scan", "mcp_scan"}
 }
 
 func mcpWorkbenchWindow(now time.Time) (time.Time, time.Time) {

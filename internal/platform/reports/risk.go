@@ -12,6 +12,8 @@ const mappingVersion = "risk-v2"
 
 var ErrInvalidFindings = errors.New("扫描结果格式无效")
 
+var canonicalMCPTaskTypeAliases = [...]string{"Mcp-Scan", "mcp_scan"}
+
 type RiskSummary struct {
 	MappingVersion string `json:"mapping_version"`
 	High           int    `json:"high"`
@@ -44,11 +46,12 @@ func MapRisk(taskType string, raw []byte) (RiskSummary, error) {
 }
 
 func riskTaskType(taskType string) (string, bool) {
+	if isMCPTaskType(taskType) {
+		return "mcp", true
+	}
 	switch taskType {
 	case "AI-Infra-Scan", "ai_infra_scan":
 		return "ai", true
-	case "Mcp-Scan", "mcp_scan":
-		return "mcp", true
 	case "Agent-Scan", "agent_scan":
 		return "agent", true
 	case "Model-Redteam-Report", "model_redteam_report":
@@ -56,6 +59,19 @@ func riskTaskType(taskType string) (string, bool) {
 	default:
 		return "", false
 	}
+}
+
+func mcpTaskTypeAliases() []string {
+	return append([]string(nil), canonicalMCPTaskTypeAliases[:]...)
+}
+
+func isMCPTaskType(taskType string) bool {
+	for _, alias := range canonicalMCPTaskTypeAliases {
+		if taskType == alias {
+			return true
+		}
+	}
+	return false
 }
 
 func eventResult(raw []byte) (json.RawMessage, error) {

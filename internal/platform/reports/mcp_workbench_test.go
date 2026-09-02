@@ -3,6 +3,9 @@ package reports
 import (
 	"context"
 	"encoding/json"
+	"fmt"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -10,8 +13,32 @@ import (
 	"github.com/Juneoww/AIG_Custom/pkg/database"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"gorm.io/gorm"
 	"gorm.io/gorm/logger"
 )
+
+type mcpWorkbenchBarrierLogger struct {
+	logger.Interface
+	firstBatch chan struct{}
+	resume     chan struct{}
+	once       sync.Once
+}
+
+func (barrier *mcpWorkbenchBarrierLogger) Trace(ctx context.Context, begin time.Time, fc func() (string, int64), err error) {
+	statement, rows := fc()
+	wait := false
+	lowerStatement := strings.ToLower(statement)
+	if strings.Contains(lowerStatement, "report_snapshots") && strings.Contains(lowerStatement, "reports.task_type") && strings.Contains(lowerStatement, "limit 64") {
+		barrier.once.Do(func() {
+			close(barrier.firstBatch)
+			wait = true
+		})
+	}
+	if wait {
+		<-barrier.resume
+	}
+	barrier.Interface.Trace(ctx, begin, func() (string, int64) { return statement, rows }, err)
+}
 
 func TestMCPWorkbenchProjectionScopesUTCDayWindowSortsAndCapsWithoutRawResult(t *testing.T) {
 	ctx := context.Background()
@@ -203,6 +230,147 @@ func TestGormMCPWorkbenchProjectionMatchesMemoryAndNeverReadsRawResult(t *testin
 	assert.Contains(t, statement, "render_data")
 	assert.NotContains(t, statement, "raw_result")
 	assert.NotContains(t, string(mustJSON(t, got)), "raw-result-never-read-sentinel")
+}
+
+func TestGormMCPWorkbenchBatchesHighCardinalityProjection(t *testing.T) {
+	const reportCount = 66
+	const expectedBatchSize = 64
+	ctx := context.Background()
+	db := openReportsTestDB(t)
+	require.NoError(t, database.Migrate(db))
+	gormRepository := NewGormRepository(db)
+	memoryRepository := NewMemoryRepository()
+	now := time.Date(2026, 8, 17, 12, 0, 0, 0, time.UTC)
+	aliases := mcpTaskTypeAliases()
+	require.Equal(t, []string{"Mcp-Scan", "mcp_scan"}, aliases)
+	for _, alias := range aliases {
+		kind, ok := riskTaskType(alias)
+		require.True(t, ok, alias)
+		assert.Equal(t, "mcp", kind)
+	}
+
+	for index := 0; index < reportCount; index++ {
+		taskType := aliases[index%len(aliases)]
+		snapshot := mcpWorkbenchSnapshot(t,
+			fmt.Sprintf("batch-%03d", index),
+			fmt.Sprintf("task-batch-%03d", index),
+			"alice",
+			taskType,
+			now,
+			RiskSummary{High: 1},
+			[]TechnicalFinding{{Title: "scanner-controlled-title", Category: "command_file", Severity: "high"}},
+			"report-render-v2",
+		)
+		require.NoError(t, memoryRepository.Create(ctx, snapshot))
+		require.NoError(t, gormRepository.Create(ctx, snapshot))
+	}
+
+	query := MCPWorkbenchQuery{OwnerUserID: "alice", Now: now}
+	want, err := memoryRepository.MCPWorkbench(ctx, query)
+	require.NoError(t, err)
+	assert.Equal(t, reportCount, want.HighRisk)
+	require.Len(t, want.Highlights, 5)
+	assert.Equal(t, []string{"batch-065", "batch-064", "batch-063", "batch-062", "batch-061"}, mcpHighlightReportIDs(want.Highlights))
+
+	capture := &queryCaptureLogger{Interface: logger.Default.LogMode(logger.Silent)}
+	db.Config.Logger = capture
+	got, err := gormRepository.MCPWorkbench(ctx, query)
+	require.NoError(t, err)
+	assert.Equal(t, want, got)
+	assert.Equal(t, reportCount, got.HighRisk)
+	require.Len(t, got.Highlights, 5)
+	require.GreaterOrEqual(t, len(capture.statements), 2, "high-cardinality projection must use bounded batches")
+	for _, statement := range capture.statements {
+		assert.Contains(t, statement, fmt.Sprintf("limit %d", expectedBatchSize))
+		assert.Contains(t, statement, "reports.task_type in")
+		assert.NotContains(t, statement, "raw_result")
+	}
+}
+
+func TestGormMCPWorkbenchUsesOneReadOnlyRepeatableReadSnapshot(t *testing.T) {
+	const existingReportCount = 65
+	ctx := context.Background()
+	db := openReportsTestDB(t)
+	require.NoError(t, database.Migrate(db))
+	now := time.Date(2026, 8, 17, 12, 0, 0, 0, time.UTC)
+	for index := 0; index < existingReportCount; index++ {
+		snapshot := mcpWorkbenchSnapshot(t,
+			fmt.Sprintf("mcp-tx-%03d", index),
+			fmt.Sprintf("task-mcp-tx-%03d", index),
+			"alice",
+			mcpTaskTypeAliases()[index%len(mcpTaskTypeAliases())],
+			now,
+			RiskSummary{High: 1},
+			[]TechnicalFinding{{Category: "command_file", Severity: "high"}},
+			"report-render-v2",
+		)
+		require.NoError(t, NewGormRepository(db).Create(ctx, snapshot))
+	}
+
+	barrier := &mcpWorkbenchBarrierLogger{
+		Interface: logger.Default.LogMode(logger.Silent), firstBatch: make(chan struct{}), resume: make(chan struct{}),
+	}
+	defer func() {
+		select {
+		case <-barrier.resume:
+		default:
+			close(barrier.resume)
+		}
+	}()
+	readDB := db.Session(&gorm.Session{Logger: barrier})
+	var settings struct {
+		isolation string
+		readOnly  string
+		err       error
+	}
+	var settingsOnce sync.Once
+	captureSettings := func(queryDB *gorm.DB) {
+		settingsOnce.Do(func() {
+			settings.err = queryDB.Statement.ConnPool.QueryRowContext(queryDB.Statement.Context, "SHOW transaction_isolation").Scan(&settings.isolation)
+			if settings.err == nil {
+				settings.err = queryDB.Statement.ConnPool.QueryRowContext(queryDB.Statement.Context, "SHOW transaction_read_only").Scan(&settings.readOnly)
+			}
+		})
+	}
+	require.NoError(t, readDB.Callback().Query().Before("gorm:query").Register("test:mcp_workbench_transaction_settings", captureSettings))
+
+	type workbenchResult struct {
+		projection MCPWorkbenchProjection
+		err        error
+	}
+	result := make(chan workbenchResult, 1)
+	query := MCPWorkbenchQuery{OwnerUserID: "alice", Now: now}
+	go func() {
+		projection, err := NewGormRepository(readDB).MCPWorkbench(ctx, query)
+		result <- workbenchResult{projection: projection, err: err}
+	}()
+	select {
+	case <-barrier.firstBatch:
+	case completed := <-result:
+		require.NoError(t, completed.err)
+		t.Fatal("MCP workbench completed before first-batch barrier")
+	}
+
+	concurrent := mcpWorkbenchSnapshot(t,
+		"mcp-tx-999", "task-mcp-tx-999", "alice", "mcp_scan", now,
+		RiskSummary{High: 1}, []TechnicalFinding{{Category: "command_file", Severity: "high"}}, "report-render-v2",
+	)
+	writerDB := db.Session(&gorm.Session{Logger: logger.Default.LogMode(logger.Silent)})
+	require.NoError(t, NewGormRepository(writerDB).Create(ctx, concurrent))
+	close(barrier.resume)
+
+	completed := <-result
+	require.NoError(t, completed.err)
+	require.NoError(t, settings.err)
+	assert.Equal(t, "repeatable read", settings.isolation)
+	assert.Equal(t, "on", settings.readOnly)
+	assert.Equal(t, existingReportCount, completed.projection.HighRisk)
+	assert.NotContains(t, mcpHighlightReportIDs(completed.projection.Highlights), concurrent.ID)
+
+	next, err := NewGormRepository(writerDB).MCPWorkbench(ctx, query)
+	require.NoError(t, err)
+	assert.Equal(t, existingReportCount+1, next.HighRisk)
+	assert.Contains(t, mcpHighlightReportIDs(next.Highlights), concurrent.ID)
 }
 
 func mcpWorkbenchSnapshot(t *testing.T, reportID, taskID, owner, taskType string, completedAt time.Time, risk RiskSummary, findings []TechnicalFinding, renderVersion string) *Snapshot {
