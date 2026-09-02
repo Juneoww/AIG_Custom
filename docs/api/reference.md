@@ -64,12 +64,25 @@ AIG Custom Platform 是基于 Tencent Zhuque Lab AI-Infra-Guard（https://github
 | 端点 | Envelope | Scope 与安全 item 契约 |
 |---|---|---|
 | `GET /api/v1/platform/tasks` | `TaskListResponse` | 普通用户仅本人；审计员/管理员全局。`TaskSummary` 仅含 ID、owner 展示名、规范化类型/状态与时间戳。可选 `status` 与 `task_type` 仅接受文档列出的精确规范值，并在 total 与分页前由服务端筛选；非法值返回固定 `400`。 |
+| `GET /api/v1/platform/mcp-workbench` | `mcpworkbench.View` | 只读 MCP 安全投影。普通用户仅本人任务/报告；审计员/管理员全局。它不是原始报告、任务、目标或日志 API。 |
 | `GET /api/v1/platform/reports` | `ReportListResponse` | 普通用户仅本人；审计员/管理员全局。item 是不可变安全摘要。 |
 | `GET /api/v1/platform/admin/users` | `UserListResponse` | 仅管理员；不含任何凭据材料。 |
 | `GET /api/v1/platform/admin/audit-events` | `AuditListResponse` | 仅审计员/管理员；metadata 递归脱敏。 |
 | `GET /api/v1/platform/models` | `CatalogPage` | 普通用户看全局和本人私有 platform 行；审计员只读全局行；管理员看全部 platform 行。token 始终为 `********`，`source` 为 `platform` 或 `yaml`，并显式返回 `read_only`。只读 YAML 行与同 ID platform 行发生碰撞时仍分别保留；目录加载失败时失败关闭。 |
 
 `GET /api/v1/platform/tasks/{taskID}` 返回 `TaskDetail`，其 `input_summary` 仅含有界展示元数据。普通用户只看本人任务，审计员/管理员全局只读；任务不存在或对普通用户不可见时返回 `404`。`GET /api/v1/platform/tasks/{taskID}/result` 已退役：通过认证与首次改密门禁后恒定返回 `410 Gone`，且绝不读取引擎输出。
+
+### 受治理的 MCP 扫描创建
+
+当 `POST /api/v1/platform/tasks` 的 `task_type="mcp_scan"` 时，`params.source_kind` 必填且只能是 `repository` 或 `service`。`repository` 扫描只能二选一使用合法 Git 仓库引用或 owner 范围内 ready 的代码附件，且不得携带 `authorization_confirmed`。`service` 扫描使用受控 HTTP(S) 服务端点，不能携带代码附件，并要求 `params.authorization_confirmed=true`。服务端拒绝未知 MCP 参数字段和嵌套凭据。任务创建审计元数据仅记录来源类别与布尔授权确认，不记录也不返回仓库引用、服务端点、凭据或授权材料。历史已持久化但缺少 `source_kind` 的 MCP 任务仍可读，只显示为 `legacy_unknown`。
+
+### MCP 安全扫描工作台
+
+`GET /api/v1/platform/mcp-workbench` 是只读、由服务端拥有的安全投影。它使用固定 30 个 UTC 日窗口 `[utcDay(now)-29d, utcDay(now)+1d)`：普通用户只读取本人任务/报告范围，审计员与管理员读取全局范围。`running` 计数窗口内 `created_at` 的 `dispatching`/`running` MCP 任务，`pending` 计数 `pending`/`dispatch_unknown` MCP 任务；`completed_30d` 计数窗口内 `completed_at` 的 MCP 报告，`high_risk` 汇总这些报告的安全高风险计数。`active_tasks` 最多 10 项，按 `updated_at DESC, id DESC` 排序的非终态任务；`recent_risks` 最多 5 项，按高、中、低，再按 `completed_at DESC`、报告 ID 倒序排列。
+
+响应顶层精确只有 `metrics`、`active_tasks` 与 `recent_risks`。活跃项只含 `task_id`、服务端生成的泛化 `label`、`source_kind`、可空 `phase`、`status` 与 `updated_at`。风险项只含 `report_id`、`task_id`、`severity`、`category`、有界泛化 `summary` 与 `completed_at`。`source_kind` 仅为 `repository`、`service` 或 `legacy_unknown`；风险 `category` 只能是固定类别或 `other`。历史报告缺少可信类别/严重度时，服务端只用已存风险计数生成泛化 `other` 摘要。该端点绝不返回请求 `content`、仓库或服务端点、原始结果、扫描器原始发现、模型 ID、headers、授权材料、附件引用、参数或日志。
+
+成功返回 `200`；未认证调用方返回 `401`；首次改密门禁或不支持角色返回 `403`；聚合失败返回脱敏 `500`。它没有变更、分页、筛选或原始详情模式。
 
 ### 任务创建响应的安全加固迁移
 

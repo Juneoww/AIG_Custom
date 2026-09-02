@@ -64,12 +64,25 @@ The list endpoints use explicit envelopes with `items`, int64 `total`, `page`, a
 | Endpoint | Envelope | Scope and safe item contract |
 |---|---|---|
 | `GET /api/v1/platform/tasks` | `TaskListResponse` | Users: own tasks; auditors/admins: global. `TaskSummary` has only ID, owner display name, canonical type/status, and timestamps. Optional `status` and `task_type` accept only the documented exact canonical values and are filtered server-side before total and pagination; invalid values return fixed `400`. |
+| `GET /api/v1/platform/mcp-workbench` | `mcpworkbench.View` | Read-only safe MCP projection. Users: own tasks/reports; auditors/admins: global. It is not a raw report, task, target, or log API. |
 | `GET /api/v1/platform/reports` | `ReportListResponse` | Users: own reports; auditors/admins: global. Each item is an immutable safe summary. |
 | `GET /api/v1/platform/admin/users` | `UserListResponse` | Administrator only. No credential material. |
 | `GET /api/v1/platform/admin/audit-events` | `AuditListResponse` | Auditors/admins only. Metadata is recursively sanitized. |
 | `GET /api/v1/platform/models` | `CatalogPage` | Users see global plus own private platform rows; auditors see global rows read-only; admins see all platform rows. Tokens are always `********`; `source` is `platform` or `yaml`, and `read_only` is explicit. Read-only YAML rows remain distinct when an ID collides with a platform row and catalog loading fails closed. |
 
 `GET /api/v1/platform/tasks/{taskID}` returns `TaskDetail`, whose `input_summary` contains only bounded display metadata. A user sees only their own task; auditors/admins have global read access; absent or user-invisible tasks return `404`. `GET /api/v1/platform/tasks/{taskID}/result` is retired: after authentication and the password-change gate it always returns `410 Gone` and never reads engine output.
+
+### Governed MCP scan creation
+
+For `POST /api/v1/platform/tasks` with `task_type="mcp_scan"`, `params.source_kind` is required and is exactly `repository` or `service`. A `repository` scan uses exactly one of a valid Git repository reference or owner-scoped ready code attachments; it must not include `authorization_confirmed`. A `service` scan uses a controlled HTTP(S) service endpoint, accepts no code attachments, and requires `params.authorization_confirmed=true`. The server rejects unknown MCP parameter fields and nested credentials. The task-created audit metadata records only the source category and the Boolean authorization confirmation; it never records or returns the repository reference, service endpoint, credentials, or authorization material. Persisted historical MCP tasks without `source_kind` remain readable and are shown only as `legacy_unknown`.
+
+### MCP scan workbench
+
+`GET /api/v1/platform/mcp-workbench` is a read-only server-owned safe projection. It uses one fixed 30 UTC-day window, `[utcDay(now)-29d, utcDay(now)+1d)`: ordinary users receive their own task/report scope, while auditors and administrators receive the global scope. `running` counts `dispatching`/`running` MCP tasks and `pending` counts `pending`/`dispatch_unknown` MCP tasks whose `created_at` is in that window. `completed_30d` counts MCP reports and `high_risk` sums their safe high-risk counts whose `completed_at` is in that window. `active_tasks` contains at most 10 nonterminal tasks ordered by `updated_at DESC, id DESC`. `recent_risks` contains at most 5 items ordered high, medium, low, then `completed_at DESC`, then report ID descending.
+
+The exact response has only `metrics`, `active_tasks`, and `recent_risks`. An active item has only `task_id`, a generic server-generated `label`, `source_kind`, nullable `phase`, `status`, and `updated_at`. A risk item has only `report_id`, `task_id`, `severity`, `category`, bounded generic `summary`, and `completed_at`. `source_kind` is `repository`, `service`, or `legacy_unknown`; risk `category` is one of the fixed categories or `other`. For a historical report without trusted category/severity fields, the server emits a generic `other` highlight derived only from stored risk counts. The endpoint never returns request `content`, a repository or service endpoint, raw result, raw scanner finding, model ID, headers, authorization material, attachment reference, parameters, or logs.
+
+It returns `200`, `401` for an unauthenticated caller, `403` for the password-change gate or unsupported role, or a sanitized `500`; it has no mutation, pagination, filtering, or raw-detail mode.
 
 ### Security-hardening task-create response migration
 

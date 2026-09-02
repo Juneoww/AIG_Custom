@@ -697,6 +697,103 @@ func TestSwaggerDocumentsTaskCreateAndLegacySecurityCorrections(t *testing.T) {
 	}
 }
 
+func TestSwaggerDocumentsGovernedMCPCreateAndWorkbenchContract(t *testing.T) {
+	for name, document := range loadSwaggerDocuments(t) {
+		t.Run(name, func(t *testing.T) {
+			const createPath = "/api/v1/platform/tasks"
+			createDescription := strings.ToLower(swaggerValue(t, document, "paths", createPath, "post", "description").(string))
+			for _, term := range []string{"mcp_scan", "source_kind", "repository", "service", "authorization_confirmed", "audit"} {
+				if !strings.Contains(createDescription, term) {
+					t.Errorf("governed MCP create description lacks %q", term)
+				}
+			}
+
+			params := swaggerValue(t, swaggerBodyParameterSchema(t, document, createPath, "post"), "properties", "params").(map[string]interface{})
+			assertSwaggerStringEnum(t, swaggerValue(t, params, "properties").(map[string]interface{}), "source_kind", []string{"repository", "service"})
+			authorization := swaggerValue(t, params, "properties", "authorization_confirmed").(map[string]interface{})
+			if authorization["type"] != "boolean" {
+				t.Errorf("authorization_confirmed type = %v, want boolean", authorization["type"])
+			}
+			for _, term := range []string{"service", "true", "repository"} {
+				if !strings.Contains(strings.ToLower(authorization["description"].(string)), term) {
+					t.Errorf("authorization_confirmed description lacks %q", term)
+				}
+			}
+			assertSwaggerStringEnum(t, swaggerValue(t, document, "definitions", "tasks.TaskInputSummary", "properties").(map[string]interface{}), "source_kind", []string{"repository", "service", "legacy_unknown"})
+
+			const workbenchPath = "/api/v1/platform/mcp-workbench"
+			for _, status := range []string{"200", "401", "403", "500"} {
+				_ = swaggerValue(t, document, "paths", workbenchPath, "get", "responses", status)
+			}
+			if got := swaggerNestedRef(t, swaggerValue(t, document, "paths", workbenchPath, "get", "responses", "200", "schema")); got != "#/definitions/mcpworkbench.View" {
+				t.Errorf("MCP workbench response schema = %q, want safe View", got)
+			}
+			workbenchDescription := strings.ToLower(swaggerValue(t, document, "paths", workbenchPath, "get", "description").(string))
+			for _, term := range []string{"read-only", "30", "utc", "created_at", "completed_at", "users", "auditors", "administrators", "10", "5", "legacy_unknown", "other", "raw"} {
+				if !strings.Contains(workbenchDescription, term) {
+					t.Errorf("MCP workbench description lacks %q", term)
+				}
+			}
+
+			assertExactProperties(t, document, "mcpworkbench.View", "metrics", "active_tasks", "recent_risks")
+			assertExactProperties(t, document, "mcpworkbench.Metrics", "running", "pending", "high_risk", "completed_30d")
+			assertExactProperties(t, document, "mcpworkbench.ActiveTask", "task_id", "label", "source_kind", "phase", "status", "updated_at")
+			assertExactProperties(t, document, "mcpworkbench.RecentRisk", "report_id", "task_id", "severity", "category", "summary", "completed_at")
+			assertSwaggerStringEnum(t, swaggerValue(t, document, "definitions", "mcpworkbench.ActiveTask", "properties").(map[string]interface{}), "source_kind", []string{"repository", "service", "legacy_unknown"})
+			assertSwaggerStringEnum(t, swaggerValue(t, document, "definitions", "mcpworkbench.ActiveTask", "properties").(map[string]interface{}), "status", []string{"pending", "dispatching", "running", "dispatch_failed", "dispatch_unknown"})
+			assertSwaggerStringEnum(t, swaggerValue(t, document, "definitions", "mcpworkbench.RecentRisk", "properties").(map[string]interface{}), "severity", []string{"high", "medium", "low"})
+			assertSwaggerStringEnum(t, swaggerValue(t, document, "definitions", "mcpworkbench.RecentRisk", "properties").(map[string]interface{}), "category", []string{"dangerous_tool", "command_file", "authorization", "data_leakage", "tool_poisoning", "skill_mismatch", "other"})
+			if got := swaggerValue(t, document, "definitions", "mcpworkbench.RecentRisk", "properties", "summary", "maxLength"); got != float64(160) && got != 160 {
+				t.Errorf("MCP workbench summary maxLength = %v, want 160", got)
+			}
+			if got := swaggerValue(t, document, "definitions", "mcpworkbench.ActiveTask", "properties", "phase", "x-nullable"); got != true {
+				t.Errorf("MCP workbench phase x-nullable = %v, want true", got)
+			}
+
+			for _, definition := range []string{"mcpworkbench.View", "mcpworkbench.Metrics", "mcpworkbench.ActiveTask", "mcpworkbench.RecentRisk"} {
+				properties := swaggerValue(t, document, "definitions", definition, "properties").(map[string]interface{})
+				for _, forbidden := range []string{"content", "endpoint", "raw_result", "render_data", "model_id", "headers", "params", "authorization_confirmed", "attachment_ids", "owner"} {
+					if _, exists := properties[forbidden]; exists {
+						t.Errorf("MCP workbench definition %s exposes forbidden %s", definition, forbidden)
+					}
+				}
+			}
+		})
+	}
+
+	for _, guide := range []struct {
+		path     string
+		required []string
+	}{
+		{
+			path: "../../docs/api/reference.en.md",
+			required: []string{
+				"GET /api/v1/platform/mcp-workbench", "source_kind", "authorization_confirmed", "fixed 30 UTC-day window",
+				"created_at", "completed_at", "legacy_unknown", "other", "at most 10", "at most 5", "read-only",
+				"raw result", "endpoint", "model ID", "headers",
+			},
+		},
+		{
+			path: "../../docs/api/reference.md",
+			required: []string{
+				"GET /api/v1/platform/mcp-workbench", "source_kind", "authorization_confirmed", "固定 30 个 UTC 日窗口",
+				"created_at", "completed_at", "legacy_unknown", "other", "最多 10", "最多 5", "只读",
+				"原始结果", "端点", "模型 ID", "headers",
+			},
+		},
+	} {
+		contents, err := os.ReadFile(guide.path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, required := range guide.required {
+			if !strings.Contains(string(contents), required) {
+				t.Errorf("%s does not document %q", guide.path, required)
+			}
+		}
+	}
+}
+
 func TestSwaggerDocumentsTaskListExactFilters(t *testing.T) {
 	for name, document := range loadSwaggerDocuments(t) {
 		t.Run(name, func(t *testing.T) {

@@ -390,6 +390,122 @@ definitions:
     - token
     - temporary_password
     type: object
+  mcpworkbench.ActiveTask:
+    description: Safe active MCP task projection. It has no request content, target, parameters, attachment, identity, or engine fields.
+    properties:
+      label:
+        description: Server-generated generic label using only an opaque task ID prefix.
+        type: string
+      phase:
+        description: Always null until the platform has a trusted stage-event source; it is never inferred from task status.
+        type: string
+        x-nullable: true
+      source_kind:
+        description: Server-decoded MCP source category; persisted legacy values fall back to legacy_unknown.
+        enum:
+        - repository
+        - service
+        - legacy_unknown
+        type: string
+      status:
+        enum:
+        - pending
+        - dispatching
+        - running
+        - dispatch_failed
+        - dispatch_unknown
+        type: string
+      task_id:
+        description: Opaque platform task identifier.
+        type: string
+      updated_at:
+        format: date-time
+        type: string
+    required:
+    - task_id
+    - label
+    - source_kind
+    - phase
+    - status
+    - updated_at
+    type: object
+  mcpworkbench.Metrics:
+    description: Fixed MCP workbench counters for the shared thirty UTC-day window.
+    properties:
+      completed_30d:
+        minimum: 0
+        type: integer
+      high_risk:
+        minimum: 0
+        type: integer
+      pending:
+        minimum: 0
+        type: integer
+      running:
+        minimum: 0
+        type: integer
+    required:
+    - running
+    - pending
+    - high_risk
+    - completed_30d
+    type: object
+  mcpworkbench.RecentRisk:
+    description: Safe server-derived MCP risk highlight; it omits raw results, scanner text, evidence, impact, remediation, and render artifacts.
+    properties:
+      category:
+        enum:
+        - dangerous_tool
+        - command_file
+        - authorization
+        - data_leakage
+        - tool_poisoning
+        - skill_mismatch
+        - other
+        type: string
+      completed_at:
+        format: date-time
+        type: string
+      report_id:
+        type: string
+      severity:
+        enum:
+        - high
+        - medium
+        - low
+        type: string
+      summary:
+        description: Server-owned generic summary derived only from fixed category and severity; at most 160 Unicode code points.
+        maxLength: 160
+        type: string
+      task_id:
+        type: string
+    required:
+    - report_id
+    - task_id
+    - severity
+    - category
+    - summary
+    - completed_at
+    type: object
+  mcpworkbench.View:
+    description: Complete read-only safe projection for the MCP scan workbench.
+    properties:
+      active_tasks:
+        items:
+          $ref: '#/definitions/mcpworkbench.ActiveTask'
+        type: array
+      metrics:
+        $ref: '#/definitions/mcpworkbench.Metrics'
+      recent_risks:
+        items:
+          $ref: '#/definitions/mcpworkbench.RecentRisk'
+        type: array
+    required:
+    - metrics
+    - active_tasks
+    - recent_risks
+    type: object
   models.CatalogPage:
     description: Paginated governed model catalog containing encrypted platform rows followed by immutable YAML rows.
     properties:
@@ -950,6 +1066,13 @@ definitions:
         - fixed_ai
         - full_tcp
         type: string
+      source_kind:
+        description: Server-decoded MCP source category. Missing or unrecognized legacy persisted values are legacy_unknown; raw source content is never returned.
+        enum:
+        - repository
+        - service
+        - legacy_unknown
+        type: string
       target_count:
         minimum: 1
         type: integer
@@ -1229,6 +1352,25 @@ paths:
       summary: Get governed enterprise dashboard
       tags:
       - platform-dashboard
+  /api/v1/platform/mcp-workbench:
+    get:
+      description: Read-only MCP scan workbench projection. It uses one fixed 30 UTC-day window [utcDay(now)-29d, utcDay(now)+1d). Users receive only their own tasks and reports; auditors and administrators receive global scope. running counts dispatching/running MCP tasks and pending counts pending/dispatch_unknown MCP tasks by created_at. completed_30d counts MCP reports and high_risk sums their safe high-risk counts by completed_at. active_tasks contains at most 10 nonterminal tasks ordered updated_at DESC then task ID DESC. recent_risks contains at most 5 safe highlights ordered high, medium, low, then completed_at DESC and report ID DESC. Missing or unrecognized legacy source values are legacy_unknown. Legacy reports lacking trusted category/severity use generic other highlights derived only from risk counts. The response is a server-owned whitelist and never returns raw results, scanner findings, request content, repository or service endpoints, model IDs, authorization data, headers, attachments, parameters, or logs.
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: Authorized safe MCP workbench projection.
+          schema:
+            $ref: '#/definitions/mcpworkbench.View'
+        "401":
+          description: Unauthenticated.
+        "403":
+          description: Password change is incomplete or the Subject role is unsupported.
+        "500":
+          description: MCP workbench aggregation failed; internal details are not exposed.
+      summary: Get read-only MCP scan workbench
+      tags:
+      - platform-mcp-workbench
   /api/v1/public/brand:
     get:
       description: Anonymous exact safe brand projection. It returns only product_name, primary_color, and logo_data_url. The Logo value is empty or a verified PNG/JPEG data URL; mutable governance and storage fields are absent.
@@ -1948,7 +2090,7 @@ paths:
     post:
       consumes:
       - application/json
-      description: 'Breaking security hardening: create responses now use the browser-safe TaskDetail with bounded input_summary instead of the former internal task View; clients must migrate field access. The JSON body is limited to 256 KiB. Creates an owner-scoped platform task from the authenticated Cookie Subject. Idempotency-Key is required and unique per owner. A retry with the same persisted request payload returns the existing task without revalidating live governed references; reusing that key with a different payload returns 400 invalid task request. Only exact canonical task types are accepted and the platform maps them to private Agent aliases: mcp_scan params allow model_id and thread; ai_infra_scan params allow model_id, timeout, and port_scan_mode (fixed_ai or full_tcp; omission defaults to fixed_ai); model_redteam_report params require model_id as a bounded string array plus eval_model_id and may include dataset numPrompts/randomSeed/promptColumn and techniques; agent_scan params require agent_id and eval_model_id. Every model_id/eval_model_id must resolve through the governed model boundary, and agent_id through the user or public Agent registry, before persistence; unknown or invisible references write no task. Unknown fields, nested credential objects, raw model credentials, and legacy aliases are rejected. Attachments are supplied only as at most ten opaque attachment IDs. Dispatch uses persisted claims and a global attempt budget. An uncertain network acknowledgement becomes dispatch_unknown and is never submitted automatically again; this is at-most-once dispatch, not exactly-once execution. Requires CSRF protection.'
+      description: 'Breaking security hardening: create responses now use the browser-safe TaskDetail with bounded input_summary instead of the former internal task View; clients must migrate field access. The JSON body is limited to 256 KiB. Creates an owner-scoped platform task from the authenticated Cookie Subject. Idempotency-Key is required and unique per owner. A retry with the same persisted request payload returns the existing task without revalidating live governed references; reusing that key with a different payload returns 400 invalid task request. Only exact canonical task types are accepted and the platform maps them to private Agent aliases: mcp_scan params allow model_id and thread; ai_infra_scan params allow model_id, timeout, and port_scan_mode (fixed_ai or full_tcp; omission defaults to fixed_ai); model_redteam_report params require model_id as a bounded string array plus eval_model_id and may include dataset numPrompts/randomSeed/promptColumn and techniques; agent_scan params require agent_id and eval_model_id. For mcp_scan, params.source_kind is required and is exactly repository or service. repository accepts exactly a Git repository reference or opaque code attachments and must not include authorization_confirmed. service accepts a controlled HTTP(S) endpoint with no attachments and requires params.authorization_confirmed=true; that Boolean confirmation is included in the task-created audit metadata, while endpoint and authorization data never cross the browser boundary. Every model_id/eval_model_id must resolve through the governed model boundary, and agent_id through the user or public Agent registry, before persistence; unknown or invisible references write no task. Unknown fields, nested credential objects, raw model credentials, and legacy aliases are rejected. Attachments are supplied only as at most ten opaque attachment IDs. Dispatch uses persisted claims and a global attempt budget. An uncertain network acknowledgement becomes dispatch_unknown and is never submitted automatically again; this is at-most-once dispatch, not exactly-once execution. Requires CSRF protection.'
       parameters:
       - in: header
         maxLength: 128
@@ -1977,7 +2119,17 @@ paths:
               - en
               type: string
             params:
-              description: Exact per-task schema described by this operation; arbitrary and credential-bearing fields are rejected.
+              description: Exact per-task schema described by this operation; arbitrary and credential-bearing fields are rejected. For mcp_scan, source_kind is required; its conditional fields are documented below.
+              properties:
+                authorization_confirmed:
+                  description: Allowed and required only for mcp_scan service, where it must be true. repository rejects this field. The server audits only the Boolean confirmation and never exposes endpoint or authorization material.
+                  type: boolean
+                source_kind:
+                  description: Required only for mcp_scan. repository selects a Git repository reference or code attachments; service selects a controlled HTTP(S) service with no attachments.
+                  enum:
+                  - repository
+                  - service
+                  type: string
               type: object
             task_type:
               enum:
