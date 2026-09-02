@@ -161,19 +161,110 @@ func mcpTechnicalFindings(raw json.RawMessage) ([]technicalFindingCandidate, err
 	}
 	candidates := make([]technicalFindingCandidate, 0, len(payload.Results))
 	for _, finding := range payload.Results {
-		riskType := safeFindingText(finding.RiskType, "未分类", 128, 256)
-		level := safeFindingText(finding.Level, "未知", 32, 64)
+		category := mcpFindingCategory(finding.RiskType)
+		severity := mcpFindingSeverity(finding.Level)
 		candidates = append(candidates, technicalFindingCandidate{
 			TechnicalFinding: TechnicalFinding{
-				Title:       safeFindingText(finding.Title, "MCP 安全发现", maxFindingTitleRunes, maxFindingTitleBytes),
+				Title:       safeMCPFindingTitle(finding.Title, finding.RiskType),
 				Evidence:    safeFindingText(finding.Description, "MCP 扫描器确认了该风险。", maxFindingTextRunes, maxFindingTextBytes),
-				Impact:      safeFindingText(fmt.Sprintf("%s 风险（%s）可能影响 MCP 服务或其调用链。", riskType, level), "该风险可能影响 MCP 服务。", maxImpactRunes, maxImpactBytes),
+				Impact:      mcpFindingImpact(category),
 				Remediation: safeFindingText(finding.Suggestion, "限制受影响能力，修复后复测。", maxRemediationRunes, maxRemediationBytes),
+				Category:    category,
+				Severity:    severity,
 			},
 			severity: findingSeverity(finding.Level), order: len(candidates),
 		})
 	}
 	return candidates, nil
+}
+
+// safeMCPFindingTitle keeps a scanner-supplied title useful while preventing
+// the original scanner risk_type from being persisted into a display field.
+func safeMCPFindingTitle(value, riskType string) string {
+	title := safeFindingText(value, "MCP 安全发现", maxFindingTitleRunes, maxFindingTitleBytes)
+	cleanRiskType := safeFindingText(riskType, "", maxFindingTitleRunes, maxFindingTitleBytes)
+	if cleanRiskType != "" {
+		title = regexp.MustCompile(`(?i)`+regexp.QuoteMeta(cleanRiskType)).ReplaceAllString(title, "[REDACTED_RISK_TYPE]")
+	}
+	return safeFindingText(title, "MCP 安全发现", maxFindingTitleRunes, maxFindingTitleBytes)
+}
+
+func mcpFindingCategory(value string) string {
+	normalized := strings.ToLower(strings.TrimSpace(value))
+	switch normalized {
+	case "dangerous_tool", "command_file", "authorization", "data_leakage", "tool_poisoning", "skill_mismatch":
+		return normalized
+	}
+	switch {
+	case containsMCPRisk(normalized, "mcp03") || strings.Contains(normalized, "tool poisoning") || strings.Contains(normalized, "tool poison") || strings.Contains(normalized, "工具投毒") || strings.Contains(normalized, "prompt injection") || strings.Contains(normalized, "提示注入"):
+		return "tool_poisoning"
+	case strings.Contains(normalized, "skill mismatch") || strings.Contains(normalized, "skill-mismatch") || strings.Contains(normalized, "技能不匹配"):
+		return "skill_mismatch"
+	case containsMCPRisk(normalized, "mcp05") || strings.Contains(normalized, "command") || strings.Contains(normalized, "shell") || strings.Contains(normalized, "rce") || strings.Contains(normalized, "code execution") || strings.Contains(normalized, "file access") || strings.Contains(normalized, "file read") || strings.Contains(normalized, "file write") || strings.Contains(normalized, "path traversal") || strings.Contains(normalized, "文件") || strings.Contains(normalized, "命令"):
+		return "command_file"
+	case containsMCPRisk(normalized, "mcp02") || containsMCPRisk(normalized, "mcp07") || strings.Contains(normalized, "authorization") || strings.Contains(normalized, "authentication") || strings.Contains(normalized, "authz") || strings.Contains(normalized, "authn") || strings.Contains(normalized, "privilege") || strings.Contains(normalized, "scope creep") || strings.Contains(normalized, "越权") || strings.Contains(normalized, "授权") || strings.Contains(normalized, "认证") || strings.Contains(normalized, "权限"):
+		return "authorization"
+	case containsMCPRisk(normalized, "mcp01") || containsMCPRisk(normalized, "mcp10") || strings.Contains(normalized, "data leak") || strings.Contains(normalized, "data exfiltration") || strings.Contains(normalized, "secret exposure") || strings.Contains(normalized, "token mismanagement") || strings.Contains(normalized, "credential") || strings.Contains(normalized, "information disclosure") || strings.Contains(normalized, "sensitive data") || strings.Contains(normalized, "泄露") || strings.Contains(normalized, "凭据") || strings.Contains(normalized, "密钥"):
+		return "data_leakage"
+	case containsMCPRisk(normalized, "mcp04") || containsMCPRisk(normalized, "mcp09") || strings.Contains(normalized, "dangerous tool") || strings.Contains(normalized, "malicious tool") || strings.Contains(normalized, "shadow mcp") || strings.Contains(normalized, "tool shadow") || strings.Contains(normalized, "supply chain") || strings.Contains(normalized, "rug pull") || strings.Contains(normalized, "name confusion") || strings.Contains(normalized, "危险工具"):
+		return "dangerous_tool"
+	default:
+		return "other"
+	}
+}
+
+func containsMCPRisk(value, identifier string) bool {
+	for offset := 0; offset < len(value); {
+		index := strings.Index(value[offset:], identifier)
+		if index < 0 {
+			return false
+		}
+		index += offset
+		end := index + len(identifier)
+		before, _ := utf8.DecodeLastRuneInString(value[:index])
+		after, _ := utf8.DecodeRuneInString(value[end:])
+		beforeBoundary := index == 0 || !mcpRiskIdentifierRune(before)
+		afterBoundary := end == len(value) || !mcpRiskIdentifierRune(after)
+		if beforeBoundary && afterBoundary {
+			return true
+		}
+		offset = end
+	}
+	return false
+}
+
+func mcpRiskIdentifierRune(value rune) bool {
+	return unicode.IsLetter(value) || unicode.IsNumber(value)
+}
+
+func mcpFindingSeverity(value string) string {
+	switch findingSeverity(value) {
+	case 0:
+		return "high"
+	case 1:
+		return "medium"
+	default:
+		return "low"
+	}
+}
+
+func mcpFindingImpact(category string) string {
+	switch category {
+	case "dangerous_tool":
+		return "该工具的安全行为或来源需要复核。"
+	case "command_file":
+		return "该风险可能影响命令执行或文件访问边界。"
+	case "authorization":
+		return "该风险可能导致权限或授权边界失效。"
+	case "data_leakage":
+		return "该风险可能导致敏感数据或凭据暴露。"
+	case "tool_poisoning":
+		return "该风险可能通过工具元数据或输出影响调用行为。"
+	case "skill_mismatch":
+		return "该风险可能导致技能声明与实际能力不一致。"
+	default:
+		return "MCP 扫描器确认了需进一步复核的风险。"
+	}
 }
 
 func agentTechnicalFindings(raw json.RawMessage) ([]technicalFindingCandidate, error) {
