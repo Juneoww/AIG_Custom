@@ -82,6 +82,11 @@ func planMcpExecution(rawParams json.RawMessage, content string, attachments []s
 		if len(attachments) > 0 || !validMcpServiceEndpoint(content) {
 			return mcpExecutionPlan{}, errors.New("MCP service source requires a service endpoint without attachments")
 		}
+		rawAuthorization, authorizationProvided := fields["authorization_confirmed"]
+		var authorizationConfirmed bool
+		if !authorizationProvided || json.Unmarshal(rawAuthorization, &authorizationConfirmed) != nil || !authorizationConfirmed {
+			return mcpExecutionPlan{}, errors.New("MCP service source requires explicit authorization")
+		}
 		return mcpServiceExecutionPlan(), nil
 	default:
 		return mcpExecutionPlan{}, errors.New("unknown MCP source kind")

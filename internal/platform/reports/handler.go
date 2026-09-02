@@ -170,6 +170,7 @@ func detailOf(snapshot *Snapshot) (ReportDetail, error) {
 		return ReportDetail{}, ErrInvalidSnapshot
 	}
 	sanitizeRenderInfrastructurePortScan(snapshot.TaskType, &render)
+	sanitizeMCPRenderTechnicalFindings(snapshot.TaskType, &render)
 	return ReportDetail{ID: snapshot.ID, TaskID: snapshot.TaskID, TaskType: snapshot.TaskType, CompletedAt: snapshot.CompletedAt, CreatedAt: snapshot.CreatedAt, Risk: snapshot.Risk, Render: render}, nil
 }
 

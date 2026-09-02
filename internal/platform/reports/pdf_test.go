@@ -67,7 +67,10 @@ func TestPDFRendererWrapsAndPaginatesLongTechnicalFindings(t *testing.T) {
 	assert.Greater(t, bytes.Count(pdf, []byte("/Type /Page")), 2, "long findings must produce multiple pages")
 	var render RenderModel
 	require.NoError(t, json.Unmarshal(snapshot.RenderData, &render))
-	assert.Contains(t, reportLines(render)[len(reportLines(render))-1], "final-remediation-49", "the final finding must remain in the paginated layout input")
+	lines := reportLines(render)
+	assert.Len(t, render.TechnicalFindings, 50)
+	assert.Equal(t, 50, strings.Count(strings.Join(lines, "\n"), "MCP 其他安全风险发现"), "every MCP finding must remain in the paginated layout input")
+	assert.NotContains(t, strings.Join(lines, "\n"), "final-remediation-49")
 }
 
 func TestPDFRendererProducesPopplerReadableMultiPageUnicodeDocument(t *testing.T) {
@@ -136,7 +139,7 @@ func TestPDFRendererProducesPopplerReadableMultiPageUnicodeDocument(t *testing.T
 	// rotated fixture watermark with nearby body text. Remove those known
 	// watermark glyphs before asserting body-text continuity.
 	normalized = strings.NewReplacer("内", "", "部", "").Replace(normalized)
-	for _, expected := range []string{"企业安全平台", "安全报告", "生成时间", "末条技术发现", "最终修复建议"} {
+	for _, expected := range []string{"企业安全平台", "安全报告", "生成时间", "MCP 其他安全风险发现", "限制相关工具能力与权限边界"} {
 		expected = strings.NewReplacer("内", "", "部", "").Replace(expected)
 		assert.Contains(t, normalized, expected)
 	}
@@ -237,6 +240,33 @@ func TestPDFRendererNeverConsumesNaturalLanguageOrStructuredCredentials(t *testi
 			assert.NotContains(t, string(extracted), sentinel)
 		}
 	}
+}
+
+func TestPDFRendererDoesNotExposeMCPTargetOrRepositoryIdentifiers(t *testing.T) {
+	renderer, err := NewPDFRenderer(loadReportFont(t))
+	require.NoError(t, err)
+	completed := time.Date(2026, 8, 12, 18, 30, 0, 0, time.UTC)
+	snapshot, err := BuildSnapshotAt("mcp-pdf-task", "alice", "mcp_scan", event(`{
+		"score": 100,
+		"results": [{
+			"title": "Target https://customer-mcp.example.internal/rpc permits command execution",
+			"description": "Repository git@customer-repos.internal:team/mcp-server.git is reachable",
+			"risk_type": "command_injection",
+			"level": "high",
+			"suggestion": "Restrict https://customer-mcp.example.internal/rpc"
+		}]
+	}`), brand.Config{ProductName: "企业安全平台", PrimaryColor: "#1677FF"}, completed, completed)
+	require.NoError(t, err)
+	snapshot.ID = "mcp-pdf-report"
+
+	var render RenderModel
+	require.NoError(t, json.Unmarshal(snapshot.RenderData, &render))
+	layout := strings.Join(reportLines(render), "\n")
+	for _, sentinel := range []string{"customer-mcp.example.internal", "customer-repos.internal", "mcp-server.git"} {
+		assert.NotContains(t, layout, sentinel)
+	}
+	_, err = renderer.Render(context.Background(), snapshot)
+	require.NoError(t, err)
 }
 
 func TestPDFRendererRejectsMissingOrInvalidRenderModel(t *testing.T) {

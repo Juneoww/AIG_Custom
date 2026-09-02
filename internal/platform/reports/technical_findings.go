@@ -267,6 +267,46 @@ func mcpFindingImpact(category string) string {
 	}
 }
 
+// sanitizeMCPRenderTechnicalFindings projects MCP findings into fixed server
+// summaries before they cross the browser report-detail boundary. Stored MCP
+// render data may contain scanner descriptions, target URLs, or repository
+// references, so it must not be returned verbatim even to an authorized user.
+func sanitizeMCPRenderTechnicalFindings(taskType string, render *RenderModel) {
+	if render == nil || !isMCPTaskType(taskType) {
+		return
+	}
+	for index := range render.TechnicalFindings {
+		finding := render.TechnicalFindings[index]
+		category := mcpFindingCategory(finding.Category)
+		severity := safeMCPDetailSeverity(finding.Severity)
+		title := "MCP 安全风险发现。"
+		if severity != "" {
+			title = mcpWorkbenchFindingSummary(category, severity)
+		}
+		render.TechnicalFindings[index] = TechnicalFinding{
+			Title:       title,
+			Evidence:    "MCP 扫描器确认了该类风险；原始目标与扫描参数未在报告详情中展示。",
+			Impact:      mcpFindingImpact(category),
+			Remediation: "限制相关工具能力与权限边界，修复后重新执行授权扫描。",
+			Category:    category,
+			Severity:    severity,
+		}
+	}
+}
+
+func safeMCPDetailSeverity(value string) string {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "critical", "high", "严重", "高危":
+		return "high"
+	case "medium", "中危":
+		return "medium"
+	case "low", "低危", "info", "informational":
+		return "low"
+	default:
+		return ""
+	}
+}
+
 func agentTechnicalFindings(raw json.RawMessage) ([]technicalFindingCandidate, error) {
 	var payload struct {
 		SchemaVersion string `json:"schema_version"`

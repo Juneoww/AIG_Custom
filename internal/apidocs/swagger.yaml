@@ -689,7 +689,7 @@ definitions:
     - task_id
     type: object
   reports.ReportDetail:
-    description: Safe immutable online report. It contains only the frozen RenderModel and public report metadata; stored source results, render payloads, private ownership metadata, Logo bytes, paths, and mutable brand records are absent.
+    description: Safe immutable online report. It contains only a server-safe RenderModel projection and public report metadata; stored source results, render payloads, private ownership metadata, Logo bytes, paths, and mutable brand records are absent. MCP technical findings are generic server-derived summaries without targets, repository identifiers, or scanner free text.
     properties:
       completed_at:
         format: date-time
@@ -769,7 +769,7 @@ definitions:
     - page_size
     type: object
   reports.RenderModel:
-    description: Versioned presentation model frozen when the snapshot is created. Online detail and every PDF retry consume this same immutable value.
+    description: Versioned presentation model frozen when the snapshot is created. Before online MCP detail or PDF presentation, its technical findings are projected into generic server-derived summaries.
     properties:
       completed_at:
         format: date-time
@@ -1539,7 +1539,7 @@ paths:
       - platform-reports
   /api/v1/platform/reports/{reportID}:
     get:
-      description: Returns the safe immutable RenderModel for one report. Users read only their own reports; auditors and administrators have global read access. raw engine results, stored render JSON, Logo bytes, owner IDs, paths, and mutable brand records are never exposed.
+      description: Returns the safe immutable RenderModel projection for one report. Users read only their own reports; auditors and administrators have global read access. raw engine results, stored render JSON, Logo bytes, owner IDs, paths, and mutable brand records are never exposed. MCP technical findings are generic summaries without targets, repository identifiers, or scanner free text.
       parameters:
       - in: path
         name: reportID

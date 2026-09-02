@@ -47,7 +47,7 @@ func TestMcpExecutionPlanUsesExplicitSourceKind(t *testing.T) {
 		},
 		{
 			name:      "service URL",
-			params:    `{"source_kind":"service"}`,
+			params:    `{"source_kind":"service","authorization_confirmed":true}`,
 			content:   "https://mcp.example.test/rpc",
 			transport: "url",
 			titles:    []string{"Info Collection", "Malicious Testing", "Vulnerability Testing", "Vulnerability Review"},
@@ -61,6 +61,20 @@ func TestMcpExecutionPlanUsesExplicitSourceKind(t *testing.T) {
 			require.NoError(t, err)
 			assert.Equal(t, test.transport, plan.transport)
 			assert.Equal(t, test.titles, plan.taskTitles)
+		})
+	}
+}
+
+func TestMcpExecutionPlanRequiresExplicitServiceAuthorization(t *testing.T) {
+	for _, params := range []string{
+		`{"source_kind":"service"}`,
+		`{"source_kind":"service","authorization_confirmed":false}`,
+		`{"source_kind":"service","authorization_confirmed":"true"}`,
+	} {
+		t.Run(params, func(t *testing.T) {
+			_, err := planMcpExecution(json.RawMessage(params), "https://mcp.example.test/rpc", nil)
+
+			require.Error(t, err)
 		})
 	}
 }
