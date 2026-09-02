@@ -88,6 +88,8 @@ export function TaskCreatePage() {
   const mutexRef = useRef(false)
   const mountedRef = useRef(true)
   const controllerRef = useRef<AbortController | null>(null)
+  const hasMCPRepositoryAttachment = taskType === 'mcp_scan' && mcpSourceKind === 'repository' && attachments.length > 0
+  const contentRequired = !hasMCPRepositoryAttachment
   const targetPreview = useMemo(
     () => (taskType === 'ai_infra_scan' ? previewTargetExpressions(content) : null),
     [content, taskType],
@@ -167,6 +169,7 @@ export function TaskCreatePage() {
   const submit = async (event: FormEvent) => {
     event.preventDefault()
     const serviceScan = taskType === 'mcp_scan' && mcpSourceKind === 'service'
+    const repositoryAttachmentScan = taskType === 'mcp_scan' && mcpSourceKind === 'repository' && attachments.length > 0
     if (serviceScan && (files.length > 0 || attachments.length > 0)) {
       setError('服务扫描不能携带代码附件。')
       return
@@ -191,7 +194,7 @@ export function TaskCreatePage() {
     controllerRef.current?.abort()
     controllerRef.current = controller
     try {
-      if (!content.trim()) throw new Error('请填写扫描目标或任务说明。')
+      if (!content.trim() && !repositoryAttachmentScan) throw new Error('请填写扫描目标或任务说明。')
       const params: TaskCreateRequest['params'] = {}
       if (taskType === 'mcp_scan') {
         params.source_kind = mcpSourceKind
@@ -283,7 +286,7 @@ export function TaskCreatePage() {
         </fieldset>
         <fieldset className={styles.step} aria-label="第二步：参数">
           <Text weight="semibold">第二步：参数</Text>
-          <Field label="扫描目标或任务说明" required>
+          <Field label="扫描目标或任务说明" required={contentRequired}>
             <Textarea
               value={content}
               onChange={(_, data) => { setContent(data.value); invalidateSubmission() }}

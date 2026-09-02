@@ -21,7 +21,7 @@ import type {
 const MAX_ACTIVE_TASKS = 10
 const MAX_RECENT_RISKS = 5
 const MAX_SUMMARY_LENGTH = 160
-const RFC3339 = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?(?:Z|[+-]\d{2}:\d{2})$/
+const RFC3339 = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.\d{1,9})?(Z|[+-]\d{2}:\d{2})$/
 
 const MCP_SOURCE_KINDS = new Set<MCPSourceKind>(['repository', 'service', 'legacy_unknown'])
 const MCP_RISK_SEVERITIES = new Set<MCPRiskSeverity>(['high', 'medium', 'low'])
@@ -46,7 +46,35 @@ function boundedString(value: unknown, maximum: number): string | undefined {
 
 function rfc3339(value: unknown): string | undefined {
   const text = boundedString(value, 64)
-  return text && RFC3339.test(text) && Number.isFinite(Date.parse(text)) ? text : undefined
+  const parts = text?.match(RFC3339)
+  if (!parts) return undefined
+  const [, yearText, monthText, dayText, hourText, minuteText, secondText, offset] = parts
+  const year = Number(yearText)
+  const month = Number(monthText)
+  const day = Number(dayText)
+  const hour = Number(hourText)
+  const minute = Number(minuteText)
+  const second = Number(secondText)
+  if (
+    year < 1 ||
+    month < 1 || month > 12 ||
+    day < 1 || day > daysInMonth(year, month) ||
+    hour > 23 || minute > 59 || second > 59 ||
+    !validOffset(offset)
+  ) return undefined
+  return text
+}
+
+function daysInMonth(year: number, month: number): number {
+  if (month === 2) return year % 4 === 0 && (year % 100 !== 0 || year % 400 === 0) ? 29 : 28
+  return month === 4 || month === 6 || month === 9 || month === 11 ? 30 : 31
+}
+
+function validOffset(value: string): boolean {
+  if (value === 'Z') return true
+  const offsetHour = Number(value.slice(1, 3))
+  const offsetMinute = Number(value.slice(4, 6))
+  return offsetHour <= 23 && offsetMinute <= 59
 }
 
 function count(value: unknown): number | undefined {

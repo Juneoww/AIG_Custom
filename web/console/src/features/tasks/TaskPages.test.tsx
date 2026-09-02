@@ -387,6 +387,7 @@ describe('任务页面', () => {
     expect(screen.getByRole('combobox', { name: '扫描类型' })).toHaveValue('mcp_scan')
     expect(screen.getByRole('combobox', { name: 'MCP 扫描对象' })).toHaveValue('service')
     expect(screen.getByText('受控运行服务扫描')).toBeInTheDocument()
+    expect(screen.getByRole('textbox', { name: '扫描目标或任务说明' })).toHaveAttribute('required')
     expect(screen.queryByRole('group', { name: '第三步：附件' })).not.toBeInTheDocument()
 
     fireEvent.change(screen.getByRole('textbox', { name: '扫描目标或任务说明' }), { target: { value: 'https://mcp.example.test/sse' } })
@@ -445,6 +446,57 @@ describe('任务页面', () => {
       params: { source_kind: 'service', authorization_confirmed: true, thread: 4 },
       attachment_ids: [],
     }))
+  })
+
+  it('MCP 仓库扫描在代码附件已就绪时允许空正文提交', async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(jsonResponse({
+        id: 'attachment-opaque-archive',
+        filename: 'source.zip',
+        size: 6,
+        state: 'ready',
+        created_at: '2026-09-02T01:00:00Z',
+      }))
+      .mockResolvedValueOnce(jsonResponse(task))
+    vi.stubGlobal('fetch', fetchMock)
+    renderPage(
+      <TaskCreatePage />,
+      { id: 'user-1', username: 'alice', role: 'user', must_change_password: false },
+      '/tasks/new?task_type=mcp_scan&source_kind=repository',
+    )
+
+    fireEvent.change(document.querySelector('input[type="file"]') as HTMLInputElement, {
+      target: { files: [new File(['source'], 'source.zip')] },
+    })
+    screen.getByRole('button', { name: '上传附件' }).click()
+    expect(await screen.findByText('source.zip（6 字节）')).toBeInTheDocument()
+    expect(screen.getByRole('textbox', { name: '扫描目标或任务说明' })).not.toHaveAttribute('required')
+
+    screen.getByRole('button', { name: '创建任务' }).click()
+
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2))
+    const body = JSON.parse(String((fetchMock.mock.calls[1]?.[1] as RequestInit).body))
+    expect(body).toEqual(expect.objectContaining({
+      task_type: 'mcp_scan',
+      content: '',
+      params: { source_kind: 'repository', thread: 4 },
+      attachment_ids: ['attachment-opaque-archive'],
+    }))
+  })
+
+  it('MCP 仓库扫描在没有代码附件时仍要求填写目标', () => {
+    const fetchMock = vi.fn()
+    vi.stubGlobal('fetch', fetchMock)
+    renderPage(
+      <TaskCreatePage />,
+      { id: 'user-1', username: 'alice', role: 'user', must_change_password: false },
+      '/tasks/new?task_type=mcp_scan&source_kind=repository',
+    )
+
+    expect(screen.getByRole('textbox', { name: '扫描目标或任务说明' })).toHaveAttribute('required')
+    screen.getByRole('button', { name: '创建任务' }).click()
+    expect(fetchMock).not.toHaveBeenCalled()
   })
 
   it('MCP 仓库预设不携带服务授权，非法查询安全回退到仓库默认值', async () => {

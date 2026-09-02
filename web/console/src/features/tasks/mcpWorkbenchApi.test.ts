@@ -75,10 +75,21 @@ describe('MCP 工作台安全响应合同', () => {
     ['未知来源枚举', workbenchView({ active_tasks: [{ ...activeTask, source_kind: 'endpoint' }] })],
     ['未知风险类别', workbenchView({ recent_risks: [{ ...recentRisk, category: 'scanner_title' }] })],
     ['非法时间戳', workbenchView({ active_tasks: [{ ...activeTask, updated_at: 'not-a-date' }] })],
+    ['溢出日历日期', workbenchView({ active_tasks: [{ ...activeTask, updated_at: '2026-02-31T01:00:00Z' }] })],
     ['过长风险摘要', workbenchView({ recent_risks: [{ ...recentRisk, summary: '高'.repeat(161) }] })],
     ['负数指标', workbenchView({ metrics: { running: -1, pending: 2, high_risk: 3, completed_30d: 4 } })],
   ])('拒绝%s', (_label, payload) => {
     expect(() => parseMCPWorkbenchView(payload)).toThrowError(new ApiError('unexpected-response', 200))
+  })
+
+  it('接受日历有效且带 RFC3339 时区偏移的时间', () => {
+    const result = parseMCPWorkbenchView(workbenchView({
+      active_tasks: [{ ...activeTask, updated_at: '2026-02-28T23:30:00+08:00' }],
+      recent_risks: [{ ...recentRisk, completed_at: '2026-02-28T23:30:00-05:30' }],
+    }))
+
+    expect(result.active_tasks[0]?.updated_at).toBe('2026-02-28T23:30:00+08:00')
+    expect(result.recent_risks[0]?.completed_at).toBe('2026-02-28T23:30:00-05:30')
   })
 
   it('从固定端点读取并在有效载荷错误时抛出固定响应错误', async () => {
