@@ -526,8 +526,7 @@ describe('任务页面', () => {
     vi.stubGlobal('fetch', fetchMock)
     renderPage(<TaskDetailPage expectedTaskType="ai_infra_scan" />, { id: 'user-1', username: 'alice', role: 'user', must_change_password: false }, '/tasks/ai-infra/task-opaque-1', '/tasks/ai-infra/:taskId')
 
-    await act(async () => { await vi.advanceTimersByTimeAsync(1) })
-    expect(screen.getByText('该任务不属于 AI 基础设施扫描')).toBeInTheDocument()
+    expect(await screen.findByText('该任务不属于 AI 基础设施扫描')).toBeInTheDocument()
     expect(screen.queryByRole('region', { name: '任务安全摘要' })).not.toBeInTheDocument()
     expect(screen.queryByText('alice')).not.toBeInTheDocument()
     expect(screen.queryByText('执行中')).not.toBeInTheDocument()
