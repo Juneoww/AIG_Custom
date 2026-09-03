@@ -56,10 +56,10 @@ describe('role navigation', () => {
 
   it('exposes grouped scan navigation for regular users', () => {
     const scanChildren = [
-      expect.objectContaining({ label: 'MCP 扫描', path: '/tasks/new?scan=mcp' }),
-      expect.objectContaining({ label: 'Skills 扫描', path: '/tasks/new?scan=skills' }),
-      expect.objectContaining({ label: 'AI 基础设施扫描', path: '/tasks/new?scan=ai-infra' }),
-      expect.objectContaining({ label: 'Agent 工作流扫描', path: '/tasks/new?scan=agent-workflow' }),
+      expect.objectContaining({ label: 'MCP 安全扫描', path: '/tasks/mcp' }),
+      expect.objectContaining({ label: 'AI 基础设施扫描', path: '/tasks?task_type=ai_infra_scan' }),
+      expect.objectContaining({ label: '模型红队评测', path: '/tasks?task_type=model_redteam_report' }),
+      expect.objectContaining({ label: 'Agent 工作流扫描', path: '/tasks?task_type=agent_scan' }),
     ]
     const credentialChildren = [
       expect.objectContaining({ label: '模型配置', path: '/models' }),
