@@ -10,13 +10,17 @@ import type { ModelCatalogItem, ModelCatalogPage } from '../models/api'
 export const MODEL_CATALOG_PAGE_SIZE = 100
 const MAX_MODEL_CATALOG_PAGE = 1_000
 
-export function selectableModels(items: readonly ModelCatalogItem[]): readonly ModelCatalogItem[] {
+export function canonicalModels(items: readonly ModelCatalogItem[]): readonly ModelCatalogItem[] {
   const seenIDs = new Set<string>()
   return items.filter((model) => {
     if (seenIDs.has(model.id)) return false
     seenIDs.add(model.id)
-    return !model.disabled
+    return true
   })
+}
+
+export function selectableModels(items: readonly ModelCatalogItem[]): readonly ModelCatalogItem[] {
+  return canonicalModels(items).filter((model) => !model.disabled)
 }
 
 export function modelOptionLabel(model: Pick<ModelCatalogItem, 'name' | 'provider_model' | 'scope'>): string {

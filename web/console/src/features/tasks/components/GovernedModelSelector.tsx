@@ -12,7 +12,7 @@ import { Link } from 'react-router-dom'
 
 import { fetchModelCatalog } from '../../models/api'
 import { ApiError } from '../../../shared/api/errors'
-import { MODEL_CATALOG_PAGE_SIZE, modelOptionLabel, nextCatalogPage, selectableModels } from '../governedModels'
+import { MODEL_CATALOG_PAGE_SIZE, canonicalModels, modelOptionLabel, nextCatalogPage, selectableModels } from '../governedModels'
 
 const useStyles = makeStyles({
   container: { display: 'flex', flexDirection: 'column', gap: tokens.spacingVerticalS },
@@ -28,6 +28,7 @@ export interface GovernedModelSelectorProps {
 export function GovernedModelSelector({ value, onChange, disabled = false }: GovernedModelSelectorProps) {
   const styles = useStyles()
   const clearedModelIDRef = useRef<string | undefined>(undefined)
+  const verifiedPageParamsRef = useRef<string | undefined>(undefined)
   const catalog = useInfiniteQuery({
     queryKey: ['governed-model-catalog'],
     initialPageParam: 1,
@@ -40,11 +41,20 @@ export function GovernedModelSelector({ value, onChange, disabled = false }: Gov
       lastPage.page === lastPageParam ? nextCatalogPage(lastPage, allPageParams) : undefined,
     retry: false,
   })
-  const models = selectableModels(catalog.data?.pages.flatMap((page) => page.items) ?? [])
+  const catalogItems = catalog.data?.pages.flatMap((page) => page.items) ?? []
+  const canonicalCatalogItems = canonicalModels(catalogItems)
+  const models = selectableModels(catalogItems)
   const selectedModelID = typeof value === 'string' && value !== '' ? value : undefined
   const selectedIsAvailable = selectedModelID !== undefined && models.some((model) => model.id === selectedModelID)
-  const firstPageLoaded = catalog.data?.pageParams[0] === 1 && catalog.data.pages[0] !== undefined
-  const unavailableSelectedModel = firstPageLoaded && selectedModelID !== undefined && !selectedIsAvailable
+  const selectedCanonicalModel = selectedModelID === undefined ? undefined : canonicalCatalogItems.find((model) => model.id === selectedModelID)
+  const selectedCanonicalDisabled = selectedCanonicalModel?.disabled === true
+  const selectionNeedsVerification = selectedModelID !== undefined && !selectedIsAvailable && !selectedCanonicalDisabled
+  const catalogExhausted = Boolean(catalog.data) && !catalog.hasNextPage && !catalog.isFetchingNextPage && !catalog.isFetchNextPageError
+  const unavailableSelectedModel = selectedModelID !== undefined && !selectedIsAvailable && (selectedCanonicalDisabled || catalogExhausted)
+  const canAutomaticallyVerifySelection = selectionNeedsVerification && Boolean(catalog.data) && Boolean(catalog.hasNextPage) &&
+    !catalog.isFetchingNextPage && !catalog.isFetchNextPageError
+  const verificationPageParamsKey = `${selectedModelID ?? ''}:${catalog.data?.pageParams.join(',') ?? ''}`
+  const selectionVerificationPending = selectionNeedsVerification && Boolean(catalog.hasNextPage) && !catalog.isFetchNextPageError
   const firstPageFailed = catalog.isError && !catalog.data
   const emptyCatalog = Boolean(catalog.data) && models.length === 0
 
@@ -56,6 +66,16 @@ export function GovernedModelSelector({ value, onChange, disabled = false }: Gov
     }
     if (!unavailableSelectedModel) clearedModelIDRef.current = undefined
   }, [onChange, selectedModelID, unavailableSelectedModel])
+
+  useEffect(() => {
+    if (!canAutomaticallyVerifySelection) {
+      verifiedPageParamsRef.current = undefined
+      return
+    }
+    if (verifiedPageParamsRef.current === verificationPageParamsKey) return
+    verifiedPageParamsRef.current = verificationPageParamsKey
+    void catalog.fetchNextPage()
+  }, [canAutomaticallyVerifySelection, catalog.fetchNextPage, verificationPageParamsKey])
 
   return (
     <Field label="扫描模型">
@@ -78,6 +98,7 @@ export function GovernedModelSelector({ value, onChange, disabled = false }: Gov
           <option value="">不使用模型</option>
           {models.map((model) => <option key={model.id} value={model.id}>{modelOptionLabel(model)}</option>)}
         </Select>
+        {selectionVerificationPending ? <span role="status">正在验证已选模型</span> : null}
         {unavailableSelectedModel ? <MessageBar intent="warning"><MessageBarBody>已选模型不可用，已清除选择。</MessageBarBody></MessageBar> : null}
         {emptyCatalog ? <Link to="/models">前往凭证配置 → 模型配置</Link> : null}
         {catalog.isFetchNextPageError ? (

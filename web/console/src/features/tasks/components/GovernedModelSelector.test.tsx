@@ -115,7 +115,7 @@ describe('GovernedModelSelector', () => {
     expect(screen.getByRole('link', { name: '前往凭证配置 → 模型配置' })).toHaveAttribute('href', '/models')
   })
 
-  it('在首批目录成功后清除失效模型 ID，但不会把它渲染为普通选项', async () => {
+  it('目录耗尽后清除不存在的模型 ID，但不会把它渲染为普通选项', async () => {
     const onChange = vi.fn()
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue(response({ items: [catalogItem()], total: 1, page: 1, page_size: 100 })))
     renderSelectorWithValue('stale-model-id', onChange)
@@ -123,6 +123,55 @@ describe('GovernedModelSelector', () => {
     expect(await screen.findByText('已选模型不可用，已清除选择。')).toBeInTheDocument()
     await waitFor(() => expect(onChange).toHaveBeenCalledWith(undefined))
     expect(screen.queryByRole('option', { name: /stale-model-id/ })).not.toBeInTheDocument()
+  })
+
+  it('自动加载下一页验证有效预选模型，并在找到后保留该 ID', async () => {
+    const onChange = vi.fn()
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(response({ items: [catalogItem({ id: 'page-one-model' })], total: 101, page: 1, page_size: 100 }))
+      .mockResolvedValueOnce(response({ items: [catalogItem({ id: 'preselected-model', name: '预选第二页模型' })], total: 101, page: 2, page_size: 100 }))
+    vi.stubGlobal('fetch', fetchMock)
+    renderSelectorWithValue('preselected-model', onChange)
+
+    expect(await screen.findByRole('option', { name: '预选第二页模型（gpt-secure，私有）' })).toBeInTheDocument()
+    expect(onChange).not.toHaveBeenCalled()
+    expect(requestedURL(fetchMock, 1).search).toBe('?page=2&page_size=100')
+  })
+
+  it('预选模型在下一页验证失败时不清除，并允许重试后保留', async () => {
+    const onChange = vi.fn()
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(response({ items: [catalogItem({ id: 'page-one-model' })], total: 101, page: 1, page_size: 100 }))
+      .mockRejectedValueOnce(new Error('page two offline'))
+      .mockResolvedValueOnce(response({ items: [catalogItem({ id: 'preselected-model', name: '重试后的预选模型' })], total: 101, page: 2, page_size: 100 }))
+    vi.stubGlobal('fetch', fetchMock)
+    renderSelectorWithValue('preselected-model', onChange)
+
+    expect(await screen.findByText('加载更多模型失败')).toBeInTheDocument()
+    expect(onChange).not.toHaveBeenCalled()
+    fireEvent.click(screen.getByRole('button', { name: '重试加载更多模型' }))
+    expect(await screen.findByRole('option', { name: '重试后的预选模型（gpt-secure，私有）' })).toBeInTheDocument()
+    expect(onChange).not.toHaveBeenCalled()
+  })
+
+  it('已观察到 canonical 首项停用时立即清除预选 ID，且不让 YAML 同 ID 绕过', async () => {
+    const onChange = vi.fn()
+    const fetchMock = vi.fn().mockResolvedValue(response({
+      items: [
+        catalogItem({ id: 'disabled-shared-model', name: '停用平台模型', disabled: true }),
+        catalogItem({ id: 'disabled-shared-model', name: 'YAML 同 ID 模型', source: 'yaml', scope: 'global', owner_user_id: '', read_only: true }),
+      ],
+      total: 101,
+      page: 1,
+      page_size: 100,
+    }))
+    vi.stubGlobal('fetch', fetchMock)
+    renderSelectorWithValue('disabled-shared-model', onChange)
+
+    expect(await screen.findByText('已选模型不可用，已清除选择。')).toBeInTheDocument()
+    await waitFor(() => expect(onChange).toHaveBeenCalledWith(undefined))
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+    expect(screen.queryByRole('option', { name: /YAML 同 ID 模型/ })).not.toBeInTheDocument()
   })
 
   it('在初始加载或首批目录失败时不清除当前模型 ID', async () => {
@@ -172,6 +221,7 @@ describe('GovernedModelSelector', () => {
     renderSelector()
 
     expect(await screen.findByRole('button', { name: '加载更多模型' })).toBeInTheDocument()
+    expect(fetchMock).toHaveBeenCalledTimes(1)
     fireEvent.click(screen.getByRole('button', { name: '加载更多模型' }))
     await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2))
     expect(requestedURL(fetchMock, 1).search).toBe('?page=2&page_size=100')
