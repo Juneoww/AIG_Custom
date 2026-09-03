@@ -88,6 +88,43 @@ describe('任务详情模型摘要白名单', () => {
   })
 
   it.each([
+    ['a', 'one character'],
+    ['a'.repeat(128), '128 characters'],
+    ['model.name', 'dot separator'],
+    ['model_name', 'underscore separator'],
+    ['model:name', 'colon separator'],
+    ['model-name', 'hyphen separator'],
+  ])('accepts a valid %s model ID', (modelID) => {
+    const result = parseTaskDetail({
+      ...runningTask,
+      task_type: 'ai_infra_scan',
+      input_summary: { model_id: modelID },
+    })
+
+    expect(result.input_summary).toEqual({ model_id: modelID })
+  })
+
+  it('projects model_id together with other approved AI infrastructure summary fields', () => {
+    const result = parseTaskDetail({
+      ...runningTask,
+      task_type: 'ai_infra_scan',
+      input_summary: {
+        model_id: 'model-opaque-1',
+        language: 'zh',
+        timeout: 60,
+        port_scan_mode: 'fixed_ai',
+      },
+    })
+
+    expect(result.input_summary).toEqual({
+      model_id: 'model-opaque-1',
+      language: 'zh',
+      timeout: 60,
+      port_scan_mode: 'fixed_ai',
+    })
+  })
+
+  it.each([
     ['', 'empty'],
     [' ', 'space'],
     ['a'.repeat(129), 'too long'],
@@ -99,6 +136,14 @@ describe('任务详情模型摘要白名单', () => {
       ...runningTask,
       task_type: 'ai_infra_scan',
       input_summary: { model_id: modelID },
+    })).toThrow(ApiError)
+  })
+
+  it('rejects a non-string model ID in task detail', () => {
+    expect(() => parseTaskDetail({
+      ...runningTask,
+      task_type: 'ai_infra_scan',
+      input_summary: { model_id: 123 },
     })).toThrow(ApiError)
   })
 })
