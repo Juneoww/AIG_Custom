@@ -284,6 +284,16 @@ func TestSealAndOpenRepositorySourceKeepsSnapshotEncryptedAndBoundToBinding(t *t
 	if _, err := keyring.OpenRepositorySource(tamperedBinding, context); err == nil {
 		t.Fatal("repository source opened after binding ID tampering")
 	}
+	tamperedTaskBinding := cloneTaskBinding(binding)
+	tamperedTaskBinding.TaskID = "other-task-sentinel"
+	if _, err := keyring.OpenRepositorySource(tamperedTaskBinding, context); err == nil {
+		t.Fatal("repository source opened after task ID tampering")
+	}
+	tamperedSourceBinding := cloneTaskBinding(binding)
+	tamperedSourceBinding.SourceKind = "service"
+	if _, err := keyring.OpenRepositorySource(tamperedSourceBinding, context); err == nil {
+		t.Fatal("repository source opened after source kind tampering")
+	}
 	tamperedContext := context
 	tamperedContext.Version++
 	if _, err := keyring.OpenRepositorySource(binding, tamperedContext); err == nil {

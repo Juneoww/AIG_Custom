@@ -269,10 +269,22 @@ func validTaskBinding(binding *TaskBinding) bool {
 	if binding == nil || strings.TrimSpace(binding.ID) == "" || strings.TrimSpace(binding.TaskID) == "" || strings.TrimSpace(binding.SourceKind) == "" {
 		return false
 	}
-	if len(binding.EncryptedRepositoryURL) == 0 && len(binding.RepositoryURLNonce) == 0 && binding.RepositoryURLKeyID == "" {
-		return true
+	hasConnectionConfigID := binding.ConnectionConfigID != nil && strings.TrimSpace(*binding.ConnectionConfigID) != ""
+	hasConnectionConfigVersion := binding.ConnectionConfigVersion != nil && *binding.ConnectionConfigVersion > 0
+	hasAnyConnectionReference := binding.ConnectionConfigID != nil || binding.ConnectionConfigVersion != nil
+	hasRepositoryMaterial := len(binding.EncryptedRepositoryURL) > 0 && len(binding.RepositoryURLNonce) > 0 && strings.TrimSpace(binding.RepositoryURLKeyID) != ""
+	hasAnyRepositoryMaterial := len(binding.EncryptedRepositoryURL) > 0 || len(binding.RepositoryURLNonce) > 0 || strings.TrimSpace(binding.RepositoryURLKeyID) != ""
+
+	// 来源类型决定哪一组秘密材料能够出现。拒绝混合形状可防止调用方把仓库
+	// 密文重放为服务引用（或反向重放），使后续解密和授权只有唯一的输入路径。
+	switch binding.SourceKind {
+	case "service":
+		return hasConnectionConfigID && hasConnectionConfigVersion && !hasAnyRepositoryMaterial
+	case "repository":
+		return hasRepositoryMaterial && !hasAnyConnectionReference
+	default:
+		return false
 	}
-	return len(binding.EncryptedRepositoryURL) > 0 && len(binding.RepositoryURLNonce) > 0 && strings.TrimSpace(binding.RepositoryURLKeyID) != ""
 }
 
 func incrementRevision(revision string) (string, error) {

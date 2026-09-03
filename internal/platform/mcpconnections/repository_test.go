@@ -137,6 +137,78 @@ func TestRepositoryPersistsOnlyEncryptedRepositorySourceBinding(t *testing.T) {
 	assert.NotContains(t, string(encoded), "repository-source-sentinel")
 }
 
+func TestRepositoryRejectsIncompleteOrMixedTaskBindings(t *testing.T) {
+	ctx := context.Background()
+	db := openMCPConnectionPostgresDB(t)
+	require.NoError(t, database.Migrate(db))
+	repository := NewGormRepository(db)
+	require.NoError(t, repository.Init())
+
+	configID := "connection-binding-shape-sentinel"
+	versionOne := 1
+	versionZero := 0
+	repositoryMaterial := func() (*[]byte, *[]byte, *string) {
+		ciphertext := []byte("ciphertext-binding-shape-sentinel")
+		nonce := []byte("nonce-binding-shape-sentinel")
+		keyID := "key-binding-shape-sentinel"
+		return &ciphertext, &nonce, &keyID
+	}
+	newBinding := func(id, sourceKind string) *TaskBinding {
+		return &TaskBinding{ID: id, TaskID: "task-" + id, SourceKind: sourceKind}
+	}
+	withRepositoryMaterial := func(binding *TaskBinding) *TaskBinding {
+		ciphertext, nonce, keyID := repositoryMaterial()
+		binding.EncryptedRepositoryURL = append([]byte(nil), (*ciphertext)...)
+		binding.RepositoryURLNonce = append([]byte(nil), (*nonce)...)
+		binding.RepositoryURLKeyID = *keyID
+		return binding
+	}
+
+	tests := []struct {
+		name    string
+		binding *TaskBinding
+	}{
+		{name: "service without connection reference", binding: newBinding("binding-service-no-reference-sentinel", "service")},
+		{name: "service with only config ID", binding: func() *TaskBinding {
+			binding := newBinding("binding-service-id-only-sentinel", "service")
+			binding.ConnectionConfigID = &configID
+			return binding
+		}()},
+		{name: "service with only config version", binding: func() *TaskBinding {
+			binding := newBinding("binding-service-version-only-sentinel", "service")
+			binding.ConnectionConfigVersion = &versionOne
+			return binding
+		}()},
+		{name: "service with nonpositive config version", binding: func() *TaskBinding {
+			binding := newBinding("binding-service-zero-version-sentinel", "service")
+			binding.ConnectionConfigID = &configID
+			binding.ConnectionConfigVersion = &versionZero
+			return binding
+		}()},
+		{name: "service with repository material", binding: withRepositoryMaterial(newBinding("binding-service-mixed-sentinel", "service"))},
+		{name: "repository without encrypted material", binding: newBinding("binding-repository-no-material-sentinel", "repository")},
+		{name: "repository with incomplete encrypted material", binding: func() *TaskBinding {
+			binding := newBinding("binding-repository-partial-material-sentinel", "repository")
+			binding.EncryptedRepositoryURL = []byte("ciphertext-binding-shape-sentinel")
+			binding.RepositoryURLKeyID = "key-binding-shape-sentinel"
+			return binding
+		}()},
+		{name: "repository with connection reference", binding: func() *TaskBinding {
+			binding := withRepositoryMaterial(newBinding("binding-repository-mixed-sentinel", "repository"))
+			binding.ConnectionConfigID = &configID
+			binding.ConnectionConfigVersion = &versionOne
+			return binding
+		}()},
+		{name: "unknown source kind with repository material", binding: withRepositoryMaterial(newBinding("binding-unknown-source-sentinel", "unknown"))},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			require.ErrorIs(t, repository.CreateTaskBinding(ctx, test.binding), ErrInvalid)
+		})
+	}
+}
+
 func testConnectionConfig(id string) *ConnectionConfig {
 	now := time.Date(2026, 9, 3, 2, 3, 4, 0, time.UTC)
 	return &ConnectionConfig{

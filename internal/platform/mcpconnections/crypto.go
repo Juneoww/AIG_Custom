@@ -226,7 +226,18 @@ func connectionPayloadAAD(config *ConnectionConfig, version int, fieldDomain str
 }
 
 func bindingAAD(binding *TaskBinding, context BindingEncryptionContext, fieldDomain string) []byte {
-	return aad(binding.ID, context.Version, fieldDomain, context.OwnerUserID, context.Scope)
+	// 任务 ID 和来源类型同样决定密文的业务归属。把它们放入 AAD 后，即使攻击者
+	// 能修改绑定行的外键或来源字段，也不能将仓库快照重放到另一项任务/来源。
+	return []byte(strings.Join([]string{
+		keyringAADNamespace,
+		binding.ID,
+		binding.TaskID,
+		binding.SourceKind,
+		strconv.Itoa(context.Version),
+		fieldDomain,
+		context.OwnerUserID,
+		string(context.Scope),
+	}, "\x00"))
 }
 
 // 以下 wire 类型不携带面向日志/响应的脱敏方法，只在进出 AES-GCM 前处理完整明文。
