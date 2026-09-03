@@ -256,7 +256,9 @@ func bindingV2KeyID(storedKeyID string) (string, error) {
 		return "", ErrLegacyBindingEncryptionFormat
 	}
 	keyID := strings.TrimPrefix(storedKeyID, bindingKeyIDV2Prefix)
-	if strings.TrimSpace(keyID) == "" {
+	// Keyring 在构造时会规范化 key ID；接受带空白的持久化值会令写入校验
+	// 与实际查找使用不同标识，形成无法解密的绑定，因此必须严格拒绝。
+	if keyID == "" || keyID != strings.TrimSpace(keyID) {
 		return "", errors.New("MCP 仓库来源 binding-v2 密钥标识无效")
 	}
 	return keyID, nil

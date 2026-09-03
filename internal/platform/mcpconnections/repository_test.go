@@ -210,6 +210,13 @@ func TestRepositoryRejectsIncompleteOrMixedTaskBindings(t *testing.T) {
 			binding.RepositoryURLKeyID = "mcp_connection_binding_v2:"
 			return binding
 		}()},
+		{name: "repository with whitespace binding-v2 key ID", binding: func() *TaskBinding {
+			binding := newBinding("binding-repository-whitespace-v2-key-id-sentinel", "repository")
+			binding.EncryptedRepositoryURL = []byte("ciphertext-binding-shape-sentinel")
+			binding.RepositoryURLNonce = []byte("nonce-binding-shape-sentinel")
+			binding.RepositoryURLKeyID = "mcp_connection_binding_v2: key-binding-shape-sentinel "
+			return binding
+		}()},
 		{name: "repository with connection reference", binding: func() *TaskBinding {
 			binding := withRepositoryMaterial(newBinding("binding-repository-mixed-sentinel", "repository"))
 			binding.ConnectionConfigID = &configID
