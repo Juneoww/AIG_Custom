@@ -50,7 +50,7 @@ const useStyles = makeStyles({
 })
 
 export interface TaskCreatePageProps {
-  fixedTaskType?: Exclude<TaskCreateRequest['task_type'], 'unknown'>
+  fixedTaskType?: 'ai_infra_scan'
   returnTo?: string
 }
 

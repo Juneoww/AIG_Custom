@@ -7,12 +7,11 @@
  */
 import { Button, Card, MessageBar, MessageBarBody, Text, makeStyles, tokens } from '@fluentui/react-components'
 import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { useEffect, useRef } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { Link, useParams } from 'react-router-dom'
 
 import { useSession } from '../auth/session'
 import { ApiError } from '../../shared/api/errors'
-import type { TaskType } from '../../shared/api/types'
 import { PageHeader } from '../../shared/components/PageHeader'
 import { StatePanel } from '../../shared/components/StatePanel'
 import { fetchModelCatalog } from '../models/api'
@@ -41,6 +40,7 @@ function unavailableModelLabel(id: string): string {
 
 function RestoredModelName({ modelID }: { modelID: string }) {
   const automaticPageRef = useRef<string | undefined>(undefined)
+  const [retrying, setRetrying] = useState(false)
   const catalog = useInfiniteQuery({
     queryKey: ['task-detail-model-catalog', modelID],
     initialPageParam: 1,
@@ -84,11 +84,21 @@ function RestoredModelName({ modelID }: { modelID: string }) {
     void catalog.fetchNextPage({ cancelRefetch: false })
   }, [automaticPageKey, canAutomaticallyLoadNextPage, catalog.fetchNextPage])
 
-  if (catalogUnavailable) {
+  useEffect(() => {
+    if (!catalog.isFetching) setRetrying(false)
+  }, [catalog.isFetching])
+
+  if (catalogUnavailable || retrying) {
     return (
       <>
         <Text>{unavailableModelLabel(modelID)}</Text>
-        <Button appearance="transparent" disabled={catalog.isFetching} onClick={() => void catalog.refetch()}>重试恢复模型名称</Button>
+        <Button
+          appearance="transparent"
+          disabled={catalog.isFetching || retrying}
+          onClick={() => { setRetrying(true); void catalog.refetch() }}
+        >
+          {catalog.isFetching || retrying ? '正在重试恢复模型名称…' : '重试恢复模型名称'}
+        </Button>
       </>
     )
   }
@@ -99,7 +109,7 @@ function RestoredModelName({ modelID }: { modelID: string }) {
 }
 
 export interface TaskDetailPageProps {
-  expectedTaskType?: Exclude<TaskType, 'unknown'>
+  expectedTaskType?: 'ai_infra_scan'
   returnTo?: string
 }
 

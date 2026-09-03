@@ -442,6 +442,7 @@ describe('任务页面', () => {
     expect(screen.queryByText('https://models.example.test/v1')).not.toBeInTheDocument()
     expect(screen.queryByText('不应展示')).not.toBeInTheDocument()
     expect(screen.queryByText('********')).not.toBeInTheDocument()
+    expect(screen.queryByText('user-1')).not.toBeInTheDocument()
   })
 
   it('专属 AI 基础设施详情为第二页模型自动继续请求目录', async () => {
@@ -483,15 +484,18 @@ describe('任务页面', () => {
   })
 
   it('专属 AI 基础设施详情在模型目录失败时保留暂不可用状态并允许重试', async () => {
+    let resolveRetry: ((response: Response) => void) | undefined
     const fetchMock = vi.fn()
       .mockResolvedValueOnce(jsonResponse(aiInfraDetail))
       .mockResolvedValueOnce(new Response(null, { status: 500 }))
-      .mockResolvedValueOnce(jsonResponse({ items: [catalogModel()], total: 1, page: 1, page_size: 100 }))
+      .mockImplementationOnce(() => new Promise<Response>((resolve) => { resolveRetry = resolve }))
     vi.stubGlobal('fetch', fetchMock)
     renderPage(<TaskDetailPage expectedTaskType="ai_infra_scan" />, { id: 'user-1', username: 'alice', role: 'user', must_change_password: false }, '/tasks/ai-infra/task-ai-infra-1', '/tasks/ai-infra/:taskId')
 
     expect(await screen.findByText('已选择的模型（ID: model-opaque-1，目录暂不可用）')).toBeInTheDocument()
     fireEvent.click(screen.getByRole('button', { name: '重试恢复模型名称' }))
+    expect(screen.getByRole('button', { name: '正在重试恢复模型名称…' })).toBeDisabled()
+    resolveRetry?.(jsonResponse({ items: [catalogModel()], total: 1, page: 1, page_size: 100 }))
     expect(await screen.findByText('受治理扫描模型（gpt-secure，私有）')).toBeInTheDocument()
   })
 
@@ -679,6 +683,33 @@ describe('任务页面', () => {
     renderPage(<TaskCreatePage fixedTaskType="ai_infra_scan" returnTo="/tasks/ai-infra" />, { id: 'user-1', username: 'alice', role: 'user', must_change_password: false }, '/tasks/ai-infra/new')
     fireEvent.click(screen.getByRole('button', { name: '取消' }))
     expect(screen.getByLabelText('当前任务路由')).toHaveTextContent('/tasks/ai-infra')
+  })
+
+  it('专属 AI 页面在已选模型目录后台刷新时阻止 pending 模型提交', async () => {
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } })
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(jsonResponse({ items: [catalogModel()], total: 1, page: 1, page_size: 100 }))
+      .mockImplementationOnce(() => new Promise<Response>(() => undefined))
+    vi.stubGlobal('fetch', fetchMock)
+    renderPage(
+      <TaskCreatePage fixedTaskType="ai_infra_scan" returnTo="/tasks/ai-infra" />,
+      { id: 'user-1', username: 'alice', role: 'user', must_change_password: false },
+      '/tasks/ai-infra/new',
+      '*',
+      queryClient,
+    )
+
+    fireEvent.change(screen.getByRole('textbox', { name: '扫描目标或任务说明' }), { target: { value: '192.0.2.10' } })
+    await screen.findByRole('option', { name: '受治理扫描模型（gpt-secure，私有）' })
+    fireEvent.change(screen.getByRole('combobox', { name: '扫描模型' }), { target: { value: 'model-opaque-1' } })
+    await waitFor(() => expect(screen.getByRole('combobox', { name: '扫描模型' })).toHaveValue('model-opaque-1'))
+
+    void queryClient.invalidateQueries({ queryKey: ['governed-model-catalog'] })
+    expect(await screen.findByText('正在验证已选模型')).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: '创建任务' }))
+
+    expect(await screen.findByText('扫描模型尚未确认可用，请等待目录验证完成或选择不使用模型。')).toBeInTheDocument()
+    expect(fetchMock.mock.calls.filter(([, init]) => (init as RequestInit | undefined)?.method === 'POST')).toHaveLength(0)
   })
 
   it.each(['fixed_ai', 'full_tcp'] as const)('AI 基础设施扫描提交显式发送端口扫描模式 %s', async (portScanMode) => {
