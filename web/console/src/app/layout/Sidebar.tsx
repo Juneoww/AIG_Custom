@@ -41,6 +41,9 @@ function matchingGroupFor(pathname: string): NavigationGroupID | undefined {
 
 function isSecondaryActive(item: SecondaryNavigationItem, pathname: string, search: string) {
   const [targetPathname, targetQuery] = item.path.split('?')
+  if (item.id === 'ai-infra-scan') {
+    return isPathWithin(pathname, targetPathname)
+  }
   if (pathname !== targetPathname) {
     return false
   }
@@ -251,7 +254,7 @@ export function Sidebar({ role }: SidebarProps) {
     setExpandedGroups((current) =>
       current[matchingGroup] ? current : { ...current, [matchingGroup]: true },
     )
-  }, [location.pathname, location.search])
+  }, [location.pathname])
 
   const isPrimaryActive = (item: NavigationItem) => {
     if (item.id === 'models') {

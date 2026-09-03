@@ -23,6 +23,9 @@ function RouteDriver() {
       <button onClick={() => navigate('/tasks/new')}>前往新建任务</button>
       <button onClick={() => navigate('/tasks/new?scan=mcp')}>前往 MCP 扫描</button>
       <button onClick={() => navigate('/tasks/new?scan=agent-workflow')}>前往 Agent 扫描</button>
+      <button onClick={() => navigate('/tasks/ai-infra?status=running')}>前往 AI 基础设施运行中</button>
+      <button onClick={() => navigate('/tasks/ai-infra?status=failed&page=2')}>前往 AI 基础设施失败</button>
+      <button onClick={() => navigate('/tasks/ai-infra/new')}>前往新建 AI 基础设施任务</button>
       <button onClick={() => navigate('/models')}>前往模型配置</button>
     </div>
   )
@@ -81,7 +84,7 @@ describe('Sidebar', () => {
     expect(screen.getByRole('link', { name: 'Skills 扫描' })).toHaveAttribute('href', '/tasks/new?scan=skills')
     expect(screen.getByRole('link', { name: 'AI 基础设施扫描' })).toHaveAttribute(
       'href',
-      '/tasks/new?scan=ai-infra',
+      '/tasks/ai-infra',
     )
     expect(screen.getByRole('link', { name: 'Agent 工作流扫描' })).toHaveAttribute(
       'href',
@@ -179,6 +182,37 @@ describe('Sidebar', () => {
     expect(screen.getByRole('button', { name: '收起凭证配置子菜单' })).toHaveAttribute('aria-expanded', 'true')
     expect(screen.getByRole('link', { name: '模型配置' })).toHaveAttribute('aria-current', 'page')
     expect(screen.getByRole('link', { name: '智能体配置' })).not.toHaveAttribute('aria-current', 'page')
+  })
+
+  it.each(['/tasks/ai-infra', '/tasks/ai-infra/new', '/tasks/ai-infra/scan-42'])
+  ('activates AI infrastructure scans across its task routes', (path) => {
+    renderSidebar(path)
+
+    expect(screen.getByRole('link', { name: '扫描任务' })).toHaveAttribute('href', '/tasks')
+    expect(screen.getByRole('link', { name: '扫描任务' })).toHaveAttribute('aria-current', 'page')
+    expect(screen.getByRole('button', { name: '收起扫描任务子菜单' })).toHaveAttribute('aria-expanded', 'true')
+    expect(screen.getByRole('link', { name: 'AI 基础设施扫描' })).toHaveAttribute('aria-current', 'page')
+  })
+
+  it('preserves a manual task collapse across query-only navigation', () => {
+    renderSidebar('/tasks/ai-infra?status=running', true)
+
+    fireEvent.click(screen.getByRole('button', { name: '收起扫描任务子菜单' }))
+    expect(screen.getByRole('button', { name: '展开扫描任务子菜单' })).toHaveAttribute('aria-expanded', 'false')
+
+    fireEvent.click(screen.getByRole('button', { name: '前往 AI 基础设施失败' }))
+    expect(screen.getByRole('button', { name: '展开扫描任务子菜单' })).toHaveAttribute('aria-expanded', 'false')
+    expect(screen.queryByRole('link', { name: 'AI 基础设施扫描' })).not.toBeInTheDocument()
+  })
+
+  it('auto-expands task navigation after moving to a new task pathname', () => {
+    renderSidebar('/tasks/ai-infra?status=running', true)
+
+    fireEvent.click(screen.getByRole('button', { name: '收起扫描任务子菜单' }))
+    fireEvent.click(screen.getByRole('button', { name: '前往新建 AI 基础设施任务' }))
+
+    expect(screen.getByRole('button', { name: '收起扫描任务子菜单' })).toHaveAttribute('aria-expanded', 'true')
+    expect(screen.getByRole('link', { name: 'AI 基础设施扫描' })).toHaveAttribute('aria-current', 'page')
   })
 
   it('activates credentials without activating the rules group', () => {
