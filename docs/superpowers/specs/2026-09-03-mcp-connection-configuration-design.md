@@ -23,7 +23,7 @@ MCP 连接配置用于保存“如何连接被扫描的 MCP 服务”：服务�
 2. 配置保存后，密钥只保留在服务端加密存储中，后续页面仅显示配置名称、认证类型、启用状态和最近测试结果；
 3. 用户进入 `/tasks/mcp/new`，选择“受控运行服务扫描”后，仅从可见且启用的 MCP 连接配置中选择一项；
 4. 页面仍要求用户确认已获得安全测试授权；连接配置证明的是访问方式，不等同于扫描授权；
-5. 创建请求只提交 `connection_config_id`，服务端解析对应版本的端点和密钥，并在任务执行时注入给 MCP Agent；
+5. 创建请求提交 `connection_config_id` 与在选择时取得的 `connection_config_version`，服务端在同一事务中校验并固定该版本的端点和密钥，再在任务执行时注入给 MCP Agent；
 6. 任务详情只展示连接配置的安全标签和认证类型，不展示端点、Token、Header、Cookie、证书或原始连通性响应。
 
 “无需认证”的服务也必须建立一条认证方式为 `none` 的 MCP 连接配置，从而保持服务扫描始终通过同一受治理选择器进入。
@@ -47,7 +47,7 @@ MCP 连接配置用于保存“如何连接被扫描的 MCP 服务”：服务�
 
 | 字段 | 说明 |
 | --- | --- |
-| `id` | 不透明配置 ID；任务和浏览器 API 仅以该值引用配置。 |
+| `id` | 不透明配置 ID；任务引用时与只读 `version` 组成不可变的配置版本引用。 |
 | `version` | 每次有效配置更新递增；任务创建时固定解析/记录版本，避免之后的配置修改影响已创建或运行中的任务。 |
 | `owner_scope` | 服务端根据主体、管理员策略和共享规则决定可见范围，浏览器不能伪造。 |
 | `enabled` | 只有启用配置可被新任务选择；停用不泄露密钥，也不改变已创建任务的配置快照。 |
@@ -56,6 +56,8 @@ MCP 连接配置用于保存“如何连接被扫描的 MCP 服务”：服务�
 | `created_by`、`created_at`、`updated_at` | 审计和管理元数据。 |
 
 所有影响实际连接的字段（`server_url`、`transport`、`auth_type`、任何 secret 或 Header 名称）更新时，服务端必须创建一个新 `version`，将该版本标为 `not_tested` 并自动设为 `enabled=false`。只有该版本成功测试后，才允许显式启用。仅修改 `name` 或 `description` 不改变有效连接版本和测试状态。任务创建固定引用已启用、测试成功的版本；运行中的任务继续使用创建时已解析的版本。
+
+`GET /mcp-connection-options` 的每个可选项必须返回安全的 `id` 与 `version`（不返回 secret）；响应可带集合 ETag 用于缓存失效。新建任务页将 `id + version` 一同提交。创建事务重新校验主体权限、配置当前版本、启用状态、当前版本测试成功状态与出站策略；若版本已变化或已失效，返回 `409 MCP_CONNECTION_VERSION_CONFLICT`，不静默改用新版本。测试结果只能写回其开始测试时的不可变版本；更新/启用/停用使用 `If-Match` 或等价的期望版本条件，避免并发覆盖。
 
 ### 3.3 Header 安全约束
 
@@ -87,6 +89,8 @@ MCP 连接配置用于保存“如何连接被扫描的 MCP 服务”：服务�
 
 `GET /mcp-connection-configs/:id` 只面向具有该配置管理权限的主体，返回可编辑的非 secret 字段：名称、说明、服务端点、传输方式、认证类型、Header 名称和“是否已配置值”等状态；不会返回任何认证值。安全审计员只能获得列表级安全摘要，不能读取端点或编辑详情。
 
+上述管理详情是**唯一**允许把 `server_url` 与 Header 名称返回浏览器的例外：它只面向配置管理者，不属于 MCP 工作台、任务新建、任务详情、报告或“任务可选连接”接口。任何 Token、API Key、Header 值、Cookie、证书和原始连通性响应始终不返回浏览器。
+
 新建/编辑页按“基本信息 → MCP 服务 → 认证 → 测试并保存”组织。测试连接由服务端发起最小、非破坏性的 MCP 协议探测；首期不得调用危险工具、不得执行用户工具调用，也不得把原始响应体返回浏览器。用户只能在成功测试后启用配置。
 
 权限建议如下：
@@ -100,7 +104,7 @@ MCP 连接配置用于保存“如何连接被扫描的 MCP 服务”：服务�
 服务扫描的新建页 `/tasks/mcp/new` 不显示端点、Token、Header 或 TLS 字段；它只显示连接配置选择器：
 
 - 选项标签：配置名称、传输方式、认证类型、启用状态；
-- 仅请求当前主体可使用、`enabled=true` 且当前版本测试成功的配置；
+- 仅请求当前主体可使用、`enabled=true` 且当前版本测试成功的配置；每项携带不可编辑的 `version`，供创建时的乐观并发校验；响应 ETag 仅用于选项列表缓存失效；
 - 无可用配置时，提供进入“凭证配置 → MCP 连接配置”的入口；
 - 创建前保留“我确认已获得该目标的安全测试授权”声明；
 - 代码/仓库扫描不加载或提交连接配置选择器。
@@ -111,7 +115,8 @@ MCP 专属创建接口使用以下安全形状：
 {
   "source": {
     "kind": "service",
-    "connection_config_id": "opaque-connection-id"
+    "connection_config_id": "opaque-connection-id",
+    "connection_config_version": 7
   },
   "model_id": "optional-opaque-model-id",
   "thread": 4,
@@ -135,7 +140,7 @@ MCP 专属创建接口使用以下安全形状：
 }
 ```
 
-仓库来源允许以 `attachment_ids` 替代 `repository_url`，两者必须互斥；它不得提交 `connection_config_id` 或 `authorization_confirmed`。服务来源必须提交 `connection_config_id` 和 `authorization_confirmed=true`，且不得提交附件或原始端点。
+仓库来源允许以 `attachment_ids` 替代 `repository_url`，两者必须互斥；它不得提交 `connection_config_id`、`connection_config_version` 或 `authorization_confirmed`。服务来源必须提交 `connection_config_id`、`connection_config_version` 和 `authorization_confirmed=true`，且不得提交附件或原始端点。
 
 ## 6. MCP 专属 API
 
@@ -148,13 +153,13 @@ MCP 专属创建接口使用以下安全形状：
 | 新建 MCP 任务 | `POST /api/v1/platform/mcp-scans` | 只接受 MCP 专属创建 DTO；要求幂等键与 CSRF。 |
 | MCP 任务详情 | `GET /api/v1/platform/mcp-scans/:taskId` | 只返回 MCP 任务的安全详情；非 MCP ID 不以 MCP 详情展示。 |
 | 取消 MCP 任务 | `POST /api/v1/platform/mcp-scans/:taskId/cancel` | 复用有界确认与不自动重放语义。 |
-| MCP 代码附件 | `POST /api/v1/platform/mcp-scan-attachments` 及其分片子路径 | 使用 MCP 专属的上传、分片、合并、下载和删除路径；只产生 opaque 附件 ID，任务页不调用通用任务附件路径。 |
+| MCP 代码附件 | `POST /api/v1/platform/mcp-scan-attachments` 及其分片、合并和删除子路径 | 使用 MCP 专属上传能力，只产生 opaque 附件 ID，任务页不调用通用任务附件路径；首期不提供浏览器下载源代码附件的能力。 |
 | MCP 连接配置管理列表 | `GET /api/v1/platform/mcp-connection-configs` | 返回当前主体可管理的配置（包括已停用和未测试版本）的安全摘要，供凭证配置页面使用；无管理权限的审计员仅在策略允许时读取同一摘要，不获得管理操作。 |
-| 读取任务可选连接 | `GET /api/v1/platform/mcp-connection-options` | 只返回当前主体可使用、启用且当前版本测试成功的连接安全摘要，供 MCP 新建任务页选择。 |
-| 创建连接配置 | `POST /api/v1/platform/mcp-connection-configs` | 接收 write-only secret 字段；服务端加密后持久化。 |
+| 读取任务可选连接 | `GET /api/v1/platform/mcp-connection-options` | 只返回当前主体可使用、启用且当前版本测试成功的连接安全摘要及每项 `version`；响应 ETag 仅用于缓存失效。 |
+| 创建连接配置 | `POST /api/v1/platform/mcp-connection-configs` | 接收 write-only secret 字段；服务端加密后持久化；要求 `Idempotency-Key`。 |
 | 读取连接配置详情 | `GET /api/v1/platform/mcp-connection-configs/:id` | 仅配置管理者可读取非 secret 编辑字段；不返回任何认证值。 |
-| 更新/停用连接 | `PATCH /api/v1/platform/mcp-connection-configs/:id` | 支持字段校验、版本化和启用状态管理。 |
-| 测试连接 | `POST /api/v1/platform/mcp-connection-configs/:id/test` | 返回脱敏的连通性/协议结果。 |
+| 更新/停用连接 | `PATCH /api/v1/platform/mcp-connection-configs/:id` | 支持字段校验、版本化和启用状态管理；要求 `If-Match`/期望版本。 |
+| 测试连接 | `POST /api/v1/platform/mcp-connection-configs/:id/test` | 返回脱敏的连通性/协议结果与被测试的版本；要求 `Idempotency-Key`。 |
 | 读取扫描模型 | `GET /api/v1/platform/models` | 复用既有受治理模型目录；它是“凭证配置”的模型资源，不是通用任务 API。 |
 
 服务端可以在实现内部复用既有任务持久化、附件、身份、审计和 Agent 调度能力，但 MCP Handler、浏览器 DTO、URL 路径和类型校验必须保持专属边界。
@@ -169,6 +174,10 @@ MCP 专属创建接口使用以下安全形状：
 - 任务详情只保留来源类别、连接配置安全标签/认证类型、模型引用、并发和阶段等白名单字段；
 - 取消、创建和测试连接的网络不确定结果不得自动重复写请求。
 
+所有浏览器非安全方法均要求 CSRF 防护。`POST /mcp-scans`、创建配置、测试连接、取消任务与附件合并使用 `Idempotency-Key`：键作用域为“认证主体 + 租户/组织范围 + HTTP 方法 + 规范化路径”，保留至少 24 小时；同键、同规范化载荷返回原始结果（重复响应为 `200` 并带 `Idempotent-Replay: true`），同键、不同载荷返回 `409 IDEMPOTENCY_KEY_REUSED`。浏览器不自动重放未知结果；用户明确重试时复用同一键以查询/获得原结果。附件分片以 `upload_id + chunk_index + 内容摘要` 幂等，摘要不同时返回冲突。启用、停用和编辑使用版本条件更新；取消任务的重复请求返回同一任务的当前取消状态。
+
+连接配置权限：普通用户只能管理自己拥有或被授予管理权的配置；管理员可按组织策略管理；安全审计员只在策略允许时读取列表级安全摘要，不能创建、编辑、测试、启停或读取详情。对不可见资源返回 `404`，对已知但被角色禁止的写操作返回 `403`，不泄露 secret 或端点。
+
 ## 8. 非目标
 
 - 不在 MCP 新建任务页添加 Token、Header、Cookie、TLS 忽略开关或自由文本凭据；
@@ -181,7 +190,7 @@ MCP 专属创建接口使用以下安全形状：
 
 1. 用户可在“凭证配置”中创建并测试 MCP 连接配置，且 secret 保存后不可读取；
 2. MCP 服务扫描新建页只选择启用且可见的连接配置，不录入端点或任何密钥；
-3. 服务扫描创建请求只携带 `connection_config_id`，后端从对应版本安全解析真实连接信息；
+3. 服务扫描创建请求携带 `connection_config_id` 与 `connection_config_version`；版本变化会明确冲突，后端只从已校验并固定的对应版本安全解析真实连接信息；
 4. 仓库与服务来源的字段、附件和授权声明组合均由服务端严格拒绝无效请求；
 5. MCP 专属 API 不接受或返回通用任务 DTO 中不应暴露的字段；
 6. Token、Header、Cookie、证书、原始端点和测试响应不会出现在浏览器接口、日志、报告、任务详情或审计文本中；
