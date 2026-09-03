@@ -1,6 +1,7 @@
 package mcpconnections
 
 import (
+	"bytes"
 	"crypto/aes"
 	"crypto/cipher"
 	"crypto/rand"
@@ -22,7 +23,11 @@ const (
 	connectionPayloadFieldDomain = "connection_payload"
 	repositorySourceFieldDomain  = "repository_source"
 	keyringAADNamespace          = "mcp_connection_v1"
+	bindingAADNamespaceV2        = "mcp_connection_binding_v2"
+	bindingCiphertextV2Prefix    = bindingAADNamespaceV2 + "\x00"
 )
+
+var ErrLegacyBindingEncryptionFormat = errors.New("MCP 仓库来源使用不支持的旧绑定加密格式，需要重新创建任务绑定")
 
 // Keyring 是 MCP 连接资源专用的密钥集合。它与模型密钥和模型 AAD 完全隔离，
 // 以防一个资源域的密文被错误地当作另一个资源域的密文接受。
@@ -130,7 +135,7 @@ func (keyring *Keyring) SealRepositorySource(binding *TaskBinding, context Bindi
 	if err != nil {
 		return err
 	}
-	binding.EncryptedRepositoryURL = ciphertext
+	binding.EncryptedRepositoryURL = append([]byte(bindingCiphertextV2Prefix), ciphertext...)
 	binding.RepositoryURLNonce = nonce
 	binding.RepositoryURLKeyID = keyID
 	return nil
@@ -140,7 +145,11 @@ func (keyring *Keyring) OpenRepositorySource(binding *TaskBinding, context Bindi
 	if err := validateBindingContext(binding, context); err != nil {
 		return RepositorySourceSnapshot{}, err
 	}
-	plaintext, err := keyring.open(binding.RepositoryURLKeyID, binding.RepositoryURLNonce, binding.EncryptedRepositoryURL, bindingAAD(binding, context, repositorySourceFieldDomain))
+	ciphertext, err := bindingV2Ciphertext(binding.EncryptedRepositoryURL)
+	if err != nil {
+		return RepositorySourceSnapshot{}, err
+	}
+	plaintext, err := keyring.open(binding.RepositoryURLKeyID, binding.RepositoryURLNonce, ciphertext, bindingAAD(binding, context, repositorySourceFieldDomain))
 	if err != nil {
 		return RepositorySourceSnapshot{}, errors.New("MCP 仓库来源认证解密失败")
 	}
@@ -229,7 +238,7 @@ func bindingAAD(binding *TaskBinding, context BindingEncryptionContext, fieldDom
 	// 任务 ID 和来源类型同样决定密文的业务归属。把它们放入 AAD 后，即使攻击者
 	// 能修改绑定行的外键或来源字段，也不能将仓库快照重放到另一项任务/来源。
 	return []byte(strings.Join([]string{
-		keyringAADNamespace,
+		bindingAADNamespaceV2,
 		binding.ID,
 		binding.TaskID,
 		binding.SourceKind,
@@ -238,6 +247,20 @@ func bindingAAD(binding *TaskBinding, context BindingEncryptionContext, fieldDom
 		context.OwnerUserID,
 		string(context.Scope),
 	}, "\x00"))
+}
+
+// bindingV2Ciphertext 通过密文封套识别新格式，同时保持 key-ID 列只存实际主密钥
+// 标识。MCP 绑定尚未有已发布写入路径；无封套的旧行必须明确拒绝，且不能根据
+// 可篡改的 task_id/source_kind 选择 v1 AAD 回退解密。
+func bindingV2Ciphertext(storedCiphertext []byte) ([]byte, error) {
+	if !bytes.HasPrefix(storedCiphertext, []byte(bindingCiphertextV2Prefix)) {
+		return nil, ErrLegacyBindingEncryptionFormat
+	}
+	ciphertext := storedCiphertext[len(bindingCiphertextV2Prefix):]
+	if len(ciphertext) == 0 {
+		return nil, errors.New("MCP 仓库来源 binding-v2 密文无效")
+	}
+	return ciphertext, nil
 }
 
 // 以下 wire 类型不携带面向日志/响应的脱敏方法，只在进出 AES-GCM 前处理完整明文。

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -263,6 +264,16 @@ func TestSealAndOpenRepositorySourceKeepsSnapshotEncryptedAndBoundToBinding(t *t
 	if err := keyring.SealRepositorySource(binding, context, snapshot); err != nil {
 		t.Fatalf("seal repository source: %v", err)
 	}
+	const bindingV2Marker = "mcp_connection_binding_v2\x00"
+	if binding.RepositoryURLKeyID != "repository-sentinel" {
+		t.Fatalf("binding-v2 format marker must not alter the actual key ID, got %q", binding.RepositoryURLKeyID)
+	}
+	if !bytes.HasPrefix(binding.EncryptedRepositoryURL, []byte(bindingV2Marker)) {
+		t.Fatal("new repository source must record the binding-v2 encryption format in its ciphertext envelope")
+	}
+	if !strings.HasPrefix(string(bindingAAD(binding, context, repositorySourceFieldDomain)), "mcp_connection_binding_v2\x00") {
+		t.Fatal("new repository source must use a dedicated binding-v2 AAD namespace")
+	}
 
 	encoded, err := json.Marshal(binding)
 	if err != nil {
@@ -299,8 +310,44 @@ func TestSealAndOpenRepositorySourceKeepsSnapshotEncryptedAndBoundToBinding(t *t
 	if _, err := keyring.OpenRepositorySource(binding, tamperedContext); err == nil {
 		t.Fatal("repository source opened after version tampering")
 	}
-	if _, err := keyring.open(binding.RepositoryURLKeyID, binding.RepositoryURLNonce, binding.EncryptedRepositoryURL, bindingAAD(binding, context, "wrong-field-domain")); err == nil {
+	if _, err := keyring.open(binding.RepositoryURLKeyID, binding.RepositoryURLNonce, binding.EncryptedRepositoryURL[len(bindingV2Marker):], bindingAAD(binding, context, "wrong-field-domain")); err == nil {
 		t.Fatal("repository source opened with a different field AAD domain")
+	}
+}
+
+func TestOpenRepositorySourceRejectsLegacyBindingEncryptionFormat(t *testing.T) {
+	keyring, err := NewKeyring("legacy-repository-sentinel", bytes.Repeat([]byte{0x52}, 32), nil)
+	if err != nil {
+		t.Fatalf("new keyring: %v", err)
+	}
+	binding := &TaskBinding{ID: "legacy-binding-sentinel", TaskID: "legacy-task-sentinel", SourceKind: "repository"}
+	context := BindingEncryptionContext{OwnerUserID: "legacy-owner-sentinel", Scope: ScopePrivate, Version: 1}
+	snapshot := RepositorySourceSnapshot{RepositoryURL: "legacy-repository-source-sentinel"}
+	plaintext, err := json.Marshal(repositorySourceSnapshotWire(snapshot))
+	if err != nil {
+		t.Fatalf("marshal legacy snapshot: %v", err)
+	}
+	// 此处刻意构造上一个提交写出的 v1 AAD 密文；即使其认证可通过旧格式，
+	// OpenRepositorySource 也绝不能尝试旧 AAD，否则篡改 task_id 会重新打开密文。
+	ciphertext, nonce, keyID, err := keyring.seal(plaintext, aad(binding.ID, context.Version, repositorySourceFieldDomain, context.OwnerUserID, context.Scope))
+	if err != nil {
+		t.Fatalf("seal legacy snapshot: %v", err)
+	}
+	binding.EncryptedRepositoryURL = ciphertext
+	binding.RepositoryURLNonce = nonce
+	binding.RepositoryURLKeyID = keyID
+
+	for _, candidate := range []*TaskBinding{
+		binding,
+		func() *TaskBinding {
+			tampered := cloneTaskBinding(binding)
+			tampered.TaskID = "legacy-other-task-sentinel"
+			return tampered
+		}(),
+	} {
+		if _, err := keyring.OpenRepositorySource(candidate, context); err == nil || !strings.Contains(err.Error(), "重新创建任务绑定") {
+			t.Fatalf("legacy binding encryption must fail closed with a recreate error, got %v", err)
+		}
 	}
 }
 
