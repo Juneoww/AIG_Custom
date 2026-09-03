@@ -8,7 +8,7 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { StrictMode } from 'react'
-import { MemoryRouter, Route, Routes } from 'react-router-dom'
+import { MemoryRouter, Route, Routes, useLocation } from 'react-router-dom'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { SessionProvider } from '../auth/session'
@@ -60,6 +60,10 @@ function jsonResponse(body: unknown) {
   return new Response(JSON.stringify(body), { status: 200, headers: { 'Content-Type': 'application/json' } })
 }
 
+function TaskLocationProbe() {
+  return <output aria-label="当前任务路由">{useLocation().pathname}</output>
+}
+
 function renderPage(page: React.ReactNode, subject: CurrentSubject, path = '/', routePath = '*') {
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } })
   return render(
@@ -69,10 +73,19 @@ function renderPage(page: React.ReactNode, subject: CurrentSubject, path = '/', 
           <Routes>
             <Route path={routePath} element={page} />
           </Routes>
+          <TaskLocationProbe />
         </MemoryRouter>
       </SessionProvider>
     </QueryClientProvider>,
   )
+}
+
+function catalogModel(overrides: Record<string, unknown> = {}) {
+  return {
+    id: 'model-opaque-1', owner_user_id: 'user-1', scope: 'private', name: '受治理扫描模型', provider_model: 'gpt-secure',
+    base_url: 'https://models.example.test/v1', note: '不应展示', limit: 4, disabled: false, token: '********', source: 'platform', read_only: false,
+    ...overrides,
+  }
 }
 
 beforeEach(() => {
@@ -459,6 +472,76 @@ describe('任务页面', () => {
     expect(screen.getByRole('group', { name: '第二步：参数' })).toBeInTheDocument()
     expect(screen.getByRole('group', { name: '第三步：附件' })).toBeInTheDocument()
     expect(screen.queryByLabelText(/密钥|Token|API Key/i)).not.toBeInTheDocument()
+  })
+
+  it('专属 AI 基础设施创建页固定四步，并只提供受治理扫描模型选择器', () => {
+    vi.stubGlobal('fetch', vi.fn(() => new Promise<Response>(() => undefined)))
+    renderPage(
+      <TaskCreatePage fixedTaskType="ai_infra_scan" returnTo="/tasks/ai-infra" />,
+      { id: 'user-1', username: 'alice', role: 'user', must_change_password: false },
+      '/tasks/ai-infra/new',
+    )
+
+    expect(screen.getByRole('heading', { name: '新建 AI 基础设施扫描任务' })).toBeInTheDocument()
+    expect(screen.queryByRole('group', { name: '第一步：任务类型' })).not.toBeInTheDocument()
+    expect(screen.getByRole('group', { name: '第一步：扫描目标' })).toBeInTheDocument()
+    expect(screen.getByRole('group', { name: '第二步：扫描配置' })).toBeInTheDocument()
+    expect(screen.getByRole('group', { name: '第三步：附件' })).toBeInTheDocument()
+    expect(screen.getByRole('group', { name: '第四步：确认' })).toBeInTheDocument()
+    expect(screen.queryByRole('group', { name: '第二步：参数' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('combobox', { name: '扫描类型' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('combobox', { name: '语言' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('textbox', { name: '模型 ID' })).not.toBeInTheDocument()
+    expect(screen.getByRole('combobox', { name: '扫描模型' })).toBeInTheDocument()
+  })
+
+  it('专属 AI 基础设施创建页提交受治理模型并导航到专属任务列表详情', async () => {
+    const created = { ...task, id: 'created/ai-1', task_type: 'ai_infra_scan', input_summary: { language: 'zh', timeout: 300, port_scan_mode: 'fixed_ai', model_id: 'model-opaque-1' } }
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(jsonResponse({ items: [catalogModel()], total: 1, page: 1, page_size: 100 }))
+      .mockResolvedValueOnce(jsonResponse(created))
+    vi.stubGlobal('fetch', fetchMock)
+    renderPage(
+      <TaskCreatePage fixedTaskType="ai_infra_scan" returnTo="/tasks/ai-infra" />,
+      { id: 'user-1', username: 'alice', role: 'user', must_change_password: false },
+      '/tasks/ai-infra/new',
+    )
+
+    fireEvent.change(screen.getByRole('textbox', { name: '扫描目标或任务说明' }), { target: { value: '192.0.2.10' } })
+    await screen.findByRole('option', { name: '受治理扫描模型（gpt-secure，私有）' })
+    fireEvent.change(await screen.findByRole('combobox', { name: '扫描模型' }), { target: { value: 'model-opaque-1' } })
+    await waitFor(() => expect(screen.getByRole('combobox', { name: '扫描模型' })).toHaveValue('model-opaque-1'))
+    fireEvent.click(screen.getByRole('button', { name: '创建任务' }))
+
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2))
+    expect(JSON.parse(String((fetchMock.mock.calls[1]?.[1] as RequestInit).body))).toEqual(expect.objectContaining({
+      task_type: 'ai_infra_scan', country_iso_code: 'zh_CN', params: { model_id: 'model-opaque-1', timeout: 300, port_scan_mode: 'fixed_ai' },
+    }))
+    expect(screen.getByLabelText('当前任务路由')).toHaveTextContent('/tasks/ai-infra/created%2Fai-1')
+  })
+
+  it('专属 AI 页面允许不使用模型且取消返回专属列表', async () => {
+    const created = { ...task, id: 'created-ai-2', task_type: 'ai_infra_scan', input_summary: { language: 'zh', timeout: 300, port_scan_mode: 'fixed_ai' } }
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(jsonResponse({ items: [], total: 0, page: 1, page_size: 100 }))
+      .mockResolvedValueOnce(jsonResponse(created))
+    vi.stubGlobal('fetch', fetchMock)
+    const page = renderPage(
+      <TaskCreatePage fixedTaskType="ai_infra_scan" returnTo="/tasks/ai-infra" />,
+      { id: 'user-1', username: 'alice', role: 'user', must_change_password: false },
+      '/tasks/ai-infra/new',
+    )
+    await screen.findByRole('link', { name: '前往凭证配置 → 模型配置' })
+    fireEvent.change(screen.getByRole('textbox', { name: '扫描目标或任务说明' }), { target: { value: '192.0.2.10' } })
+    fireEvent.click(screen.getByRole('button', { name: '创建任务' }))
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2))
+    expect(JSON.parse(String((fetchMock.mock.calls[1]?.[1] as RequestInit).body)).params).not.toHaveProperty('model_id')
+    page.unmount()
+
+    vi.stubGlobal('fetch', vi.fn(() => new Promise<Response>(() => undefined)))
+    renderPage(<TaskCreatePage fixedTaskType="ai_infra_scan" returnTo="/tasks/ai-infra" />, { id: 'user-1', username: 'alice', role: 'user', must_change_password: false }, '/tasks/ai-infra/new')
+    fireEvent.click(screen.getByRole('button', { name: '取消' }))
+    expect(screen.getByLabelText('当前任务路由')).toHaveTextContent('/tasks/ai-infra')
   })
 
   it.each(['fixed_ai', 'full_tcp'] as const)('AI 基础设施扫描提交显式发送端口扫描模式 %s', async (portScanMode) => {
