@@ -8,6 +8,7 @@
 import type { ModelCatalogItem, ModelCatalogPage } from '../models/api'
 
 export const MODEL_CATALOG_PAGE_SIZE = 100
+const MAX_MODEL_CATALOG_PAGE = 1_000
 
 export function selectableModels(items: readonly ModelCatalogItem[]): readonly ModelCatalogItem[] {
   return items.filter((model) => !model.disabled)
@@ -17,11 +18,15 @@ export function modelOptionLabel(model: Pick<ModelCatalogItem, 'name' | 'provide
   return `${model.name}（${model.provider_model}，${model.scope === 'private' ? '私有' : '全局'}）`
 }
 
-export function nextCatalogPage(page: Pick<ModelCatalogPage, 'page' | 'page_size' | 'total'>): number | undefined {
+export function nextCatalogPage(
+  page: Pick<ModelCatalogPage, 'page' | 'page_size' | 'total'>,
+  loadedPageParams: readonly number[] = [],
+): number | undefined {
   if (!Number.isSafeInteger(page.page) || !Number.isSafeInteger(page.page_size) || !Number.isSafeInteger(page.total) ||
-    page.page < 1 || page.page_size < 1 || page.total < 1 || page.page * page.page_size >= page.total) return undefined
+    page.page < 1 || page.page > MAX_MODEL_CATALOG_PAGE || page.page_size < 1 || page.page_size > MODEL_CATALOG_PAGE_SIZE ||
+    page.total < 1 || page.page * page.page_size >= page.total) return undefined
   const nextPage = page.page + 1
-  return Number.isSafeInteger(nextPage) && nextPage > page.page ? nextPage : undefined
+  return nextPage <= MAX_MODEL_CATALOG_PAGE && !loadedPageParams.includes(nextPage) ? nextPage : undefined
 }
 
 export function fallbackModelLabel(id: string): string {

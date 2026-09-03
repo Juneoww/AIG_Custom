@@ -37,6 +37,10 @@ function response(body: unknown, status = 200) {
   return new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json' } })
 }
 
+function requestedURL(fetchMock: ReturnType<typeof vi.fn>, call: number): URL {
+  return new URL(fetchMock.mock.calls[call]?.[0] as string)
+}
+
 function renderSelector(onChange = vi.fn()) {
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
   const view = render(
@@ -59,7 +63,8 @@ afterEach(() => {
 describe('GovernedModelSelector', () => {
   it('在首屏加载时展示状态，且加载后仅列出启用模型和不使用模型选项', async () => {
     let resolvePage: ((value: Response) => void) | undefined
-    vi.stubGlobal('fetch', vi.fn(() => new Promise<Response>((resolve) => { resolvePage = resolve })))
+    const fetchMock = vi.fn(() => new Promise<Response>((resolve) => { resolvePage = resolve }))
+    vi.stubGlobal('fetch', fetchMock)
     const { onChange } = renderSelector()
 
     expect(screen.getByText('正在加载模型…')).toBeInTheDocument()
@@ -83,6 +88,8 @@ describe('GovernedModelSelector', () => {
     expect(document.body).not.toHaveTextContent(FIXTURE_BASE_URL)
     expect(document.body).not.toHaveTextContent(FIXTURE_NOTE)
     expect(document.body).not.toHaveTextContent('********')
+    expect(document.body).not.toHaveTextContent('user-1')
+    expect(requestedURL(fetchMock, 0).search).toBe('?page=1&page_size=100')
 
     fireEvent.change(select, { target: { value: 'model-1' } })
     fireEvent.change(select, { target: { value: '' } })
@@ -121,11 +128,29 @@ describe('GovernedModelSelector', () => {
 
     expect(await screen.findByRole('button', { name: '加载更多模型' })).toBeInTheDocument()
     fireEvent.click(screen.getByRole('button', { name: '加载更多模型' }))
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2))
+    expect(requestedURL(fetchMock, 1).search).toBe('?page=2&page_size=100')
     expect(await screen.findByText('加载更多模型失败')).toBeInTheDocument()
     expect(screen.getByRole('option', { name: '受治理私有模型（gpt-secure，私有）' })).toBeInTheDocument()
 
     fireEvent.click(screen.getByRole('button', { name: '重试加载更多模型' }))
     await waitFor(() => expect(screen.getByRole('option', { name: '第二页模型（gpt-secure，私有）' })).toBeInTheDocument())
     expect(fetchMock).toHaveBeenCalledTimes(3)
+  })
+
+  it('拒绝第二页错误回传第一页元数据，避免追加重复选项或循环请求', async () => {
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(response({ items: [catalogItem()], total: 201, page: 1, page_size: 100 }))
+      .mockResolvedValueOnce(response({ items: [catalogItem()], total: 201, page: 1, page_size: 100 }))
+    vi.stubGlobal('fetch', fetchMock)
+    renderSelector()
+
+    expect(await screen.findByRole('button', { name: '加载更多模型' })).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: '加载更多模型' }))
+
+    expect(await screen.findByText('加载更多模型失败')).toBeInTheDocument()
+    expect(screen.getAllByRole('option', { name: '受治理私有模型（gpt-secure，私有）' })).toHaveLength(1)
+    expect(requestedURL(fetchMock, 1).search).toBe('?page=2&page_size=100')
+    expect(fetchMock).toHaveBeenCalledTimes(2)
   })
 })

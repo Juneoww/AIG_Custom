@@ -28,8 +28,13 @@ export function GovernedModelSelector({ value, onChange, disabled = false }: Gov
   const catalog = useInfiniteQuery({
     queryKey: ['governed-model-catalog'],
     initialPageParam: 1,
-    queryFn: ({ pageParam, signal }) => fetchModelCatalog({ page: pageParam, pageSize: MODEL_CATALOG_PAGE_SIZE }, signal),
-    getNextPageParam: nextCatalogPage,
+    queryFn: async ({ pageParam, signal }) => {
+      const page = await fetchModelCatalog({ page: pageParam, pageSize: MODEL_CATALOG_PAGE_SIZE }, signal)
+      if (page.page !== pageParam) throw new Error('catalog-page-mismatch')
+      return page
+    },
+    getNextPageParam: (lastPage, _allPages, lastPageParam, allPageParams) =>
+      lastPage.page === lastPageParam ? nextCatalogPage(lastPage, allPageParams) : undefined,
     retry: false,
   })
   const models = catalog.data?.pages.flatMap((page) => selectableModels(page.items)) ?? []

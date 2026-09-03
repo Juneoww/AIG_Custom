@@ -69,4 +69,13 @@ describe('governed model catalog helpers', () => {
   ] as const)('仅在可继续推进的分页上返回下一页：%o', (page, expected) => {
     expect(nextCatalogPage(page)).toBe(expected)
   })
+
+  it('拒绝畸形、非推进、重复或超出目录页数上限的候选页', () => {
+    expect(nextCatalogPage({ page: 1, page_size: 100, total: 201 }, [1, 2])).toBeUndefined()
+    expect(nextCatalogPage({ page: 0, page_size: 100, total: 201 })).toBeUndefined()
+    expect(nextCatalogPage({ page: 1_001, page_size: 100, total: 200_000 })).toBeUndefined()
+    expect(nextCatalogPage({ page: 1, page_size: 101, total: 201 })).toBeUndefined()
+    expect(nextCatalogPage({ page: 1, page_size: 100, total: -1 })).toBeUndefined()
+    expect(nextCatalogPage({ page: 1_000, page_size: 100, total: 100_001 })).toBeUndefined()
+  })
 })
