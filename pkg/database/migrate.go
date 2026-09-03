@@ -47,6 +47,7 @@ var migrations = []migration{
 	{version: 7, apply: migrateReportSchema},
 	{version: 8, apply: migratePlatformTaskDashboardIndexes},
 	{version: 9, apply: migratePlatformAttachmentLifecycle},
+	{version: 10, apply: migratePlatformMCPConnectionSchema},
 }
 
 const migrationAdvisoryLockKey int64 = 301237729
@@ -391,4 +392,149 @@ WHERE attachment.state = 'ready'
     ) AS reference(value)
     WHERE reference.value = attachment.id
   )`).Error
+}
+
+// 以下结构只描述 v10 迁移所需的物理表，避免 pkg/database 依赖平台业务包。
+// 敏感连接信息只允许以密文、nonce 和密钥标识落库，禁止在此处新增明文字段。
+type platformMCPConnectionConfigMigration struct {
+	ID               string    `gorm:"primaryKey;column:id"`
+	OwnerUserID      string    `gorm:"not null;column:owner_user_id"`
+	Scope            string    `gorm:"not null;column:scope"`
+	Name             string    `gorm:"not null;column:name"`
+	Description      string    `gorm:"not null;default:'';column:description"`
+	CurrentVersion   int       `gorm:"not null;default:0;column:current_version"`
+	ResourceRevision string    `gorm:"not null;default:'';column:resource_revision"`
+	Enabled          bool      `gorm:"not null;default:true;column:enabled"`
+	CreatedAt        time.Time `gorm:"not null;column:created_at"`
+	UpdatedAt        time.Time `gorm:"not null;column:updated_at"`
+}
+
+func (platformMCPConnectionConfigMigration) TableName() string {
+	return "platform_mcp_connection_configs"
+}
+
+type platformMCPConnectionVersionMigration struct {
+	ID                 string    `gorm:"primaryKey;column:id"`
+	ConnectionConfigID string    `gorm:"not null;column:connection_config_id"`
+	Version            int       `gorm:"not null;column:version"`
+	EncryptedPayload   []byte    `gorm:"not null;column:encrypted_payload"`
+	PayloadNonce       []byte    `gorm:"not null;column:payload_nonce"`
+	KeyID              string    `gorm:"not null;column:key_id"`
+	Transport          string    `gorm:"not null;column:transport"`
+	DetectedTransport  string    `gorm:"not null;default:'';column:detected_transport"`
+	ProbeStatus        string    `gorm:"not null;default:'pending';column:probe_status"`
+	CreatedAt          time.Time `gorm:"not null;column:created_at"`
+}
+
+func (platformMCPConnectionVersionMigration) TableName() string {
+	return "platform_mcp_connection_versions"
+}
+
+type platformMCPTaskBindingMigration struct {
+	ID                      string    `gorm:"primaryKey;column:id"`
+	TaskID                  string    `gorm:"not null;column:task_id"`
+	SourceKind              string    `gorm:"not null;column:source_kind"`
+	ConnectionConfigID      *string   `gorm:"column:connection_config_id"`
+	ConnectionConfigVersion *int      `gorm:"column:connection_config_version"`
+	EncryptedRepositoryURL  []byte    `gorm:"column:encrypted_repository_url"`
+	RepositoryURLNonce      []byte    `gorm:"column:repository_url_nonce"`
+	RepositoryURLKeyID      string    `gorm:"column:repository_url_key_id"`
+	CreatedAt               time.Time `gorm:"not null;column:created_at"`
+	UpdatedAt               time.Time `gorm:"not null;column:updated_at"`
+}
+
+func (platformMCPTaskBindingMigration) TableName() string {
+	return "platform_mcp_task_bindings"
+}
+
+type platformMCPRuntimeCapabilityMigration struct {
+	ID             string    `gorm:"primaryKey;column:id"`
+	TaskID         string    `gorm:"not null;column:task_id"`
+	CapabilityHash []byte    `gorm:"not null;column:capability_hash"`
+	IssuedAt       time.Time `gorm:"not null;column:issued_at"`
+	ExpiresAt      time.Time `gorm:"not null;column:expires_at"`
+	Rotation       int       `gorm:"not null;column:rotation"`
+	Version        int       `gorm:"not null;default:1;column:version"`
+	CreatedAt      time.Time `gorm:"not null;column:created_at"`
+}
+
+func (platformMCPRuntimeCapabilityMigration) TableName() string {
+	return "platform_mcp_runtime_capabilities"
+}
+
+type platformIdempotencyRecordMigration struct {
+	ID             string          `gorm:"primaryKey;column:id"`
+	PrincipalID    string          `gorm:"not null;column:principal_id"`
+	ScopeKey       string          `gorm:"not null;column:scope_key"`
+	Method         string          `gorm:"not null;column:method"`
+	Path           string          `gorm:"not null;column:path"`
+	IdempotencyKey string          `gorm:"not null;column:idempotency_key"`
+	PayloadHash    []byte          `gorm:"not null;column:payload_hash"`
+	StatusCode     int             `gorm:"not null;column:status_code"`
+	SafeResponse   json.RawMessage `gorm:"type:jsonb;not null;column:safe_response"`
+	ExpiresAt      time.Time       `gorm:"not null;column:expires_at"`
+	CreatedAt      time.Time       `gorm:"not null;column:created_at"`
+}
+
+func (platformIdempotencyRecordMigration) TableName() string {
+	return "platform_idempotency_records"
+}
+
+// migratePlatformMCPConnectionSchema 建立 MCP 扫描的专用持久化边界。
+// 该迁移只会由显式 Migrate 调用，运行时校验不得补建任何对象。
+func migratePlatformMCPConnectionSchema(db *gorm.DB) error {
+	for _, target := range []struct {
+		table   string
+		model   any
+		columns []string
+	}{
+		{
+			table: "platform_mcp_connection_configs", model: &platformMCPConnectionConfigMigration{},
+			columns: []string{"id", "owner_user_id", "scope", "name", "description", "current_version", "resource_revision", "enabled", "created_at", "updated_at"},
+		},
+		{
+			table: "platform_mcp_connection_versions", model: &platformMCPConnectionVersionMigration{},
+			columns: []string{"id", "connection_config_id", "version", "encrypted_payload", "payload_nonce", "key_id", "transport", "detected_transport", "probe_status", "created_at"},
+		},
+		{
+			table: "platform_mcp_task_bindings", model: &platformMCPTaskBindingMigration{},
+			columns: []string{"id", "task_id", "source_kind", "connection_config_id", "connection_config_version", "encrypted_repository_url", "repository_url_nonce", "repository_url_key_id", "created_at", "updated_at"},
+		},
+		{
+			table: "platform_mcp_runtime_capabilities", model: &platformMCPRuntimeCapabilityMigration{},
+			columns: []string{"id", "task_id", "capability_hash", "issued_at", "expires_at", "rotation", "version", "created_at"},
+		},
+		{
+			table: "platform_idempotency_records", model: &platformIdempotencyRecordMigration{},
+			columns: []string{"id", "principal_id", "scope_key", "method", "path", "idempotency_key", "payload_hash", "status_code", "safe_response", "expires_at", "created_at"},
+		},
+	} {
+		if !db.Migrator().HasTable(target.model) {
+			if err := db.Migrator().CreateTable(target.model); err != nil {
+				return err
+			}
+		}
+		for _, column := range target.columns {
+			if !db.Migrator().HasColumn(target.table, column) {
+				return fmt.Errorf("%s 缺少列 %s", target.table, column)
+			}
+		}
+	}
+
+	for _, statement := range []string{
+		`CREATE INDEX IF NOT EXISTS idx_platform_mcp_connection_configs_owner_scope ON platform_mcp_connection_configs(owner_user_id, scope)`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS ux_platform_mcp_connection_versions_config_version ON platform_mcp_connection_versions(connection_config_id, version)`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS ux_platform_mcp_task_bindings_task_id ON platform_mcp_task_bindings(task_id)`,
+		`CREATE INDEX IF NOT EXISTS idx_platform_mcp_task_bindings_config_version ON platform_mcp_task_bindings(connection_config_id, connection_config_version)`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS ux_platform_mcp_runtime_capabilities_task_rotation ON platform_mcp_runtime_capabilities(task_id, rotation)`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS ux_platform_mcp_runtime_capabilities_hash ON platform_mcp_runtime_capabilities(capability_hash)`,
+		`CREATE INDEX IF NOT EXISTS idx_platform_mcp_runtime_capabilities_expires_at ON platform_mcp_runtime_capabilities(expires_at)`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS ux_platform_idempotency_records_scope ON platform_idempotency_records(principal_id, scope_key, method, path, idempotency_key)`,
+		`CREATE INDEX IF NOT EXISTS idx_platform_idempotency_records_expires_at ON platform_idempotency_records(expires_at)`,
+	} {
+		if err := db.Exec(statement).Error; err != nil {
+			return err
+		}
+	}
+	return nil
 }

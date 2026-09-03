@@ -76,6 +76,46 @@ func TestRuntimeStoreInitializationValidatesRequiredObjectsWithoutDDL(t *testing
 	assert.False(t, db.Migrator().HasIndex(&Session{}, "idx_sessions_status"), "runtime initialization must not recreate indexes")
 }
 
+func TestRuntimeSchemaRejectsVersionNineWithoutMCPConnectionSchemaDDL(t *testing.T) {
+	db := openPostgresTestDB(t)
+	resetPostgresTestDB(t, db)
+	require.NoError(t, db.Migrator().DropTable(
+		"platform_idempotency_records",
+		"platform_mcp_runtime_capabilities",
+		"platform_mcp_task_bindings",
+		"platform_mcp_connection_versions",
+		"platform_mcp_connection_configs",
+	))
+	require.NoError(t, db.AutoMigrate(&SchemaMigration{}))
+	for _, apply := range []func(*gorm.DB) error{
+		migrateInitialSchema,
+		migrateIdentitySchema,
+		migrateGovernanceSchema,
+		migrateAuditCompletionSchema,
+		migratePlatformTaskSchema,
+		migratePlatformTaskDispatchClaimSchema,
+		migrateReportSchema,
+		migratePlatformTaskDashboardIndexes,
+		migratePlatformAttachmentLifecycle,
+	} {
+		require.NoError(t, apply(db))
+	}
+	for version := int64(1); version <= 9; version++ {
+		require.NoError(t, db.Create(&SchemaMigration{Version: version}).Error)
+	}
+
+	beforeVersions := migrationVersions(t, db)
+	beforeTables := mcpConnectionRuntimeTablePresence(db)
+	for table, present := range beforeTables {
+		assert.Falsef(t, present, "v9 fixture must not include %s", table)
+	}
+	err := ValidateRuntimeSchema(db)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "aig migrate")
+	assert.Equal(t, beforeVersions, migrationVersions(t, db), "runtime validation must not update migration history")
+	assert.Equal(t, beforeTables, mcpConnectionRuntimeTablePresence(db), "runtime validation must not create MCP schema tables")
+}
+
 func TestRuntimeSchemaRejectsMissingDispatchClaimColumnWithoutDDL(t *testing.T) {
 	db := openPostgresTestDB(t)
 	resetPostgresTestDB(t, db)
@@ -309,6 +349,21 @@ func runtimeTablePresence(db *gorm.DB) map[string]bool {
 		"identity_users", "identity_sessions", "identity_password_resets",
 		"audit_events", "audit_completion_outbox", "platform_models",
 		"platform_tasks", "platform_attachments",
+	}
+	presence := make(map[string]bool, len(tables))
+	for _, table := range tables {
+		presence[table] = db.Migrator().HasTable(table)
+	}
+	return presence
+}
+
+func mcpConnectionRuntimeTablePresence(db *gorm.DB) map[string]bool {
+	tables := []string{
+		"platform_mcp_connection_configs",
+		"platform_mcp_connection_versions",
+		"platform_mcp_task_bindings",
+		"platform_mcp_runtime_capabilities",
+		"platform_idempotency_records",
 	}
 	presence := make(map[string]bool, len(tables))
 	for _, table := range tables {

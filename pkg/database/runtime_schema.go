@@ -23,7 +23,7 @@ import (
 
 // LatestSchemaVersion is the schema version required by the running server.
 // Schema changes are applied only by the explicit `aig migrate` command.
-const LatestSchemaVersion int64 = 9
+const LatestSchemaVersion int64 = 10
 
 var requiredRuntimeTables = []string{
 	"users",
@@ -41,6 +41,11 @@ var requiredRuntimeTables = []string{
 	"platform_attachments",
 	"report_snapshots",
 	"report_brand_settings",
+	"platform_mcp_connection_configs",
+	"platform_mcp_connection_versions",
+	"platform_mcp_task_bindings",
+	"platform_mcp_runtime_capabilities",
+	"platform_idempotency_records",
 }
 
 var requiredRuntimeColumns = map[string][]string{
@@ -50,6 +55,21 @@ var requiredRuntimeColumns = map[string][]string{
 	},
 	"report_brand_settings": {
 		"product_name", "primary_color", "logo", "logo_mime", "watermark", "updated_by", "updated_at",
+	},
+	"platform_mcp_connection_configs": {
+		"id", "owner_user_id", "scope", "name", "description", "current_version", "resource_revision", "enabled", "created_at", "updated_at",
+	},
+	"platform_mcp_connection_versions": {
+		"id", "connection_config_id", "version", "encrypted_payload", "payload_nonce", "key_id", "transport", "detected_transport", "probe_status", "created_at",
+	},
+	"platform_mcp_task_bindings": {
+		"id", "task_id", "source_kind", "connection_config_id", "connection_config_version", "encrypted_repository_url", "repository_url_nonce", "repository_url_key_id", "created_at", "updated_at",
+	},
+	"platform_mcp_runtime_capabilities": {
+		"id", "task_id", "capability_hash", "issued_at", "expires_at", "rotation", "version", "created_at",
+	},
+	"platform_idempotency_records": {
+		"id", "principal_id", "scope_key", "method", "path", "idempotency_key", "payload_hash", "status_code", "safe_response", "expires_at", "created_at",
 	},
 }
 
@@ -81,6 +101,15 @@ var requiredRuntimeIndexes = []runtimeIndexRequirement{
 	{model: &reportSnapshotMigration{}, name: "ux_report_snapshots_task_id", table: "report_snapshots", unique: true},
 	{model: &reportSnapshotMigration{}, name: "idx_report_snapshots_completed_at"},
 	{model: &reportSnapshotMigration{}, name: "idx_report_snapshots_owner_completed_at"},
+	{model: &platformMCPConnectionConfigMigration{}, name: "idx_platform_mcp_connection_configs_owner_scope"},
+	{model: &platformMCPConnectionVersionMigration{}, name: "ux_platform_mcp_connection_versions_config_version", table: "platform_mcp_connection_versions", unique: true},
+	{model: &platformMCPTaskBindingMigration{}, name: "ux_platform_mcp_task_bindings_task_id", table: "platform_mcp_task_bindings", unique: true},
+	{model: &platformMCPTaskBindingMigration{}, name: "idx_platform_mcp_task_bindings_config_version"},
+	{model: &platformMCPRuntimeCapabilityMigration{}, name: "ux_platform_mcp_runtime_capabilities_task_rotation", table: "platform_mcp_runtime_capabilities", unique: true},
+	{model: &platformMCPRuntimeCapabilityMigration{}, name: "ux_platform_mcp_runtime_capabilities_hash", table: "platform_mcp_runtime_capabilities", unique: true},
+	{model: &platformMCPRuntimeCapabilityMigration{}, name: "idx_platform_mcp_runtime_capabilities_expires_at"},
+	{model: &platformIdempotencyRecordMigration{}, name: "ux_platform_idempotency_records_scope", table: "platform_idempotency_records", unique: true},
+	{model: &platformIdempotencyRecordMigration{}, name: "idx_platform_idempotency_records_expires_at"},
 }
 
 // ValidateRuntimeSchema performs read-only validation of the complete schema
