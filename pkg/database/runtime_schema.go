@@ -233,13 +233,14 @@ WHERE table_namespace.nspname = current_schema()
 }
 
 // postgresRuntimeIndexValid 只读取 PostgreSQL catalog，精确核验 v10 索引定义。
-// 除名称外，它还要求 btree、完整键列序、唯一性、有效/就绪状态，且禁止谓词和 INCLUDE 列。
+// 除名称外，它还要求 btree、完整键列序、唯一性、有效/就绪状态；唯一索引必须立即生效，且禁止谓词和 INCLUDE 列。
 func postgresRuntimeIndexValid(db *gorm.DB, table, index string, columns []string, unique bool) (bool, error) {
 	const query = `
 SELECT COALESCE((
   SELECT index_definition.indisvalid
      AND index_definition.indisready
      AND index_definition.indisunique = ?
+     AND (NOT ? OR index_definition.indimmediate)
      AND index_method.amname = 'btree'
      AND index_definition.indpred IS NULL
      AND index_definition.indexprs IS NULL
@@ -263,7 +264,7 @@ SELECT COALESCE((
     AND index_name.relname = ?
 ), false)`
 	var valid bool
-	if err := db.Raw(query, unique, len(columns), len(columns), strings.Join(columns, ","), table, index).Scan(&valid).Error; err != nil {
+	if err := db.Raw(query, unique, unique, len(columns), len(columns), strings.Join(columns, ","), table, index).Scan(&valid).Error; err != nil {
 		return false, err
 	}
 	return valid, nil

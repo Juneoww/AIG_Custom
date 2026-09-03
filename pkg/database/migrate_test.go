@@ -135,6 +135,28 @@ func TestMigrationVersionTenRejectsIncompatibleExistingMCPIndexes(t *testing.T) 
 	}
 }
 
+func TestMigrationVersionTenRejectsDeferrableUniqueMCPIndexes(t *testing.T) {
+	db := openPostgresTestDB(t)
+	for _, requirement := range mcpConnectionSchemaTestIndexRequirements {
+		if !requirement.unique {
+			continue
+		}
+		t.Run(requirement.name, func(t *testing.T) {
+			resetPostgresTestDB(t, db)
+			dropMCPConnectionSchemaTables(t, db)
+			t.Cleanup(func() { dropMCPConnectionSchemaTables(t, db) })
+			require.NoError(t, Migrate(db))
+			replaceMCPIndexWithDeferrableUniqueConstraint(t, db, requirement)
+			require.NoError(t, db.Where("version = ?", LatestSchemaVersion).Delete(&SchemaMigration{}).Error)
+
+			err := Migrate(db)
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), requirement.name)
+			assert.NotContains(t, migrationVersions(t, db), LatestSchemaVersion)
+		})
+	}
+}
+
 func TestMigrationUpgradesExistingVersionThreeWithoutRewritingIt(t *testing.T) {
 	db := openPostgresTestDB(t)
 	resetPostgresTestDB(t, db)
@@ -548,6 +570,31 @@ func (requirement mcpConnectionSchemaTestIndexRequirement) incompatibleCreateSta
 		requirement.table,
 		strings.Join(requirement.incompatibleColumns, ", "),
 	)
+}
+
+func replaceMCPIndexWithDeferrableUniqueConstraint(t *testing.T, db *gorm.DB, requirement mcpConnectionSchemaTestIndexRequirement) {
+	t.Helper()
+	require.True(t, requirement.unique)
+	require.NoError(t, db.Exec("DROP INDEX "+requirement.name).Error)
+	require.NoError(t, db.Exec(fmt.Sprintf(
+		"ALTER TABLE %s ADD CONSTRAINT %s UNIQUE (%s) DEFERRABLE INITIALLY DEFERRED",
+		requirement.table,
+		requirement.name,
+		strings.Join(requirement.columns, ", "),
+	)).Error)
+	require.True(t, db.Migrator().HasIndex(requirement.table, requirement.name))
+
+	var immediate bool
+	require.NoError(t, db.Raw(`
+SELECT index_definition.indimmediate
+FROM pg_catalog.pg_index AS index_definition
+JOIN pg_catalog.pg_class AS index_name ON index_name.oid = index_definition.indexrelid
+JOIN pg_catalog.pg_class AS table_definition ON table_definition.oid = index_definition.indrelid
+JOIN pg_catalog.pg_namespace AS table_namespace ON table_namespace.oid = table_definition.relnamespace
+WHERE table_namespace.nspname = current_schema()
+  AND table_definition.relname = ?
+  AND index_name.relname = ?`, requirement.table, requirement.name).Scan(&immediate).Error)
+	require.False(t, immediate, "fixture must use a deferrable unique constraint index")
 }
 
 var mcpConnectionSchemaTestIndexRequirements = []mcpConnectionSchemaTestIndexRequirement{

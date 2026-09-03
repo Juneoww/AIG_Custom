@@ -131,6 +131,30 @@ func TestRuntimeSchemaRejectsIncompatibleMCPIndexesWithoutDDL(t *testing.T) {
 	}
 }
 
+func TestRuntimeSchemaRejectsDeferrableUniqueMCPIndexesWithoutDDL(t *testing.T) {
+	db := openPostgresTestDB(t)
+	for _, requirement := range mcpConnectionSchemaTestIndexRequirements {
+		if !requirement.unique {
+			continue
+		}
+		t.Run(requirement.name, func(t *testing.T) {
+			resetPostgresTestDB(t, db)
+			dropMCPConnectionSchemaTables(t, db)
+			t.Cleanup(func() { dropMCPConnectionSchemaTables(t, db) })
+			require.NoError(t, Migrate(db))
+			replaceMCPIndexWithDeferrableUniqueConstraint(t, db, requirement)
+
+			beforeVersions := migrationVersions(t, db)
+			beforeCatalog := mcpConnectionRuntimeCatalogState(t, db)
+			err := ValidateRuntimeSchema(db)
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), requirement.name)
+			assert.Equal(t, beforeVersions, migrationVersions(t, db), "runtime validation must not update migration history")
+			assert.Equal(t, beforeCatalog, mcpConnectionRuntimeCatalogState(t, db), "runtime validation must not repair MCP indexes")
+		})
+	}
+}
+
 func TestRuntimeSchemaRejectsMissingDispatchClaimColumnWithoutDDL(t *testing.T) {
 	db := openPostgresTestDB(t)
 	resetPostgresTestDB(t, db)
