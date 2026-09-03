@@ -303,7 +303,9 @@ describe('任务页面', () => {
   })
 
   it('AI 基础设施列表在状态和分页变更中保留固定 API 类型', async () => {
-    const fetchMock = vi.fn().mockResolvedValue(jsonResponse({ items: [aiInfraRunningTask], total: 41, page: 1, page_size: 20 }))
+    const fetchMock = vi.fn().mockImplementation(() => Promise.resolve(
+      jsonResponse({ items: [aiInfraRunningTask], total: 41, page: 1, page_size: 20 }),
+    ))
     vi.stubGlobal('fetch', fetchMock)
     renderPage(
       <TaskListPage fixedTaskType="ai_infra_scan" />,
@@ -327,7 +329,9 @@ describe('任务页面', () => {
   })
 
   it('AI 基础设施列表清除状态或筛选时保留固定 API 类型', async () => {
-    const fetchMock = vi.fn().mockResolvedValue(jsonResponse({ items: [aiInfraRunningTask], total: 41, page: 1, page_size: 20 }))
+    const fetchMock = vi.fn().mockImplementation(() => Promise.resolve(
+      jsonResponse({ items: [aiInfraRunningTask], total: 41, page: 1, page_size: 20 }),
+    ))
     vi.stubGlobal('fetch', fetchMock)
     renderPage(
       <TaskListPage fixedTaskType="ai_infra_scan" />,
