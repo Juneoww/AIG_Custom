@@ -49,6 +49,13 @@ const agentScanRunningTask = {
   status: 'running',
 } as const satisfies TaskSummary
 
+const aiInfraRunningTask = {
+  ...taskSummary,
+  id: 'ai infra/opaque-1',
+  task_type: 'ai_infra_scan',
+  status: 'running',
+} as const satisfies TaskSummary
+
 function jsonResponse(body: unknown) {
   return new Response(JSON.stringify(body), { status: 200, headers: { 'Content-Type': 'application/json' } })
 }
@@ -259,6 +266,77 @@ describe('任务页面', () => {
 
     await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1))
     expect(fetchMock.mock.calls[0]?.[0]).toBe('http://localhost:3000/api/v1/platform/tasks?page=1&page_size=20')
+  })
+
+  it('AI 基础设施列表固定任务类型，使用安全列和专用操作路径', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(jsonResponse({ items: [aiInfraRunningTask], total: 41, page: 3, page_size: 20 }))
+    vi.stubGlobal('fetch', fetchMock)
+    renderPage(
+      <TaskListPage fixedTaskType="ai_infra_scan" />,
+      { id: 'user-1', username: 'alice', role: 'user', must_change_password: false },
+      '/tasks/ai-infra?page=3&status=running&task_type=agent_scan',
+      '/tasks/ai-infra',
+    )
+
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1))
+    expect(fetchMock.mock.calls[0]?.[0]).toBe(
+      'http://localhost:3000/api/v1/platform/tasks?page=3&page_size=20&status=running&task_type=ai_infra_scan',
+    )
+    expect(await screen.findByRole('heading', { name: 'AI 基础设施扫描' })).toBeInTheDocument()
+    expect(screen.getByText(/已授权目标范围/)).toBeInTheDocument()
+    expect(screen.getByRole('link', { name: '新建 AI 基础设施扫描任务' })).toHaveAttribute('href', '/tasks/ai-infra/new')
+    expect(screen.getByRole('combobox', { name: '任务状态' })).toBeInTheDocument()
+    expect(screen.queryByRole('combobox', { name: '任务类型' })).not.toBeInTheDocument()
+
+    const table = screen.getByRole('table', { name: 'AI 基础设施扫描任务台账' })
+    for (const header of ['任务 ID', '负责人', '状态', '创建时间', '更新时间', '操作']) {
+      expect(within(table).getByRole('columnheader', { name: header })).toBeInTheDocument()
+    }
+    for (const forbiddenHeader of ['任务类型', '目标', '模型', '端口', '附件', '原始结果']) {
+      expect(within(table).queryByRole('columnheader', { name: forbiddenHeader })).not.toBeInTheDocument()
+    }
+    expect(within(table).getByRole('link', { name: '查看任务 ai infra/opaque-1' })).toHaveAttribute(
+      'href',
+      '/tasks/ai-infra/ai%20infra%2Fopaque-1',
+    )
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+  })
+
+  it('AI 基础设施列表在状态和分页变更中保留固定 API 类型', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(jsonResponse({ items: [aiInfraRunningTask], total: 41, page: 1, page_size: 20 }))
+    vi.stubGlobal('fetch', fetchMock)
+    renderPage(
+      <TaskListPage fixedTaskType="ai_infra_scan" />,
+      { id: 'user-1', username: 'alice', role: 'user', must_change_password: false },
+      '/tasks/ai-infra',
+      '/tasks/ai-infra',
+    )
+
+    await screen.findByRole('table', { name: 'AI 基础设施扫描任务台账' })
+    fireEvent.change(screen.getByRole('combobox', { name: '任务状态' }), { target: { value: 'failed' } })
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2))
+    expect(fetchMock.mock.calls[1]?.[0]).toBe(
+      'http://localhost:3000/api/v1/platform/tasks?page=1&page_size=20&status=failed&task_type=ai_infra_scan',
+    )
+
+    fireEvent.click(screen.getByRole('button', { name: '下一页' }))
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(3))
+    expect(fetchMock.mock.calls[2]?.[0]).toBe(
+      'http://localhost:3000/api/v1/platform/tasks?page=2&page_size=20&status=failed&task_type=ai_infra_scan',
+    )
+  })
+
+  it('AI 基础设施列表不向审计员显示创建入口', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(jsonResponse({ items: [], total: 0, page: 1, page_size: 20 })))
+    renderPage(
+      <TaskListPage fixedTaskType="ai_infra_scan" />,
+      { id: 'auditor-1', username: 'auditor', role: 'auditor', must_change_password: false },
+      '/tasks/ai-infra',
+      '/tasks/ai-infra',
+    )
+
+    expect(await screen.findByRole('heading', { name: 'AI 基础设施扫描' })).toBeInTheDocument()
+    expect(screen.queryByRole('link', { name: '新建 AI 基础设施扫描任务' })).not.toBeInTheDocument()
   })
 
   it('详情按角色与真实状态显示取消能力，审计员无写按钮', async () => {

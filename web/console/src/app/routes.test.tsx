@@ -5,7 +5,7 @@
  * 输出：身份页、应用壳、403、404 或安全来源状态。
  * 依赖：Testing Library、React Router、主题与应用 Provider。
  */
-import { fireEvent, render, screen } from '@testing-library/react'
+import { fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { MemoryRouter, useLocation } from 'react-router-dom'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
@@ -175,6 +175,36 @@ describe('production routes', () => {
 
     expect(screen.getByRole('heading', { name: '无权访问' })).toBeInTheDocument()
     expect(screen.queryByRole('heading', { name: '页面不存在' })).not.toBeInTheDocument()
+  })
+
+  it('keeps the generic task list route and its type filter unchanged', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify({ items: [], total: 0, page: 1, page_size: 20 }), {
+      status: 200,
+      headers: { 'Content-Type': 'application/json' },
+    }))
+    vi.stubGlobal('fetch', fetchMock)
+    renderRoute(subjectState('user'), '/tasks')
+
+    expect(await screen.findByRole('heading', { name: '扫描任务' })).toBeInTheDocument()
+    expect(screen.getByRole('combobox', { name: '任务类型' })).toBeInTheDocument()
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1))
+    expect(fetchMock.mock.calls[0]?.[0]).toBe('http://localhost:3000/api/v1/platform/tasks?page=1&page_size=20')
+  })
+
+  it.each(['user', 'auditor', 'admin'] as const)('routes %s to the static AI infrastructure task list', async (role) => {
+    const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify({ items: [], total: 0, page: 1, page_size: 20 }), {
+      status: 200,
+      headers: { 'Content-Type': 'application/json' },
+    }))
+    vi.stubGlobal('fetch', fetchMock)
+    renderRoute(subjectState(role), '/tasks/ai-infra')
+
+    expect(await screen.findByRole('heading', { name: 'AI 基础设施扫描' })).toBeInTheDocument()
+    expect(screen.queryByRole('heading', { name: '任务详情' })).not.toBeInTheDocument()
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1))
+    expect(fetchMock.mock.calls[0]?.[0]).toBe(
+      'http://localhost:3000/api/v1/platform/tasks?page=1&page_size=20&task_type=ai_infra_scan',
+    )
   })
 
   it.each(['user', 'auditor', 'admin'] as const)('让%s角色读取真实报告列表与详情路由', (role) => {

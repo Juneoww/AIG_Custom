@@ -150,7 +150,7 @@ export function TaskOperationsSummary({
             </Text>
           ))}
         </div>
-        <Text className={styles.total}>匹配任务 {total}</Text>
+        <Text className={styles.total}>当前查询匹配任务 {total}</Text>
         {onClearFilters ? (
           <Button className={styles.clear} appearance="subtle" onClick={onClearFilters}>
             清除筛选

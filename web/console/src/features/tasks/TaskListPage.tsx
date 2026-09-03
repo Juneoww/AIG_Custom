@@ -147,29 +147,30 @@ export function formatTaskTime(value: string): string {
   return formatter.format(new Date(value))
 }
 
-export function TaskListPage() {
+interface TaskListPageProps {
+  fixedTaskType?: Exclude<TaskType, 'unknown'>
+}
+
+export function TaskListPage({ fixedTaskType }: TaskListPageProps) {
   const styles = useStyles()
   const { state } = useSession()
+  const isAiInfraList = fixedTaskType === 'ai_infra_scan'
   const [searchParams, setSearchParams] = useSearchParams()
   const page = positivePage(searchParams.get('page'))
   const statusValue = searchParams.get('status') as TaskStatus | null
   const taskTypeValue = searchParams.get('task_type') as Exclude<TaskType, 'unknown'> | null
   const status = statusValue && selectableStatuses.has(statusValue) ? statusValue : undefined
-  const taskType = taskTypeValue && selectableTaskTypes.has(taskTypeValue) ? taskTypeValue : undefined
-  const normalizedSearch = normalizedTaskSearch(page, status, taskType)
+  const taskType = fixedTaskType ?? (taskTypeValue && selectableTaskTypes.has(taskTypeValue) ? taskTypeValue : undefined)
+  const normalizedSearch = normalizedTaskSearch(page, status, fixedTaskType ? undefined : taskType)
   useEffect(() => {
     if (searchParams.toString() !== normalizedSearch) setSearchParams(normalizedSearch, { replace: true })
   }, [normalizedSearch, searchParams, setSearchParams])
   const updateSearch = (
     nextPage: number,
-    ...nextFilters: [] | [TaskStatus | undefined, Exclude<TaskType, 'unknown'> | undefined]
+    nextStatus: TaskStatus | undefined = status,
+    nextTaskType: Exclude<TaskType, 'unknown'> | undefined = taskType,
   ) => {
-    if (nextFilters.length === 0) {
-      setSearchParams(normalizedTaskSearch(nextPage, status, taskType))
-      return
-    }
-    const [nextStatus, nextTaskType] = nextFilters
-    setSearchParams(normalizedTaskSearch(nextPage, nextStatus, nextTaskType))
+    setSearchParams(normalizedTaskSearch(nextPage, nextStatus, fixedTaskType ? undefined : nextTaskType))
   }
   const query = useQuery({
     queryKey: ['tasks', { page, pageSize: 20, status, taskType }],
@@ -181,7 +182,7 @@ export function TaskListPage() {
     status ? `状态：${taskStatusLabels[status]}` : '全部状态',
     taskType ? `类型：${taskTypeLabels[taskType]}` : '全部类型',
   ]
-  const hasActiveFilters = Boolean(status || taskType)
+  const hasActiveFilters = Boolean(status || (!fixedTaskType && taskType))
   const statusMarkStyles: Record<TaskStatus, string> = {
     pending: styles.statusPending,
     dispatching: styles.statusActive,
@@ -192,7 +193,26 @@ export function TaskListPage() {
     dispatch_unknown: styles.statusAttention,
     cancelled: styles.statusTerminal,
   }
-  const columns: readonly DataTableColumn<TaskSummary>[] = [
+  const columns: readonly DataTableColumn<TaskSummary>[] = isAiInfraList ? [
+    { id: 'id', header: '任务 ID', render: (task) => task.id },
+    { id: 'owner', header: '负责人', render: (task) => task.owner },
+    {
+      id: 'status',
+      header: '状态',
+      render: (task) => <span className={mergeClasses(styles.statusMark, statusMarkStyles[task.status])}>{taskStatusLabels[task.status]}</span>,
+    },
+    { id: 'created', header: '创建时间', render: (task) => formatTaskTime(task.created_at) },
+    { id: 'updated', header: '更新时间', render: (task) => formatTaskTime(task.updated_at) },
+    {
+      id: 'action',
+      header: '操作',
+      render: (task) => (
+        <Link className={styles.taskLink} to={`/tasks/ai-infra/${encodeURIComponent(task.id)}`} aria-label={`查看任务 ${task.id}`}>
+          查看
+        </Link>
+      ),
+    },
+  ] : [
     { id: 'type', header: '任务类型', render: (task) => taskTypeLabels[task.task_type] },
     { id: 'owner', header: '负责人', render: (task) => task.owner },
     {
@@ -212,15 +232,25 @@ export function TaskListPage() {
     },
   ]
 
+  const pageTitle = fixedTaskType === 'ai_infra_scan' ? 'AI 基础设施扫描' : '扫描任务'
+  const pageDescription = fixedTaskType === 'ai_infra_scan'
+    ? '查看已授权目标范围内的 AI 基础设施扫描任务状态，筛选由服务端在分页前执行。'
+    : '按权限范围查看任务状态，筛选由服务端在分页前执行。'
+  const tableCaption = fixedTaskType === 'ai_infra_scan' ? 'AI 基础设施扫描任务台账' : '扫描任务台账'
+
   return (
     <section className={styles.page}>
       <PageHeader
-        title="扫描任务"
-        description="按权限范围查看任务状态，筛选由服务端在分页前执行。"
+        title={pageTitle}
+        description={pageDescription}
       >
         {canCreate ? (
-          <Link className={styles.headerAction} to="/tasks/new" aria-label="创建扫描任务">
-            创建任务
+          <Link
+            className={styles.headerAction}
+            to={fixedTaskType === 'ai_infra_scan' ? '/tasks/ai-infra/new' : '/tasks/new'}
+            aria-label={fixedTaskType === 'ai_infra_scan' ? '新建 AI 基础设施扫描任务' : '创建扫描任务'}
+          >
+            {fixedTaskType === 'ai_infra_scan' ? '新建 AI 基础设施扫描任务' : '创建任务'}
           </Link>
         ) : null}
       </PageHeader>
@@ -240,20 +270,22 @@ export function TaskListPage() {
               ))}
             </Select>
           </Field>
-          <Field className={styles.filter} label="任务类型">
-            <Select
-              className={styles.select}
-              value={taskType ?? ''}
-              onChange={(_, data) => {
-                updateSearch(1, status, (data.value || undefined) as Exclude<TaskType, 'unknown'> | undefined)
-              }}
-            >
-              <option value="">全部类型</option>
-              {Object.entries(taskTypeLabels).filter(([value]) => value !== 'unknown').map(([value, label]) => (
-                <option key={value} value={value}>{label}</option>
-              ))}
-            </Select>
-          </Field>
+          {!fixedTaskType ? (
+            <Field className={styles.filter} label="任务类型">
+              <Select
+                className={styles.select}
+                value={taskType ?? ''}
+                onChange={(_, data) => {
+                  updateSearch(1, status, (data.value || undefined) as Exclude<TaskType, 'unknown'> | undefined)
+                }}
+              >
+                <option value="">全部类型</option>
+                {Object.entries(taskTypeLabels).filter(([value]) => value !== 'unknown').map(([value, label]) => (
+                  <option key={value} value={value}>{label}</option>
+                ))}
+              </Select>
+            </Field>
+          ) : null}
         </div>
       </div>
       {query.isSuccess ? (
@@ -274,7 +306,7 @@ export function TaskListPage() {
       {query.data?.items.length === 0 ? <StatePanel state="empty" title="暂无匹配任务" description="调整筛选条件或创建新的扫描任务。" /> : null}
       {query.data?.items.length ? (
         <div className={styles.tableViewport}>
-          <DataTable caption="扫描任务台账" columns={columns} rows={query.data.items} getRowKey={(task) => task.id} />
+          <DataTable caption={tableCaption} columns={columns} rows={query.data.items} getRowKey={(task) => task.id} />
         </div>
       ) : null}
       {query.data ? (
