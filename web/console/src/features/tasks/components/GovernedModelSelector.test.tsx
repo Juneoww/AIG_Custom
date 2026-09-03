@@ -7,6 +7,7 @@
  */
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { StrictMode } from 'react'
 import { MemoryRouter } from 'react-router-dom'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
@@ -51,14 +52,15 @@ function renderSelector(onChange = vi.fn()) {
   return { ...view, onChange, queryClient }
 }
 
-function renderSelectorWithValue(value: string, onChange = vi.fn()) {
+function renderSelectorWithValue(value: string, onChange = vi.fn(), onAvailabilityChange = vi.fn(), strict = false) {
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+  const selector = <GovernedModelSelector value={value} onChange={onChange} onAvailabilityChange={onAvailabilityChange} />
   const view = render(
     <QueryClientProvider client={queryClient}>
-      <MemoryRouter><GovernedModelSelector value={value} onChange={onChange} /></MemoryRouter>
+      <MemoryRouter>{strict ? <StrictMode>{selector}</StrictMode> : selector}</MemoryRouter>
     </QueryClientProvider>,
   )
-  return { ...view, onChange, queryClient }
+  return { ...view, onChange, onAvailabilityChange, queryClient }
 }
 
 beforeEach(() => {
@@ -131,11 +133,35 @@ describe('GovernedModelSelector', () => {
       .mockResolvedValueOnce(response({ items: [catalogItem({ id: 'page-one-model' })], total: 101, page: 1, page_size: 100 }))
       .mockResolvedValueOnce(response({ items: [catalogItem({ id: 'preselected-model', name: '预选第二页模型' })], total: 101, page: 2, page_size: 100 }))
     vi.stubGlobal('fetch', fetchMock)
-    renderSelectorWithValue('preselected-model', onChange)
+    renderSelectorWithValue('preselected-model', onChange, vi.fn(), true)
 
     expect(await screen.findByRole('option', { name: '预选第二页模型（gpt-secure，私有）' })).toBeInTheDocument()
     expect(onChange).not.toHaveBeenCalled()
     expect(requestedURL(fetchMock, 1).search).toBe('?page=2&page_size=100')
+    expect(fetchMock).toHaveBeenCalledTimes(2)
+  })
+
+  it('验证预选模型时保留 combobox 的真实 ID，并允许用户选择不使用模型', async () => {
+    let resolvePageTwo: ((value: Response) => void) | undefined
+    const onChange = vi.fn()
+    const onAvailabilityChange = vi.fn()
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(response({ items: [catalogItem({ id: 'page-one-model' })], total: 101, page: 1, page_size: 100 }))
+      .mockImplementationOnce(() => new Promise<Response>((resolve) => { resolvePageTwo = resolve }))
+    vi.stubGlobal('fetch', fetchMock)
+    renderSelectorWithValue('preselected-model', onChange, onAvailabilityChange)
+
+    const select = await screen.findByRole('combobox', { name: '扫描模型' })
+    expect(await screen.findByText('正在验证已选模型')).toBeInTheDocument()
+    expect(select).toHaveValue('preselected-model')
+    expect(screen.getByRole('option', { name: '已选模型（ID: preselected-model）：正在验证' })).toBeDisabled()
+    expect(screen.getByRole('button', { name: '正在加载更多模型…' })).toBeDisabled()
+    expect(onAvailabilityChange).toHaveBeenCalledWith('pending')
+
+    fireEvent.change(select, { target: { value: '' } })
+    expect(onChange).toHaveBeenCalledWith(undefined)
+    await waitFor(() => expect(resolvePageTwo).toBeTypeOf('function'))
+    resolvePageTwo?.(response({ items: [catalogItem({ id: 'preselected-model' })], total: 101, page: 2, page_size: 100 }))
   })
 
   it('预选模型在下一页验证失败时不清除，并允许重试后保留', async () => {
@@ -149,6 +175,8 @@ describe('GovernedModelSelector', () => {
 
     expect(await screen.findByText('加载更多模型失败')).toBeInTheDocument()
     expect(onChange).not.toHaveBeenCalled()
+    expect(screen.getByRole('combobox', { name: '扫描模型' })).toHaveValue('preselected-model')
+    expect(screen.getByRole('option', { name: '已选模型（ID: preselected-model）：目录加载失败，保留待重试' })).toBeDisabled()
     fireEvent.click(screen.getByRole('button', { name: '重试加载更多模型' }))
     expect(await screen.findByRole('option', { name: '重试后的预选模型（gpt-secure，私有）' })).toBeInTheDocument()
     expect(onChange).not.toHaveBeenCalled()
@@ -210,6 +238,23 @@ describe('GovernedModelSelector', () => {
     resolveRetry?.(response({ items: [catalogItem()], total: 1, page: 1, page_size: 100 }))
     expect(await screen.findByRole('option', { name: '受治理私有模型（gpt-secure，私有）' })).toBeInTheDocument()
     expect(fetchMock).toHaveBeenCalledTimes(2)
+  })
+
+  it('重复的正确分页内容停止自动验证且保留待确认的预选 ID', async () => {
+    const onChange = vi.fn()
+    const repeatedItems = [catalogItem({ id: 'page-one-model' })]
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(response({ items: repeatedItems, total: 300, page: 1, page_size: 100 }))
+      .mockResolvedValueOnce(response({ items: repeatedItems, total: 300, page: 2, page_size: 100 }))
+    vi.stubGlobal('fetch', fetchMock)
+    renderSelectorWithValue('missing-model', onChange)
+
+    expect(await screen.findByText('模型目录响应重复，暂无法确认已选模型')).toBeInTheDocument()
+    expect(screen.getByRole('combobox', { name: '扫描模型' })).toHaveValue('missing-model')
+    expect(screen.getByRole('option', { name: '已选模型（ID: missing-model）：模型目录响应重复，暂无法确认' })).toBeDisabled()
+    expect(screen.getByRole('button', { name: '重新加载模型目录' })).toBeInTheDocument()
+    expect(fetchMock).toHaveBeenCalledTimes(2)
+    expect(onChange).not.toHaveBeenCalled()
   })
 
   it('通过加载更多模型展示后续页面，并在后续页面失败时保留选择并允许重试', async () => {

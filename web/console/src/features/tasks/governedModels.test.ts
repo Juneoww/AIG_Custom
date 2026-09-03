@@ -8,7 +8,7 @@
 import { describe, expect, it } from 'vitest'
 
 import type { ModelCatalogItem } from '../models/api'
-import { fallbackModelLabel, modelOptionLabel, nextCatalogPage, selectableModels } from './governedModels'
+import { catalogPageFingerprint, hasRepeatedCatalogPage, modelOptionLabel, nextCatalogPage, selectableModels } from './governedModels'
 
 function model(overrides: Partial<ModelCatalogItem> = {}): ModelCatalogItem {
   return {
@@ -51,7 +51,16 @@ describe('governed model catalog helpers', () => {
 
     expect(modelOptionLabel(privateModel)).toBe('私有扫描模型（gpt-secure，私有）')
     expect(modelOptionLabel(globalModel)).toBe('全局模型（claude-secure，全局）')
-    expect(fallbackModelLabel('model-deleted-1')).toBe('已选择的模型（ID: model-deleted-1）')
+  })
+
+  it('以白名单字段比较目录页内容，不受地址或备注变化影响', () => {
+    const accepted = model({ base_url: 'https://first.example.test/v1', note: 'first-note' })
+    const sameSafeModel = model({ base_url: 'https://second.example.test/v1', note: 'second-note' })
+    const changedSafeModel = model({ name: '不同模型名' })
+
+    expect(catalogPageFingerprint([accepted])).toBe(catalogPageFingerprint([sameSafeModel]))
+    expect(catalogPageFingerprint([accepted])).not.toBe(catalogPageFingerprint([changedSafeModel]))
+    expect(hasRepeatedCatalogPage([sameSafeModel], [[accepted]])).toBe(true)
   })
 
   it('标签不会泄露 base URL、token 或备注', () => {

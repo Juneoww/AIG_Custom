@@ -10,6 +10,28 @@ import type { ModelCatalogItem, ModelCatalogPage } from '../models/api'
 export const MODEL_CATALOG_PAGE_SIZE = 100
 const MAX_MODEL_CATALOG_PAGE = 1_000
 
+type CatalogFingerprintItem = Pick<ModelCatalogItem, 'id' | 'name' | 'provider_model' | 'scope' | 'disabled' | 'source' | 'read_only'>
+
+export function catalogPageFingerprint(items: readonly CatalogFingerprintItem[]): string {
+  return JSON.stringify(items.map((model) => [
+    model.id,
+    model.name,
+    model.provider_model,
+    model.scope,
+    model.disabled,
+    model.source,
+    model.read_only,
+  ]))
+}
+
+export function hasRepeatedCatalogPage(
+  items: readonly CatalogFingerprintItem[],
+  acceptedPages: readonly (readonly CatalogFingerprintItem[])[],
+): boolean {
+  const fingerprint = catalogPageFingerprint(items)
+  return acceptedPages.some((page) => catalogPageFingerprint(page) === fingerprint)
+}
+
 export function canonicalModels(items: readonly ModelCatalogItem[]): readonly ModelCatalogItem[] {
   const seenIDs = new Set<string>()
   return items.filter((model) => {
@@ -36,8 +58,4 @@ export function nextCatalogPage(
     page.total < 1 || page.page * page.page_size >= page.total) return undefined
   const nextPage = page.page + 1
   return nextPage <= MAX_MODEL_CATALOG_PAGE && !loadedPageParams.includes(nextPage) ? nextPage : undefined
-}
-
-export function fallbackModelLabel(id: string): string {
-  return `已选择的模型（ID: ${id}）`
 }
