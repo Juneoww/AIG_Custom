@@ -16,6 +16,8 @@ package database
 
 import (
 	"encoding/json"
+	"fmt"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -101,6 +103,10 @@ func TestMigrationAppliesGovernanceAndPlatformTaskSchemaThroughVersionTen(t *tes
 func TestMigrationAppliesMCPConnectionSchemaAsVersionTen(t *testing.T) {
 	db := openPostgresTestDB(t)
 	resetPostgresTestDB(t, db)
+	dropMCPConnectionSchemaTables(t, db)
+	for table, present := range mcpConnectionRuntimeTablePresence(db) {
+		assert.Falsef(t, present, "empty fixture must not include %s", table)
+	}
 
 	require.NoError(t, Migrate(db))
 	assertMCPConnectionSchema(t, db)
@@ -108,6 +114,25 @@ func TestMigrationAppliesMCPConnectionSchemaAsVersionTen(t *testing.T) {
 
 	require.NoError(t, Migrate(db), "v10 migration must remain idempotent")
 	assertMCPConnectionSchema(t, db)
+}
+
+func TestMigrationVersionTenRejectsIncompatibleExistingMCPIndexes(t *testing.T) {
+	db := openPostgresTestDB(t)
+	for _, requirement := range mcpConnectionSchemaTestIndexRequirements {
+		t.Run(requirement.name, func(t *testing.T) {
+			resetPostgresTestDB(t, db)
+			dropMCPConnectionSchemaTables(t, db)
+			require.NoError(t, Migrate(db))
+			require.NoError(t, db.Exec("DROP INDEX "+requirement.name).Error)
+			require.NoError(t, db.Exec(requirement.incompatibleCreateStatement()).Error)
+			require.NoError(t, db.Where("version = ?", LatestSchemaVersion).Delete(&SchemaMigration{}).Error)
+
+			err := Migrate(db)
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), requirement.name)
+			assert.NotContains(t, migrationVersions(t, db), LatestSchemaVersion)
+		})
+	}
 }
 
 func TestMigrationUpgradesExistingVersionThreeWithoutRewritingIt(t *testing.T) {
@@ -503,6 +528,78 @@ WHERE schemaname = current_schema() AND tablename = 'platform_tasks' AND indexna
 	}
 }
 
+type mcpConnectionSchemaTestIndexRequirement struct {
+	table               string
+	name                string
+	columns             []string
+	unique              bool
+	incompatibleColumns []string
+}
+
+func (requirement mcpConnectionSchemaTestIndexRequirement) incompatibleCreateStatement() string {
+	statement := "CREATE INDEX"
+	if requirement.unique {
+		statement = "CREATE UNIQUE INDEX"
+	}
+	return fmt.Sprintf(
+		"%s %s ON %s(%s)",
+		statement,
+		requirement.name,
+		requirement.table,
+		strings.Join(requirement.incompatibleColumns, ", "),
+	)
+}
+
+var mcpConnectionSchemaTestIndexRequirements = []mcpConnectionSchemaTestIndexRequirement{
+	{
+		table: "platform_mcp_connection_configs", name: "idx_platform_mcp_connection_configs_owner_scope",
+		columns: []string{"owner_user_id", "scope"}, incompatibleColumns: []string{"enabled"},
+	},
+	{
+		table: "platform_mcp_connection_versions", name: "ux_platform_mcp_connection_versions_config_version", unique: true,
+		columns: []string{"connection_config_id", "version"}, incompatibleColumns: []string{"id"},
+	},
+	{
+		table: "platform_mcp_task_bindings", name: "ux_platform_mcp_task_bindings_task_id", unique: true,
+		columns: []string{"task_id"}, incompatibleColumns: []string{"id"},
+	},
+	{
+		table: "platform_mcp_task_bindings", name: "idx_platform_mcp_task_bindings_config_version",
+		columns: []string{"connection_config_id", "connection_config_version"}, incompatibleColumns: []string{"task_id"},
+	},
+	{
+		table: "platform_mcp_runtime_capabilities", name: "ux_platform_mcp_runtime_capabilities_task_rotation", unique: true,
+		columns: []string{"task_id", "rotation"}, incompatibleColumns: []string{"id"},
+	},
+	{
+		table: "platform_mcp_runtime_capabilities", name: "ux_platform_mcp_runtime_capabilities_hash", unique: true,
+		columns: []string{"capability_hash"}, incompatibleColumns: []string{"id"},
+	},
+	{
+		table: "platform_mcp_runtime_capabilities", name: "idx_platform_mcp_runtime_capabilities_expires_at",
+		columns: []string{"expires_at"}, incompatibleColumns: []string{"task_id"},
+	},
+	{
+		table: "platform_idempotency_records", name: "ux_platform_idempotency_records_scope", unique: true,
+		columns: []string{"principal_id", "scope_key", "method", "path", "idempotency_key"}, incompatibleColumns: []string{"id"},
+	},
+	{
+		table: "platform_idempotency_records", name: "idx_platform_idempotency_records_expires_at",
+		columns: []string{"expires_at"}, incompatibleColumns: []string{"principal_id"},
+	},
+}
+
+func dropMCPConnectionSchemaTables(t *testing.T, db *gorm.DB) {
+	t.Helper()
+	require.NoError(t, db.Migrator().DropTable(
+		"platform_idempotency_records",
+		"platform_mcp_runtime_capabilities",
+		"platform_mcp_task_bindings",
+		"platform_mcp_connection_versions",
+		"platform_mcp_connection_configs",
+	))
+}
+
 func assertMCPConnectionSchema(t *testing.T, db *gorm.DB) {
 	t.Helper()
 	for table, columns := range map[string][]string{
@@ -530,22 +627,31 @@ func assertMCPConnectionSchema(t *testing.T, db *gorm.DB) {
 		})
 	}
 
-	for _, requirement := range []struct {
-		table, name, columns string
-	}{
-		{table: "platform_mcp_connection_versions", name: "ux_platform_mcp_connection_versions_config_version", columns: "(connection_config_id, version)"},
-		{table: "platform_mcp_task_bindings", name: "ux_platform_mcp_task_bindings_task_id", columns: "(task_id)"},
-		{table: "platform_mcp_runtime_capabilities", name: "ux_platform_mcp_runtime_capabilities_task_rotation", columns: "(task_id, rotation)"},
-		{table: "platform_idempotency_records", name: "ux_platform_idempotency_records_scope", columns: "(principal_id, scope_key, method, path, idempotency_key)"},
-	} {
+	for _, requirement := range mcpConnectionSchemaTestIndexRequirements {
 		t.Run(requirement.name, func(t *testing.T) {
-			var definition string
+			var index struct {
+				Unique     bool   `gorm:"column:unique"`
+				Valid      bool   `gorm:"column:valid"`
+				Ready      bool   `gorm:"column:ready"`
+				Definition string `gorm:"column:definition"`
+			}
 			require.NoError(t, db.Raw(`
-SELECT indexdef
-FROM pg_catalog.pg_indexes
-WHERE schemaname = current_schema() AND tablename = ? AND indexname = ?`, requirement.table, requirement.name).Scan(&definition).Error)
-			assert.Contains(t, definition, "UNIQUE INDEX")
-			assert.Contains(t, definition, requirement.columns)
+
+SELECT index_definition.indisunique AS unique,
+       index_definition.indisvalid AS valid,
+       index_definition.indisready AS ready,
+       pg_get_indexdef(index_definition.indexrelid) AS definition
+FROM pg_catalog.pg_class AS table_definition
+JOIN pg_catalog.pg_namespace AS table_namespace ON table_namespace.oid = table_definition.relnamespace
+JOIN pg_catalog.pg_index AS index_definition ON index_definition.indrelid = table_definition.oid
+JOIN pg_catalog.pg_class AS index_name ON index_name.oid = index_definition.indexrelid
+WHERE table_namespace.nspname = current_schema()
+  AND table_definition.relname = ?
+  AND index_name.relname = ?`, requirement.table, requirement.name).Scan(&index).Error)
+			assert.Equal(t, requirement.unique, index.Unique)
+			assert.True(t, index.Valid)
+			assert.True(t, index.Ready)
+			assert.Contains(t, index.Definition, "("+strings.Join(requirement.columns, ", ")+")")
 		})
 	}
 }

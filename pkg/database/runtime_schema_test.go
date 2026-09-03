@@ -79,13 +79,7 @@ func TestRuntimeStoreInitializationValidatesRequiredObjectsWithoutDDL(t *testing
 func TestRuntimeSchemaRejectsVersionNineWithoutMCPConnectionSchemaDDL(t *testing.T) {
 	db := openPostgresTestDB(t)
 	resetPostgresTestDB(t, db)
-	require.NoError(t, db.Migrator().DropTable(
-		"platform_idempotency_records",
-		"platform_mcp_runtime_capabilities",
-		"platform_mcp_task_bindings",
-		"platform_mcp_connection_versions",
-		"platform_mcp_connection_configs",
-	))
+	dropMCPConnectionSchemaTables(t, db)
 	require.NoError(t, db.AutoMigrate(&SchemaMigration{}))
 	for _, apply := range []func(*gorm.DB) error{
 		migrateInitialSchema,
@@ -114,6 +108,27 @@ func TestRuntimeSchemaRejectsVersionNineWithoutMCPConnectionSchemaDDL(t *testing
 	assert.Contains(t, err.Error(), "aig migrate")
 	assert.Equal(t, beforeVersions, migrationVersions(t, db), "runtime validation must not update migration history")
 	assert.Equal(t, beforeTables, mcpConnectionRuntimeTablePresence(db), "runtime validation must not create MCP schema tables")
+}
+
+func TestRuntimeSchemaRejectsIncompatibleMCPIndexesWithoutDDL(t *testing.T) {
+	db := openPostgresTestDB(t)
+	for _, requirement := range mcpConnectionSchemaTestIndexRequirements {
+		t.Run(requirement.name, func(t *testing.T) {
+			resetPostgresTestDB(t, db)
+			dropMCPConnectionSchemaTables(t, db)
+			require.NoError(t, Migrate(db))
+			require.NoError(t, db.Exec("DROP INDEX "+requirement.name).Error)
+			require.NoError(t, db.Exec(requirement.incompatibleCreateStatement()).Error)
+
+			beforeVersions := migrationVersions(t, db)
+			beforeCatalog := mcpConnectionRuntimeCatalogState(t, db)
+			err := ValidateRuntimeSchema(db)
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), requirement.name)
+			assert.Equal(t, beforeVersions, migrationVersions(t, db), "runtime validation must not update migration history")
+			assert.Equal(t, beforeCatalog, mcpConnectionRuntimeCatalogState(t, db), "runtime validation must not repair MCP indexes")
+		})
+	}
 }
 
 func TestRuntimeSchemaRejectsMissingDispatchClaimColumnWithoutDDL(t *testing.T) {
@@ -370,4 +385,28 @@ func mcpConnectionRuntimeTablePresence(db *gorm.DB) map[string]bool {
 		presence[table] = db.Migrator().HasTable(table)
 	}
 	return presence
+}
+
+func mcpConnectionRuntimeCatalogState(t *testing.T, db *gorm.DB) []string {
+	t.Helper()
+	var rows []struct {
+		Object string `gorm:"column:object"`
+	}
+	require.NoError(t, db.Raw(`
+SELECT 'index:' || tablename || '.' || indexname || ':' || indexdef AS object
+FROM pg_catalog.pg_indexes
+WHERE schemaname = current_schema()
+  AND tablename IN (
+    'platform_mcp_connection_configs',
+    'platform_mcp_connection_versions',
+    'platform_mcp_task_bindings',
+    'platform_mcp_runtime_capabilities',
+    'platform_idempotency_records'
+  )
+ORDER BY object`).Scan(&rows).Error)
+	objects := make([]string, len(rows))
+	for index, row := range rows {
+		objects[index] = row.Object
+	}
+	return objects
 }

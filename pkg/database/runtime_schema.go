@@ -74,10 +74,11 @@ var requiredRuntimeColumns = map[string][]string{
 }
 
 type runtimeIndexRequirement struct {
-	model  any
-	name   string
-	table  string
-	unique bool
+	model   any
+	name    string
+	table   string
+	unique  bool
+	columns []string
 }
 
 var requiredRuntimeIndexes = []runtimeIndexRequirement{
@@ -101,15 +102,31 @@ var requiredRuntimeIndexes = []runtimeIndexRequirement{
 	{model: &reportSnapshotMigration{}, name: "ux_report_snapshots_task_id", table: "report_snapshots", unique: true},
 	{model: &reportSnapshotMigration{}, name: "idx_report_snapshots_completed_at"},
 	{model: &reportSnapshotMigration{}, name: "idx_report_snapshots_owner_completed_at"},
-	{model: &platformMCPConnectionConfigMigration{}, name: "idx_platform_mcp_connection_configs_owner_scope"},
-	{model: &platformMCPConnectionVersionMigration{}, name: "ux_platform_mcp_connection_versions_config_version", table: "platform_mcp_connection_versions", unique: true},
-	{model: &platformMCPTaskBindingMigration{}, name: "ux_platform_mcp_task_bindings_task_id", table: "platform_mcp_task_bindings", unique: true},
-	{model: &platformMCPTaskBindingMigration{}, name: "idx_platform_mcp_task_bindings_config_version"},
-	{model: &platformMCPRuntimeCapabilityMigration{}, name: "ux_platform_mcp_runtime_capabilities_task_rotation", table: "platform_mcp_runtime_capabilities", unique: true},
-	{model: &platformMCPRuntimeCapabilityMigration{}, name: "ux_platform_mcp_runtime_capabilities_hash", table: "platform_mcp_runtime_capabilities", unique: true},
-	{model: &platformMCPRuntimeCapabilityMigration{}, name: "idx_platform_mcp_runtime_capabilities_expires_at"},
-	{model: &platformIdempotencyRecordMigration{}, name: "ux_platform_idempotency_records_scope", table: "platform_idempotency_records", unique: true},
-	{model: &platformIdempotencyRecordMigration{}, name: "idx_platform_idempotency_records_expires_at"},
+}
+
+func init() {
+	requiredRuntimeIndexes = append(requiredRuntimeIndexes, mcpRuntimeIndexRequirements()...)
+}
+
+func mcpRuntimeIndexRequirements() []runtimeIndexRequirement {
+	models := map[string]any{
+		"platform_mcp_connection_configs":   &platformMCPConnectionConfigMigration{},
+		"platform_mcp_connection_versions":  &platformMCPConnectionVersionMigration{},
+		"platform_mcp_task_bindings":        &platformMCPTaskBindingMigration{},
+		"platform_mcp_runtime_capabilities": &platformMCPRuntimeCapabilityMigration{},
+		"platform_idempotency_records":      &platformIdempotencyRecordMigration{},
+	}
+	requirements := make([]runtimeIndexRequirement, 0, len(mcpConnectionSchemaIndexRequirements))
+	for _, requirement := range mcpConnectionSchemaIndexRequirements {
+		requirements = append(requirements, runtimeIndexRequirement{
+			model:   models[requirement.table],
+			name:    requirement.name,
+			table:   requirement.table,
+			unique:  requirement.unique,
+			columns: requirement.columns,
+		})
+	}
+	return requirements
 }
 
 // ValidateRuntimeSchema performs read-only validation of the complete schema
@@ -157,6 +174,16 @@ func ValidateRuntimeSchema(db *gorm.DB) error {
 
 	missingIndexes := make([]string, 0)
 	for _, requirement := range requiredRuntimeIndexes {
+		if len(requirement.columns) > 0 {
+			valid, err := postgresRuntimeIndexValid(db, requirement.table, requirement.name, requirement.columns, requirement.unique)
+			if err != nil {
+				return runtimeMigrationRequiredError(fmt.Sprintf("读取索引 %s 失败: %v", requirement.name, err))
+			}
+			if !valid {
+				missingIndexes = append(missingIndexes, requirement.name)
+			}
+			continue
+		}
 		if requirement.unique {
 			valid, err := postgresRuntimeUniqueIndexValid(db, requirement.table, requirement.name)
 			if err != nil {
@@ -200,6 +227,43 @@ WHERE table_namespace.nspname = current_schema()
   AND index_definition.indisready`
 	var valid bool
 	if err := db.Raw(query, table, index).Scan(&valid).Error; err != nil {
+		return false, err
+	}
+	return valid, nil
+}
+
+// postgresRuntimeIndexValid 只读取 PostgreSQL catalog，精确核验 v10 索引定义。
+// 除名称外，它还要求 btree、完整键列序、唯一性、有效/就绪状态，且禁止谓词和 INCLUDE 列。
+func postgresRuntimeIndexValid(db *gorm.DB, table, index string, columns []string, unique bool) (bool, error) {
+	const query = `
+SELECT COALESCE((
+  SELECT index_definition.indisvalid
+     AND index_definition.indisready
+     AND index_definition.indisunique = ?
+     AND index_method.amname = 'btree'
+     AND index_definition.indpred IS NULL
+     AND index_definition.indexprs IS NULL
+     AND index_definition.indnkeyatts = ?
+     AND index_definition.indnatts = ?
+     AND (
+       SELECT string_agg(attribute.attname, ',' ORDER BY key_column.ordinality)
+       FROM unnest(index_definition.indkey) WITH ORDINALITY AS key_column(attribute_number, ordinality)
+       JOIN pg_catalog.pg_attribute AS attribute
+         ON attribute.attrelid = table_definition.oid
+        AND attribute.attnum = key_column.attribute_number
+       WHERE key_column.ordinality <= index_definition.indnkeyatts
+     ) = ?
+  FROM pg_catalog.pg_class AS table_definition
+  JOIN pg_catalog.pg_namespace AS table_namespace ON table_namespace.oid = table_definition.relnamespace
+  JOIN pg_catalog.pg_index AS index_definition ON index_definition.indrelid = table_definition.oid
+  JOIN pg_catalog.pg_class AS index_name ON index_name.oid = index_definition.indexrelid
+  JOIN pg_catalog.pg_am AS index_method ON index_method.oid = index_name.relam
+  WHERE table_namespace.nspname = current_schema()
+    AND table_definition.relname = ?
+    AND index_name.relname = ?
+), false)`
+	var valid bool
+	if err := db.Raw(query, unique, len(columns), len(columns), strings.Join(columns, ","), table, index).Scan(&valid).Error; err != nil {
 		return false, err
 	}
 	return valid, nil

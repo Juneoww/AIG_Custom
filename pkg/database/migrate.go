@@ -480,6 +480,64 @@ func (platformIdempotencyRecordMigration) TableName() string {
 	return "platform_idempotency_records"
 }
 
+// mcpConnectionSchemaIndexRequirement 固定 v10 MCP 表的索引语义。
+// 迁移与运行时均以这些列序和唯一性要求验证 catalog，避免同名错误索引被接受。
+type mcpConnectionSchemaIndexRequirement struct {
+	table     string
+	name      string
+	columns   []string
+	unique    bool
+	statement string
+}
+
+var mcpConnectionSchemaIndexRequirements = []mcpConnectionSchemaIndexRequirement{
+	{
+		table: "platform_mcp_connection_configs", name: "idx_platform_mcp_connection_configs_owner_scope",
+		columns:   []string{"owner_user_id", "scope"},
+		statement: `CREATE INDEX IF NOT EXISTS idx_platform_mcp_connection_configs_owner_scope ON platform_mcp_connection_configs(owner_user_id, scope)`,
+	},
+	{
+		table: "platform_mcp_connection_versions", name: "ux_platform_mcp_connection_versions_config_version", unique: true,
+		columns:   []string{"connection_config_id", "version"},
+		statement: `CREATE UNIQUE INDEX IF NOT EXISTS ux_platform_mcp_connection_versions_config_version ON platform_mcp_connection_versions(connection_config_id, version)`,
+	},
+	{
+		table: "platform_mcp_task_bindings", name: "ux_platform_mcp_task_bindings_task_id", unique: true,
+		columns:   []string{"task_id"},
+		statement: `CREATE UNIQUE INDEX IF NOT EXISTS ux_platform_mcp_task_bindings_task_id ON platform_mcp_task_bindings(task_id)`,
+	},
+	{
+		table: "platform_mcp_task_bindings", name: "idx_platform_mcp_task_bindings_config_version",
+		columns:   []string{"connection_config_id", "connection_config_version"},
+		statement: `CREATE INDEX IF NOT EXISTS idx_platform_mcp_task_bindings_config_version ON platform_mcp_task_bindings(connection_config_id, connection_config_version)`,
+	},
+	{
+		table: "platform_mcp_runtime_capabilities", name: "ux_platform_mcp_runtime_capabilities_task_rotation", unique: true,
+		columns:   []string{"task_id", "rotation"},
+		statement: `CREATE UNIQUE INDEX IF NOT EXISTS ux_platform_mcp_runtime_capabilities_task_rotation ON platform_mcp_runtime_capabilities(task_id, rotation)`,
+	},
+	{
+		table: "platform_mcp_runtime_capabilities", name: "ux_platform_mcp_runtime_capabilities_hash", unique: true,
+		columns:   []string{"capability_hash"},
+		statement: `CREATE UNIQUE INDEX IF NOT EXISTS ux_platform_mcp_runtime_capabilities_hash ON platform_mcp_runtime_capabilities(capability_hash)`,
+	},
+	{
+		table: "platform_mcp_runtime_capabilities", name: "idx_platform_mcp_runtime_capabilities_expires_at",
+		columns:   []string{"expires_at"},
+		statement: `CREATE INDEX IF NOT EXISTS idx_platform_mcp_runtime_capabilities_expires_at ON platform_mcp_runtime_capabilities(expires_at)`,
+	},
+	{
+		table: "platform_idempotency_records", name: "ux_platform_idempotency_records_scope", unique: true,
+		columns:   []string{"principal_id", "scope_key", "method", "path", "idempotency_key"},
+		statement: `CREATE UNIQUE INDEX IF NOT EXISTS ux_platform_idempotency_records_scope ON platform_idempotency_records(principal_id, scope_key, method, path, idempotency_key)`,
+	},
+	{
+		table: "platform_idempotency_records", name: "idx_platform_idempotency_records_expires_at",
+		columns:   []string{"expires_at"},
+		statement: `CREATE INDEX IF NOT EXISTS idx_platform_idempotency_records_expires_at ON platform_idempotency_records(expires_at)`,
+	},
+}
+
 // migratePlatformMCPConnectionSchema 建立 MCP 扫描的专用持久化边界。
 // 该迁移只会由显式 Migrate 调用，运行时校验不得补建任何对象。
 func migratePlatformMCPConnectionSchema(db *gorm.DB) error {
@@ -521,19 +579,16 @@ func migratePlatformMCPConnectionSchema(db *gorm.DB) error {
 		}
 	}
 
-	for _, statement := range []string{
-		`CREATE INDEX IF NOT EXISTS idx_platform_mcp_connection_configs_owner_scope ON platform_mcp_connection_configs(owner_user_id, scope)`,
-		`CREATE UNIQUE INDEX IF NOT EXISTS ux_platform_mcp_connection_versions_config_version ON platform_mcp_connection_versions(connection_config_id, version)`,
-		`CREATE UNIQUE INDEX IF NOT EXISTS ux_platform_mcp_task_bindings_task_id ON platform_mcp_task_bindings(task_id)`,
-		`CREATE INDEX IF NOT EXISTS idx_platform_mcp_task_bindings_config_version ON platform_mcp_task_bindings(connection_config_id, connection_config_version)`,
-		`CREATE UNIQUE INDEX IF NOT EXISTS ux_platform_mcp_runtime_capabilities_task_rotation ON platform_mcp_runtime_capabilities(task_id, rotation)`,
-		`CREATE UNIQUE INDEX IF NOT EXISTS ux_platform_mcp_runtime_capabilities_hash ON platform_mcp_runtime_capabilities(capability_hash)`,
-		`CREATE INDEX IF NOT EXISTS idx_platform_mcp_runtime_capabilities_expires_at ON platform_mcp_runtime_capabilities(expires_at)`,
-		`CREATE UNIQUE INDEX IF NOT EXISTS ux_platform_idempotency_records_scope ON platform_idempotency_records(principal_id, scope_key, method, path, idempotency_key)`,
-		`CREATE INDEX IF NOT EXISTS idx_platform_idempotency_records_expires_at ON platform_idempotency_records(expires_at)`,
-	} {
-		if err := db.Exec(statement).Error; err != nil {
+	for _, requirement := range mcpConnectionSchemaIndexRequirements {
+		if err := db.Exec(requirement.statement).Error; err != nil {
 			return err
+		}
+		valid, err := postgresRuntimeIndexValid(db, requirement.table, requirement.name, requirement.columns, requirement.unique)
+		if err != nil {
+			return fmt.Errorf("读取索引 %s 失败: %w", requirement.name, err)
+		}
+		if !valid {
+			return fmt.Errorf("索引 %s 与 v10 定义不兼容", requirement.name)
 		}
 	}
 	return nil
