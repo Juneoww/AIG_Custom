@@ -218,6 +218,40 @@ func TestSealPayloadJSONMasksSensitiveFields(t *testing.T) {
 	}
 }
 
+func TestSealLeafJSONMasksSecretsWhileRoundTripKeepsPlaintext(t *testing.T) {
+	header := Header{Name: "X-Leaf-Sentinel", Value: "header-value-leaf-sentinel"}
+	authentication := Authentication{Kind: AuthenticationAPIKeyHeader, HeaderName: header.Name, Secret: "authentication-leaf-sentinel"}
+	for _, value := range []any{header, authentication} {
+		encoded, err := json.Marshal(value)
+		if err != nil {
+			t.Fatalf("marshal leaf value: %v", err)
+		}
+		for _, secret := range []string{"header-value-leaf-sentinel", "authentication-leaf-sentinel"} {
+			if bytes.Contains(encoded, []byte(secret)) {
+				t.Fatalf("leaf JSON leaked %q: %s", secret, encoded)
+			}
+		}
+	}
+
+	keyring, err := NewKeyring("leaf-sentinel", bytes.Repeat([]byte{0x71}, 32), nil)
+	if err != nil {
+		t.Fatalf("new keyring: %v", err)
+	}
+	config := &ConnectionConfig{ID: "leaf-config-sentinel", OwnerUserID: "leaf-owner-sentinel", Scope: ScopePrivate}
+	version := &ConnectionVersion{ID: "leaf-version-sentinel", ConnectionConfigID: config.ID, Version: 1, Transport: TransportHTTP}
+	payload := ConnectionPayload{Endpoint: "leaf-endpoint-sentinel", Authentication: authentication, Headers: []Header{header}}
+	if err := keyring.SealConnectionPayload(config, version, payload); err != nil {
+		t.Fatalf("seal payload: %v", err)
+	}
+	opened, err := keyring.OpenConnectionPayload(config, version)
+	if err != nil {
+		t.Fatalf("open payload: %v", err)
+	}
+	if !reflect.DeepEqual(payload, opened) {
+		t.Fatalf("leaf payload round-trip mismatch: got %#v want %#v", opened, payload)
+	}
+}
+
 func TestSealAndOpenRepositorySourceKeepsSnapshotEncryptedAndBoundToBinding(t *testing.T) {
 	keyring, err := NewKeyring("repository-sentinel", bytes.Repeat([]byte{0x51}, 32), nil)
 	if err != nil {

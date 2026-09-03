@@ -36,3 +36,9 @@ func TestRunWebServerComposesMCPWorkbenchInsideProtectedPlatformGroup(t *testing
 	assert.Contains(t, text, "registerPlatformMCPWorkbenchRoutes(platformGroup")
 	assert.Less(t, strings.Index(text, "registerPlatformGovernanceRoutes(platformGroup"), strings.Index(text, "registerPlatformMCPWorkbenchRoutes(platformGroup"))
 }
+
+func TestRunWebServerDoesNotRequireMCPKeyringBeforeMCPConsumerExists(t *testing.T) {
+	source, err := os.ReadFile("server.go")
+	require.NoError(t, err)
+	assert.NotContains(t, string(source), "platformmcpconnections.LoadKeyringFromEnv()")
+}

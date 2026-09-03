@@ -87,7 +87,7 @@ func (keyring *Keyring) SealConnectionPayload(config *ConnectionConfig, version 
 	if err := validateConfigVersion(config, version); err != nil {
 		return err
 	}
-	plaintext, err := json.Marshal(connectionPayloadWire(payload))
+	plaintext, err := json.Marshal(connectionPayloadWireOf(payload))
 	if err != nil {
 		return fmt.Errorf("序列化 MCP 连接载荷失败: %w", err)
 	}
@@ -231,7 +231,37 @@ func bindingAAD(binding *TaskBinding, context BindingEncryptionContext, fieldDom
 
 // 以下 wire 类型不携带面向日志/响应的脱敏方法，只在进出 AES-GCM 前处理完整明文。
 // 它们不能映射 GORM 字段，因此不会成为持久化明文字段。
-type connectionPayloadWire ConnectionPayload
+type connectionPayloadWire struct {
+	Endpoint       string             `json:"endpoint"`
+	Authentication authenticationWire `json:"authentication"`
+	Headers        []headerWire       `json:"headers,omitempty"`
+}
+
+type authenticationWire struct {
+	Kind       AuthenticationKind `json:"kind"`
+	HeaderName string             `json:"header_name,omitempty"`
+	Secret     string             `json:"secret,omitempty"`
+}
+
+type headerWire struct {
+	Name  string `json:"name"`
+	Value string `json:"value"`
+}
+
+func connectionPayloadWireOf(payload ConnectionPayload) connectionPayloadWire {
+	headers := make([]headerWire, len(payload.Headers))
+	for index, header := range payload.Headers {
+		headers[index] = headerWire{Name: header.Name, Value: header.Value}
+	}
+	return connectionPayloadWire{
+		Endpoint: payload.Endpoint,
+		Authentication: authenticationWire{
+			Kind: payload.Authentication.Kind, HeaderName: payload.Authentication.HeaderName, Secret: payload.Authentication.Secret,
+		},
+		Headers: headers,
+	}
+}
+
 type repositorySourceSnapshotWire RepositorySourceSnapshot
 
 func aad(resourceID string, version int, fieldDomain, ownerUserID string, scope Scope) []byte {
