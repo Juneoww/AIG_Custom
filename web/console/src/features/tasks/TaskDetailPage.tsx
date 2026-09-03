@@ -56,18 +56,22 @@ function RestoredModelName({ modelID }: { modelID: string }) {
     retry: false,
   })
   const catalogItems = catalog.data?.pages.flatMap((page) => page.items) ?? []
-  const canonicalCatalogItems = canonicalModels(catalogItems)
+  const catalogRefreshInProgress = catalog.isRefetching && !catalog.isFetchingNextPage
+  const catalogRefreshFailed = Boolean(catalog.data) && catalog.isRefetchError && !catalog.isFetchNextPageError
+  const catalogTrusted = !catalogRefreshInProgress && !catalogRefreshFailed
+  const trustedCatalogItems = catalogTrusted ? catalogItems : []
+  const canonicalCatalogItems = canonicalModels(trustedCatalogItems)
   const selectedCanonicalModel = canonicalCatalogItems.find((model) => model.id === modelID)
-  const selectedModel = selectableModels(catalogItems).find((model) => model.id === modelID)
+  const selectedModel = selectableModels(trustedCatalogItems).find((model) => model.id === modelID)
   const lastPage = catalog.data?.pages.at(-1)
-  const repeatedCatalogPage = lastPage !== undefined && hasRepeatedCatalogPage(
+  const repeatedCatalogPage = catalogTrusted && lastPage !== undefined && hasRepeatedCatalogPage(
     lastPage.items,
     (catalog.data?.pages.slice(0, -1) ?? []).map((page) => page.items),
   )
-  const catalogUnavailable = catalog.isError || catalog.isFetchNextPageError || repeatedCatalogPage
-  const catalogExhausted = Boolean(catalog.data) && !catalog.hasNextPage && !catalog.isFetching && !catalog.isFetchingNextPage
+  const catalogUnavailable = catalogRefreshFailed || catalog.isError || catalog.isFetchNextPageError || repeatedCatalogPage
+  const catalogExhausted = catalogTrusted && Boolean(catalog.data) && !catalog.hasNextPage && !catalog.isFetching && !catalog.isFetchingNextPage
   const canAutomaticallyLoadNextPage = !selectedCanonicalModel && Boolean(catalog.data) && Boolean(catalog.hasNextPage) &&
-    !catalogUnavailable && !catalog.isFetching && !catalog.isFetchingNextPage
+    catalogTrusted && !catalogUnavailable && !catalog.isFetching && !catalog.isFetchingNextPage
   const automaticPageKey = catalog.data?.pageParams.join(',') ?? ''
 
   useEffect(() => {
@@ -80,7 +84,6 @@ function RestoredModelName({ modelID }: { modelID: string }) {
     void catalog.fetchNextPage({ cancelRefetch: false })
   }, [automaticPageKey, canAutomaticallyLoadNextPage, catalog.fetchNextPage])
 
-  if (selectedModel) return <Text>{modelOptionLabel(selectedModel)}</Text>
   if (catalogUnavailable) {
     return (
       <>
@@ -89,6 +92,8 @@ function RestoredModelName({ modelID }: { modelID: string }) {
       </>
     )
   }
+  if (catalogRefreshInProgress) return <Text role="status">正在恢复模型名称</Text>
+  if (selectedModel) return <Text>{modelOptionLabel(selectedModel)}</Text>
   if (selectedCanonicalModel?.disabled || catalogExhausted) return <Text>{fallbackModelLabel(modelID)}</Text>
   return <Text role="status">正在恢复模型名称</Text>
 }

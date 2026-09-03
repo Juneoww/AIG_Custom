@@ -70,8 +70,13 @@ function TaskLocationProbe() {
   return <output aria-label="当前任务路由">{useLocation().pathname}</output>
 }
 
-function renderPage(page: React.ReactNode, subject: CurrentSubject, path = '/', routePath = '*') {
-  const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } })
+function renderPage(
+  page: React.ReactNode,
+  subject: CurrentSubject,
+  path = '/',
+  routePath = '*',
+  queryClient = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } }),
+) {
   return render(
     <QueryClientProvider client={queryClient}>
       <SessionProvider initialState={{ status: 'authenticated', subject }}>
@@ -490,16 +495,54 @@ describe('任务页面', () => {
     expect(await screen.findByText('受治理扫描模型（gpt-secure，私有）')).toBeInTheDocument()
   })
 
+  it.each([
+    ['enabled', catalogModel(), '受治理扫描模型（gpt-secure，私有）'],
+    ['disabled', catalogModel({ disabled: true }), '已选择的模型（ID: model-opaque-1）'],
+  ])('专属 AI 基础设施详情不会在缓存 %s 模型刷新失败时采信旧目录', async (_state, cachedModel, oldLabel) => {
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } })
+    queryClient.setQueryData(['task-detail-model-catalog', 'model-opaque-1'], {
+      pages: [{ items: [cachedModel], total: 1, page: 1, page_size: 100 }],
+      pageParams: [1],
+    })
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(jsonResponse(aiInfraDetail))
+      .mockResolvedValueOnce(new Response(null, { status: 500 }))
+    vi.stubGlobal('fetch', fetchMock)
+    renderPage(
+      <TaskDetailPage expectedTaskType="ai_infra_scan" />,
+      { id: 'user-1', username: 'alice', role: 'user', must_change_password: false },
+      '/tasks/ai-infra/task-ai-infra-1',
+      '/tasks/ai-infra/:taskId',
+      queryClient,
+    )
+
+    expect(await screen.findByText('已选择的模型（ID: model-opaque-1，目录暂不可用）')).toBeInTheDocument()
+    expect(screen.queryByText(oldLabel)).not.toBeInTheDocument()
+    expect(screen.getByRole('button', { name: '重试恢复模型名称' })).toBeInTheDocument()
+  })
+
   it('专属 AI 基础设施详情类型不匹配时不展示任何任务事实或请求模型目录', async () => {
     const fetchMock = vi.fn().mockResolvedValue(jsonResponse(task))
     vi.stubGlobal('fetch', fetchMock)
     renderPage(<TaskDetailPage expectedTaskType="ai_infra_scan" />, { id: 'user-1', username: 'alice', role: 'user', must_change_password: false }, '/tasks/ai-infra/task-opaque-1', '/tasks/ai-infra/:taskId')
 
-    expect(await screen.findByText('该任务不属于 AI 基础设施扫描')).toBeInTheDocument()
+    await act(async () => { await vi.advanceTimersByTimeAsync(1) })
+    expect(screen.getByText('该任务不属于 AI 基础设施扫描')).toBeInTheDocument()
     expect(screen.queryByRole('region', { name: '任务安全摘要' })).not.toBeInTheDocument()
     expect(screen.queryByText('alice')).not.toBeInTheDocument()
     expect(screen.queryByText('执行中')).not.toBeInTheDocument()
     expect(screen.queryByRole('button', { name: '取消任务' })).not.toBeInTheDocument()
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+  })
+
+  it('专属 AI 基础设施详情类型不匹配后停止后续轮询', async () => {
+    vi.useFakeTimers()
+    const fetchMock = vi.fn().mockResolvedValue(jsonResponse(task))
+    vi.stubGlobal('fetch', fetchMock)
+    renderPage(<TaskDetailPage expectedTaskType="ai_infra_scan" />, { id: 'user-1', username: 'alice', role: 'user', must_change_password: false }, '/tasks/ai-infra/task-opaque-1', '/tasks/ai-infra/:taskId')
+
+    expect(await screen.findByText('该任务不属于 AI 基础设施扫描')).toBeInTheDocument()
+    await act(async () => { await vi.advanceTimersByTimeAsync(120_000) })
     expect(fetchMock).toHaveBeenCalledTimes(1)
   })
 
