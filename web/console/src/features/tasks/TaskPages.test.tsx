@@ -326,6 +326,32 @@ describe('任务页面', () => {
     )
   })
 
+  it('AI 基础设施列表清除状态或筛选时保留固定 API 类型', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(jsonResponse({ items: [aiInfraRunningTask], total: 41, page: 1, page_size: 20 }))
+    vi.stubGlobal('fetch', fetchMock)
+    renderPage(
+      <TaskListPage fixedTaskType="ai_infra_scan" />,
+      { id: 'user-1', username: 'alice', role: 'user', must_change_password: false },
+      '/tasks/ai-infra?status=running',
+      '/tasks/ai-infra',
+    )
+
+    await screen.findByRole('table', { name: 'AI 基础设施扫描任务台账' })
+    fireEvent.change(screen.getByRole('combobox', { name: '任务状态' }), { target: { value: '' } })
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2))
+    expect(fetchMock.mock.calls[1]?.[0]).toBe(
+      'http://localhost:3000/api/v1/platform/tasks?page=1&page_size=20&task_type=ai_infra_scan',
+    )
+
+    fireEvent.change(screen.getByRole('combobox', { name: '任务状态' }), { target: { value: 'failed' } })
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(3))
+    fireEvent.click(screen.getByRole('button', { name: '清除筛选' }))
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(4))
+    expect(fetchMock.mock.calls[3]?.[0]).toBe(
+      'http://localhost:3000/api/v1/platform/tasks?page=1&page_size=20&task_type=ai_infra_scan',
+    )
+  })
+
   it('AI 基础设施列表不向审计员显示创建入口', async () => {
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue(jsonResponse({ items: [], total: 0, page: 1, page_size: 20 })))
     renderPage(

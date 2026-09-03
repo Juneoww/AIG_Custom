@@ -167,10 +167,14 @@ export function TaskListPage({ fixedTaskType }: TaskListPageProps) {
   }, [normalizedSearch, searchParams, setSearchParams])
   const updateSearch = (
     nextPage: number,
-    nextStatus: TaskStatus | undefined = status,
-    nextTaskType: Exclude<TaskType, 'unknown'> | undefined = taskType,
+    ...nextFilters: [] | [TaskStatus | undefined, Exclude<TaskType, 'unknown'> | undefined]
   ) => {
-    setSearchParams(normalizedTaskSearch(nextPage, nextStatus, fixedTaskType ? undefined : nextTaskType))
+    const [nextStatus, nextTaskType] = nextFilters
+    setSearchParams(normalizedTaskSearch(
+      nextPage,
+      nextFilters.length === 0 ? status : nextStatus,
+      fixedTaskType ? undefined : nextFilters.length === 0 ? taskType : nextTaskType,
+    ))
   }
   const query = useQuery({
     queryKey: ['tasks', { page, pageSize: 20, status, taskType }],
