@@ -56,6 +56,12 @@ const aiInfraRunningTask = {
   status: 'running',
 } as const satisfies TaskSummary
 
+const aiInfraDetail = {
+  ...aiInfraRunningTask,
+  id: 'task-ai-infra-1',
+  input_summary: { language: 'zh', target_count: 2, timeout: 300, port_scan_mode: 'fixed_ai', model_id: 'model-opaque-1' },
+} as const
+
 function jsonResponse(body: unknown) {
   return new Response(JSON.stringify(body), { status: 200, headers: { 'Content-Type': 'application/json' } })
 }
@@ -407,6 +413,94 @@ describe('任务页面', () => {
     )
 
     expect(await screen.findByRole('button', { name: '取消任务' })).toBeInTheDocument()
+  })
+
+  it('专属 AI 基础设施详情显示安全摘要并恢复受治理模型名称', async () => {
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(jsonResponse(aiInfraDetail))
+      .mockResolvedValueOnce(jsonResponse({ items: [catalogModel()], total: 1, page: 1, page_size: 100 }))
+    vi.stubGlobal('fetch', fetchMock)
+    renderPage(
+      <TaskDetailPage expectedTaskType="ai_infra_scan" returnTo="/tasks/ai-infra" />,
+      { id: 'user-1', username: 'alice', role: 'user', must_change_password: false },
+      '/tasks/ai-infra/task-ai-infra-1',
+      '/tasks/ai-infra/:taskId',
+    )
+
+    expect(await screen.findByRole('heading', { name: 'AI 基础设施扫描任务详情' })).toBeInTheDocument()
+    expect(screen.getByRole('link', { name: '返回任务台账' })).toHaveAttribute('href', '/tasks/ai-infra')
+    expect(await screen.findByText('受治理扫描模型（gpt-secure，私有）')).toBeInTheDocument()
+    expect(screen.getByText('2')).toBeInTheDocument()
+    expect(screen.getByText('中文')).toBeInTheDocument()
+    expect(screen.getByText('300')).toBeInTheDocument()
+    expect(screen.getByText('固定 AI 端口（11434、1337、7000–9000、18789）')).toBeInTheDocument()
+    expect(screen.queryByText('https://models.example.test/v1')).not.toBeInTheDocument()
+    expect(screen.queryByText('不应展示')).not.toBeInTheDocument()
+    expect(screen.queryByText('********')).not.toBeInTheDocument()
+  })
+
+  it('专属 AI 基础设施详情为第二页模型自动继续请求目录', async () => {
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(jsonResponse(aiInfraDetail))
+      .mockResolvedValueOnce(jsonResponse({ items: [catalogModel({ id: 'other-model', name: '其他模型' })], total: 101, page: 1, page_size: 100 }))
+      .mockResolvedValueOnce(jsonResponse({ items: [catalogModel()], total: 101, page: 2, page_size: 100 }))
+    vi.stubGlobal('fetch', fetchMock)
+    renderPage(<TaskDetailPage expectedTaskType="ai_infra_scan" />, { id: 'user-1', username: 'alice', role: 'user', must_change_password: false }, '/tasks/ai-infra/task-ai-infra-1', '/tasks/ai-infra/:taskId')
+
+    expect(await screen.findByText('受治理扫描模型（gpt-secure，私有）')).toBeInTheDocument()
+    expect(fetchMock.mock.calls[2]?.[0]).toBe('http://localhost:3000/api/v1/platform/models?page=2&page_size=100')
+  })
+
+  it('专属 AI 基础设施详情遇到重复模型目录页时停止并保留暂不可用状态', async () => {
+    const repeatedPage = [catalogModel({ id: 'other-model', name: '其他模型' })]
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(jsonResponse(aiInfraDetail))
+      .mockResolvedValueOnce(jsonResponse({ items: repeatedPage, total: 201, page: 1, page_size: 100 }))
+      .mockResolvedValueOnce(jsonResponse({ items: repeatedPage, total: 201, page: 2, page_size: 100 }))
+    vi.stubGlobal('fetch', fetchMock)
+    renderPage(<TaskDetailPage expectedTaskType="ai_infra_scan" />, { id: 'user-1', username: 'alice', role: 'user', must_change_password: false }, '/tasks/ai-infra/task-ai-infra-1', '/tasks/ai-infra/:taskId')
+
+    expect(await screen.findByText('已选择的模型（ID: model-opaque-1，目录暂不可用）')).toBeInTheDocument()
+    expect(fetchMock).toHaveBeenCalledTimes(3)
+  })
+
+  it.each([
+    ['目录耗尽后缺失', jsonResponse({ items: [catalogModel({ id: 'other-model' })], total: 1, page: 1, page_size: 100 })], 'model-opaque-1'],
+    ['canonical 首项已停用', jsonResponse({ items: [catalogModel({ disabled: true })], total: 1, page: 1, page_size: 100 })], 'model-opaque-1'],
+  ])('专属 AI 基础设施详情在%s时显示安全模型回退', async (_caseName, catalogResponse, modelID) => {
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(jsonResponse({ ...aiInfraDetail, input_summary: { ...aiInfraDetail.input_summary, model_id: modelID } }))
+      .mockResolvedValueOnce(catalogResponse)
+    vi.stubGlobal('fetch', fetchMock)
+    renderPage(<TaskDetailPage expectedTaskType="ai_infra_scan" />, { id: 'user-1', username: 'alice', role: 'user', must_change_password: false }, '/tasks/ai-infra/task-ai-infra-1', '/tasks/ai-infra/:taskId')
+
+    expect(await screen.findByText('已选择的模型（ID: model-opaque-1）')).toBeInTheDocument()
+  })
+
+  it('专属 AI 基础设施详情在模型目录失败时保留暂不可用状态并允许重试', async () => {
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(jsonResponse(aiInfraDetail))
+      .mockResolvedValueOnce(new Response(null, { status: 500 }))
+      .mockResolvedValueOnce(jsonResponse({ items: [catalogModel()], total: 1, page: 1, page_size: 100 }))
+    vi.stubGlobal('fetch', fetchMock)
+    renderPage(<TaskDetailPage expectedTaskType="ai_infra_scan" />, { id: 'user-1', username: 'alice', role: 'user', must_change_password: false }, '/tasks/ai-infra/task-ai-infra-1', '/tasks/ai-infra/:taskId')
+
+    expect(await screen.findByText('已选择的模型（ID: model-opaque-1，目录暂不可用）')).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: '重试恢复模型名称' }))
+    expect(await screen.findByText('受治理扫描模型（gpt-secure，私有）')).toBeInTheDocument()
+  })
+
+  it('专属 AI 基础设施详情类型不匹配时不展示任何任务事实或请求模型目录', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(jsonResponse(task))
+    vi.stubGlobal('fetch', fetchMock)
+    renderPage(<TaskDetailPage expectedTaskType="ai_infra_scan" />, { id: 'user-1', username: 'alice', role: 'user', must_change_password: false }, '/tasks/ai-infra/task-opaque-1', '/tasks/ai-infra/:taskId')
+
+    expect(await screen.findByText('该任务不属于 AI 基础设施扫描')).toBeInTheDocument()
+    expect(screen.queryByRole('region', { name: '任务安全摘要' })).not.toBeInTheDocument()
+    expect(screen.queryByText('alice')).not.toBeInTheDocument()
+    expect(screen.queryByText('执行中')).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: '取消任务' })).not.toBeInTheDocument()
+    expect(fetchMock).toHaveBeenCalledTimes(1)
   })
 
   it('取消写入不确定时复用确认详情且不触发第三次读取', async () => {

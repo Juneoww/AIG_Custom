@@ -251,7 +251,7 @@ export function TaskCreatePage({ fixedTaskType, returnTo }: TaskCreatePageProps)
       {isDedicatedAI ? (
         <GovernedModelSelector
           value={modelID || undefined}
-          onChange={(modelID) => { setModelID(modelID ?? ''); setModelAvailability(modelID ? 'pending' : 'available'); invalidateSubmission() }}
+          onChange={(modelID) => { setModelID(modelID ?? ''); invalidateSubmission() }}
           onAvailabilityChange={setModelAvailability}
           disabled={submitting || uploading}
         />

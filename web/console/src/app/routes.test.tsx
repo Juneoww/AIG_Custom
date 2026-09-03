@@ -193,6 +193,14 @@ describe('production routes', () => {
     expect(screen.queryByRole('heading', { name: '新建 AI 基础设施扫描任务' })).not.toBeInTheDocument()
   })
 
+  it.each(['user', 'auditor', 'admin'] as const)('routes %s to the dedicated AI infrastructure detail page', (role) => {
+    vi.stubGlobal('fetch', vi.fn(() => new Promise<Response>(() => undefined)))
+    renderRoute(subjectState(role), '/tasks/ai-infra/task-1')
+
+    expect(screen.getByRole('heading', { name: 'AI 基础设施扫描任务详情' })).toBeInTheDocument()
+    expect(screen.queryByRole('heading', { name: '任务详情' })).not.toBeInTheDocument()
+  })
+
   it('keeps the generic task list route and its type filter unchanged', async () => {
     const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify({ items: [], total: 0, page: 1, page_size: 20 }), {
       status: 200,

@@ -8,7 +8,7 @@
 import { describe, expect, it } from 'vitest'
 
 import type { ModelCatalogItem } from '../models/api'
-import { catalogPageFingerprint, hasRepeatedCatalogPage, modelOptionLabel, nextCatalogPage, selectableModels } from './governedModels'
+import { catalogPageFingerprint, fallbackModelLabel, hasRepeatedCatalogPage, modelOptionLabel, nextCatalogPage, selectableModels } from './governedModels'
 
 function model(overrides: Partial<ModelCatalogItem> = {}): ModelCatalogItem {
   return {
@@ -83,6 +83,10 @@ describe('governed model catalog helpers', () => {
     expect(label).not.toContain('base-url-secret')
     expect(label).not.toContain('note-secret')
     expect(label).not.toContain('token-secret')
+  })
+
+  it('为无法恢复名称的 opaque 模型 ID 提供安全回退标签', () => {
+    expect(fallbackModelLabel('model-deleted-1')).toBe('已选择的模型（ID: model-deleted-1）')
   })
 
   it.each([

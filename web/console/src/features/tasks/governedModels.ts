@@ -51,6 +51,10 @@ export function modelOptionLabel(model: Pick<ModelCatalogItem, 'name' | 'provide
   return `${model.name}（${model.provider_model}，${model.scope === 'private' ? '私有' : '全局'}）`
 }
 
+export function fallbackModelLabel(id: string): string {
+  return `已选择的模型（ID: ${id}）`
+}
+
 export function nextCatalogPage(
   page: Pick<ModelCatalogPage, 'page' | 'page_size' | 'total'>,
   loadedPageParams: readonly number[] = [],
