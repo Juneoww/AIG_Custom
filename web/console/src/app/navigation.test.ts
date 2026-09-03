@@ -7,9 +7,9 @@
  */
 import { describe, expect, it } from 'vitest'
 
-import { navigationItems, visibleNavigationFor } from './navigation'
+import { navigationItems, secondaryNavigationFor, visibleNavigationFor } from './navigation'
 
-const common = ['治理总览', '扫描任务', '安全报告', '模型与凭据', '规则与知识库']
+const common = ['治理总览', '扫描任务', '安全报告', '凭证配置', '规则与知识库']
 
 describe('role navigation', () => {
   it('keeps the approved route order and unique paths', () => {
@@ -41,5 +41,24 @@ describe('role navigation', () => {
       '品牌设置',
       '系统信息',
     ])
+  })
+
+  it('exposes grouped scan navigation for regular users', () => {
+    const scanChildren = [
+      expect.objectContaining({ label: 'MCP 扫描', path: '/tasks/new?scan=mcp' }),
+      expect.objectContaining({ label: 'Skills 扫描', path: '/tasks/new?scan=skills' }),
+      expect.objectContaining({ label: 'AI 基础设施扫描', path: '/tasks/new?scan=ai-infra' }),
+      expect.objectContaining({ label: 'Agent 工作流扫描', path: '/tasks/new?scan=agent-workflow' }),
+    ]
+    const credentialChildren = [
+      expect.objectContaining({ label: '模型配置', path: '/models' }),
+      expect.objectContaining({ label: '智能体配置', path: '/knowledge/agents' }),
+    ]
+
+    for (const role of ['user', 'auditor', 'admin'] as const) {
+      expect(visibleNavigationFor(role).map((item) => item.label)).toContain('凭证配置')
+      expect(secondaryNavigationFor('tasks', role)).toEqual(scanChildren)
+      expect(secondaryNavigationFor('credentials', role)).toEqual(credentialChildren)
+    }
   })
 })

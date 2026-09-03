@@ -1,8 +1,8 @@
 /**
- * 功能：复用指纹、漏洞和评测集的服务端分页、原文查看与管理员治理流程。
- * 实现：URL 驱动筛选，原文仅在页面内按需读取，写操作经二次确认且支持取消与卸载隔离。
- * 输入：资源文案、领域查询函数、白名单列和真实创建/更新/删除函数。
- * 输出：原生台账、独立状态面板、原文字节编辑器和单次治理请求。
+ * 功能：复用规则资产的分页或完整目录、原文查看与管理员治理流程。
+ * 实现：按目录类型隔离 URL 分页，目录仅在当前查询成功时显示；原文仅在页面内按需读取。
+ * 输入：资源文案、判别式目录查询函数、白名单列和真实创建/更新/删除函数。
+ * 输出：安全目录概览、原生台账、独立状态面板、原文字节编辑器和单次治理请求。
  * 依赖：Fluent UI、TanStack Query、React Router、Session 与共享台账组件。
  */
 import {
@@ -30,9 +30,10 @@ import { StatePanel } from '../../../shared/components/StatePanel'
 import { ApiError } from '../../../shared/api/errors'
 import { useSession } from '../../auth/session'
 import type { KnowledgePage, KnowledgePageQuery } from '../api'
+import { KnowledgeCatalogBrief, type KnowledgeCatalogScope } from './KnowledgeCatalogBrief'
 import { StructuredEditor, type StructuredValidationResult } from './StructuredEditor'
 
-interface RawResourceLedgerProps<T> {
+interface LedgerBase<T> {
   resourceKey: string
   title: string
   description: string
@@ -40,7 +41,6 @@ interface RawResourceLedgerProps<T> {
   format: 'yaml' | 'json'
   columns: readonly DataTableColumn<T>[]
   getID: (item: T) => string
-  fetchPage: (query: KnowledgePageQuery, signal?: AbortSignal) => Promise<KnowledgePage<T>>
   fetchRaw: (id: string, signal?: AbortSignal) => Promise<string>
   createResource: (content: string, signal?: AbortSignal) => Promise<void>
   updateResource: (id: string, content: string, signal?: AbortSignal) => Promise<void>
@@ -48,17 +48,55 @@ interface RawResourceLedgerProps<T> {
   sampleContent?: string
   sampleFileName?: string
   currentFileName?: (id: string) => string
-  searchable?: boolean
+}
+
+interface PaginatedLedgerProps<T> extends LedgerBase<T> {
+  catalogMode?: 'paginated'
+  fetchPage: (query: KnowledgePageQuery, signal?: AbortSignal) => Promise<KnowledgePage<T>>
+}
+
+export interface CompleteCatalog<T> {
+  items: T[]
+  total: number
+}
+
+interface CompleteLedgerProps<T> extends LedgerBase<T> {
+  catalogMode: 'complete'
+  fetchComplete: (signal?: AbortSignal) => Promise<CompleteCatalog<T>>
+}
+
+type RawResourceLedgerProps<T> = PaginatedLedgerProps<T> | CompleteLedgerProps<T>
+
+interface PaginationState {
+  page: number
+  queryText: string
 }
 
 type EditorMode<T> = { kind: 'view' | 'edit'; item: T } | { kind: 'create' }
 
 const useStyles = makeStyles({
-  page: { display: 'flex', flexDirection: 'column', gap: tokens.spacingVerticalL },
-  filters: { display: 'flex', gap: tokens.spacingHorizontalS, alignItems: 'end', flexWrap: 'wrap' },
+  page: { display: 'flex', flexDirection: 'column', gap: tokens.spacingVerticalL, minWidth: 0, maxWidth: '100%' },
+  filters: {
+    display: 'flex',
+    gap: tokens.spacingHorizontalS,
+    alignItems: 'end',
+    flexWrap: 'wrap',
+    minWidth: 0,
+    '@media (max-width: 960px)': { alignItems: 'stretch', flexDirection: 'column' },
+  },
+  filterField: { flex: '1 1 16rem', minWidth: 0 },
+  filterInput: { width: '100%', minWidth: 0 },
   actions: { display: 'flex', gap: tokens.spacingHorizontalXS, flexWrap: 'wrap' },
-  editor: { display: 'flex', flexDirection: 'column', gap: tokens.spacingVerticalM },
-  pagination: { display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: tokens.spacingHorizontalM },
+  editor: { display: 'flex', flexDirection: 'column', gap: tokens.spacingVerticalM, minWidth: 0 },
+  tableViewport: { minWidth: 0, maxWidth: '100%', overflowX: 'auto' },
+  pagination: {
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: tokens.spacingHorizontalM,
+    minWidth: 0,
+    '@media (max-width: 960px)': { alignItems: 'flex-start', flexDirection: 'column' },
+  },
 })
 
 function normalizedPage(value: string | null): number {
@@ -77,15 +115,21 @@ export function RawResourceLedger<T>(props: RawResourceLedgerProps<T>) {
   const admin = state.status === 'authenticated' && state.subject.role === 'admin'
   const queryClient = useQueryClient()
   const [searchParams, setSearchParams] = useSearchParams()
-  const page = normalizedPage(searchParams.get('page'))
-  const queryText = props.searchable === false ? '' : normalizedQuery(searchParams.get('q'))
+  const paginationState = useMemo<PaginationState | null>(() => {
+    if (props.catalogMode === 'complete') return null
+    return {
+      page: normalizedPage(searchParams.get('page')),
+      queryText: normalizedQuery(searchParams.get('q')),
+    }
+  }, [props.catalogMode, searchParams])
   const normalizedSearch = useMemo(() => {
+    if (!paginationState) return ''
     const next = new URLSearchParams()
-    if (page > 1) next.set('page', String(page))
-    if (queryText) next.set('q', queryText)
+    if (paginationState.page > 1) next.set('page', String(paginationState.page))
+    if (paginationState.queryText) next.set('q', paginationState.queryText)
     return next.toString()
-  }, [page, queryText])
-  const [draftQuery, setDraftQuery] = useState(queryText)
+  }, [paginationState])
+  const [draftQuery, setDraftQuery] = useState(paginationState?.queryText ?? '')
   const [mode, setMode] = useState<EditorMode<T> | null>(null)
   const [content, setContent] = useState('')
   const [validation, setValidation] = useState<StructuredValidationResult>({ valid: false, message: '内容不能为空。' })
@@ -124,11 +168,27 @@ export function RawResourceLedger<T>(props: RawResourceLedgerProps<T>) {
   }, [])
 
   const activeID = mode && mode.kind !== 'create' ? props.getID(mode.item) : ''
-  const listQuery = useQuery({
-    queryKey: ['knowledge', props.resourceKey, { page, size: 20, query: queryText }],
-    queryFn: ({ signal }) => props.fetchPage({ page, size: 20, query: queryText }, signal),
+  const listQuery = useQuery<KnowledgePage<T> | CompleteCatalog<T>>({
+    queryKey: props.catalogMode === 'complete'
+      ? ['knowledge', props.resourceKey, 'complete']
+      : ['knowledge', props.resourceKey, { page: paginationState?.page ?? 1, size: 20, query: paginationState?.queryText ?? '' }],
+    queryFn: ({ signal }) => {
+      if (props.catalogMode === 'complete') return props.fetchComplete(signal)
+      return props.fetchPage({ page: paginationState?.page ?? 1, size: 20, query: paginationState?.queryText ?? '' }, signal)
+    },
     retry: false,
   })
+  const catalog = listQuery.isSuccess ? listQuery.data : null
+  const isCompleteCatalog = props.catalogMode === 'complete'
+  const paginatedCatalog = !isCompleteCatalog && catalog ? catalog as KnowledgePage<T> : null
+  const hasEmptyPage = catalog?.items.length === 0
+  const hasEmptyCatalog = catalog !== null && hasEmptyPage && catalog.total === 0
+  const hasOutOfRangePage = !isCompleteCatalog && catalog !== null && hasEmptyPage && catalog.total > 0
+  const catalogScope: KnowledgeCatalogScope | null = catalog
+    ? isCompleteCatalog
+      ? { kind: 'complete', total: catalog.total, visibleItems: catalog.items.length }
+      : { kind: 'paginated', total: catalog.total, page: paginatedCatalog?.page ?? 1, visibleItems: catalog.items.length }
+    : null
   useEffect(() => {
     rawControllerRef.current?.abort()
     rawControllerRef.current = null
@@ -282,10 +342,11 @@ export function RawResourceLedger<T>(props: RawResourceLedgerProps<T>) {
         {admin ? <Button appearance="primary" aria-label={`新增${props.resourceLabel}`} onClick={() => openMode({ kind: 'create' })}>新增{props.resourceLabel}</Button> : null}
       </PageHeader>
       {actionError ? <MessageBar intent="error" role="alert"><MessageBarBody>{actionError}</MessageBarBody></MessageBar> : null}
-      {props.searchable !== false ? <form className={styles.filters} aria-label={`${props.resourceLabel}筛选`} onSubmit={submitSearch}>
-        <Field label="名称或说明"><Input value={draftQuery} maxLength={200} onChange={(_, data) => setDraftQuery(data.value)} /></Field>
+      {catalogScope ? <KnowledgeCatalogBrief resourceLabel={props.resourceLabel} scope={catalogScope} canManage={admin} /> : null}
+      {!isCompleteCatalog ? <form className={styles.filters} aria-label={`${props.resourceLabel}筛选`} onSubmit={submitSearch}>
+        <Field className={styles.filterField} label="名称或说明"><Input className={styles.filterInput} value={draftQuery} maxLength={200} onChange={(_, data) => setDraftQuery(data.value)} /></Field>
         <Button type="submit">查询</Button>
-        {queryText ? <Button type="button" appearance="secondary" onClick={() => { setDraftQuery(''); setSearchParams({}) }}>清除</Button> : null}
+        {paginationState?.queryText ? <Button type="button" appearance="secondary" onClick={() => { setDraftQuery(''); setSearchParams({}) }}>清除</Button> : null}
       </form> : null}
 
       {mode ? (
@@ -316,14 +377,13 @@ export function RawResourceLedger<T>(props: RawResourceLedgerProps<T>) {
       {listQuery.isPending ? <StatePanel state="loading" title={`正在加载${props.resourceLabel}目录`} /> : null}
       {listQuery.isError && listQuery.error instanceof ApiError && listQuery.error.kind === 'forbidden' ? <StatePanel state="forbidden" title={`无权查看${props.resourceLabel}`} /> : null}
       {listQuery.isError && !(listQuery.error instanceof ApiError && listQuery.error.kind === 'forbidden') ? <StatePanel state="error" title={`${props.resourceLabel}目录加载失败`} actionLabel="重试" onAction={() => void listQuery.refetch()} /> : null}
-      {listQuery.data?.items.length === 0 ? <StatePanel state="empty" title={`暂无${props.resourceLabel}`} /> : null}
-      {listQuery.data?.items.length ? <DataTable caption={`${props.resourceLabel}台账`} columns={columns} rows={listQuery.data.items} getRowKey={props.getID} /> : null}
-      {listQuery.data ? (
+      {catalog?.items.length && !hasEmptyCatalog && !hasOutOfRangePage ? <div className={styles.tableViewport}><DataTable caption={`${props.resourceLabel}台账`} columns={columns} rows={catalog.items} getRowKey={props.getID} /></div> : null}
+      {paginatedCatalog ? (
         <nav className={styles.pagination} aria-label={`${props.resourceLabel}分页`}>
-          <span>共 {listQuery.data.total} 条，第 {listQuery.data.page} 页</span>
+          <span>共 {paginatedCatalog.total} 条，第 {paginatedCatalog.page} 页</span>
           <div className={styles.actions}>
-            <Button disabled={page <= 1} onClick={() => setSearchParams(page > 2 ? { page: String(page - 1), ...(queryText ? { q: queryText } : {}) } : queryText ? { q: queryText } : {})}>上一页</Button>
-            <Button disabled={page * listQuery.data.size >= listQuery.data.total} onClick={() => setSearchParams({ page: String(page + 1), ...(queryText ? { q: queryText } : {}) })}>下一页</Button>
+            <Button disabled={paginatedCatalog.page <= 1} onClick={() => setSearchParams(paginatedCatalog.page > 2 ? { page: String(paginatedCatalog.page - 1), ...(paginationState?.queryText ? { q: paginationState.queryText } : {}) } : paginationState?.queryText ? { q: paginationState.queryText } : {})}>上一页</Button>
+            <Button disabled={paginatedCatalog.page * paginatedCatalog.size >= paginatedCatalog.total} onClick={() => setSearchParams({ page: String(paginatedCatalog.page + 1), ...(paginationState?.queryText ? { q: paginationState.queryText } : {}) })}>下一页</Button>
           </div>
         </nav>
       ) : null}

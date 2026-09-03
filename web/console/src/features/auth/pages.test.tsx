@@ -65,6 +65,22 @@ describe('LoginPage', () => {
     expect(screen.queryByText(/^A\.I\.G$/)).not.toBeInTheDocument()
   })
 
+  it('呈现已批准的治理叙事与受控访问提示，同时保留认证表单', () => {
+    renderPage(<LoginPage />)
+
+    expect(screen.getByText('受控本地访问')).toBeInTheDocument()
+    expect(screen.getByText('TRUSTWORTHY AI OPERATIONS')).toBeInTheDocument()
+    expect(screen.getByText('AUTHORIZED ACCESS')).toBeInTheDocument()
+    expect(screen.getByText('资产可见')).toBeInTheDocument()
+    expect(screen.getByText('风险可控')).toBeInTheDocument()
+    expect(screen.getByText('治理可证')).toBeInTheDocument()
+    expect(screen.getByText('登录活动将被记录，用于安全审计')).toBeInTheDocument()
+    expect(screen.getByRole('heading', { name: '登录平台' })).toBeInTheDocument()
+    expect(screen.getByRole('link', { name: '使用重置凭据' })).toHaveAttribute('href', '/reset-password')
+    expect(screen.getByLabelText(/^用户名/)).toBeInTheDocument()
+    expect(screen.getByLabelText(/^密码/)).toBeInTheDocument()
+  })
+
   it('认证失败展示固定中文错误、保留用户名并清除密码', async () => {
     const fetchMock = vi
       .fn()

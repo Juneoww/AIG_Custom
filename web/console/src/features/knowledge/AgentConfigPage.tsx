@@ -6,6 +6,7 @@
  * 依赖：Fluent UI、TanStack Query、Session、StructuredEditor 与知识 API。
  */
 import {
+  Badge,
   Button,
   Dialog,
   DialogActions,
@@ -18,12 +19,14 @@ import {
   MessageBar,
   MessageBarBody,
   Select,
+  Text,
   Textarea,
   makeStyles,
   tokens,
 } from '@fluentui/react-components'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { useEffect, useMemo, useRef, useState } from 'react'
+import { flushSync } from 'react-dom'
 
 import { ApiError } from '../../shared/api/errors'
 import { DataTable, type DataTableColumn } from '../../shared/components/DataTable'
@@ -42,15 +45,119 @@ import {
   type AgentTemplate,
   type AgentTemplateField,
 } from './api'
-import { StructuredEditor, type StructuredValidationResult } from './components/StructuredEditor'
+import { AgentConfigurationBrief } from './components/AgentConfigurationBrief'
+import { StructuredEditor, type StructuredValidationResult, validateStructuredText } from './components/StructuredEditor'
 
 const useStyles = makeStyles({
-  page: { display: 'flex', flexDirection: 'column', gap: tokens.spacingVerticalL },
+  page: { display: 'flex', flexDirection: 'column', gap: tokens.spacingVerticalL, minWidth: 0, maxWidth: '100%' },
+  catalog: { display: 'flex', flexDirection: 'column', gap: tokens.spacingVerticalM, minWidth: 0, maxWidth: '100%' },
   actions: { display: 'flex', gap: tokens.spacingHorizontalXS, flexWrap: 'wrap' },
-  editor: { display: 'flex', flexDirection: 'column', gap: tokens.spacingVerticalM },
-  form: { display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(16rem, 1fr))', gap: tokens.spacingHorizontalM },
+  rowAction: { display: 'flex', alignItems: 'center', gap: tokens.spacingHorizontalS, flexWrap: 'wrap', minWidth: 0 },
+  editor: { display: 'flex', flexDirection: 'column', gap: tokens.spacingVerticalM, minWidth: 0, maxWidth: '100%' },
+  tableViewport: { minWidth: 0, maxWidth: '100%', overflowX: 'auto' },
+  form: {
+    display: 'grid',
+    gridTemplateColumns: 'repeat(auto-fit, minmax(16rem, 1fr))',
+    gap: tokens.spacingHorizontalM,
+    minWidth: 0,
+    maxWidth: '100%',
+    '@media (max-width: 390px)': {
+      gridTemplateColumns: 'minmax(0, 1fr)',
+    },
+  },
   wide: { gridColumn: '1 / -1' },
   advanced: { gridColumn: '1 / -1', padding: tokens.spacingVerticalS, border: `${tokens.strokeWidthThin} solid ${tokens.colorNeutralStroke2}`, borderRadius: tokens.borderRadiusMedium },
+  workspace: {
+    display: 'flex',
+    flexDirection: 'column',
+    gap: tokens.spacingVerticalL,
+    minWidth: 0,
+    maxWidth: '100%',
+    padding: tokens.spacingVerticalL,
+    border: `${tokens.strokeWidthThin} solid ${tokens.colorNeutralStroke2}`,
+    borderRadius: tokens.borderRadiusLarge,
+    backgroundColor: tokens.colorNeutralBackground1,
+    boxShadow: tokens.shadow2,
+  },
+  workspaceHeader: {
+    display: 'flex',
+    alignItems: 'flex-start',
+    justifyContent: 'space-between',
+    gap: tokens.spacingHorizontalL,
+    minWidth: 0,
+    paddingBottom: tokens.spacingVerticalM,
+    borderBottom: `${tokens.strokeWidthThin} solid ${tokens.colorNeutralStroke2}`,
+    '@media (max-width: 960px)': {
+      flexDirection: 'column',
+      alignItems: 'stretch',
+    },
+  },
+  workspaceIdentity: { display: 'flex', flexDirection: 'column', gap: tokens.spacingVerticalXS, minWidth: 0 },
+  workspaceTitle: {
+    color: tokens.colorNeutralForeground1,
+    fontSize: tokens.fontSizeBase500,
+    fontWeight: tokens.fontWeightSemibold,
+    lineHeight: tokens.lineHeightBase500,
+    overflowWrap: 'anywhere',
+  },
+  workspaceDescription: { color: tokens.colorNeutralForeground2, overflowWrap: 'anywhere' },
+  sourceZone: {
+    display: 'flex',
+    flexDirection: 'column',
+    gap: tokens.spacingVerticalM,
+    minWidth: 0,
+    maxWidth: '100%',
+    padding: tokens.spacingVerticalM,
+    border: `${tokens.strokeWidthThin} solid ${tokens.colorNeutralStroke2}`,
+    borderRadius: tokens.borderRadiusMedium,
+    backgroundColor: tokens.colorNeutralBackground2,
+  },
+  zoneHeader: { display: 'flex', flexDirection: 'column', gap: tokens.spacingVerticalXXS, minWidth: 0 },
+  zoneTitle: { color: tokens.colorNeutralForeground1, fontWeight: tokens.fontWeightSemibold },
+  zoneDescription: { color: tokens.colorNeutralForeground2, overflowWrap: 'anywhere' },
+  sourceNotice: { color: tokens.colorNeutralForeground2, fontWeight: tokens.fontWeightSemibold },
+  zoneGrid: {
+    display: 'grid',
+    gridTemplateColumns: 'repeat(2, minmax(0, 1fr))',
+    gap: tokens.spacingHorizontalM,
+    minWidth: 0,
+    maxWidth: '100%',
+    '@media (max-width: 960px)': {
+      gridTemplateColumns: 'minmax(0, 1fr)',
+    },
+  },
+  zone: {
+    display: 'flex',
+    flexDirection: 'column',
+    gap: tokens.spacingVerticalM,
+    minWidth: 0,
+    maxWidth: '100%',
+    padding: tokens.spacingVerticalM,
+    border: `${tokens.strokeWidthThin} solid ${tokens.colorNeutralStroke2}`,
+    borderRadius: tokens.borderRadiusMedium,
+    backgroundColor: tokens.colorNeutralBackground2,
+  },
+  actionButtons: {
+    display: 'flex',
+    flexWrap: 'wrap',
+    gap: tokens.spacingHorizontalS,
+    minWidth: 0,
+    maxWidth: '100%',
+    '@media (max-width: 390px)': {
+      flexDirection: 'column',
+      alignItems: 'stretch',
+    },
+  },
+  formControl: { width: '100%', minWidth: 0, maxWidth: '100%' },
+  workspaceClose: {
+    flexShrink: 0,
+    '@media (max-width: 960px)': {
+      alignSelf: 'flex-start',
+    },
+    '@media (max-width: 390px)': {
+      width: '100%',
+    },
+  },
 })
 
 function initialTemplateValues(template: AgentTemplate | undefined): Record<string, string> {
@@ -90,14 +197,15 @@ function buildTemplateContent(template: AgentTemplate, values: Record<string, st
 }
 
 function TemplateField({ field, value, disabled, onChange }: { field: AgentTemplateField; value: string; disabled: boolean; onChange: (value: string) => void }) {
+  const styles = useStyles()
   if (field.type === 'select') return <Field label={field.label} required={field.required} hint={field.description}>
-    <Select value={value} disabled={disabled} onChange={(_, data) => onChange(data.value)}>{field.options?.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}</Select>
+    <Select className={styles.formControl} value={value} disabled={disabled} onChange={(_, data) => onChange(data.value)}>{field.options?.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}</Select>
   </Field>
   if (field.type === 'textarea' || field.type === 'json') return <Field label={field.label} required={field.required} hint={field.description}>
-    <Textarea value={value} disabled={disabled} placeholder={field.placeholder} resize="vertical" onChange={(_, data) => onChange(data.value)} />
+    <Textarea className={styles.formControl} value={value} disabled={disabled} placeholder={field.placeholder} resize="vertical" onChange={(_, data) => onChange(data.value)} />
   </Field>
   return <Field label={field.label} required={field.required} hint={field.description}>
-    <Input type={field.type === 'password' ? 'password' : field.type === 'number' ? 'number' : 'text'} autoComplete={field.type === 'password' ? 'new-password' : 'off'} value={value} disabled={disabled} placeholder={field.placeholder} min={field.minimum} max={field.maximum} step={field.step} onChange={(_, data) => onChange(data.value)} />
+    <Input className={styles.formControl} type={field.type === 'password' ? 'password' : field.type === 'number' ? 'number' : 'text'} autoComplete={field.type === 'password' ? 'new-password' : 'off'} value={value} disabled={disabled} placeholder={field.placeholder} min={field.minimum} max={field.maximum} step={field.step} onChange={(_, data) => onChange(data.value)} />
   </Field>
 }
 
@@ -107,7 +215,9 @@ export function AgentConfigPage() {
   const admin = state.status === 'authenticated' && state.subject.role === 'admin'
   const queryClient = useQueryClient()
   const namesQuery = useQuery({ queryKey: ['knowledge', 'agents'], queryFn: ({ signal }) => fetchAgentNames(signal), retry: false })
+  const catalog = namesQuery.isSuccess ? namesQuery.data : null
   const templatesQuery = useQuery({ queryKey: ['knowledge', 'agent-templates'], queryFn: ({ signal }) => fetchAgentTemplates(signal), retry: false, enabled: admin })
+  const templates = templatesQuery.isSuccess ? templatesQuery.data : null
   const [selectedName, setSelectedName] = useState<string | null>(null)
   const [creating, setCreating] = useState(false)
   const [draftName, setDraftName] = useState('')
@@ -127,11 +237,34 @@ export function AgentConfigPage() {
   const epochRef = useRef(0)
   const configEpochRef = useRef(0)
   const mutexRef = useRef(false)
+  const contentRef = useRef('')
+  const validRef = useRef(false)
+  const existingReadyRef = useRef(false)
+  const workbenchReadyRef = useRef(false)
   const downloadURLsRef = useRef(new Set<string>())
   const downloadTimersRef = useRef(new Set<number>())
   const [configState, setConfigState] = useState<'idle' | 'loading' | 'ready' | 'error'>('idle')
   const [configReload, setConfigReload] = useState(0)
-  const selectedTemplate = useMemo(() => templatesQuery.data?.find((template) => template.id === templateID), [templateID, templatesQuery.data])
+  const selectedTemplate = useMemo(() => templates?.find((template) => template.id === templateID), [templateID, templates])
+  const existingReady = selectedName !== null && configState === 'ready'
+  const createReady = creating && templates !== null && templates.length > 0 && selectedTemplate !== undefined
+  const workbenchReady = existingReady || createReady
+  existingReadyRef.current = existingReady
+  workbenchReadyRef.current = workbenchReady
+
+  const replaceContent = (nextContent: string, clearActionResult = false) => {
+    contentRef.current = nextContent
+    validRef.current = false
+    setContent(nextContent)
+    setValid(false)
+    if (clearActionResult) setActionResult('')
+  }
+
+  const updateContentValidation = (result: StructuredValidationResult) => {
+    if (validateStructuredText('yaml', contentRef.current).valid !== result.valid) return
+    validRef.current = result.valid
+    setValid(result.valid)
+  }
 
   useEffect(() => {
     mountedRef.current = true
@@ -153,21 +286,29 @@ export function AgentConfigPage() {
     configControllerRef.current = null
     configEpochRef.current += 1
     if (!selectedName) {
+      existingReadyRef.current = false
+      workbenchReadyRef.current = false
       setConfigState('idle')
       return
     }
-    setContent('')
+    existingReadyRef.current = false
+    workbenchReadyRef.current = false
+    replaceContent('')
     const controller = new AbortController()
     const epoch = configEpochRef.current
     configControllerRef.current = controller
     setConfigState('loading')
     void fetchAgentConfig(selectedName, controller.signal).then((config) => {
       if (!mountedRef.current || controller.signal.aborted || configEpochRef.current !== epoch || config.name !== selectedName) return
-      setContent(config.content)
+      replaceContent(config.content)
+      existingReadyRef.current = true
+      workbenchReadyRef.current = true
       setConfigState('ready')
     }).catch(() => {
       if (!mountedRef.current || controller.signal.aborted || configEpochRef.current !== epoch) return
-      setContent('')
+      replaceContent('')
+      existingReadyRef.current = false
+      workbenchReadyRef.current = false
       setConfigState('error')
     }).finally(() => {
       if (configControllerRef.current === controller) configControllerRef.current = null
@@ -176,13 +317,13 @@ export function AgentConfigPage() {
   }, [configReload, selectedName])
 
   useEffect(() => {
-    if (!creating || templateID || !templatesQuery.data?.length) return
-    const template = templatesQuery.data[0]
+    if (!creating || !templates?.length || selectedTemplate) return
+    const template = templates[0]
     const values = initialTemplateValues(template)
     setTemplateID(template.id)
     setTemplateValues(values)
-    setContent(buildTemplateContent(template, values) ?? '')
-  }, [creating, templateID, templatesQuery.data])
+    replaceContent(buildTemplateContent(template, values) ?? '')
+  }, [creating, selectedTemplate, templates])
 
   const invalidateStage = () => {
     controllerRef.current?.abort()
@@ -202,10 +343,15 @@ export function AgentConfigPage() {
     configControllerRef.current?.abort()
     configControllerRef.current = null
     configEpochRef.current += 1
-    setCreating(false)
-    setDraftName(name)
-    setContent('')
-    setSelectedName(name)
+    existingReadyRef.current = false
+    workbenchReadyRef.current = false
+    flushSync(() => {
+      setCreating(false)
+      setConfigState('loading')
+      setDraftName(name)
+      replaceContent('')
+      setSelectedName(name)
+    })
   }
 
   const openCreate = () => {
@@ -213,14 +359,17 @@ export function AgentConfigPage() {
     configControllerRef.current?.abort()
     configControllerRef.current = null
     configEpochRef.current += 1
+    existingReadyRef.current = false
+    workbenchReadyRef.current = false
     setSelectedName(null)
     setCreating(true)
     setDraftName('')
-    const template = templatesQuery.data?.[0]
+    setConfigState('idle')
+    const template = templates?.[0]
     setTemplateID(template?.id ?? '')
     const values = initialTemplateValues(template)
     setTemplateValues(values)
-    setContent(template ? buildTemplateContent(template, values) ?? '' : '')
+    replaceContent(template ? buildTemplateContent(template, values) ?? '' : '')
   }
 
   const closeEditor = () => {
@@ -228,34 +377,35 @@ export function AgentConfigPage() {
     configControllerRef.current?.abort()
     configControllerRef.current = null
     configEpochRef.current += 1
+    existingReadyRef.current = false
+    workbenchReadyRef.current = false
     setSelectedName(null)
     setCreating(false)
     setDraftName('')
     setTemplateID('')
     setTemplateValues({})
-    setContent('')
-    setValid(false)
+    replaceContent('')
     setConfigState('idle')
   }
 
   const changeTemplate = (id: string) => {
-    const template = templatesQuery.data?.find((item) => item.id === id)
+    const template = templates?.find((item) => item.id === id)
     const values = initialTemplateValues(template)
     setTemplateID(id)
     setTemplateValues(values)
-    setContent(template ? buildTemplateContent(template, values) ?? '' : '')
+    replaceContent(template ? buildTemplateContent(template, values) ?? '' : '', true)
   }
 
   const changeTemplateField = (field: string, value: string) => {
     if (!selectedTemplate) return
     const values = { ...templateValues, [field]: value }
     setTemplateValues(values)
-    setContent(buildTemplateContent(selectedTemplate, values) ?? '')
+    replaceContent(buildTemplateContent(selectedTemplate, values) ?? '', true)
   }
 
   const downloadTemplate = () => {
     if (!selectedTemplate) return
-    const templateContent = content || JSON.stringify({ type: selectedTemplate.id }, null, 2)
+    const templateContent = contentRef.current || JSON.stringify({ type: selectedTemplate.id }, null, 2)
     const url = URL.createObjectURL(new Blob([templateContent], { type: 'text/yaml;charset=utf-8' }))
     downloadURLsRef.current.add(url)
     const link = document.createElement('a')
@@ -270,8 +420,21 @@ export function AgentConfigPage() {
     downloadTimersRef.current.add(timer)
   }
 
+  const openSaveConfirmation = () => {
+    if (!admin || !workbenchReadyRef.current || !validRef.current || mutexRef.current || !isSafeKnowledgeID(draftName)) return
+    setConfirmSave(true)
+  }
+
+  const openDeleteConfirmation = () => {
+    if (!admin || !workbenchReadyRef.current || !existingReadyRef.current || mutexRef.current || !isSafeKnowledgeID(draftName)) return
+    setConfirmDelete(true)
+  }
+
   const runAction = async (kind: 'save' | 'delete' | 'connect' | 'prompt') => {
-    if (!admin || mutexRef.current || !isSafeKnowledgeID(draftName)) return
+    const actionReady = kind === 'delete'
+      ? existingReadyRef.current
+      : validRef.current && (kind !== 'prompt' || Boolean(prompt.trim()))
+    if (!admin || !workbenchReadyRef.current || !actionReady || mutexRef.current || !isSafeKnowledgeID(draftName)) return
     mutexRef.current = true
     setSubmitting(true)
     setActionError('')
@@ -280,16 +443,19 @@ export function AgentConfigPage() {
     const controller = new AbortController()
     controllerRef.current?.abort()
     controllerRef.current = controller
+    const currentContent = contentRef.current
     try {
-      if (kind === 'save') await saveAgentConfig(draftName, content, controller.signal)
+      if (kind === 'save') await saveAgentConfig(draftName, currentContent, controller.signal)
       if (kind === 'delete') await deleteAgentConfig(draftName, controller.signal)
-      if (kind === 'connect') await testAgentConnection(content, controller.signal)
-      const output = kind === 'prompt' ? await testAgentPrompt(content, prompt, controller.signal) : ''
+      if (kind === 'connect') await testAgentConnection(currentContent, controller.signal)
+      const output = kind === 'prompt' ? await testAgentPrompt(currentContent, prompt, controller.signal) : ''
       if (!mountedRef.current || controller.signal.aborted || epochRef.current !== epoch) return
       setConfirmSave(false)
       setConfirmDelete(false)
       if (kind === 'save' || kind === 'delete') {
-        setContent('')
+        existingReadyRef.current = false
+        workbenchReadyRef.current = false
+        replaceContent('')
         setTemplateValues({})
         setPrompt('')
         setCreating(false)
@@ -299,9 +465,10 @@ export function AgentConfigPage() {
       } else setActionResult(kind === 'connect' ? '连通性测试通过。' : `Prompt 测试完成：${output}`)
     } catch {
       if (mountedRef.current && !controller.signal.aborted && epochRef.current === epoch) {
-        setContent('')
+        replaceContent('')
         setTemplateValues({})
         setPrompt('')
+        setActionResult('')
         setConfirmSave(false)
         setConfirmDelete(false)
         setActionError(`${kind === 'delete' ? 'Agent 配置删除' : kind === 'save' ? 'Agent 配置保存' : 'Agent 测试'}失败，请显式重试。`)
@@ -316,7 +483,14 @@ export function AgentConfigPage() {
   const columns: readonly DataTableColumn<string>[] = [
     { id: 'name', header: '配置名称', render: (name) => name },
     { id: 'scope', header: '访问模式', render: () => '受身份范围控制' },
-    { id: 'actions', header: '操作', render: (name) => <Button appearance="subtle" aria-label={`查看 ${name}`} onClick={() => openExisting(name)}>查看</Button> },
+    {
+      id: 'actions',
+      header: '操作',
+      render: (name) => <div className={styles.rowAction}>
+        {selectedName === name ? <Badge color="brand">当前工作区</Badge> : null}
+        <Button appearance="subtle" aria-label={`进入工作区 ${name}`} onClick={() => openExisting(name)}>进入工作区</Button>
+      </div>,
+    },
   ]
 
   const editorOpen = selectedName !== null || creating
@@ -324,32 +498,72 @@ export function AgentConfigPage() {
     <PageHeader title="Agent 配置" description="浏览 Agent provider 配置；管理员可使用既有模板维护并执行受控测试。">
       {admin ? <Button appearance="primary" onClick={openCreate}>新增 Agent 配置</Button> : null}
     </PageHeader>
-    {actionError ? <MessageBar role="alert" intent="error"><MessageBarBody>{actionError}</MessageBarBody></MessageBar> : null}
-    {actionResult ? <MessageBar role="status" intent="success"><MessageBarBody>{actionResult}</MessageBarBody></MessageBar> : null}
     {namesQuery.isPending ? <StatePanel state="loading" title="正在加载 Agent 配置" /> : null}
     {namesQuery.isError && namesQuery.error instanceof ApiError && namesQuery.error.kind === 'forbidden' ? <StatePanel state="forbidden" title="无权查看 Agent 配置" /> : null}
     {namesQuery.isError && !(namesQuery.error instanceof ApiError && namesQuery.error.kind === 'forbidden') ? <StatePanel state="error" title="Agent 配置加载失败" actionLabel="重试" onAction={() => void namesQuery.refetch()} /> : null}
-    {namesQuery.data?.length === 0 ? <StatePanel state="empty" title="暂无 Agent 配置" /> : null}
-    {namesQuery.data?.length ? <DataTable caption="Agent 配置台账" columns={columns} rows={namesQuery.data} getRowKey={(name) => name} /> : null}
+    {catalog !== null ? <section className={styles.catalog} aria-label="Agent 配置目录">
+      <AgentConfigurationBrief total={catalog.length} canManage={admin} />
+      {catalog.length === 0 ? <StatePanel state="empty" title="暂无 Agent 配置" /> : null}
+      {catalog.length ? <div className={styles.tableViewport}><DataTable caption="Agent 配置台账" columns={columns} rows={catalog} getRowKey={(name) => name} /></div> : null}
+    </section> : null}
 
-    {editorOpen ? <div className={styles.editor}>
-      <Field label="配置名称" required><Input value={draftName} disabled={!creating || submitting || !admin} maxLength={256} onChange={(_, data) => setDraftName(data.value)} /></Field>
-      {creating && templatesQuery.data ? <div className={styles.form}>
-        <Field label="Provider 类型" required><Select value={templateID} disabled={submitting} onChange={(_, data) => changeTemplate(data.value)}>{templatesQuery.data.map((template) => <option key={template.id} value={template.id}>{template.name}</option>)}</Select></Field>
-        <Button type="button" appearance="secondary" disabled={!selectedTemplate} onClick={downloadTemplate}>下载配置模板</Button>
-        {selectedTemplate?.fields.filter((field) => field.required).map((field) => <TemplateField key={field.field} field={field} value={templateValues[field.field] ?? ''} disabled={submitting} onChange={(value) => changeTemplateField(field.field, value)} />)}
-        {selectedTemplate?.fields.some((field) => !field.required) ? <details className={styles.advanced}><summary>高级设置</summary><div className={styles.form}>{selectedTemplate.fields.filter((field) => !field.required).map((field) => <TemplateField key={field.field} field={field} value={templateValues[field.field] ?? ''} disabled={submitting} onChange={(value) => changeTemplateField(field.field, value)} />)}</div></details> : null}
+    {editorOpen && workbenchReady ? <section className={styles.workspace} aria-label="Agent 配置工作区">
+      <header className={styles.workspaceHeader}>
+        <div className={styles.workspaceIdentity}>
+          <Text as="h2" className={styles.workspaceTitle}>{creating ? draftName || '新建 Agent 配置' : selectedName}</Text>
+          <Text className={styles.workspaceDescription}>{creating ? '使用已选模板在本地工作区生成和维护配置。' : '当前工作区仅展示所选 Agent 配置，并在本地完成受控操作。'}</Text>
+        </div>
+        <Button className={styles.workspaceClose} disabled={submitting} onClick={closeEditor}>关闭</Button>
+      </header>
+      {actionError ? <MessageBar role="alert" intent="error"><MessageBarBody>{actionError}</MessageBarBody></MessageBar> : null}
+      {actionResult ? <MessageBar role="status" intent="success"><MessageBarBody>{actionResult}</MessageBarBody></MessageBar> : null}
+      <section className={styles.sourceZone} aria-label="配置来源与原文">
+        <div className={styles.zoneHeader}>
+          <Text as="h3" className={styles.zoneTitle}>配置来源与原文</Text>
+          <Text className={styles.sourceNotice}>原文仅在当前本地工作区显示</Text>
+        </div>
+        <Field label="配置名称" required><Input className={styles.formControl} value={draftName} disabled={!creating || submitting || !admin} maxLength={256} onChange={(_, data) => setDraftName(data.value)} /></Field>
+        {creating && templates && selectedTemplate ? <div className={styles.form}>
+          <Field label="Provider 类型" required><Select className={styles.formControl} value={templateID} disabled={submitting} onChange={(_, data) => changeTemplate(data.value)}>{templates.map((template) => <option key={template.id} value={template.id}>{template.name}</option>)}</Select></Field>
+          <Button className={styles.formControl} type="button" appearance="secondary" disabled={!selectedTemplate} onClick={downloadTemplate}>下载配置模板</Button>
+          {selectedTemplate.fields.filter((field) => field.required).map((field) => <TemplateField key={field.field} field={field} value={templateValues[field.field] ?? ''} disabled={submitting} onChange={(value) => changeTemplateField(field.field, value)} />)}
+          {selectedTemplate.fields.some((field) => !field.required) ? <details className={styles.advanced}><summary>高级设置</summary><div className={styles.form}>{selectedTemplate.fields.filter((field) => !field.required).map((field) => <TemplateField key={field.field} field={field} value={templateValues[field.field] ?? ''} disabled={submitting} onChange={(value) => changeTemplateField(field.field, value)} />)}</div></details> : null}
+        </div> : null}
+        <StructuredEditor format="yaml" label="Agent 配置原文" value={content} disabled={!admin || submitting} onChange={(value) => replaceContent(value, true)} onValidationChange={updateContentValidation} />
+      </section>
+      {admin ? <div className={styles.zoneGrid}>
+        <section className={styles.zone} aria-label="配置操作">
+          <div className={styles.zoneHeader}>
+            <Text as="h3" className={styles.zoneTitle}>配置操作</Text>
+            <Text className={styles.zoneDescription}>保存或删除前会再次要求确认。</Text>
+          </div>
+          <div className={styles.actionButtons}>
+            <Button appearance="primary" disabled={submitting || !valid || !isSafeKnowledgeID(draftName)} onClick={openSaveConfirmation}>保存 Agent 配置</Button>
+            {existingReady ? <Button disabled={submitting} onClick={openDeleteConfirmation}>删除 Agent 配置</Button> : null}
+          </div>
+        </section>
+        <section className={styles.zone} aria-label="受控验证">
+          <div className={styles.zoneHeader}>
+            <Text as="h3" className={styles.zoneTitle}>受控验证</Text>
+            <Text className={styles.zoneDescription}>单次测试不代表持续健康</Text>
+          </div>
+          <div className={styles.actionButtons}>
+            <Button disabled={submitting || !valid} onClick={() => void runAction('connect')}>测试连通性</Button>
+          </div>
+          <Field label="测试 Prompt"><Textarea className={styles.formControl} value={prompt} disabled={submitting} maxLength={16_384} onChange={(_, data) => { setPrompt(data.value); setActionResult('') }} /></Field>
+          <div className={styles.actionButtons}>
+            <Button disabled={submitting || !valid || !prompt.trim()} onClick={() => void runAction('prompt')}>Prompt 测试</Button>
+          </div>
+        </section>
       </div> : null}
-      {selectedName && configState === 'loading' ? <StatePanel state="loading" title="正在加载 Agent 配置原文" /> : null}
+    </section> : null}
+    {editorOpen && !workbenchReady ? <div className={styles.editor}>
+      {selectedName && configState !== 'error' ? <StatePanel state="loading" title="正在加载 Agent 配置原文" /> : null}
       {selectedName && configState === 'error' ? <StatePanel state="error" title="Agent 配置原文加载失败" actionLabel="重试" onAction={() => setConfigReload((current) => current + 1)} /> : null}
-      {(!selectedName || configState === 'ready') ? <StructuredEditor format="yaml" label="Agent 配置原文" value={content} disabled={!admin || submitting} onChange={setContent} onValidationChange={(result: StructuredValidationResult) => setValid(result.valid)} /> : null}
-      {admin ? <div className={styles.actions}>
-        <Button appearance="primary" disabled={submitting || !valid || !isSafeKnowledgeID(draftName)} onClick={() => setConfirmSave(true)}>保存 Agent 配置</Button>
-        {!creating ? <Button disabled={submitting} onClick={() => setConfirmDelete(true)}>删除 Agent 配置</Button> : null}
-        <Button disabled={submitting || !valid} onClick={() => void runAction('connect')}>测试连通性</Button>
-        <Field label="测试 Prompt"><Textarea value={prompt} disabled={submitting} maxLength={16_384} onChange={(_, data) => setPrompt(data.value)} /></Field>
-        <Button disabled={submitting || !valid || !prompt.trim()} onClick={() => void runAction('prompt')}>Prompt 测试</Button>
-      </div> : null}
+      {creating && templatesQuery.isPending ? <StatePanel state="loading" title="正在加载 Agent 配置模板" /> : null}
+      {creating && templatesQuery.isError ? <StatePanel state="error" title="Agent 配置模板加载失败" actionLabel="重试" onAction={() => void templatesQuery.refetch()} /> : null}
+      {creating && templates !== null && templates.length === 0 ? <StatePanel state="empty" title="暂无可用 Agent 配置模板" actionLabel="重试" onAction={() => void templatesQuery.refetch()} /> : null}
+      {creating && templates !== null && templates.length > 0 && !selectedTemplate ? <StatePanel state="loading" title="正在准备 Agent 配置模板" /> : null}
       <div className={styles.actions}><Button disabled={submitting} onClick={closeEditor}>关闭</Button></div>
     </div> : null}
     <Dialog open={confirmSave} onOpenChange={(_, data) => { if (!data.open && !submitting) setConfirmSave(false) }}><DialogSurface aria-label="确认保存 Agent 配置"><DialogBody><DialogTitle>确认保存 Agent 配置</DialogTitle><DialogContent>配置可能包含访问凭据，保存前请确认内容和作用域无误。</DialogContent><DialogActions><Button onClick={() => setConfirmSave(false)}>取消</Button><Button appearance="primary" onClick={() => void runAction('save')}>确认保存</Button></DialogActions></DialogBody></DialogSurface></Dialog>

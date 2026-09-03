@@ -11,6 +11,7 @@ import { MemoryRouter, Route, Routes, useNavigate } from 'react-router-dom'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { ThemeProvider } from '../../shared/theme/ThemeProvider'
+import type { ReportSummaryView } from './api'
 import { ReportDetailPage } from './ReportDetailPage'
 import { ReportListPage } from './ReportListPage'
 
@@ -52,9 +53,39 @@ function detail(overrides: Record<string, unknown> = {}) {
   }
 }
 
+const reviewReports: readonly ReportSummaryView[] = [
+  {
+    id: 'report-high-a',
+    task_id: 'task-high-a',
+    task_type: 'mcp_scan',
+    completed_at: '2026-08-18T01:00:00Z',
+    created_at: '2026-08-18T01:01:00Z',
+    risk: { mapping_version: 'risk-v2', high: 2, medium: 1, low: 3, score: 72 },
+    brand_product_name: '历史快照品牌',
+  },
+  {
+    id: 'report-low-b',
+    task_id: 'task-low-b',
+    task_type: 'ai_infra_scan',
+    completed_at: '2026-08-19T01:00:00Z',
+    created_at: '2026-08-19T01:01:00Z',
+    risk: { mapping_version: 'risk-v2', high: 0, medium: 2, low: 4, score: 48 },
+    brand_product_name: '历史快照品牌',
+  },
+  {
+    id: 'report-high-c',
+    task_id: 'task-high-c',
+    task_type: 'agent_scan',
+    completed_at: '2026-08-20T01:00:00Z',
+    created_at: '2026-08-20T01:01:00Z',
+    risk: { mapping_version: 'risk-v2', high: 1, medium: 0, low: 1, score: 65 },
+    brand_product_name: '历史快照品牌',
+  },
+]
+
 function renderAt(page: React.ReactNode, path: string, routePath: string) {
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } })
-  return render(
+  const view = render(
     <ThemeProvider initialMode="light">
       <QueryClientProvider client={queryClient}>
         <MemoryRouter initialEntries={[path]}>
@@ -63,6 +94,28 @@ function renderAt(page: React.ReactNode, path: string, routePath: string) {
       </QueryClientProvider>
     </ThemeProvider>,
   )
+  return { ...view, queryClient }
+}
+
+function hasSingleColumnMetadataRule(metadata: Element) {
+  const classNames = new Set(metadata.classList)
+  return Array.from(document.styleSheets).some((sheet) => {
+    try {
+      return Array.from(sheet.cssRules).some((rule) => {
+        if (rule.type !== CSSRule.MEDIA_RULE) return false
+        const mediaRule = rule as CSSMediaRule
+        if (!mediaRule.conditionText.replaceAll(' ', '').includes('(max-width:960px)')) return false
+        return Array.from(mediaRule.cssRules).some((nestedRule) => {
+          if (nestedRule.type !== CSSRule.STYLE_RULE) return false
+          const styleRule = nestedRule as CSSStyleRule
+          return styleRule.style.getPropertyValue('grid-template-columns') === '1fr'
+            && styleRule.selectorText.split(',').some((selector) => [...classNames].some((className) => selector.includes(`.${className}`)))
+        })
+      })
+    } catch {
+      return false
+    }
+  })
 }
 
 function ReportSwitchHarness() {
@@ -86,19 +139,57 @@ afterEach(() => {
 })
 
 describe('ReportListPage', () => {
-  it('从可分享URL读取服务端分页并呈现原生报告台账', async () => {
+  it('从可分享URL呈现报告复核态势与原生报告台账', async () => {
     const fetchMock = vi.fn().mockResolvedValue(jsonResponse({
-      items: [{ ...detail(), brand_product_name: '历史快照品牌' }], total: 45, page: 2, page_size: 20,
+      items: reviewReports, total: 45, page: 2, page_size: 20,
     }))
     vi.stubGlobal('fetch', fetchMock)
     renderAt(<ReportListPage />, '/reports?page=2', '/reports')
 
+    const summary = await screen.findByRole('region', { name: '报告复核态势' })
+    expect(summary).toHaveTextContent('当前查询')
+    expect(summary).toHaveTextContent('全部报告')
+    expect(summary).toHaveTextContent('匹配报告 45')
+    expect(summary).toHaveTextContent('本页需优先复核 2')
+    expect(summary).toHaveTextContent('本页高风险发现 3')
+    expect(summary).not.toHaveTextContent('本页高风险发现 45')
     const table = await screen.findByRole('table', { name: '不可变安全报告台账' })
     expect(table.tagName).toBe('TABLE')
     expect(screen.getByRole('columnheader', { name: '风险分布' }).tagName).toBe('TH')
     expect(fetchMock.mock.calls[0]?.[0]).toBe('http://localhost:3000/api/v1/platform/reports?page=2&page_size=20')
-    expect(screen.getByRole('link', { name: '查看报告 report-opaque-1' })).toHaveAttribute('href', '/reports/report-opaque-1')
+    expect(screen.getByRole('link', { name: '查看报告 report-high-a' })).toHaveAttribute('href', '/reports/report-high-a')
+    expect(table).toHaveTextContent('高 2 / 中 1 / 低 3')
     expect(screen.getByText('共 45 条，第 2 页')).toBeInTheDocument()
+  })
+
+  it('空报告库仍展示当前查询但不渲染本页复核信号', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(jsonResponse({ items: [], total: 0, page: 1, page_size: 20 })))
+    renderAt(<ReportListPage />, '/reports', '/reports')
+
+    const summary = await screen.findByRole('region', { name: '报告复核态势' })
+    expect(summary).toHaveTextContent('当前查询')
+    expect(summary).toHaveTextContent('全部报告')
+    expect(summary).toHaveTextContent('匹配报告 0')
+    expect(await screen.findByText('暂无安全报告')).toBeInTheDocument()
+    expect(summary).not.toHaveTextContent('本页需优先复核 0')
+    expect(summary).not.toHaveTextContent('本页高风险发现 0')
+    expect(screen.queryByRole('group', { name: '本页复核信号' })).not.toBeInTheDocument()
+  })
+
+  it('有查询结果但当前页为空时保留总量与可用分页', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(jsonResponse({ items: [], total: 45, page: 3, page_size: 20 })))
+    renderAt(<ReportListPage />, '/reports?page=3', '/reports')
+
+    expect(await screen.findByText('当前页没有报告')).toBeInTheDocument()
+    expect(screen.queryByText('暂无安全报告')).not.toBeInTheDocument()
+    const summary = await screen.findByRole('region', { name: '报告复核态势' })
+    expect(summary).toHaveTextContent('当前查询')
+    expect(summary).toHaveTextContent('全部报告')
+    expect(summary).toHaveTextContent('匹配报告 45')
+    expect(summary).not.toHaveTextContent('本页需优先复核 0')
+    expect(summary).not.toHaveTextContent('本页高风险发现 0')
+    expect(screen.getByText('共 45 条，第 3 页')).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: '上一页' })).toBeEnabled()
   })
 
   it('恶意分页参数规范化到第一页且不做当前页假筛选', async () => {
@@ -118,6 +209,38 @@ describe('ReportListPage', () => {
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(null, { status })))
     renderAt(<ReportListPage />, '/reports', '/reports')
     expect(await screen.findByText(message)).toBeInTheDocument()
+    expect(screen.queryByRole('region', { name: '报告复核态势' })).not.toBeInTheDocument()
+  })
+
+  it.each([
+    [403, '无权查看安全报告'],
+    [500, '暂时无法加载安全报告'],
+  ])('缓存报告在重取%s失败后只显示独立安全状态', async (status, message) => {
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(jsonResponse({ items: reviewReports, total: 45, page: 2, page_size: 20 }))
+      .mockResolvedValueOnce(new Response(null, { status }))
+    vi.stubGlobal('fetch', fetchMock)
+    const { queryClient } = renderAt(<ReportListPage />, '/reports?page=2', '/reports')
+
+    expect(await screen.findByRole('table', { name: '不可变安全报告台账' })).toBeInTheDocument()
+    await act(async () => {
+      await queryClient.invalidateQueries({ queryKey: ['reports', { page: 2, pageSize: 20 }], exact: true })
+    })
+
+    expect(await screen.findByText(message)).toBeInTheDocument()
+    expect(fetchMock).toHaveBeenCalledTimes(2)
+    expect(screen.queryByRole('region', { name: '报告复核态势' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('table', { name: '不可变安全报告台账' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('navigation', { name: '报告分页' })).not.toBeInTheDocument()
+  })
+
+  it('加载安全报告时不提前渲染报告复核态势', async () => {
+    vi.stubGlobal('fetch', vi.fn(() => new Promise<Response>(() => undefined)))
+    const view = renderAt(<ReportListPage />, '/reports', '/reports')
+
+    expect(await screen.findByText('正在加载安全报告')).toBeInTheDocument()
+    expect(screen.queryByRole('region', { name: '报告复核态势' })).not.toBeInTheDocument()
+    view.unmount()
   })
 })
 
@@ -153,20 +276,40 @@ describe('ReportDetailPage', () => {
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue(jsonResponse(detail())))
     renderAt(<ReportDetailPage />, '/reports/report-opaque-1', '/reports/:reportId')
 
-    expect(await screen.findByRole('heading', { level: 1, name: '安全报告详情' })).toBeInTheDocument()
-    expect(screen.getByText('历史快照品牌')).toBeInTheDocument()
-    expect(screen.getByText('历史水印')).toBeInTheDocument()
-    expect(screen.getByText('安全评分')).toBeInTheDocument()
-    expect(screen.getByText('72')).toBeInTheDocument()
-    expect(screen.getByText('risk-v2')).toBeInTheDocument()
-    expect(screen.getByText('使用生成时固化的 risk-v2 映射。')).toBeInTheDocument()
+    const pageTitle = await screen.findByRole('heading', { level: 1, name: '安全报告详情' })
+    const exportButton = screen.getByRole('button', { name: '导出 PDF' })
+    const brief = screen.getByRole('region', { name: '报告决策摘要' })
+    expect(brief).toHaveTextContent('安全评分')
+    expect(brief).toHaveTextContent('72')
+    expect(brief).toHaveTextContent('risk-v2')
+    expect(brief).toHaveTextContent('使用生成时固化的 risk-v2 映射。')
+    expect(brief).toHaveTextContent('覆盖 1/1 条可信发现')
+    expect(brief).toHaveTextContent('完成修复后复核。')
+    const metadata = brief.querySelector('dl')
+    expect(metadata).not.toBeNull()
+    expect(hasSingleColumnMetadataRule(metadata!)).toBe(true)
     const top = screen.getByRole('region', { name: '重点风险' })
     const orderedText = top.textContent ?? ''
     expect(orderedText.indexOf('高风险')).toBeLessThan(orderedText.indexOf('中风险'))
     expect(orderedText.indexOf('中风险')).toBeLessThan(orderedText.indexOf('低风险'))
-    expect(screen.getByRole('region', { name: '技术发现' })).toHaveTextContent('可信证据')
-    expect(screen.getByRole('region', { name: '覆盖与结论' })).toHaveTextContent('覆盖 1/1 条可信发现')
+    expect(top).toHaveTextContent('立即修复')
+    const recommendations = screen.getByRole('region', { name: '修复建议' })
+    expect(recommendations).toHaveTextContent('优先修复高风险项')
+    const technicalFindings = screen.getByRole('region', { name: '技术发现' })
+    expect(technicalFindings).toHaveTextContent('可信证据')
+    const trend = screen.getByRole('region', { name: '风险趋势' })
     expect(screen.getByRole('table', { name: '不可变风险趋势' })).toBeInTheDocument()
+    const snapshot = screen.getByRole('region', { name: '快照信息' })
+    expect(snapshot).toHaveTextContent('历史快照品牌')
+    expect(snapshot).toHaveTextContent('历史水印')
+    expect(snapshot).toHaveTextContent('#2457a7')
+    expect(snapshot).not.toHaveTextContent('当前品牌')
+    expect(pageTitle.compareDocumentPosition(brief) & Node.DOCUMENT_POSITION_FOLLOWING).not.toBe(0)
+    expect(exportButton.compareDocumentPosition(brief) & Node.DOCUMENT_POSITION_FOLLOWING).not.toBe(0)
+    expect(brief.compareDocumentPosition(recommendations) & Node.DOCUMENT_POSITION_FOLLOWING).not.toBe(0)
+    expect(recommendations.compareDocumentPosition(technicalFindings) & Node.DOCUMENT_POSITION_FOLLOWING).not.toBe(0)
+    expect(technicalFindings.compareDocumentPosition(trend) & Node.DOCUMENT_POSITION_FOLLOWING).not.toBe(0)
+    expect(trend.compareDocumentPosition(snapshot) & Node.DOCUMENT_POSITION_FOLLOWING).not.toBe(0)
     expect(document.body).not.toHaveTextContent('当前品牌')
   })
 

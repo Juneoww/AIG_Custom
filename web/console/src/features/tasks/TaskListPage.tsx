@@ -5,7 +5,7 @@
  * 输出：任务台账、筛选、分页及独立加载/空/失败/403状态。
  * 依赖：Fluent UI、React Query、React Router 与共享监管组件。
  */
-import { Button, Field, Select, makeStyles, tokens } from '@fluentui/react-components'
+import { Button, Field, Select, makeStyles, mergeClasses, tokens } from '@fluentui/react-components'
 import { useQuery } from '@tanstack/react-query'
 import { useEffect } from 'react'
 import { Link, useSearchParams } from 'react-router-dom'
@@ -17,14 +17,82 @@ import { DataTable, type DataTableColumn } from '../../shared/components/DataTab
 import { PageHeader } from '../../shared/components/PageHeader'
 import { StatePanel } from '../../shared/components/StatePanel'
 import { fetchTaskList } from './api'
+import { TaskOperationsSummary } from './components/TaskOperationsSummary'
 
 const useStyles = makeStyles({
-  page: { display: 'flex', flexDirection: 'column', gap: tokens.spacingVerticalL },
+  page: { display: 'flex', flexDirection: 'column', gap: tokens.spacingVerticalL, minWidth: 0 },
   headerAction: { color: tokens.colorBrandForegroundLink, fontWeight: tokens.fontWeightSemibold },
-  filters: { display: 'flex', flexWrap: 'wrap', gap: tokens.spacingHorizontalL, alignItems: 'end' },
-  filter: { minWidth: '200px' },
-  pagination: { display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: tokens.spacingHorizontalM },
+  filterPanel: {
+    minWidth: 0,
+    padding: tokens.spacingVerticalL,
+    border: `1px solid ${tokens.colorNeutralStroke1}`,
+    borderRadius: tokens.borderRadiusLarge,
+    backgroundColor: tokens.colorNeutralBackground2,
+  },
+  filters: {
+    display: 'flex',
+    flexWrap: 'wrap',
+    gap: tokens.spacingHorizontalL,
+    alignItems: 'end',
+    minWidth: 0,
+    '@media (max-width: 960px)': {
+      flexDirection: 'column',
+      alignItems: 'stretch',
+      gap: tokens.spacingVerticalM,
+    },
+  },
+  filter: {
+    flexGrow: 1,
+    minWidth: '200px',
+    '@media (max-width: 960px)': {
+      minWidth: 0,
+      width: '100%',
+    },
+  },
+  select: { minWidth: 0, width: '100%' },
+  tableViewport: { minWidth: 0, overflowX: 'auto' },
+  pagination: {
+    display: 'flex',
+    flexWrap: 'wrap',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: tokens.spacingHorizontalM,
+    '@media (max-width: 960px)': {
+      flexDirection: 'column',
+      alignItems: 'stretch',
+    },
+  },
+  paginationActions: { display: 'flex', flexWrap: 'wrap', gap: tokens.spacingHorizontalS },
   taskLink: { color: tokens.colorBrandForegroundLink },
+  statusMark: {
+    display: 'inline-flex',
+    alignItems: 'center',
+    padding: `${tokens.spacingVerticalXXS} ${tokens.spacingHorizontalS}`,
+    border: `1px solid ${tokens.colorNeutralStroke2}`,
+    borderRadius: tokens.borderRadiusCircular,
+    fontWeight: tokens.fontWeightSemibold,
+    whiteSpace: 'nowrap',
+  },
+  statusActive: {
+    border: `1px solid ${tokens.colorBrandStroke1}`,
+    backgroundColor: tokens.colorBrandBackground2,
+    color: tokens.colorBrandForeground1,
+  },
+  statusPending: {
+    border: `1px solid ${tokens.colorNeutralStroke2}`,
+    backgroundColor: tokens.colorNeutralBackground3,
+    color: tokens.colorNeutralForeground2,
+  },
+  statusAttention: {
+    border: `1px solid ${tokens.colorStatusWarningBorder1}`,
+    backgroundColor: tokens.colorStatusWarningBackground1,
+    color: tokens.colorStatusWarningForeground1,
+  },
+  statusTerminal: {
+    border: `1px solid ${tokens.colorNeutralStroke1}`,
+    backgroundColor: tokens.colorNeutralBackground1,
+    color: tokens.colorNeutralForeground2,
+  },
 })
 
 export const taskTypeLabels: Record<TaskType, string> = {
@@ -92,7 +160,15 @@ export function TaskListPage() {
   useEffect(() => {
     if (searchParams.toString() !== normalizedSearch) setSearchParams(normalizedSearch, { replace: true })
   }, [normalizedSearch, searchParams, setSearchParams])
-  const updateSearch = (nextPage: number, nextStatus = status, nextTaskType = taskType) => {
+  const updateSearch = (
+    nextPage: number,
+    ...nextFilters: [] | [TaskStatus | undefined, Exclude<TaskType, 'unknown'> | undefined]
+  ) => {
+    if (nextFilters.length === 0) {
+      setSearchParams(normalizedTaskSearch(nextPage, status, taskType))
+      return
+    }
+    const [nextStatus, nextTaskType] = nextFilters
     setSearchParams(normalizedTaskSearch(nextPage, nextStatus, nextTaskType))
   }
   const query = useQuery({
@@ -101,10 +177,29 @@ export function TaskListPage() {
     retry: false,
   })
   const canCreate = state.status === 'authenticated' && state.subject.role !== 'auditor'
+  const filterLabels = [
+    status ? `状态：${taskStatusLabels[status]}` : '全部状态',
+    taskType ? `类型：${taskTypeLabels[taskType]}` : '全部类型',
+  ]
+  const hasActiveFilters = Boolean(status || taskType)
+  const statusMarkStyles: Record<TaskStatus, string> = {
+    pending: styles.statusPending,
+    dispatching: styles.statusActive,
+    running: styles.statusActive,
+    succeeded: styles.statusTerminal,
+    failed: styles.statusAttention,
+    dispatch_failed: styles.statusAttention,
+    dispatch_unknown: styles.statusAttention,
+    cancelled: styles.statusTerminal,
+  }
   const columns: readonly DataTableColumn<TaskSummary>[] = [
     { id: 'type', header: '任务类型', render: (task) => taskTypeLabels[task.task_type] },
     { id: 'owner', header: '负责人', render: (task) => task.owner },
-    { id: 'status', header: '状态', render: (task) => taskStatusLabels[task.status] },
+    {
+      id: 'status',
+      header: '状态',
+      render: (task) => <span className={mergeClasses(styles.statusMark, statusMarkStyles[task.status])}>{taskStatusLabels[task.status]}</span>,
+    },
     { id: 'updated', header: '更新时间', render: (task) => formatTaskTime(task.updated_at) },
     {
       id: 'action',
@@ -129,34 +224,46 @@ export function TaskListPage() {
           </Link>
         ) : null}
       </PageHeader>
-      <div className={styles.filters} aria-label="任务筛选">
-        <Field className={styles.filter} label="任务状态">
-          <Select
-            value={status ?? ''}
-            onChange={(_, data) => {
-              updateSearch(1, (data.value || undefined) as TaskStatus | undefined, taskType)
-            }}
-          >
-            <option value="">全部状态</option>
-            {Object.entries(taskStatusLabels).map(([value, label]) => (
-              <option key={value} value={value}>{label}</option>
-            ))}
-          </Select>
-        </Field>
-        <Field className={styles.filter} label="任务类型">
-          <Select
-            value={taskType ?? ''}
-            onChange={(_, data) => {
-              updateSearch(1, status, (data.value || undefined) as Exclude<TaskType, 'unknown'> | undefined)
-            }}
-          >
-            <option value="">全部类型</option>
-            {Object.entries(taskTypeLabels).filter(([value]) => value !== 'unknown').map(([value, label]) => (
-              <option key={value} value={value}>{label}</option>
-            ))}
-          </Select>
-        </Field>
+      <div className={styles.filterPanel} role="group" aria-label="任务筛选">
+        <div className={styles.filters}>
+          <Field className={styles.filter} label="任务状态">
+            <Select
+              className={styles.select}
+              value={status ?? ''}
+              onChange={(_, data) => {
+                updateSearch(1, (data.value || undefined) as TaskStatus | undefined, taskType)
+              }}
+            >
+              <option value="">全部状态</option>
+              {Object.entries(taskStatusLabels).map(([value, label]) => (
+                <option key={value} value={value}>{label}</option>
+              ))}
+            </Select>
+          </Field>
+          <Field className={styles.filter} label="任务类型">
+            <Select
+              className={styles.select}
+              value={taskType ?? ''}
+              onChange={(_, data) => {
+                updateSearch(1, status, (data.value || undefined) as Exclude<TaskType, 'unknown'> | undefined)
+              }}
+            >
+              <option value="">全部类型</option>
+              {Object.entries(taskTypeLabels).filter(([value]) => value !== 'unknown').map(([value, label]) => (
+                <option key={value} value={value}>{label}</option>
+              ))}
+            </Select>
+          </Field>
+        </div>
       </div>
+      {query.isSuccess ? (
+        <TaskOperationsSummary
+          tasks={query.data.items}
+          total={query.data.total}
+          filterLabels={filterLabels}
+          onClearFilters={hasActiveFilters ? () => updateSearch(1, undefined, undefined) : undefined}
+        />
+      ) : null}
       {query.isPending ? <StatePanel state="loading" title="正在加载扫描任务" /> : null}
       {query.isError && query.error instanceof ApiError && query.error.kind === 'forbidden' ? (
         <StatePanel state="forbidden" title="无权查看任务台账" />
@@ -166,13 +273,15 @@ export function TaskListPage() {
       ) : null}
       {query.data?.items.length === 0 ? <StatePanel state="empty" title="暂无匹配任务" description="调整筛选条件或创建新的扫描任务。" /> : null}
       {query.data?.items.length ? (
-        <DataTable caption="扫描任务台账" columns={columns} rows={query.data.items} getRowKey={(task) => task.id} />
+        <div className={styles.tableViewport}>
+          <DataTable caption="扫描任务台账" columns={columns} rows={query.data.items} getRowKey={(task) => task.id} />
+        </div>
       ) : null}
       {query.data ? (
         <nav className={styles.pagination} aria-label="任务分页">
           <span>共 {query.data.total} 条，第 {query.data.page} 页</span>
-          <div>
-            <Button appearance="secondary" disabled={page <= 1} onClick={() => updateSearch(page - 1)}>上一页</Button>{' '}
+          <div className={styles.paginationActions}>
+            <Button appearance="secondary" disabled={page <= 1} onClick={() => updateSearch(page - 1)}>上一页</Button>
             <Button appearance="secondary" disabled={page * query.data.page_size >= query.data.total} onClick={() => updateSearch(page + 1)}>下一页</Button>
           </div>
         </nav>

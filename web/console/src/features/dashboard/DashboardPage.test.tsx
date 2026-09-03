@@ -2,7 +2,7 @@
  * 功能：验证治理总览只消费安全聚合 DTO，并完整呈现台账四区与独立状态。
  * 实现：在真实 QueryClient、主题和内存路由中驱动网络响应及重试交互。
  * 输入：成功、空数据、403、网络失败和含额外敏感字段的总览响应。
- * 输出：指标、30 日趋势、待关注、最近任务与安全状态断言。
+ * 输出：管理者摘要、管理者信号、30 日趋势、待关注、最近任务与安全状态断言。
  * 依赖：Vitest、Testing Library、React Router 与应用 Provider。
  */
 import { fireEvent, render, screen, waitFor, within } from '@testing-library/react'
@@ -85,7 +85,7 @@ function renderDashboard() {
 afterEach(() => vi.unstubAllGlobals())
 
 describe('DashboardPage', () => {
-  it('在单屏语义区域展示核心指标、30 日趋势、高风险待办和最近任务', async () => {
+  it('在单屏语义区域展示管理者摘要、管理者信号、30 日趋势、高风险待办和最近任务', async () => {
     let requestSignal: AbortSignal | undefined
     const fetchMock = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
       requestSignal = init?.signal ?? undefined
@@ -104,11 +104,30 @@ describe('DashboardPage', () => {
     renderDashboard()
 
     expect(await screen.findByRole('heading', { level: 1, name: '治理总览' })).toBeInTheDocument()
-    const metrics = await screen.findByRole('region', { name: '核心指标' })
-    expect(metrics).toHaveTextContent('快照平均安全分72')
-    expect(metrics).toHaveTextContent('高风险3')
+    const summary = await screen.findByRole('region', { name: '管理者摘要' })
+    expect(summary).toHaveTextContent('当前总体安全分72')
+    expect(summary).toHaveTextContent('高风险3')
+    expect(summary).toHaveTextContent('中风险6')
+    expect(summary).toHaveTextContent('低风险12')
+    expect(summary).toHaveTextContent('近 30 日已完成扫描30')
+    expect(summary).toHaveTextContent('执行中任务1')
+    expect(summary).toHaveTextContent('待调度任务0')
     const trendRegion = screen.getByRole('region', { name: '最近 30 日趋势' })
+    const signals = screen.getByRole('region', { name: '管理者信号' })
+    expect(summary.compareDocumentPosition(trendRegion) & Node.DOCUMENT_POSITION_FOLLOWING).toBe(
+      Node.DOCUMENT_POSITION_FOLLOWING,
+    )
+    expect(signals).toHaveTextContent('高风险3')
+    expect(signals).toHaveTextContent('执行中任务1')
+    expect(signals).toHaveTextContent('risk-v1')
+    expect(signals).toHaveTextContent('risk-v2')
+    expect(summary).not.toContainElement(signals)
+    expect(screen.queryByRole('region', { name: '核心指标' })).not.toBeInTheDocument()
     expect(within(trendRegion).getAllByRole('listitem')).toHaveLength(30)
+    const trendFigure = within(trendRegion).getByRole('figure', {
+      name: '最近 30 日快照平均安全分',
+    })
+    expect(within(trendFigure).getAllByRole('listitem')).toHaveLength(30)
     expect(screen.getByRole('region', { name: '高风险待办' })).toHaveTextContent('MCP 扫描')
     expect(screen.getByRole('link', { name: '查看报告 report-opaque-1' })).toHaveAttribute(
       'href',
@@ -128,6 +147,60 @@ describe('DashboardPage', () => {
     expect(requestSignal).toBeInstanceOf(AbortSignal)
   })
 
+  it('管理者摘要按任务状态矩阵计算治理动态', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue(
+        jsonResponse(
+          dashboardResponse({
+            trend: trend(2),
+            recent_tasks: [
+              {
+                id: 'task-pending',
+                owner: 'operator',
+                task_type: 'mcp_scan',
+                status: 'pending',
+                created_at: '2026-08-17T00:00:00Z',
+                updated_at: '2026-08-18T01:00:00Z',
+              },
+              {
+                id: 'task-dispatching',
+                owner: 'operator',
+                task_type: 'mcp_scan',
+                status: 'dispatching',
+                created_at: '2026-08-17T00:00:00Z',
+                updated_at: '2026-08-18T01:00:00Z',
+              },
+              {
+                id: 'task-running',
+                owner: 'operator',
+                task_type: 'mcp_scan',
+                status: 'running',
+                created_at: '2026-08-17T00:00:00Z',
+                updated_at: '2026-08-18T01:00:00Z',
+              },
+              {
+                id: 'task-succeeded',
+                owner: 'operator',
+                task_type: 'mcp_scan',
+                status: 'succeeded',
+                created_at: '2026-08-17T00:00:00Z',
+                updated_at: '2026-08-18T01:00:00Z',
+              },
+            ],
+          }),
+        ),
+      ),
+    )
+
+    renderDashboard()
+
+    const summary = await screen.findByRole('region', { name: '管理者摘要' })
+    expect(summary).toHaveTextContent('近 30 日已完成扫描60')
+    expect(summary).toHaveTextContent('执行中任务3')
+    expect(summary).toHaveTextContent('待调度任务2')
+  })
+
   it('加载期间显示专用状态且不提前显示空数据', () => {
     vi.stubGlobal('fetch', vi.fn(() => new Promise<Response>(() => undefined)))
 
@@ -137,7 +210,7 @@ describe('DashboardPage', () => {
     expect(screen.queryByText('暂无已完成报告')).not.toBeInTheDocument()
   })
 
-  it('空数据不伪装成满分并仍保留四区结构', async () => {
+  it('空数据不伪装成满分，也不展示管理者摘要或信号', async () => {
     vi.stubGlobal(
       'fetch',
       vi.fn().mockResolvedValue(
@@ -158,7 +231,8 @@ describe('DashboardPage', () => {
     renderDashboard()
 
     expect(await screen.findByText('暂无已完成报告')).toBeInTheDocument()
-    expect(screen.getByRole('region', { name: '核心指标' })).toHaveTextContent('快照平均安全分暂无')
+    expect(screen.queryByRole('region', { name: '管理者摘要' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('region', { name: '管理者信号' })).not.toBeInTheDocument()
     expect(screen.getByRole('region', { name: '最近 30 日趋势' })).toBeInTheDocument()
     expect(screen.getByRole('region', { name: '高风险待办' })).toHaveTextContent('暂无待关注事项')
     expect(screen.getByRole('region', { name: '最近任务' })).toHaveTextContent('暂无扫描任务')
@@ -214,6 +288,6 @@ describe('DashboardPage', () => {
     fireEvent.click(screen.getByRole('button', { name: '重试' }))
 
     await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2))
-    expect(await screen.findByRole('region', { name: '核心指标' })).toBeInTheDocument()
+    expect(await screen.findByRole('region', { name: '管理者摘要' })).toBeInTheDocument()
   })
 })

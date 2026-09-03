@@ -1,21 +1,22 @@
 /**
- * 功能：展示按当前主体限定的治理总览四区和独立加载、空、失败、无权限状态。
- * 实现：用 TanStack Query 读取服务端聚合 DTO，以 Fluent 指标、趋势和原生表格呈现。
+ * 功能：展示按当前主体限定的管理者摘要、趋势、管理者信号与两张独立治理台账。
+ * 实现：用 TanStack Query 读取服务端聚合 DTO，以 Fluent 局部面板、趋势和原生表格呈现。
  * 输入：GET /api/v1/platform/dashboard 的安全白名单响应。
- * 输出：核心指标、30 日趋势、高风险待办和最近扫描任务。
+ * 输出：管理者摘要、30 日趋势、管理者信号、高风险待办和最近扫描任务。
  * 依赖：React Query、React Router、Fluent UI 与共享监管台账组件。
  */
-import { Card, Text, makeStyles, tokens } from '@fluentui/react-components'
+import { Card, makeStyles, tokens } from '@fluentui/react-components'
 import { useQuery } from '@tanstack/react-query'
 import { Link } from 'react-router-dom'
 
 import { ApiError } from '../../shared/api/errors'
 import type { TaskStatus, TaskType } from '../../shared/api/types'
 import { DataTable, type DataTableColumn } from '../../shared/components/DataTable'
-import { MetricCard } from '../../shared/components/MetricCard'
 import { PageHeader } from '../../shared/components/PageHeader'
 import { StatePanel } from '../../shared/components/StatePanel'
 import { fetchDashboard, type AttentionItem, type DashboardView } from './api'
+import { ExecutiveSummary, deriveGovernanceActivity } from './components/ExecutiveSummary'
+import { ManagementSignals } from './components/ManagementSignals'
 import { RiskTrend } from './components/RiskTrend'
 
 const useStyles = makeStyles({
@@ -23,31 +24,36 @@ const useStyles = makeStyles({
     display: 'flex',
     flexDirection: 'column',
     gap: tokens.spacingVerticalXXL,
+    minWidth: 0,
   },
-  metrics: {
+  trendSignalsGrid: {
     display: 'grid',
-    gridTemplateColumns: 'repeat(4, minmax(0, 1fr))',
+    gridTemplateColumns: 'minmax(0, 1.25fr) minmax(0, 0.75fr)',
     gap: tokens.spacingHorizontalL,
     '@media (max-width: 960px)': {
-      gridTemplateColumns: 'repeat(2, minmax(0, 1fr))',
-    },
-    '@media (max-width: 640px)': {
       gridTemplateColumns: '1fr',
     },
+    minWidth: 0,
+  },
+  trendOnly: {
+    minWidth: 0,
   },
   ledgerGrid: {
     display: 'grid',
-    gridTemplateColumns: 'minmax(0, 3fr) minmax(320px, 2fr)',
+    gridTemplateColumns: 'repeat(2, minmax(0, 1fr))',
     gap: tokens.spacingHorizontalL,
     '@media (max-width: 960px)': {
       gridTemplateColumns: '1fr',
     },
+    minWidth: 0,
   },
   panel: {
     minWidth: 0,
     padding: tokens.spacingVerticalL,
+    border: `1px solid ${tokens.colorNeutralStroke1}`,
     borderRadius: tokens.borderRadiusMedium,
-    boxShadow: 'none',
+    backgroundColor: tokens.colorNeutralBackground1,
+    boxShadow: tokens.shadow4,
   },
   sectionTitle: {
     margin: `0 0 ${tokens.spacingVerticalL} 0`,
@@ -56,13 +62,12 @@ const useStyles = makeStyles({
     lineHeight: tokens.lineHeightBase400,
     fontWeight: tokens.fontWeightSemibold,
   },
-  notice: {
-    display: 'block',
-    marginTop: tokens.spacingVerticalS,
-    color: tokens.colorNeutralForeground2,
-  },
   taskLink: {
     color: tokens.colorBrandForegroundLink,
+  },
+  tableViewport: {
+    minWidth: 0,
+    overflowX: 'auto',
   },
 })
 
@@ -141,6 +146,8 @@ function RecentTaskTable({ tasks }: { tasks: DashboardView['recent_tasks'] }) {
 
 function DashboardContent({ view }: { view: DashboardView }) {
   const styles = useStyles()
+  const activity = view.has_data ? deriveGovernanceActivity(view.trend, view.recent_tasks) : null
+
   return (
     <>
       {!view.has_data ? (
@@ -150,38 +157,35 @@ function DashboardContent({ view }: { view: DashboardView }) {
           description="完成首份扫描并生成安全报告后，此处将展示快照指标。"
         />
       ) : null}
-      <section aria-label="核心指标">
-        <div className={styles.metrics}>
-          <MetricCard label="快照平均安全分" value={view.security_score ?? '暂无'} supportingText="最近 30 个 UTC 自然日" />
-          <MetricCard label="高风险" value={view.risk.high} status="high" supportingText="有效报告快照汇总" />
-          <MetricCard label="中风险" value={view.risk.medium} status="medium" supportingText="有效报告快照汇总" />
-          <MetricCard label="低风险" value={view.risk.low} status="low" supportingText="有效报告快照汇总" />
-        </div>
-        {view.mapping_versions.length > 1 ? (
-          <Text className={styles.notice}>当前总览包含多个风险映射版本</Text>
-        ) : null}
-      </section>
-      <div className={styles.ledgerGrid}>
+      {view.has_data ? <ExecutiveSummary view={view} /> : null}
+      <div className={view.has_data ? styles.trendSignalsGrid : styles.trendOnly}>
         <Card className={styles.panel} role="region" aria-label="最近 30 日趋势">
           <RiskTrend points={view.trend} />
         </Card>
+        {activity ? <ManagementSignals risk={view.risk} mappingVersions={view.mapping_versions} activity={activity} /> : null}
+      </div>
+      <div className={styles.ledgerGrid}>
         <Card className={styles.panel} role="region" aria-label="高风险待办">
           <h2 className={styles.sectionTitle}>高风险待办</h2>
           {view.attention.length > 0 ? (
-            <AttentionTable items={view.attention} />
+            <div className={styles.tableViewport}>
+              <AttentionTable items={view.attention} />
+            </div>
           ) : (
             <StatePanel state="empty" title="暂无待关注事项" description="当前窗口内没有高风险或低分报告。" />
           )}
         </Card>
+        <Card className={styles.panel} role="region" aria-label="最近任务">
+          <h2 className={styles.sectionTitle}>最近任务</h2>
+          {view.recent_tasks.length > 0 ? (
+            <div className={styles.tableViewport}>
+              <RecentTaskTable tasks={view.recent_tasks} />
+            </div>
+          ) : (
+            <StatePanel state="empty" title="暂无扫描任务" description="创建扫描任务后将在此显示最近状态。" />
+          )}
+        </Card>
       </div>
-      <Card className={styles.panel} role="region" aria-label="最近任务">
-        <h2 className={styles.sectionTitle}>最近任务</h2>
-        {view.recent_tasks.length > 0 ? (
-          <RecentTaskTable tasks={view.recent_tasks} />
-        ) : (
-          <StatePanel state="empty" title="暂无扫描任务" description="创建扫描任务后将在此显示最近状态。" />
-        )}
-      </Card>
     </>
   )
 }
