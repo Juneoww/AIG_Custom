@@ -13,7 +13,7 @@ const MAX_MODEL_CATALOG_PAGE = 1_000
 type CatalogFingerprintItem = Pick<ModelCatalogItem, 'id' | 'name' | 'provider_model' | 'scope' | 'disabled' | 'source' | 'read_only'>
 
 export function catalogPageFingerprint(items: readonly CatalogFingerprintItem[]): string {
-  return JSON.stringify(items.map((model) => [
+  const tuples = items.map((model) => [
     model.id,
     model.name,
     model.provider_model,
@@ -21,7 +21,9 @@ export function catalogPageFingerprint(items: readonly CatalogFingerprintItem[])
     model.disabled,
     model.source,
     model.read_only,
-  ]))
+  ])
+  tuples.sort((left, right) => JSON.stringify(left).localeCompare(JSON.stringify(right)))
+  return JSON.stringify(tuples)
 }
 
 export function hasRepeatedCatalogPage(

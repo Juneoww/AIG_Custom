@@ -7,7 +7,7 @@
  */
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { fireEvent, render, screen, waitFor } from '@testing-library/react'
-import { StrictMode } from 'react'
+import { StrictMode, useState } from 'react'
 import { MemoryRouter } from 'react-router-dom'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
@@ -65,11 +65,16 @@ function renderSelectorWithValue(value: string, onChange = vi.fn(), onAvailabili
   return { ...view, onChange, onAvailabilityChange, queryClient }
 }
 
-function cacheFirstCatalogPage(queryClient: QueryClient) {
+function cacheFirstCatalogPage(queryClient: QueryClient, items = [catalogItem({ id: 'page-one-model' })], total = 101) {
   queryClient.setQueryData(['governed-model-catalog'], {
-    pages: [{ items: [catalogItem({ id: 'page-one-model' })], total: 101, page: 1, page_size: 100 }],
+    pages: [{ items, total, page: 1, page_size: 100 }],
     pageParams: [1],
   })
+}
+
+function ControlledSelector({ initialValue, onAvailabilityChange }: { initialValue: string; onAvailabilityChange: ReturnType<typeof vi.fn> }) {
+  const [value, setValue] = useState<string | undefined>(initialValue)
+  return <GovernedModelSelector value={value} onChange={setValue} onAvailabilityChange={onAvailabilityChange} />
 }
 
 beforeEach(() => {
@@ -136,6 +141,22 @@ describe('GovernedModelSelector', () => {
     expect(screen.queryByRole('option', { name: /stale-model-id/ })).not.toBeInTheDocument()
   })
 
+  it('受控调用方清除失效 ID 后不保留不可用提示，并最终报告 available', async () => {
+    const onAvailabilityChange = vi.fn()
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(response({ items: [catalogItem()], total: 1, page: 1, page_size: 100 })))
+    const queryClient = createQueryClient()
+    render(
+      <QueryClientProvider client={queryClient}>
+        <MemoryRouter><ControlledSelector initialValue="stale-model-id" onAvailabilityChange={onAvailabilityChange} /></MemoryRouter>
+      </QueryClientProvider>,
+    )
+
+    await waitFor(() => expect(screen.getByRole('combobox', { name: '扫描模型' })).toHaveValue(''))
+    expect(screen.queryByText('已选模型不可用，已清除选择。')).not.toBeInTheDocument()
+    expect(screen.queryByRole('option', { name: /stale-model-id/ })).not.toBeInTheDocument()
+    expect(onAvailabilityChange.mock.calls.map(([availability]) => availability)).toEqual(['pending', 'unavailable', 'available'])
+  })
+
   it('自动加载下一页验证有效预选模型，并在找到后保留该 ID', async () => {
     const onChange = vi.fn()
     const fetchMock = vi.fn()
@@ -190,6 +211,42 @@ describe('GovernedModelSelector', () => {
 
     expect(await screen.findByRole('option', { name: '缓存后的预选模型（gpt-secure，私有）' })).toBeInTheDocument()
     expect(fetchMock).toHaveBeenCalledTimes(2)
+  })
+
+  it('缓存目录后台刷新期间将已加载预选模型保持为 pending，成功后恢复 available', async () => {
+    let resolveRefresh: ((value: Response) => void) | undefined
+    const onAvailabilityChange = vi.fn()
+    const queryClient = createQueryClient()
+    cacheFirstCatalogPage(queryClient, [catalogItem({ id: 'preselected-model', name: '缓存模型' })], 1)
+    vi.stubGlobal('fetch', vi.fn(() => new Promise<Response>((resolve) => { resolveRefresh = resolve })))
+    renderSelectorWithValue('preselected-model', vi.fn(), onAvailabilityChange, false, queryClient)
+
+    expect(await screen.findByRole('option', { name: '已选模型（ID: preselected-model）：正在验证' })).toBeDisabled()
+    expect(onAvailabilityChange).toHaveBeenCalledWith('pending')
+    await waitFor(() => expect(resolveRefresh).toBeTypeOf('function'))
+    resolveRefresh?.(response({ items: [catalogItem({ id: 'preselected-model', name: '刷新后模型' })], total: 1, page: 1, page_size: 100 }))
+
+    expect(await screen.findByRole('option', { name: '刷新后模型（gpt-secure，私有）' })).toBeInTheDocument()
+    await waitFor(() => expect(onAvailabilityChange.mock.calls.at(-1)).toEqual(['available']))
+    expect(screen.queryByRole('option', { name: /正在验证/ })).not.toBeInTheDocument()
+  })
+
+  it.each([
+    ['缺失模型', 'missing-model', [catalogItem({ id: 'page-one-model' })]],
+    ['停用模型', 'disabled-model', [catalogItem({ id: 'disabled-model', disabled: true })]],
+  ])('缓存%s的后台刷新失败时保持 pending 且不清除', async (_label, value, items) => {
+    const onChange = vi.fn()
+    const onAvailabilityChange = vi.fn()
+    const queryClient = createQueryClient()
+    cacheFirstCatalogPage(queryClient, items, 1)
+    vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new Error('refresh offline')))
+    renderSelectorWithValue(value, onChange, onAvailabilityChange, false, queryClient)
+
+    expect(await screen.findByText('模型目录刷新失败，当前选择待确认')).toBeInTheDocument()
+    expect(screen.getByRole('combobox', { name: '扫描模型' })).toHaveValue(value)
+    expect(onChange).not.toHaveBeenCalled()
+    expect(onAvailabilityChange.mock.calls.at(-1)).toEqual(['pending'])
+    expect(screen.getByRole('button', { name: '重试刷新模型目录' })).toBeInTheDocument()
   })
 
   it('无预选模型时，后台刷新期间禁用加载更多且完成后恢复可用', async () => {
@@ -291,10 +348,24 @@ describe('GovernedModelSelector', () => {
     vi.stubGlobal('fetch', fetchMock)
     renderSelectorWithValue('missing-model', onChange)
 
-    expect(await screen.findByText('模型目录响应重复，暂无法确认已选模型')).toBeInTheDocument()
+    expect(await screen.findByText('模型目录分页响应重复，无法继续加载；已选模型尚未确认')).toBeInTheDocument()
     expect(screen.getByRole('combobox', { name: '扫描模型' })).toHaveValue('missing-model')
-    expect(screen.getByRole('option', { name: '已选模型（ID: missing-model）：模型目录响应重复，暂无法确认' })).toBeDisabled()
+    expect(screen.getByRole('option', { name: '已选模型（ID: missing-model）：模型目录分页响应重复，尚未确认' })).toBeDisabled()
     expect(screen.getByRole('button', { name: '重新加载模型目录' })).toBeInTheDocument()
+    expect(fetchMock).toHaveBeenCalledTimes(2)
+    expect(onChange).not.toHaveBeenCalled()
+  })
+
+  it('同页内容仅顺序不同也会停止自动验证并避免后续请求', async () => {
+    const onChange = vi.fn()
+    const firstItems = [catalogItem({ id: 'first-model' }), catalogItem({ id: 'second-model', name: '第二模型' })]
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(response({ items: firstItems, total: 300, page: 1, page_size: 100 }))
+      .mockResolvedValueOnce(response({ items: [...firstItems].reverse(), total: 300, page: 2, page_size: 100 }))
+    vi.stubGlobal('fetch', fetchMock)
+    renderSelectorWithValue('missing-model', onChange)
+
+    expect(await screen.findByText('模型目录分页响应重复，无法继续加载；已选模型尚未确认')).toBeInTheDocument()
     expect(fetchMock).toHaveBeenCalledTimes(2)
     expect(onChange).not.toHaveBeenCalled()
   })

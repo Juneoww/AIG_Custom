@@ -48,27 +48,32 @@ export function GovernedModelSelector({ value, onChange, onAvailabilityChange, d
   })
   const catalogItems = catalog.data?.pages.flatMap((page) => page.items) ?? []
   const canonicalCatalogItems = canonicalModels(catalogItems)
-  const models = selectableModels(catalogItems)
+  const catalogRefreshInProgress = catalog.isRefetching && !catalog.isFetchingNextPage
+  const catalogRefreshFailed = Boolean(catalog.data) && catalog.isRefetchError && !catalog.isFetchNextPageError
+  const catalogTrusted = !catalogRefreshInProgress && !catalogRefreshFailed
+  const models = catalogTrusted ? selectableModels(catalogItems) : []
   const selectedModelID = typeof value === 'string' && value !== '' ? value : undefined
   const lastCatalogPage = catalog.data?.pages.at(-1)
-  const repeatedCatalogPage = lastCatalogPage !== undefined && hasRepeatedCatalogPage(
+  const repeatedCatalogPage = catalogTrusted && lastCatalogPage !== undefined && hasRepeatedCatalogPage(
     lastCatalogPage.items,
     (catalog.data?.pages.slice(0, -1) ?? []).map((page) => page.items),
   )
   const selectedIsAvailable = selectedModelID !== undefined && models.some((model) => model.id === selectedModelID)
-  const selectedCanonicalModel = selectedModelID === undefined ? undefined : canonicalCatalogItems.find((model) => model.id === selectedModelID)
+  const selectedCanonicalModel = !catalogTrusted || selectedModelID === undefined ? undefined : canonicalCatalogItems.find((model) => model.id === selectedModelID)
   const selectedCanonicalDisabled = selectedCanonicalModel?.disabled === true
   const selectionNeedsVerification = selectedModelID !== undefined && !selectedIsAvailable && !selectedCanonicalDisabled
-  const catalogExhausted = Boolean(catalog.data) && !repeatedCatalogPage && !catalog.hasNextPage && !catalog.isFetching && !catalog.isFetchNextPageError
+  const catalogExhausted = catalogTrusted && Boolean(catalog.data) && !repeatedCatalogPage && !catalog.hasNextPage && !catalog.isFetching && !catalog.isFetchNextPageError
   const unavailableSelectedModel = selectedModelID !== undefined && !selectedIsAvailable && (selectedCanonicalDisabled || catalogExhausted)
   const canAutomaticallyVerifySelection = selectionNeedsVerification && Boolean(catalog.data) && Boolean(catalog.hasNextPage) &&
-    !repeatedCatalogPage && !catalog.isFetching && !catalog.isFetchingNextPage && !catalog.isFetchNextPageError
+    catalogTrusted && !repeatedCatalogPage && !catalog.isFetching && !catalog.isFetchingNextPage && !catalog.isFetchNextPageError
   const verificationPageParamsKey = `${selectedModelID ?? ''}:${catalog.data?.pageParams.join(',') ?? ''}`
   const firstPageFailed = catalog.isError && !catalog.data
   const pendingSelectedModelID = selectedModelID !== undefined && !selectedIsAvailable && !unavailableSelectedModel ? selectedModelID : undefined
   const pendingModelLabel = repeatedCatalogPage
-    ? `已选模型（ID: ${pendingSelectedModelID}）：模型目录响应重复，暂无法确认`
-    : firstPageFailed || catalog.isFetchNextPageError
+    ? `已选模型（ID: ${pendingSelectedModelID}）：模型目录分页响应重复，尚未确认`
+    : catalogRefreshFailed
+      ? `已选模型（ID: ${pendingSelectedModelID}）：目录刷新失败，保留待重试`
+      : firstPageFailed || catalog.isFetchNextPageError
       ? `已选模型（ID: ${pendingSelectedModelID}）：目录加载失败，保留待重试`
       : `已选模型（ID: ${pendingSelectedModelID}）：正在验证`
   const availability: GovernedModelAvailability = selectedModelID === undefined || selectedIsAvailable
@@ -80,7 +85,7 @@ export function GovernedModelSelector({ value, onChange, onAvailabilityChange, d
     : catalog.isFetching ? '正在刷新模型目录…' : '加载更多模型'
 
   const requestNextPage = () => {
-    if (!catalog.isFetching) void catalog.fetchNextPage({ cancelRefetch: false })
+    if (!catalog.isFetching && !catalogRefreshFailed) void catalog.fetchNextPage({ cancelRefetch: false })
   }
 
   useEffect(() => {
@@ -92,9 +97,18 @@ export function GovernedModelSelector({ value, onChange, onAvailabilityChange, d
     if (!unavailableSelectedModel) clearedModelIDRef.current = undefined
   }, [onChange, selectedModelID, unavailableSelectedModel])
 
+  const availabilityCallbackRef = useRef(onAvailabilityChange)
+  const reportedAvailabilityRef = useRef<GovernedModelAvailability | undefined>(undefined)
+
   useEffect(() => {
-    onAvailabilityChange?.(availability)
-  }, [availability, onAvailabilityChange])
+    availabilityCallbackRef.current = onAvailabilityChange
+  }, [onAvailabilityChange])
+
+  useEffect(() => {
+    if (reportedAvailabilityRef.current === availability) return
+    reportedAvailabilityRef.current = availability
+    availabilityCallbackRef.current?.(availability)
+  }, [availability])
 
   useEffect(() => {
     if (!canAutomaticallyVerifySelection) {
@@ -118,6 +132,14 @@ export function GovernedModelSelector({ value, onChange, onAvailabilityChange, d
             </Button>
           </MessageBar>
         ) : null}
+        {catalogRefreshFailed ? (
+          <MessageBar intent="error">
+            <MessageBarBody>模型目录刷新失败，当前选择待确认</MessageBarBody>
+            <Button appearance="transparent" disabled={catalog.isFetching} onClick={() => void catalog.refetch()}>
+              {catalog.isFetching ? '正在重试刷新模型目录…' : '重试刷新模型目录'}
+            </Button>
+          </MessageBar>
+        ) : null}
         <Select
           aria-label="扫描模型"
           value={value ?? ''}
@@ -131,7 +153,7 @@ export function GovernedModelSelector({ value, onChange, onAvailabilityChange, d
         {pendingSelectedModelID !== undefined && !repeatedCatalogPage && !catalog.isFetchNextPageError && !firstPageFailed ? <span role="status">正在验证已选模型</span> : null}
         {repeatedCatalogPage ? (
           <MessageBar intent="warning">
-            <MessageBarBody>模型目录响应重复，暂无法确认已选模型</MessageBarBody>
+            <MessageBarBody>{pendingSelectedModelID === undefined ? '模型目录分页响应重复，无法继续加载' : '模型目录分页响应重复，无法继续加载；已选模型尚未确认'}</MessageBarBody>
             <Button appearance="transparent" disabled={catalog.isFetching} onClick={() => void catalog.refetch()}>
               {catalog.isFetching ? '正在重新加载模型目录…' : '重新加载模型目录'}
             </Button>
@@ -149,7 +171,7 @@ export function GovernedModelSelector({ value, onChange, onAvailabilityChange, d
         ) : null}
         {catalog.hasNextPage && !catalog.isFetchNextPageError ? (
           <div className={styles.actions}>
-            <Button disabled={disabled || catalog.isFetching || pendingSelectedModelID !== undefined} onClick={requestNextPage}>
+            <Button disabled={disabled || catalog.isFetching || catalogRefreshFailed || pendingSelectedModelID !== undefined} onClick={requestNextPage}>
               {nextPageButtonLabel}
             </Button>
           </div>

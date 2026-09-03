@@ -63,6 +63,14 @@ describe('governed model catalog helpers', () => {
     expect(hasRepeatedCatalogPage([sameSafeModel], [[accepted]])).toBe(true)
   })
 
+  it('将同一页白名单项按多重集合比较，忽略服务端返回顺序', () => {
+    const first = model({ id: 'first' })
+    const second = model({ id: 'second', name: '第二个模型' })
+
+    expect(catalogPageFingerprint([first, second])).toBe(catalogPageFingerprint([second, first]))
+    expect(hasRepeatedCatalogPage([second, first], [[first, second]])).toBe(true)
+  })
+
   it('标签不会泄露 base URL、token 或备注', () => {
     const sensitiveModel = model({
       name: '安全名称',
