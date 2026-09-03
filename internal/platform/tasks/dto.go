@@ -2,9 +2,12 @@ package tasks
 
 import (
 	"encoding/json"
+	"regexp"
 	"strings"
 	"time"
 )
+
+var safeModelIDPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$`)
 
 // TaskSummary is the intentionally small browser list wire model.
 type TaskSummary struct {
@@ -28,6 +31,7 @@ type TaskListResponse struct {
 // are intentionally not representable by this type.
 type TaskInputSummary struct {
 	Language     string `json:"language,omitempty"`
+	ModelID      string `json:"model_id,omitempty"`
 	Thread       int    `json:"thread,omitempty"`
 	Timeout      int    `json:"timeout,omitempty"`
 	TargetCount  int    `json:"target_count,omitempty"`
@@ -102,8 +106,9 @@ func safeInputSummary(task *Task) TaskInputSummary {
 		return TaskInputSummary{}
 	}
 	type displayParams struct {
-		Thread  int `json:"thread"`
-		Timeout int `json:"timeout"`
+		ModelID string `json:"model_id"`
+		Thread  int    `json:"thread"`
+		Timeout int    `json:"timeout"`
 		Dataset struct {
 			NumPrompts int `json:"numPrompts"`
 		} `json:"dataset"`
@@ -119,6 +124,7 @@ func safeInputSummary(task *Task) TaskInputSummary {
 	case "ai_infra_scan":
 		summary := TaskInputSummary{
 			Language:    safeLanguage(task.CountryIsoCode),
+			ModelID:     safeModelID(params.ModelID),
 			Timeout:     safePositiveInt(params.Timeout, 86400),
 			TargetCount: nonEmptyLineCount(task.Content),
 		}
@@ -136,6 +142,13 @@ func safeInputSummary(task *Task) TaskInputSummary {
 	default:
 		return TaskInputSummary{}
 	}
+}
+
+func safeModelID(value string) string {
+	if len(value) == 0 || len(value) > 128 || !safeModelIDPattern.MatchString(value) {
+		return ""
+	}
+	return value
 }
 
 func canonicalTaskType(value string) string {

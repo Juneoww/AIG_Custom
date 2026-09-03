@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -297,6 +298,67 @@ func TestTaskBrowserDetailUsesTaskTypeWhitelistAndDropsUnsafeFields(t *testing.T
 		"dGhpcy1pcy1oaWdoLWVudHJvcHktZnJlZS10ZXh0",
 	} {
 		assert.NotContains(t, response.Body.String(), unsafe)
+	}
+}
+
+func TestTaskBrowserDetailAIInfraModelIDProjectionIsSafe(t *testing.T) {
+	router, tokens, repository, _ := newTaskBrowserFixture(t)
+	now := time.Now().UTC()
+	putBrowserTask(t, repository, Task{
+		ID: "infra-model-safe", OwnerUserID: "user-alice", OwnerUsername: "alice", IdempotencyKey: "infra-model-safe",
+		TaskType: "ai_infra_scan", Content: "first-target\nsecond-target", CountryIsoCode: "zh", Status: StatusPending,
+		Params: json.RawMessage(`{"model_id":"model-opaque-1","timeout":300,"port_scan_mode":"fixed_ai"}`),
+		AttachmentRefs: json.RawMessage(`[]`), CreatedAt: now, UpdatedAt: now,
+	})
+	putBrowserTask(t, repository, Task{
+		ID: "infra-model-unsafe", OwnerUserID: "user-alice", OwnerUsername: "alice", IdempotencyKey: "infra-model-unsafe",
+		TaskType: "ai_infra_scan", Content: "one-target", CountryIsoCode: "en", Status: StatusPending,
+		Params: json.RawMessage(`{"model_id":"model-opaque-2","timeout":60,"port_scan_mode":"fixed_ai","token":"token-sentinel","base_url":"https://credential.invalid","credentials":{"token":"nested-credential-sentinel"}}`),
+		AttachmentRefs: json.RawMessage(`[]`), CreatedAt: now, UpdatedAt: now,
+	})
+
+	response := performTaskJSON(t, router, tokens["alice"], http.MethodGet, "/tasks/infra-model-safe", "", nil)
+	require.Equal(t, http.StatusOK, response.Code, response.Body.String())
+	var safeWire map[string]any
+	require.NoError(t, json.Unmarshal(response.Body.Bytes(), &safeWire))
+	assert.Equal(t, map[string]any{
+		"language": "zh", "model_id": "model-opaque-1", "timeout": float64(300), "target_count": float64(2), "port_scan_mode": "fixed_ai",
+	}, safeWire["input_summary"])
+
+	response = performTaskJSON(t, router, tokens["alice"], http.MethodGet, "/tasks/infra-model-unsafe", "", nil)
+	require.Equal(t, http.StatusOK, response.Code, response.Body.String())
+	var unsafeWire map[string]any
+	require.NoError(t, json.Unmarshal(response.Body.Bytes(), &unsafeWire))
+	assert.Equal(t, map[string]any{
+		"language": "en", "model_id": "model-opaque-2", "timeout": float64(60), "target_count": float64(1),
+	}, unsafeWire["input_summary"])
+	for _, forbidden := range []string{"token-sentinel", "https://credential.invalid", "nested-credential-sentinel", "credentials", "params"} {
+		assert.NotContains(t, response.Body.String(), forbidden)
+	}
+}
+
+func TestSafeInputSummaryOmitsInvalidAIInfraModelID(t *testing.T) {
+	for _, modelID := range []string{
+		"model with space",
+		"model/forbidden",
+		"m" + strings.Repeat("a", 128),
+	} {
+		t.Run(modelID, func(t *testing.T) {
+			summary := safeInputSummary(&Task{TaskType: "ai_infra_scan", Params: json.RawMessage(`{"model_id":` + strconv.Quote(modelID) + `}`)})
+			assert.Empty(t, summary.ModelID)
+			encoded, err := json.Marshal(summary)
+			require.NoError(t, err)
+			assert.NotContains(t, string(encoded), "model_id")
+		})
+	}
+}
+
+func TestSafeInputSummaryOnlyAIInfraProjectsModelID(t *testing.T) {
+	for _, taskType := range []string{"mcp_scan", "model_redteam_report", "agent_scan", "future_task"} {
+		t.Run(taskType, func(t *testing.T) {
+			summary := safeInputSummary(&Task{TaskType: taskType, Params: json.RawMessage(`{"model_id":"model-opaque-1"}`)})
+			assert.Empty(t, summary.ModelID)
+		})
 	}
 }
 

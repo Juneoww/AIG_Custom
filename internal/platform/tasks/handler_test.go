@@ -100,6 +100,25 @@ func TestTaskCreateAcceptedResponseUsesSafeDetailWire(t *testing.T) {
 	assert.Zero(t, engine.statusReads.Load(), "rendering the response must not read the engine")
 }
 
+func TestTaskCreateAcceptedAIInfraResponseUsesSafeModelIDDetailWire(t *testing.T) {
+	engine := &taskCreateWireEngine{sessionID: "engine-session-sentinel"}
+	router, tokens := newTaskHandlerFixtureWithEngine(t, engine)
+
+	response := performTaskJSON(t, router, tokens["alice"], http.MethodPost, "/tasks", "safe-ai-infra-model-create", map[string]any{
+		"task_type": "ai_infra_scan", "content": "first-target\nsecond-target", "country_iso_code": "zh",
+		"params": map[string]any{"model_id": "model-opaque-1", "timeout": 300, "port_scan_mode": "fixed_ai"},
+	})
+	require.Equal(t, http.StatusAccepted, response.Code, response.Body.String())
+
+	assertSafeTaskCreateDetail(t, response.Body.Bytes(), map[string]any{
+		"task_type": "ai_infra_scan",
+		"input_summary": map[string]any{
+			"language": "zh", "model_id": "model-opaque-1", "timeout": float64(300), "target_count": float64(2), "port_scan_mode": "fixed_ai",
+		},
+	}, "user-alice", "first-target", "second-target", "engine-session-sentinel")
+	assert.Zero(t, engine.statusReads.Load(), "rendering the response must not read the engine")
+}
+
 func TestTaskCreateRejectsOversizedJSONWithFixedBadRequest(t *testing.T) {
 	router, tokens, engine := newTaskHandlerFixture(t)
 	payload := `{"task_type":"mcp_scan","content":"` + strings.Repeat("x", 300<<10) + `"}`
