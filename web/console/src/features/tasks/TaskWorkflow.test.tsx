@@ -70,6 +70,39 @@ describe('任务服务端列表合同', () => {
   })
 })
 
+describe('任务详情模型摘要白名单', () => {
+  it('AI 基础设施任务只投影安全 model_id，不向页面传递敏感未知字段', () => {
+    const result = parseTaskDetail({
+      ...runningTask,
+      task_type: 'ai_infra_scan',
+      input_summary: {
+        model_id: 'model-opaque-1',
+        token: 'must-not-reach-page',
+        base_url: 'https://internal.invalid',
+      },
+    })
+
+    expect(result.input_summary).toEqual({ model_id: 'model-opaque-1' })
+    expect(JSON.stringify(result)).not.toContain('token')
+    expect(JSON.stringify(result)).not.toContain('base_url')
+  })
+
+  it.each([
+    ['', 'empty'],
+    [' ', 'space'],
+    ['a'.repeat(129), 'too long'],
+    ['model/unsafe', 'forbidden character'],
+    ['.', 'single dot'],
+    ['..', 'double dot'],
+  ])('rejects a %s model ID in task detail', (modelID) => {
+    expect(() => parseTaskDetail({
+      ...runningTask,
+      task_type: 'ai_infra_scan',
+      input_summary: { model_id: modelID },
+    })).toThrow(ApiError)
+  })
+})
+
 describe('任务写入和短轮询边界', () => {
   it('同一次逻辑提交显式重试复用幂等键且不会自动重放', async () => {
     const fetchMock = vi

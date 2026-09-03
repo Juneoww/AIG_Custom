@@ -48,6 +48,15 @@ function boundedString(value: unknown, maximum = 256): string | undefined {
   return typeof value === 'string' && value.length > 0 && value.length <= maximum ? value : undefined
 }
 
+function safeModelID(value: unknown): string | undefined {
+  return typeof value === 'string'
+    && /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(value)
+    && value !== '.'
+    && value !== '..'
+    ? value
+    : undefined
+}
+
 function safeDate(value: unknown): string | undefined {
   const text = boundedString(value, 64)
   return text && Number.isFinite(Date.parse(text)) ? text : undefined
@@ -77,6 +86,11 @@ function parseInputSummary(value: unknown): TaskInputSummary | undefined {
   const source = recordOf(value)
   if (!source) return undefined
   const result: TaskInputSummary = {}
+  if (source.model_id !== undefined) {
+    const modelID = safeModelID(source.model_id)
+    if (!modelID) return undefined
+    result.model_id = modelID
+  }
   if (source.language !== undefined) {
     if (source.language !== 'zh' && source.language !== 'en') return undefined
     result.language = source.language

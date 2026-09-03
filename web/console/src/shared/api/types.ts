@@ -72,6 +72,7 @@ export interface TaskSummary {
 }
 
 export interface TaskInputSummary {
+  model_id?: string
   language?: 'zh' | 'en'
   thread?: number
   timeout?: number
