@@ -184,8 +184,7 @@ describe('Sidebar', () => {
     expect(screen.getByRole('link', { name: '智能体配置' })).not.toHaveAttribute('aria-current', 'page')
   })
 
-  it.each(['/tasks/ai-infra', '/tasks/ai-infra/new', '/tasks/ai-infra/scan-42'])
-  ('activates AI infrastructure scans across its task routes', (path) => {
+  it.each(['/tasks/ai-infra', '/tasks/ai-infra/new', '/tasks/ai-infra/scan-42'])('activates AI infrastructure scans across its task routes', (path) => {
     renderSidebar(path)
 
     expect(screen.getByRole('link', { name: '扫描任务' })).toHaveAttribute('href', '/tasks')

@@ -345,7 +345,7 @@ describe('任务页面', () => {
       'http://localhost:3000/api/v1/platform/tasks?page=1&page_size=20&status=failed&task_type=ai_infra_scan',
     )
 
-    fireEvent.click(screen.getByRole('button', { name: '下一页' }))
+    fireEvent.click(await screen.findByRole('button', { name: '下一页' }))
     await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(3))
     expect(fetchMock.mock.calls[2]?.[0]).toBe(
       'http://localhost:3000/api/v1/platform/tasks?page=2&page_size=20&status=failed&task_type=ai_infra_scan',
@@ -471,8 +471,8 @@ describe('任务页面', () => {
   })
 
   it.each([
-    ['目录耗尽后缺失', jsonResponse({ items: [catalogModel({ id: 'other-model' })], total: 1, page: 1, page_size: 100 })], 'model-opaque-1'],
-    ['canonical 首项已停用', jsonResponse({ items: [catalogModel({ disabled: true })], total: 1, page: 1, page_size: 100 })], 'model-opaque-1'],
+    ['目录耗尽后缺失', jsonResponse({ items: [catalogModel({ id: 'other-model' })], total: 1, page: 1, page_size: 100 }), 'model-opaque-1'],
+    ['canonical 首项已停用', jsonResponse({ items: [catalogModel({ disabled: true })], total: 1, page: 1, page_size: 100 }), 'model-opaque-1'],
   ])('专属 AI 基础设施详情在%s时显示安全模型回退', async (_caseName, catalogResponse, modelID) => {
     const fetchMock = vi.fn()
       .mockResolvedValueOnce(jsonResponse({ ...aiInfraDetail, input_summary: { ...aiInfraDetail.input_summary, model_id: modelID } }))
@@ -658,7 +658,7 @@ describe('任务页面', () => {
     expect(JSON.parse(String((fetchMock.mock.calls[1]?.[1] as RequestInit).body))).toEqual(expect.objectContaining({
       task_type: 'ai_infra_scan', country_iso_code: 'zh_CN', params: { model_id: 'model-opaque-1', timeout: 300, port_scan_mode: 'fixed_ai' },
     }))
-    expect(screen.getByLabelText('当前任务路由')).toHaveTextContent('/tasks/ai-infra/created%2Fai-1')
+    await waitFor(() => expect(screen.getByLabelText('当前任务路由')).toHaveTextContent('/tasks/ai-infra/created%2Fai-1'))
   })
 
   it('专属 AI 页面允许不使用模型且取消返回专属列表', async () => {

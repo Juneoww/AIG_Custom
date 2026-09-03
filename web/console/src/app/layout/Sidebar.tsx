@@ -241,6 +241,9 @@ export function Sidebar({ role }: SidebarProps) {
   const location = useLocation()
   const [collapsed, setCollapsed] = useState(false)
   const initialGroup = matchingGroupFor(location.pathname)
+  const navigationGroupRouteKey = location.pathname === '/tasks/new'
+    ? `${location.pathname}?scan=${new URLSearchParams(location.search).get('scan') ?? ''}`
+    : location.pathname
   const [expandedGroups, setExpandedGroups] = useState<Record<NavigationGroupID, boolean>>({
     tasks: initialGroup === 'tasks',
     credentials: initialGroup === 'credentials',
@@ -254,7 +257,7 @@ export function Sidebar({ role }: SidebarProps) {
     setExpandedGroups((current) =>
       current[matchingGroup] ? current : { ...current, [matchingGroup]: true },
     )
-  }, [location.pathname])
+  }, [location.pathname, navigationGroupRouteKey])
 
   const isPrimaryActive = (item: NavigationItem) => {
     if (item.id === 'models') {

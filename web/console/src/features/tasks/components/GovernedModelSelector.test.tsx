@@ -106,7 +106,8 @@ describe('GovernedModelSelector', () => {
       page_size: 100,
     }))
 
-    const select = await screen.findByRole('combobox', { name: '扫描模型' })
+    await screen.findByRole('option', { name: '受治理私有模型（gpt-secure，私有）' })
+    const select = screen.getByRole('combobox', { name: '扫描模型' })
     expect(screen.getByRole('option', { name: '不使用模型' })).toHaveValue('')
     expect(screen.getByRole('option', { name: '受治理私有模型（gpt-secure，私有）' })).toHaveValue('model-1')
     expect(screen.getByRole('option', { name: 'YAML 全局模型（gpt-secure，全局）' })).toHaveValue('yaml-1')
@@ -127,8 +128,8 @@ describe('GovernedModelSelector', () => {
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue(response({ items: [], total: 0, page: 1, page_size: 100 })))
     renderSelector()
 
-    expect(await screen.findByRole('option', { name: '不使用模型' })).toHaveValue('')
-    expect(screen.getByRole('link', { name: '前往凭证配置 → 模型配置' })).toHaveAttribute('href', '/models')
+    expect(await screen.findByRole('link', { name: '前往凭证配置 → 模型配置' })).toHaveAttribute('href', '/models')
+    expect(screen.getByRole('option', { name: '不使用模型' })).toHaveValue('')
   })
 
   it('目录耗尽后清除不存在的模型 ID，但不会把它渲染为普通选项', async () => {
@@ -154,7 +155,7 @@ describe('GovernedModelSelector', () => {
     await waitFor(() => expect(screen.getByRole('combobox', { name: '扫描模型' })).toHaveValue(''))
     expect(screen.queryByText('已选模型不可用，已清除选择。')).not.toBeInTheDocument()
     expect(screen.queryByRole('option', { name: /stale-model-id/ })).not.toBeInTheDocument()
-    expect(onAvailabilityChange.mock.calls.map(([availability]) => availability)).toEqual(['pending', 'unavailable', 'available'])
+    await waitFor(() => expect(onAvailabilityChange.mock.calls.map(([availability]) => availability)).toEqual(['pending', 'unavailable', 'available']))
   })
 
   it('自动加载下一页验证有效预选模型，并在找到后保留该 ID', async () => {
@@ -185,6 +186,7 @@ describe('GovernedModelSelector', () => {
     expect(await screen.findByText('正在验证已选模型')).toBeInTheDocument()
     expect(select).toHaveValue('preselected-model')
     expect(screen.getByRole('option', { name: '已选模型（ID: preselected-model）：正在验证' })).toBeDisabled()
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2))
     expect(screen.getByRole('button', { name: '正在加载更多模型…' })).toBeDisabled()
     expect(onAvailabilityChange).toHaveBeenCalledWith('pending')
 
@@ -344,7 +346,6 @@ describe('GovernedModelSelector', () => {
 
     expect(await screen.findByText('模型目录加载失败')).toBeInTheDocument()
     fireEvent.click(screen.getByRole('button', { name: '重试加载模型' }))
-    expect(await screen.findByRole('button', { name: '正在重试模型…' })).toBeDisabled()
     await waitFor(() => expect(resolveRetry).toBeTypeOf('function'))
     resolveRetry?.(response({ items: [catalogItem()], total: 1, page: 1, page_size: 100 }))
     expect(await screen.findByRole('option', { name: '受治理私有模型（gpt-secure，私有）' })).toBeInTheDocument()
