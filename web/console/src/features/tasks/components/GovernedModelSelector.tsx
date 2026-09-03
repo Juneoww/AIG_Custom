@@ -79,7 +79,7 @@ export function GovernedModelSelector({ value, onChange, onAvailabilityChange, d
   const availability: GovernedModelAvailability = selectedModelID === undefined || selectedIsAvailable
     ? 'available'
     : unavailableSelectedModel ? 'unavailable' : 'pending'
-  const emptyCatalog = Boolean(catalog.data) && models.length === 0
+  const emptyCatalog = catalogTrusted && Boolean(catalog.data) && models.length === 0
   const nextPageButtonLabel = catalog.isFetchingNextPage
     ? '正在加载更多模型…'
     : catalog.isFetching ? '正在刷新模型目录…' : '加载更多模型'

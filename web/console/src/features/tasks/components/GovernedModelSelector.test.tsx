@@ -222,6 +222,7 @@ describe('GovernedModelSelector', () => {
     renderSelectorWithValue('preselected-model', vi.fn(), onAvailabilityChange, false, queryClient)
 
     expect(await screen.findByRole('option', { name: '已选模型（ID: preselected-model）：正在验证' })).toBeDisabled()
+    expect(screen.queryByRole('link', { name: '前往凭证配置 → 模型配置' })).not.toBeInTheDocument()
     expect(onAvailabilityChange).toHaveBeenCalledWith('pending')
     await waitFor(() => expect(resolveRefresh).toBeTypeOf('function'))
     resolveRefresh?.(response({ items: [catalogItem({ id: 'preselected-model', name: '刷新后模型' })], total: 1, page: 1, page_size: 100 }))
@@ -246,6 +247,7 @@ describe('GovernedModelSelector', () => {
     expect(screen.getByRole('combobox', { name: '扫描模型' })).toHaveValue(value)
     expect(onChange).not.toHaveBeenCalled()
     expect(onAvailabilityChange.mock.calls.at(-1)).toEqual(['pending'])
+    expect(screen.queryByRole('link', { name: '前往凭证配置 → 模型配置' })).not.toBeInTheDocument()
     expect(screen.getByRole('button', { name: '重试刷新模型目录' })).toBeInTheDocument()
   })
 
