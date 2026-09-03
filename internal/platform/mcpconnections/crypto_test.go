@@ -264,12 +264,9 @@ func TestSealAndOpenRepositorySourceKeepsSnapshotEncryptedAndBoundToBinding(t *t
 	if err := keyring.SealRepositorySource(binding, context, snapshot); err != nil {
 		t.Fatalf("seal repository source: %v", err)
 	}
-	const bindingV2Marker = "mcp_connection_binding_v2\x00"
-	if binding.RepositoryURLKeyID != "repository-sentinel" {
-		t.Fatalf("binding-v2 format marker must not alter the actual key ID, got %q", binding.RepositoryURLKeyID)
-	}
-	if !bytes.HasPrefix(binding.EncryptedRepositoryURL, []byte(bindingV2Marker)) {
-		t.Fatal("new repository source must record the binding-v2 encryption format in its ciphertext envelope")
+	const bindingV2KeyIDPrefix = "mcp_connection_binding_v2:"
+	if !strings.HasPrefix(binding.RepositoryURLKeyID, bindingV2KeyIDPrefix) {
+		t.Fatalf("new repository source must record the binding-v2 encryption format in key ID %q", binding.RepositoryURLKeyID)
 	}
 	if !strings.HasPrefix(string(bindingAAD(binding, context, repositorySourceFieldDomain)), "mcp_connection_binding_v2\x00") {
 		t.Fatal("new repository source must use a dedicated binding-v2 AAD namespace")
@@ -310,7 +307,11 @@ func TestSealAndOpenRepositorySourceKeepsSnapshotEncryptedAndBoundToBinding(t *t
 	if _, err := keyring.OpenRepositorySource(binding, tamperedContext); err == nil {
 		t.Fatal("repository source opened after version tampering")
 	}
-	if _, err := keyring.open(binding.RepositoryURLKeyID, binding.RepositoryURLNonce, binding.EncryptedRepositoryURL[len(bindingV2Marker):], bindingAAD(binding, context, "wrong-field-domain")); err == nil {
+	keyID, err := bindingV2KeyID(binding.RepositoryURLKeyID)
+	if err != nil {
+		t.Fatalf("parse binding-v2 key ID: %v", err)
+	}
+	if _, err := keyring.open(keyID, binding.RepositoryURLNonce, binding.EncryptedRepositoryURL, bindingAAD(binding, context, "wrong-field-domain")); err == nil {
 		t.Fatal("repository source opened with a different field AAD domain")
 	}
 }

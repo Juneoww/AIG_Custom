@@ -1,6 +1,7 @@
 package mcpconnections
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -121,17 +122,25 @@ func TestRepositoryPersistsOnlyEncryptedRepositorySourceBinding(t *testing.T) {
 	repository := NewGormRepository(db)
 	require.NoError(t, repository.Init())
 
+	keyring, err := NewKeyring("repository-persisted-key-sentinel", bytes.Repeat([]byte{0x53}, 32), nil)
+	require.NoError(t, err)
+	bindingContext := BindingEncryptionContext{OwnerUserID: "repository-persisted-owner-sentinel", Scope: ScopePrivate, Version: 1}
+	snapshot := RepositorySourceSnapshot{RepositoryURL: "repository-source-sentinel"}
 	binding := &TaskBinding{
 		ID: "binding-persisted-sentinel", TaskID: "task-persisted-sentinel", SourceKind: "repository",
-		EncryptedRepositoryURL: []byte("ciphertext-repository-source-sentinel"), RepositoryURLNonce: []byte("nonce-repository-source-sentinel"), RepositoryURLKeyID: "repository-key-sentinel",
 		CreatedAt: time.Date(2026, 9, 3, 4, 5, 6, 0, time.UTC), UpdatedAt: time.Date(2026, 9, 3, 4, 5, 6, 0, time.UTC),
 	}
+	require.NoError(t, keyring.SealRepositorySource(binding, bindingContext, snapshot))
+	assert.True(t, strings.HasPrefix(binding.RepositoryURLKeyID, "mcp_connection_binding_v2:"), "sealed repository bindings must carry the v2 key-ID envelope")
 	require.NoError(t, repository.CreateTaskBinding(ctx, binding))
 	stored, err := repository.GetTaskBinding(ctx, binding.TaskID)
 	require.NoError(t, err)
 	assert.Equal(t, binding.EncryptedRepositoryURL, stored.EncryptedRepositoryURL)
 	assert.Equal(t, binding.RepositoryURLNonce, stored.RepositoryURLNonce)
 	assert.Equal(t, binding.RepositoryURLKeyID, stored.RepositoryURLKeyID)
+	opened, err := keyring.OpenRepositorySource(stored, bindingContext)
+	require.NoError(t, err)
+	assert.Equal(t, snapshot, opened)
 	encoded, err := json.Marshal(stored)
 	require.NoError(t, err)
 	assert.NotContains(t, string(encoded), "repository-source-sentinel")
@@ -191,6 +200,14 @@ func TestRepositoryRejectsIncompleteOrMixedTaskBindings(t *testing.T) {
 			binding := newBinding("binding-repository-partial-material-sentinel", "repository")
 			binding.EncryptedRepositoryURL = []byte("ciphertext-binding-shape-sentinel")
 			binding.RepositoryURLKeyID = "key-binding-shape-sentinel"
+			return binding
+		}()},
+		{name: "repository with legacy key ID", binding: withRepositoryMaterial(newBinding("binding-repository-legacy-key-id-sentinel", "repository"))},
+		{name: "repository with empty binding-v2 key ID", binding: func() *TaskBinding {
+			binding := newBinding("binding-repository-empty-v2-key-id-sentinel", "repository")
+			binding.EncryptedRepositoryURL = []byte("ciphertext-binding-shape-sentinel")
+			binding.RepositoryURLNonce = []byte("nonce-binding-shape-sentinel")
+			binding.RepositoryURLKeyID = "mcp_connection_binding_v2:"
 			return binding
 		}()},
 		{name: "repository with connection reference", binding: func() *TaskBinding {
