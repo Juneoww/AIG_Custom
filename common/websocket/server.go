@@ -41,6 +41,7 @@ import (
 	platformdashboard "github.com/Juneoww/AIG_Custom/internal/platform/dashboard"
 	"github.com/Juneoww/AIG_Custom/internal/platform/identity"
 	platformknowledge "github.com/Juneoww/AIG_Custom/internal/platform/knowledge"
+	platformmcpconnections "github.com/Juneoww/AIG_Custom/internal/platform/mcpconnections"
 	platformmcpworkbench "github.com/Juneoww/AIG_Custom/internal/platform/mcpworkbench"
 	platformmodels "github.com/Juneoww/AIG_Custom/internal/platform/models"
 	platformreports "github.com/Juneoww/AIG_Custom/internal/platform/reports"
@@ -182,6 +183,11 @@ func RunWebServer(options *version.Options) {
 	modelKeyring, err := platformmodels.LoadKeyringFromEnv()
 	if err != nil {
 		log.Fatalf("模型主密钥配置无效: trace_id=system_startup, error=%v", err)
+	}
+	// MCP 连接密钥域独立于模型密钥域；此处仅完成启动期构造和配置校验，
+	// 路由、策略及探测接入留给后续阶段，不能借此提前暴露连接材料。
+	if _, err := platformmcpconnections.LoadKeyringFromEnv(); err != nil {
+		log.Fatalf("MCP 连接主密钥配置无效: trace_id=system_startup, error=%v", err)
 	}
 	platformModelService := platformmodels.NewService(platformModelRepo, modelKeyring, auditService)
 	adminHandler := platformadmin.NewHandler(identityService, auditService)
