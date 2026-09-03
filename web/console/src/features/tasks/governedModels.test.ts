@@ -36,6 +36,15 @@ describe('governed model catalog helpers', () => {
     expect(selectableModels([privateModel, yamlModel, disabledModel])).toEqual([privateModel, yamlModel])
   })
 
+  it('按服务端顺序对同 ID 模型 canonical 去重后再筛停用项', () => {
+    const platformModel = model({ id: 'shared-id', name: '平台模型', source: 'platform', disabled: false })
+    const yamlCollision = model({ id: 'shared-id', name: 'YAML 同 ID 模型', source: 'yaml', scope: 'global', owner_user_id: undefined, read_only: true })
+    const disabledPlatform = model({ id: 'disabled-shared-id', name: '停用平台模型', source: 'platform', disabled: true })
+    const enabledYamlCollision = model({ id: 'disabled-shared-id', name: '不应绕过的 YAML 模型', source: 'yaml', scope: 'global', owner_user_id: undefined, read_only: true })
+
+    expect(selectableModels([platformModel, yamlCollision, disabledPlatform, enabledYamlCollision])).toEqual([platformModel])
+  })
+
   it('只用名称、provider model 与中文作用域生成标签', () => {
     const privateModel = model()
     const globalModel = model({ scope: 'global', name: '全局模型', provider_model: 'claude-secure' })

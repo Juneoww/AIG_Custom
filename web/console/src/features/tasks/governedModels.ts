@@ -11,7 +11,12 @@ export const MODEL_CATALOG_PAGE_SIZE = 100
 const MAX_MODEL_CATALOG_PAGE = 1_000
 
 export function selectableModels(items: readonly ModelCatalogItem[]): readonly ModelCatalogItem[] {
-  return items.filter((model) => !model.disabled)
+  const seenIDs = new Set<string>()
+  return items.filter((model) => {
+    if (seenIDs.has(model.id)) return false
+    seenIDs.add(model.id)
+    return !model.disabled
+  })
 }
 
 export function modelOptionLabel(model: Pick<ModelCatalogItem, 'name' | 'provider_model' | 'scope'>): string {

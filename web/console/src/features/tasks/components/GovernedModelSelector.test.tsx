@@ -51,6 +51,16 @@ function renderSelector(onChange = vi.fn()) {
   return { ...view, onChange, queryClient }
 }
 
+function renderSelectorWithValue(value: string, onChange = vi.fn()) {
+  const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+  const view = render(
+    <QueryClientProvider client={queryClient}>
+      <MemoryRouter><GovernedModelSelector value={value} onChange={onChange} /></MemoryRouter>
+    </QueryClientProvider>,
+  )
+  return { ...view, onChange, queryClient }
+}
+
 beforeEach(() => {
   vi.stubGlobal('ResizeObserver', class { observe() {} unobserve() {} disconnect() {} })
 })
@@ -105,15 +115,50 @@ describe('GovernedModelSelector', () => {
     expect(screen.getByRole('link', { name: '前往凭证配置 → 模型配置' })).toHaveAttribute('href', '/models')
   })
 
+  it('在首批目录成功后清除失效模型 ID，但不会把它渲染为普通选项', async () => {
+    const onChange = vi.fn()
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(response({ items: [catalogItem()], total: 1, page: 1, page_size: 100 })))
+    renderSelectorWithValue('stale-model-id', onChange)
+
+    expect(await screen.findByText('已选模型不可用，已清除选择。')).toBeInTheDocument()
+    await waitFor(() => expect(onChange).toHaveBeenCalledWith(undefined))
+    expect(screen.queryByRole('option', { name: /stale-model-id/ })).not.toBeInTheDocument()
+  })
+
+  it('在初始加载或首批目录失败时不清除当前模型 ID', async () => {
+    let rejectPage: ((reason?: unknown) => void) | undefined
+    vi.stubGlobal('fetch', vi.fn(() => new Promise<Response>((_, reject) => { rejectPage = reject })))
+    const { onChange } = renderSelectorWithValue('still-selected')
+
+    expect(screen.getByText('正在加载模型…')).toBeInTheDocument()
+    expect(onChange).not.toHaveBeenCalled()
+    await waitFor(() => expect(rejectPage).toBeTypeOf('function'))
+    rejectPage?.(new Error('offline'))
+    expect(await screen.findByText('模型目录加载失败')).toBeInTheDocument()
+    expect(onChange).not.toHaveBeenCalled()
+  })
+
+  it('拒绝 page_size 与请求页大小不一致的目录响应', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(response({ items: [catalogItem()], total: 1, page: 1, page_size: 99 })))
+    renderSelector()
+
+    expect(await screen.findByText('模型目录加载失败')).toBeInTheDocument()
+    expect(screen.queryByRole('option', { name: '受治理私有模型（gpt-secure，私有）' })).not.toBeInTheDocument()
+  })
+
   it('首屏目录失败后允许重试', async () => {
+    let resolveRetry: ((value: Response) => void) | undefined
     const fetchMock = vi.fn()
       .mockRejectedValueOnce(new Error('offline'))
-      .mockResolvedValueOnce(response({ items: [catalogItem()], total: 1, page: 1, page_size: 100 }))
+      .mockImplementationOnce(() => new Promise<Response>((resolve) => { resolveRetry = resolve }))
     vi.stubGlobal('fetch', fetchMock)
     renderSelector()
 
     expect(await screen.findByText('模型目录加载失败')).toBeInTheDocument()
     fireEvent.click(screen.getByRole('button', { name: '重试加载模型' }))
+    expect(await screen.findByRole('button', { name: '正在重试模型…' })).toBeDisabled()
+    await waitFor(() => expect(resolveRetry).toBeTypeOf('function'))
+    resolveRetry?.(response({ items: [catalogItem()], total: 1, page: 1, page_size: 100 }))
     expect(await screen.findByRole('option', { name: '受治理私有模型（gpt-secure，私有）' })).toBeInTheDocument()
     expect(fetchMock).toHaveBeenCalledTimes(2)
   })
@@ -152,5 +197,27 @@ describe('GovernedModelSelector', () => {
     expect(screen.getAllByRole('option', { name: '受治理私有模型（gpt-secure，私有）' })).toHaveLength(1)
     expect(requestedURL(fetchMock, 1).search).toBe('?page=2&page_size=100')
     expect(fetchMock).toHaveBeenCalledTimes(2)
+  })
+
+  it('跨页同 ID 碰撞保留第一页 platform 项，并且不产生重复 option', async () => {
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(response({ items: [catalogItem({ id: 'shared-model', name: '平台优先模型' })], total: 101, page: 1, page_size: 100 }))
+      .mockResolvedValueOnce(response({
+        items: [
+          catalogItem({ id: 'shared-model', name: 'YAML 同 ID 模型', source: 'yaml', scope: 'global', owner_user_id: '', read_only: true }),
+          catalogItem({ id: 'page-two-model', name: '第二页唯一模型' }),
+        ],
+        total: 101,
+        page: 2,
+        page_size: 100,
+      }))
+    vi.stubGlobal('fetch', fetchMock)
+    renderSelector()
+
+    fireEvent.click(await screen.findByRole('button', { name: '加载更多模型' }))
+
+    expect(await screen.findByRole('option', { name: '第二页唯一模型（gpt-secure，私有）' })).toBeInTheDocument()
+    expect(screen.getAllByRole('option', { name: '平台优先模型（gpt-secure，私有）' })).toHaveLength(1)
+    expect(screen.queryByRole('option', { name: 'YAML 同 ID 模型（gpt-secure，全局）' })).not.toBeInTheDocument()
   })
 })
