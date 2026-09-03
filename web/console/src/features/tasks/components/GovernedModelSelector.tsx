@@ -79,6 +79,7 @@ export function GovernedModelSelector({ value, onChange, onAvailabilityChange, d
   const availability: GovernedModelAvailability = selectedModelID === undefined || selectedIsAvailable
     ? 'available'
     : unavailableSelectedModel ? 'unavailable' : 'pending'
+  const catalogRefreshFailureMessage = selectedModelID === undefined ? '模型目录刷新失败' : '模型目录刷新失败，当前选择待确认'
   const emptyCatalog = catalogTrusted && Boolean(catalog.data) && models.length === 0
   const nextPageButtonLabel = catalog.isFetchingNextPage
     ? '正在加载更多模型…'
@@ -134,7 +135,7 @@ export function GovernedModelSelector({ value, onChange, onAvailabilityChange, d
         ) : null}
         {catalogRefreshFailed ? (
           <MessageBar intent="error">
-            <MessageBarBody>模型目录刷新失败，当前选择待确认</MessageBarBody>
+            <MessageBarBody>{catalogRefreshFailureMessage}</MessageBarBody>
             <Button appearance="transparent" disabled={catalog.isFetching} onClick={() => void catalog.refetch()}>
               {catalog.isFetching ? '正在重试刷新模型目录…' : '重试刷新模型目录'}
             </Button>

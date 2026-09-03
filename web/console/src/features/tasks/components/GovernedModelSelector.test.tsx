@@ -251,6 +251,16 @@ describe('GovernedModelSelector', () => {
     expect(screen.getByRole('button', { name: '重试刷新模型目录' })).toBeInTheDocument()
   })
 
+  it('无预选模型时以通用文案提示缓存目录刷新失败', async () => {
+    const queryClient = createQueryClient()
+    cacheFirstCatalogPage(queryClient, [catalogItem({ id: 'cached-model' })], 1)
+    vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new Error('refresh offline')))
+    renderSelector(vi.fn(), queryClient)
+
+    expect(await screen.findByText('模型目录刷新失败')).toBeInTheDocument()
+    expect(screen.queryByText('模型目录刷新失败，当前选择待确认')).not.toBeInTheDocument()
+  })
+
   it('无预选模型时，后台刷新期间禁用加载更多且完成后恢复可用', async () => {
     let resolveRefresh: ((value: Response) => void) | undefined
     const queryClient = createQueryClient()
