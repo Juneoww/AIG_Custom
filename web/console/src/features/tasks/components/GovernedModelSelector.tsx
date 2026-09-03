@@ -59,10 +59,10 @@ export function GovernedModelSelector({ value, onChange, onAvailabilityChange, d
   const selectedCanonicalModel = selectedModelID === undefined ? undefined : canonicalCatalogItems.find((model) => model.id === selectedModelID)
   const selectedCanonicalDisabled = selectedCanonicalModel?.disabled === true
   const selectionNeedsVerification = selectedModelID !== undefined && !selectedIsAvailable && !selectedCanonicalDisabled
-  const catalogExhausted = Boolean(catalog.data) && !repeatedCatalogPage && !catalog.hasNextPage && !catalog.isFetchingNextPage && !catalog.isFetchNextPageError
+  const catalogExhausted = Boolean(catalog.data) && !repeatedCatalogPage && !catalog.hasNextPage && !catalog.isFetching && !catalog.isFetchNextPageError
   const unavailableSelectedModel = selectedModelID !== undefined && !selectedIsAvailable && (selectedCanonicalDisabled || catalogExhausted)
   const canAutomaticallyVerifySelection = selectionNeedsVerification && Boolean(catalog.data) && Boolean(catalog.hasNextPage) &&
-    !repeatedCatalogPage && !catalog.isFetchingNextPage && !catalog.isFetchNextPageError
+    !repeatedCatalogPage && !catalog.isFetching && !catalog.isFetchingNextPage && !catalog.isFetchNextPageError
   const verificationPageParamsKey = `${selectedModelID ?? ''}:${catalog.data?.pageParams.join(',') ?? ''}`
   const firstPageFailed = catalog.isError && !catalog.data
   const pendingSelectedModelID = selectedModelID !== undefined && !selectedIsAvailable && !unavailableSelectedModel ? selectedModelID : undefined
@@ -75,6 +75,13 @@ export function GovernedModelSelector({ value, onChange, onAvailabilityChange, d
     ? 'available'
     : unavailableSelectedModel ? 'unavailable' : 'pending'
   const emptyCatalog = Boolean(catalog.data) && models.length === 0
+  const nextPageButtonLabel = catalog.isFetchingNextPage
+    ? '正在加载更多模型…'
+    : catalog.isFetching ? '正在刷新模型目录…' : '加载更多模型'
+
+  const requestNextPage = () => {
+    if (!catalog.isFetching) void catalog.fetchNextPage({ cancelRefetch: false })
+  }
 
   useEffect(() => {
     if (unavailableSelectedModel && clearedModelIDRef.current !== selectedModelID) {
@@ -135,15 +142,15 @@ export function GovernedModelSelector({ value, onChange, onAvailabilityChange, d
         {catalog.isFetchNextPageError ? (
           <MessageBar intent="error">
             <MessageBarBody>加载更多模型失败</MessageBarBody>
-            <Button appearance="transparent" disabled={catalog.isFetchingNextPage} onClick={() => void catalog.fetchNextPage({ cancelRefetch: false })}>
-              {catalog.isFetchingNextPage ? '正在重试更多模型…' : '重试加载更多模型'}
+            <Button appearance="transparent" disabled={catalog.isFetching} onClick={requestNextPage}>
+              {catalog.isFetchingNextPage ? '正在重试更多模型…' : catalog.isFetching ? '正在刷新模型目录…' : '重试加载更多模型'}
             </Button>
           </MessageBar>
         ) : null}
         {catalog.hasNextPage && !catalog.isFetchNextPageError ? (
           <div className={styles.actions}>
-            <Button disabled={disabled || catalog.isFetchingNextPage || pendingSelectedModelID !== undefined} onClick={() => void catalog.fetchNextPage({ cancelRefetch: false })}>
-              {catalog.isFetchingNextPage ? '正在加载更多模型…' : '加载更多模型'}
+            <Button disabled={disabled || catalog.isFetching || pendingSelectedModelID !== undefined} onClick={requestNextPage}>
+              {nextPageButtonLabel}
             </Button>
           </div>
         ) : null}

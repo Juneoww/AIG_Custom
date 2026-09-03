@@ -42,8 +42,11 @@ function requestedURL(fetchMock: ReturnType<typeof vi.fn>, call: number): URL {
   return new URL(fetchMock.mock.calls[call]?.[0] as string)
 }
 
-function renderSelector(onChange = vi.fn()) {
-  const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+function createQueryClient() {
+  return new QueryClient({ defaultOptions: { queries: { retry: false } } })
+}
+
+function renderSelector(onChange = vi.fn(), queryClient = createQueryClient()) {
   const view = render(
     <QueryClientProvider client={queryClient}>
       <MemoryRouter><GovernedModelSelector onChange={onChange} /></MemoryRouter>
@@ -52,8 +55,7 @@ function renderSelector(onChange = vi.fn()) {
   return { ...view, onChange, queryClient }
 }
 
-function renderSelectorWithValue(value: string, onChange = vi.fn(), onAvailabilityChange = vi.fn(), strict = false) {
-  const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+function renderSelectorWithValue(value: string, onChange = vi.fn(), onAvailabilityChange = vi.fn(), strict = false, queryClient = createQueryClient()) {
   const selector = <GovernedModelSelector value={value} onChange={onChange} onAvailabilityChange={onAvailabilityChange} />
   const view = render(
     <QueryClientProvider client={queryClient}>
@@ -61,6 +63,13 @@ function renderSelectorWithValue(value: string, onChange = vi.fn(), onAvailabili
     </QueryClientProvider>,
   )
   return { ...view, onChange, onAvailabilityChange, queryClient }
+}
+
+function cacheFirstCatalogPage(queryClient: QueryClient) {
+  queryClient.setQueryData(['governed-model-catalog'], {
+    pages: [{ items: [catalogItem({ id: 'page-one-model' })], total: 101, page: 1, page_size: 100 }],
+    pageParams: [1],
+  })
 }
 
 beforeEach(() => {
@@ -162,6 +171,39 @@ describe('GovernedModelSelector', () => {
     expect(onChange).toHaveBeenCalledWith(undefined)
     await waitFor(() => expect(resolvePageTwo).toBeTypeOf('function'))
     resolvePageTwo?.(response({ items: [catalogItem({ id: 'preselected-model' })], total: 101, page: 2, page_size: 100 }))
+  })
+
+  it('缓存首批目录后台刷新结束后，自动验证才请求下一页', async () => {
+    let resolveRefresh: ((value: Response) => void) | undefined
+    const queryClient = createQueryClient()
+    cacheFirstCatalogPage(queryClient)
+    const fetchMock = vi.fn()
+      .mockImplementationOnce(() => new Promise<Response>((resolve) => { resolveRefresh = resolve }))
+      .mockResolvedValueOnce(response({ items: [catalogItem({ id: 'preselected-model', name: '缓存后的预选模型' })], total: 101, page: 2, page_size: 100 }))
+    vi.stubGlobal('fetch', fetchMock)
+    renderSelectorWithValue('preselected-model', vi.fn(), vi.fn(), false, queryClient)
+
+    expect(await screen.findByRole('button', { name: '正在刷新模型目录…' })).toBeDisabled()
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+    await waitFor(() => expect(resolveRefresh).toBeTypeOf('function'))
+    resolveRefresh?.(response({ items: [catalogItem({ id: 'page-one-model' })], total: 101, page: 1, page_size: 100 }))
+
+    expect(await screen.findByRole('option', { name: '缓存后的预选模型（gpt-secure，私有）' })).toBeInTheDocument()
+    expect(fetchMock).toHaveBeenCalledTimes(2)
+  })
+
+  it('无预选模型时，后台刷新期间禁用加载更多且完成后恢复可用', async () => {
+    let resolveRefresh: ((value: Response) => void) | undefined
+    const queryClient = createQueryClient()
+    cacheFirstCatalogPage(queryClient)
+    vi.stubGlobal('fetch', vi.fn(() => new Promise<Response>((resolve) => { resolveRefresh = resolve })))
+    renderSelector(vi.fn(), queryClient)
+
+    expect(await screen.findByRole('button', { name: '正在刷新模型目录…' })).toBeDisabled()
+    await waitFor(() => expect(resolveRefresh).toBeTypeOf('function'))
+    resolveRefresh?.(response({ items: [catalogItem({ id: 'page-one-model' })], total: 101, page: 1, page_size: 100 }))
+
+    expect(await screen.findByRole('button', { name: '加载更多模型' })).toBeEnabled()
   })
 
   it('预选模型在下一页验证失败时不清除，并允许重试后保留', async () => {
