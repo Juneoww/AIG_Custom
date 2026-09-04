@@ -25,6 +25,10 @@ func validInitializeResponseSSE() string {
 	return "event: message\ndata: " + validInitializeResponseJSON() + "\n\n"
 }
 
+func unauthenticatedProbePayload(endpoint string) ConnectionPayload {
+	return ConnectionPayload{Endpoint: endpoint, Authentication: Authentication{Kind: AuthenticationNone}}
+}
+
 type timeoutProbePort struct{}
 
 func (timeoutProbePort) Initialize(ctx context.Context, _ ProbeRequest) error {
@@ -39,7 +43,7 @@ func TestProbeEngineAutoUsesOnlyStreamableHTTPThenSSE(t *testing.T) {
 	}}
 	engine := NewProbeEngine(port, ProbeOptions{Timeout: time.Second})
 
-	result, err := engine.Probe(context.Background(), "config-auto-order", ConnectionPayload{Endpoint: "https://safe.example.test/mcp"}, TransportAuto)
+	result, err := engine.Probe(context.Background(), "config-auto-order", unauthenticatedProbePayload("https://safe.example.test/mcp"), TransportAuto)
 	require.NoError(t, err)
 	assert.Equal(t, TransportSSE, result.DetectedTransport)
 	assert.Equal(t, []Transport{TransportHTTP, TransportSSE}, port.attempts)
@@ -52,7 +56,7 @@ func TestProbeEngineFixedTransportNeverFallsBack(t *testing.T) {
 	}}
 	engine := NewProbeEngine(port, ProbeOptions{Timeout: time.Second})
 
-	_, err := engine.Probe(context.Background(), "config-fixed-transport", ConnectionPayload{Endpoint: "https://safe.example.test/mcp"}, TransportHTTP)
+	_, err := engine.Probe(context.Background(), "config-fixed-transport", unauthenticatedProbePayload("https://safe.example.test/mcp"), TransportHTTP)
 	require.ErrorIs(t, err, ErrProbeFailed)
 	assert.Equal(t, []Transport{TransportHTTP}, port.attempts)
 }
@@ -65,10 +69,10 @@ func TestProbeEngineBoundsTimeoutAndRateLimitsWithoutLeakingProbeError(t *testin
 		Clock:           clock,
 	})
 
-	_, err := engine.Probe(context.Background(), "config-timeout-rate", ConnectionPayload{Endpoint: "https://safe.example.test/mcp"}, TransportHTTP)
+	_, err := engine.Probe(context.Background(), "config-timeout-rate", unauthenticatedProbePayload("https://safe.example.test/mcp"), TransportHTTP)
 	require.ErrorIs(t, err, ErrProbeFailed)
 	assert.NotContains(t, err.Error(), "safe.example.test")
-	_, err = engine.Probe(context.Background(), "config-timeout-rate", ConnectionPayload{Endpoint: "https://safe.example.test/mcp"}, TransportHTTP)
+	_, err = engine.Probe(context.Background(), "config-timeout-rate", unauthenticatedProbePayload("https://safe.example.test/mcp"), TransportHTTP)
 	require.ErrorIs(t, err, ErrProbeRateLimited)
 }
 
@@ -77,9 +81,9 @@ func TestProbeEngineAppliesSafeDefaultMinimumInterval(t *testing.T) {
 	port := &scriptedProbePort{errors: map[Transport]error{TransportHTTP: nil}}
 	engine := NewProbeEngine(port, ProbeOptions{Clock: clock})
 
-	_, err := engine.Probe(context.Background(), "config-default-rate", ConnectionPayload{Endpoint: "https://safe.example.test/mcp"}, TransportHTTP)
+	_, err := engine.Probe(context.Background(), "config-default-rate", unauthenticatedProbePayload("https://safe.example.test/mcp"), TransportHTTP)
 	require.NoError(t, err)
-	_, err = engine.Probe(context.Background(), "config-default-rate", ConnectionPayload{Endpoint: "https://safe.example.test/mcp"}, TransportHTTP)
+	_, err = engine.Probe(context.Background(), "config-default-rate", unauthenticatedProbePayload("https://safe.example.test/mcp"), TransportHTTP)
 	require.ErrorIs(t, err, ErrProbeRateLimited, "the default must not permit unlimited probing")
 }
 
@@ -88,11 +92,11 @@ func TestProbeEngineRateLimitsByOpaqueConnectionConfigID(t *testing.T) {
 	port := &scriptedProbePort{errors: map[Transport]error{TransportHTTP: nil}}
 	engine := NewProbeEngine(port, ProbeOptions{MinimumInterval: time.Minute, Clock: clock})
 
-	_, err := engine.Probe(context.Background(), "config-opaque-a", ConnectionPayload{Endpoint: "https://one.example.test/mcp"}, TransportHTTP)
+	_, err := engine.Probe(context.Background(), "config-opaque-a", unauthenticatedProbePayload("https://one.example.test/mcp"), TransportHTTP)
 	require.NoError(t, err)
-	_, err = engine.Probe(context.Background(), "config-opaque-b", ConnectionPayload{Endpoint: "https://one.example.test/mcp"}, TransportHTTP)
+	_, err = engine.Probe(context.Background(), "config-opaque-b", unauthenticatedProbePayload("https://one.example.test/mcp"), TransportHTTP)
 	require.NoError(t, err, "another opaque config ID must not be blocked by a different configuration")
-	_, err = engine.Probe(context.Background(), "config-opaque-a", ConnectionPayload{Endpoint: "https://two.example.test/mcp"}, TransportHTTP)
+	_, err = engine.Probe(context.Background(), "config-opaque-a", unauthenticatedProbePayload("https://two.example.test/mcp"), TransportHTTP)
 	require.ErrorIs(t, err, ErrProbeRateLimited, "the same config remains limited even if its endpoint changes")
 }
 
@@ -153,7 +157,7 @@ func TestHTTPProbePortUsesInitializeThenInitializedWithoutToolsAndBoundsResponse
 	})}, 256)
 
 	err := port.Initialize(context.Background(), ProbeRequest{
-		Payload:   ConnectionPayload{Endpoint: "https://safe.example.test/mcp"},
+		Payload:   unauthenticatedProbePayload("https://safe.example.test/mcp"),
 		Transport: TransportHTTP,
 	})
 	require.NoError(t, err)
@@ -168,26 +172,133 @@ func TestHTTPProbePortUsesInitializeThenInitializedWithoutToolsAndBoundsResponse
 		}, nil
 	})}, 128)
 	err = tooLarge.Initialize(context.Background(), ProbeRequest{
-		Payload:   ConnectionPayload{Endpoint: "https://safe.example.test/mcp/private-token-value"},
+		Payload:   unauthenticatedProbePayload("https://safe.example.test/mcp/private-token-value"),
 		Transport: TransportHTTP,
 	})
 	require.ErrorIs(t, err, ErrProbeFailed)
 	assert.NotContains(t, err.Error(), "private-token-value")
 }
 
-func TestHTTPProbePortProtectsProtocolHeadersAndCredentialPrecedence(t *testing.T) {
+func TestHTTPProbePortRejectsUnsafeDirectPayloadBeforeAnyLifecycleRequest(t *testing.T) {
 	policy := testPolicy(t, true)
+	calls := 0
+	port := newHTTPProbePortWithTestClient(t, policy, &http.Client{Transport: roundTripperFunc(func(*http.Request) (*http.Response, error) {
+		calls++
+		return nil, errors.New("the invalid payload must not reach the network")
+	})}, 512)
+
+	unsafePayloads := []struct {
+		name    string
+		payload ConnectionPayload
+	}{
+		{
+			name: "reserved protocol header",
+			payload: ConnectionPayload{
+				Endpoint:       "https://safe.example.test/mcp",
+				Authentication: Authentication{Kind: AuthenticationCustomHeaders},
+				Headers:        []Header{{Name: "Content-Type", Value: "text/plain"}},
+			},
+		},
+		{
+			name: "trusted proxy custom header",
+			payload: ConnectionPayload{
+				Endpoint:       "https://safe.example.test/mcp",
+				Authentication: Authentication{Kind: AuthenticationCustomHeaders},
+				Headers:        []Header{{Name: "X-Forwarded-For", Value: "127.0.0.1"}},
+			},
+		},
+		{
+			name: "trusted proxy api key header",
+			payload: ConnectionPayload{
+				Endpoint:       "https://safe.example.test/mcp",
+				Authentication: Authentication{Kind: AuthenticationAPIKeyHeader, HeaderName: "Forwarded", Secret: "opaque"},
+			},
+		},
+		{
+			name: "duplicate custom headers after normalization",
+			payload: ConnectionPayload{
+				Endpoint:       "https://safe.example.test/mcp",
+				Authentication: Authentication{Kind: AuthenticationCustomHeaders},
+				Headers: []Header{
+					{Name: "X-Environment", Value: "intranet"},
+					{Name: " x-environment ", Value: "duplicate"},
+				},
+			},
+		},
+		{
+			name: "malformed authentication shape",
+			payload: ConnectionPayload{
+				Endpoint:       "https://safe.example.test/mcp",
+				Authentication: Authentication{Kind: AuthenticationNone, Secret: "unexpected"},
+			},
+		},
+		{
+			name: "missing authentication kind",
+			payload: ConnectionPayload{
+				Endpoint: "https://safe.example.test/mcp",
+			},
+		},
+		{
+			name: "malformed managed secret",
+			payload: ConnectionPayload{
+				Endpoint:       "https://safe.example.test/mcp",
+				Authentication: Authentication{Kind: AuthenticationBearer, Secret: "opaque\r\ninjected"},
+			},
+		},
+		{
+			name: "newline in header value",
+			payload: ConnectionPayload{
+				Endpoint:       "https://safe.example.test/mcp",
+				Authentication: Authentication{Kind: AuthenticationCustomHeaders},
+				Headers:        []Header{{Name: "X-Environment", Value: "intranet\r\ninjected"}},
+			},
+		},
+	}
+	tooManyHeaders := make([]Header, maxCustomHeaders+1)
+	for index := range tooManyHeaders {
+		tooManyHeaders[index] = Header{Name: "X-Header-" + string(rune('A'+index)), Value: "opaque"}
+	}
+	unsafePayloads = append(unsafePayloads, struct {
+		name    string
+		payload ConnectionPayload
+	}{
+		name: "too many custom headers",
+		payload: ConnectionPayload{
+			Endpoint:       "https://safe.example.test/mcp",
+			Authentication: Authentication{Kind: AuthenticationCustomHeaders},
+			Headers:        tooManyHeaders,
+		},
+	})
+
+	for _, transport := range []Transport{TransportHTTP, TransportSSE} {
+		for _, test := range unsafePayloads {
+			t.Run(string(transport)+"/"+test.name, func(t *testing.T) {
+				err := port.Initialize(context.Background(), ProbeRequest{Payload: test.payload, Transport: transport})
+				require.ErrorIs(t, err, ErrProbeFailed)
+			})
+		}
+	}
+	assert.Zero(t, calls, "invalid direct or historical payloads must not start HTTP, SSE, notification, or cleanup requests")
+}
+
+func TestHTTPProbePortAppliesValidatedCredentialPrecedence(t *testing.T) {
+	policy := testPolicy(t, true)
+	requests := 0
 	port := newHTTPProbePortWithTestClient(t, policy, &http.Client{Transport: roundTripperFunc(func(request *http.Request) (*http.Response, error) {
+		requests++
 		assert.Equal(t, "application/json", request.Header.Get("Content-Type"))
 		assert.Equal(t, "application/json, text/event-stream", request.Header.Get("Accept"))
 		assert.Equal(t, "Bearer managed-bearer-token", request.Header.Get("Authorization"))
 		assert.Equal(t, "intranet", request.Header.Get("X-Environment"))
-		return &http.Response{
-			StatusCode: http.StatusOK,
-			Header:     http.Header{"Content-Type": []string{"application/json"}},
-			Body:       io.NopCloser(strings.NewReader(`{"jsonrpc":"2.0","id":"mcp-probe","result":{"protocolVersion":"2025-03-26","capabilities":{},"serverInfo":{"name":"test","version":"1"}}}`)),
-			Request:    request,
-		}, nil
+		if requests == 1 {
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Header:     http.Header{"Content-Type": []string{"application/json"}},
+				Body:       io.NopCloser(strings.NewReader(validInitializeResponseJSON())),
+				Request:    request,
+			}, nil
+		}
+		return &http.Response{StatusCode: http.StatusAccepted, Body: io.NopCloser(strings.NewReader("")), Request: request}, nil
 	})}, 512)
 
 	err := port.Initialize(context.Background(), ProbeRequest{
@@ -195,8 +306,6 @@ func TestHTTPProbePortProtectsProtocolHeadersAndCredentialPrecedence(t *testing.
 			Endpoint:       "https://safe.example.test/mcp",
 			Authentication: Authentication{Kind: AuthenticationBearer, Secret: "managed-bearer-token"},
 			Headers: []Header{
-				{Name: "Content-Type", Value: "text/plain"},
-				{Name: "Accept", Value: "text/plain"},
 				{Name: "Authorization", Value: "Bearer custom-token"},
 				{Name: "X-Environment", Value: "intranet"},
 			},
@@ -204,6 +313,7 @@ func TestHTTPProbePortProtectsProtocolHeadersAndCredentialPrecedence(t *testing.
 		Transport: TransportHTTP,
 	})
 	require.NoError(t, err)
+	assert.Equal(t, 2, requests)
 }
 
 func TestHTTPProbePortRequiresMatchingInitializeResponse(t *testing.T) {
@@ -248,7 +358,7 @@ func TestHTTPProbePortRequiresMatchingInitializeResponse(t *testing.T) {
 				})}, 512)
 
 				err := port.Initialize(context.Background(), ProbeRequest{
-					Payload:   ConnectionPayload{Endpoint: "https://safe.example.test/mcp"},
+					Payload:   unauthenticatedProbePayload("https://safe.example.test/mcp"),
 					Transport: transport,
 				})
 				if test.valid {
@@ -296,7 +406,7 @@ func TestHTTPProbePortRejectsRedirectResponseWithoutFollowingIt(t *testing.T) {
 	})}, 0)
 
 	err := port.Initialize(context.Background(), ProbeRequest{
-		Payload:   ConnectionPayload{Endpoint: "https://safe.example.test/mcp"},
+		Payload:   unauthenticatedProbePayload("https://safe.example.test/mcp"),
 		Transport: TransportHTTP,
 	})
 	require.ErrorIs(t, err, ErrProbeFailed)
@@ -317,7 +427,7 @@ func TestHTTPProbePortStreamableHTTPAcceptsEventStreamWithoutLegacyFallback(t *t
 	})}, 256)
 	engine := NewProbeEngine(port, ProbeOptions{Timeout: time.Second})
 
-	result, err := engine.Probe(context.Background(), "config-streamable-sse", ConnectionPayload{Endpoint: "https://safe.example.test/mcp"}, TransportAuto)
+	result, err := engine.Probe(context.Background(), "config-streamable-sse", unauthenticatedProbePayload("https://safe.example.test/mcp"), TransportAuto)
 	require.NoError(t, err)
 	assert.Equal(t, TransportHTTP, result.DetectedTransport)
 	assert.Equal(t, []string{"application/json, text/event-stream", "application/json, text/event-stream"}, accepts)
@@ -335,7 +445,7 @@ func TestHTTPProbePortFixedHTTPAcceptsEventStreamResponse(t *testing.T) {
 	})}, 256)
 
 	err := port.Initialize(context.Background(), ProbeRequest{
-		Payload:   ConnectionPayload{Endpoint: "https://safe.example.test/mcp"},
+		Payload:   unauthenticatedProbePayload("https://safe.example.test/mcp"),
 		Transport: TransportHTTP,
 	})
 	require.NoError(t, err)
@@ -353,7 +463,7 @@ func TestHTTPProbePortFixedSSERejectsJSONResponse(t *testing.T) {
 	})}, 256)
 
 	err := port.Initialize(context.Background(), ProbeRequest{
-		Payload:   ConnectionPayload{Endpoint: "https://safe.example.test/mcp"},
+		Payload:   unauthenticatedProbePayload("https://safe.example.test/mcp"),
 		Transport: TransportSSE,
 	})
 	require.ErrorIs(t, err, ErrProbeFailed)
@@ -392,7 +502,7 @@ func TestHTTPProbePortStreamableHTTPNotifiesAndCleansSession(t *testing.T) {
 		}
 	})}, 512)
 
-	err := port.Initialize(context.Background(), ProbeRequest{Payload: ConnectionPayload{Endpoint: "https://safe.example.test/mcp"}, Transport: TransportHTTP})
+	err := port.Initialize(context.Background(), ProbeRequest{Payload: unauthenticatedProbePayload("https://safe.example.test/mcp"), Transport: TransportHTTP})
 	require.NoError(t, err)
 	assert.Equal(t, []string{http.MethodPost, http.MethodPost, http.MethodDelete}, methods)
 }
@@ -420,7 +530,7 @@ func TestHTTPProbePortCleansSessionWhenInitializedNotificationFails(t *testing.T
 		}
 	})}, 512)
 
-	err := port.Initialize(context.Background(), ProbeRequest{Payload: ConnectionPayload{Endpoint: "https://safe.example.test/mcp"}, Transport: TransportHTTP})
+	err := port.Initialize(context.Background(), ProbeRequest{Payload: unauthenticatedProbePayload("https://safe.example.test/mcp"), Transport: TransportHTTP})
 	require.ErrorIs(t, err, ErrProbeFailed)
 	assert.NotContains(t, err.Error(), "opaque-session-failure-sentinel")
 	assert.NotContains(t, err.Error(), "upstream-secret-response")
@@ -458,7 +568,7 @@ func TestHTTPProbePortUsesLegacySSEGETEndpointAndMessageFlow(t *testing.T) {
 		}
 	})}, 1024)
 
-	err := port.Initialize(context.Background(), ProbeRequest{Payload: ConnectionPayload{Endpoint: "https://safe.example.test/mcp"}, Transport: TransportSSE})
+	err := port.Initialize(context.Background(), ProbeRequest{Payload: unauthenticatedProbePayload("https://safe.example.test/mcp"), Transport: TransportSSE})
 	require.NoError(t, err)
 	assert.Equal(t, []string{http.MethodGet, http.MethodPost, http.MethodPost}, methods)
 	assert.Equal(t, []string{"/mcp", "/legacy/messages?sessionId=opaque-legacy-session", "/legacy/messages?sessionId=opaque-legacy-session"}, paths)
@@ -483,7 +593,7 @@ func TestHTTPProbePortLegacySSEWaitsForMatchingDefaultMessageResponse(t *testing
 		}
 	})}, 1024)
 
-	err := port.Initialize(context.Background(), ProbeRequest{Payload: ConnectionPayload{Endpoint: "https://safe.example.test/mcp"}, Transport: TransportSSE})
+	err := port.Initialize(context.Background(), ProbeRequest{Payload: unauthenticatedProbePayload("https://safe.example.test/mcp"), Transport: TransportSSE})
 	require.NoError(t, err)
 	assert.Equal(t, []string{http.MethodGet, http.MethodPost, http.MethodPost}, methods)
 }
@@ -500,7 +610,7 @@ func TestHTTPProbePortRejectsCrossOriginLegacySSEEndpoint(t *testing.T) {
 		return &http.Response{StatusCode: http.StatusOK, Header: http.Header{"Content-Type": []string{"text/event-stream"}}, Body: io.NopCloser(strings.NewReader(validInitializeResponseSSE())), Request: request}, nil
 	})}, 512)
 
-	err := port.Initialize(context.Background(), ProbeRequest{Payload: ConnectionPayload{Endpoint: "https://safe.example.test/mcp"}, Transport: TransportSSE})
+	err := port.Initialize(context.Background(), ProbeRequest{Payload: unauthenticatedProbePayload("https://safe.example.test/mcp"), Transport: TransportSSE})
 	require.ErrorIs(t, err, ErrProbeFailed)
 	assert.Equal(t, []string{http.MethodGet}, methods)
 }
@@ -537,7 +647,7 @@ func TestProbeStreamableHTTPAcceptsOpenSSEInitializeWithoutWaitingForEOF(t *test
 	}
 	done := make(chan result, 1)
 	go func() {
-		value, err := engine.Probe(context.Background(), "config-open-streamable-sse", ConnectionPayload{Endpoint: "https://safe.example.test/mcp"}, TransportAuto)
+		value, err := engine.Probe(context.Background(), "config-open-streamable-sse", unauthenticatedProbePayload("https://safe.example.test/mcp"), TransportAuto)
 		done <- result{value: value, err: err}
 	}()
 
@@ -574,7 +684,7 @@ func TestProbeSSEContextCancellationClosesStreamingBody(t *testing.T) {
 	done := make(chan error, 1)
 	go func() {
 		done <- port.Initialize(ctx, ProbeRequest{
-			Payload:   ConnectionPayload{Endpoint: "https://safe.example.test/mcp"},
+			Payload:   unauthenticatedProbePayload("https://safe.example.test/mcp"),
 			Transport: TransportSSE,
 		})
 	}()

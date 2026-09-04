@@ -136,6 +136,58 @@ func TestRepositorySetEnabledRejectsStaleCurrentVersion(t *testing.T) {
 	assert.Equal(t, 2, stored.CurrentVersion)
 }
 
+func TestRepositorySetEnabledRequiresPassedCurrentVersionInsideTransaction(t *testing.T) {
+	ctx := context.Background()
+	db := openMCPConnectionPostgresDB(t)
+	require.NoError(t, database.Migrate(db))
+	repository := NewGormRepository(db)
+	config := testConnectionConfig("config-enable-current-status-sentinel")
+	version := testConnectionVersion(config.ID, "version-enable-current-status-sentinel", "ciphertext-enable-current-status-sentinel")
+	require.NoError(t, repository.Create(ctx, config, version))
+
+	_, err := repository.SetEnabled(ctx, config.ID, 1, "1", true)
+	require.ErrorIs(t, err, ErrTaskConnectionUnavailable)
+	stored, err := repository.GetConfig(ctx, config.ID)
+	require.NoError(t, err)
+	assert.False(t, stored.Enabled)
+}
+
+func TestRepositoryFailedCurrentProbeDisablesConnectionAndOldVersionDoesNotChangeCurrent(t *testing.T) {
+	ctx := context.Background()
+	db := openMCPConnectionPostgresDB(t)
+	require.NoError(t, database.Migrate(db))
+	repository := NewGormRepository(db)
+	config := testConnectionConfig("config-probe-failure-state-sentinel")
+	first := testConnectionVersion(config.ID, "version-probe-failure-one-sentinel", "ciphertext-probe-failure-one-sentinel")
+	require.NoError(t, repository.Create(ctx, config, first))
+	require.NoError(t, repository.RecordProbeResult(ctx, config.ID, 1, TransportHTTP, ProbeStatusPassed))
+	_, err := repository.SetEnabled(ctx, config.ID, 1, "1", true)
+	require.NoError(t, err)
+
+	require.NoError(t, repository.RecordProbeResult(ctx, config.ID, 1, "", ProbeStatusFailed))
+	stored, err := repository.GetConfig(ctx, config.ID)
+	require.NoError(t, err)
+	assert.False(t, stored.Enabled)
+	failed, err := repository.GetVersion(ctx, config.ID, 1)
+	require.NoError(t, err)
+	assert.Equal(t, ProbeStatusFailed, failed.ProbeStatus)
+	assert.Empty(t, failed.DetectedTransport)
+	_, err = repository.SetEnabled(ctx, config.ID, stored.CurrentVersion, stored.ResourceRevision, true)
+	require.ErrorIs(t, err, ErrTaskConnectionUnavailable)
+
+	second := testConnectionVersion(config.ID, "version-probe-failure-two-sentinel", "ciphertext-probe-failure-two-sentinel")
+	_, err = repository.CreateNextVersion(ctx, config.ID, second)
+	require.NoError(t, err)
+	require.NoError(t, repository.RecordProbeResult(ctx, config.ID, 1, "", ProbeStatusFailed), "a stale probe may mark only its own immutable version failed")
+	current, err := repository.GetVersion(ctx, config.ID, 2)
+	require.NoError(t, err)
+	assert.Equal(t, ProbeStatusNotTested, current.ProbeStatus)
+	assert.Empty(t, current.DetectedTransport)
+	stored, err = repository.GetConfig(ctx, config.ID)
+	require.NoError(t, err)
+	assert.False(t, stored.Enabled)
+}
+
 func TestRepositoryPersistsOnlyEncryptedRepositorySourceBinding(t *testing.T) {
 	ctx := context.Background()
 	db := openMCPConnectionPostgresDB(t)

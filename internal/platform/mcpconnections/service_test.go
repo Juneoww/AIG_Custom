@@ -85,9 +85,23 @@ func (repository *memoryConnectionRepository) RecordProbeResult(_ context.Contex
 	if err != nil {
 		return err
 	}
+	if !validProbeResult(transport, status) {
+		return ErrInvalid
+	}
 	stored.DetectedTransport = transport
 	stored.ProbeStatus = status
 	repository.versions[configID][version] = stored
+	if status == ProbeStatusFailed {
+		config, ok := repository.configs[configID]
+		if ok && config.CurrentVersion == version && config.Enabled {
+			nextRevision, revisionErr := incrementRevision(config.ResourceRevision)
+			if revisionErr != nil {
+				return revisionErr
+			}
+			config.Enabled = false
+			config.ResourceRevision = nextRevision
+		}
+	}
 	repository.recorded++
 	return nil
 }
@@ -104,6 +118,21 @@ func (repository *memoryConnectionRepository) SetEnabled(_ context.Context, conf
 	}
 	if stored.CurrentVersion != expectedCurrentVersion || stored.ResourceRevision != expectedResourceRevision {
 		return nil, ErrConflict
+	}
+	version, ok := repository.versions[configID][stored.CurrentVersion]
+	if !ok {
+		return nil, ErrNotFound
+	}
+	if enabled && (version.ProbeStatus != ProbeStatusPassed || !concreteProbeTransport(version.DetectedTransport)) {
+		if stored.Enabled {
+			nextRevision, err := incrementRevision(stored.ResourceRevision)
+			if err != nil {
+				return nil, err
+			}
+			stored.Enabled = false
+			stored.ResourceRevision = nextRevision
+		}
+		return nil, ErrTaskConnectionUnavailable
 	}
 	nextRevision, err := incrementRevision(stored.ResourceRevision)
 	if err != nil {
@@ -209,6 +238,13 @@ func TestValidCreateInputRejectsUnsafeOrAmbiguousHTTPHeaders(t *testing.T) {
 		{name: "cookie", headers: []Header{{Name: "Cookie", Value: "session=value"}}},
 		{name: "proxy", headers: []Header{{Name: "Proxy-Authorization", Value: "opaque"}}},
 		{name: "mcp session", headers: []Header{{Name: "mCp-Session-Id", Value: "opaque"}}},
+		{name: "forwarded", headers: []Header{{Name: "Forwarded", Value: "for=127.0.0.1"}}},
+		{name: "forwarded chain", headers: []Header{{Name: "X-Forwarded-For", Value: "127.0.0.1"}}},
+		{name: "real ip", headers: []Header{{Name: "X-Real-IP", Value: "127.0.0.1"}}},
+		{name: "original url", headers: []Header{{Name: "X-Original-URL", Value: "/admin"}}},
+		{name: "rewrite url", headers: []Header{{Name: "X-Rewrite-URL", Value: "/admin"}}},
+		{name: "via", headers: []Header{{Name: "Via", Value: "1.1 proxy"}}},
+		{name: "method override", headers: []Header{{Name: "X-HTTP-Method-Override", Value: "DELETE"}}},
 		{name: "invalid token", headers: []Header{{Name: "X Bad", Value: "opaque"}}},
 		{name: "newline", headers: []Header{{Name: "X-Test\r\nInjected", Value: "opaque"}}},
 		{name: "name too long", headers: []Header{{Name: strings.Repeat("X", 65), Value: "opaque"}}},
@@ -235,6 +271,8 @@ func TestValidCreateInputRejectsUnsafeOrAmbiguousHTTPHeaders(t *testing.T) {
 	badAPIKeyName := base
 	badAPIKeyName.Headers = nil
 	badAPIKeyName.Authentication = Authentication{Kind: AuthenticationAPIKeyHeader, HeaderName: "Mcp-Session-Id", Secret: "opaque"}
+	assert.False(t, validCreateInput(badAPIKeyName))
+	badAPIKeyName.Authentication.HeaderName = "X-Forwarded-Host"
 	assert.False(t, validCreateInput(badAPIKeyName))
 
 	badBearerSecret := base
@@ -349,7 +387,7 @@ func TestServiceFailsClosedWithoutControlledGateway(t *testing.T) {
 	require.ErrorIs(t, service.ValidateTaskConnection(ctx, alice, created.ID), ErrControlledEgressRequired)
 }
 
-func TestServiceStoresOnlySuccessfulProbeAndNeverReturnsProbeFailureDetail(t *testing.T) {
+func TestServiceRecordsFailedProbeWithoutReturningFailureDetail(t *testing.T) {
 	ctx := context.Background()
 	repository := newMemoryConnectionRepository()
 	port := &scriptedProbePort{errors: map[Transport]error{
@@ -367,10 +405,11 @@ func TestServiceStoresOnlySuccessfulProbeAndNeverReturnsProbeFailureDetail(t *te
 	assert.NotContains(t, err.Error(), "X-Private-Header-Name")
 	assert.NotContains(t, err.Error(), "private-token-value")
 	assert.Equal(t, []Transport{TransportHTTP, TransportSSE}, port.attempts)
-	assert.Zero(t, repository.recorded, "failed probe bodies and errors must not be persisted")
+	assert.Equal(t, 1, repository.recorded, "a real probe failure must update only the immutable started version to failed")
 	version, err := repository.GetVersion(ctx, created.ID, 1)
 	require.NoError(t, err)
-	assert.Equal(t, ProbeStatusNotTested, version.ProbeStatus)
+	assert.Equal(t, ProbeStatusFailed, version.ProbeStatus)
+	assert.Empty(t, version.DetectedTransport)
 
 	port.errors = map[Transport]error{TransportHTTP: nil}
 	port.attempts = nil
@@ -378,7 +417,7 @@ func TestServiceStoresOnlySuccessfulProbeAndNeverReturnsProbeFailureDetail(t *te
 	require.NoError(t, err)
 	assert.Equal(t, ProbeStatusPassed, probed.ProbeStatus)
 	assert.Equal(t, TransportHTTP, probed.DetectedTransport)
-	assert.Equal(t, 1, repository.recorded)
+	assert.Equal(t, 2, repository.recorded)
 	_, err = service.SetEnabled(ctx, alice, created.ID, true)
 	require.NoError(t, err)
 	options, err := service.TaskOptions(ctx, alice)
@@ -386,6 +425,84 @@ func TestServiceStoresOnlySuccessfulProbeAndNeverReturnsProbeFailureDetail(t *te
 	require.Len(t, options, 1)
 	assert.Equal(t, created.ID, options[0].ConnectionID)
 	assert.Equal(t, 1, options[0].ConnectionVersion)
+}
+
+func TestServiceFailedProbeRevokesEnabledTaskEligibility(t *testing.T) {
+	ctx := context.Background()
+	repository := newMemoryConnectionRepository()
+	port := &scriptedProbePort{errors: map[Transport]error{TransportHTTP: nil}}
+	service := testService(t, repository, true, port)
+	alice := identity.Subject{UserID: "alice", Role: identity.RoleUser}
+	created, err := service.Create(ctx, alice, serviceInput("已探测连接", ScopePrivate, TransportHTTP))
+	require.NoError(t, err)
+	_, err = service.Probe(ctx, alice, created.ID)
+	require.NoError(t, err)
+	_, err = service.SetEnabled(ctx, alice, created.ID, true)
+	require.NoError(t, err)
+
+	port.errors = map[Transport]error{TransportHTTP: errors.New("upstream response containing secret material")}
+	_, err = service.Probe(ctx, alice, created.ID)
+	require.ErrorIs(t, err, ErrProbeFailed)
+	stored, err := repository.GetConfig(ctx, created.ID)
+	require.NoError(t, err)
+	assert.False(t, stored.Enabled)
+	version, err := repository.GetVersion(ctx, created.ID, 1)
+	require.NoError(t, err)
+	assert.Equal(t, ProbeStatusFailed, version.ProbeStatus)
+	assert.Empty(t, version.DetectedTransport)
+	options, err := service.TaskOptions(ctx, alice)
+	require.NoError(t, err)
+	assert.Empty(t, options)
+	require.ErrorIs(t, service.ValidateTaskConnection(ctx, alice, created.ID), ErrTaskConnectionUnavailable)
+	_, err = service.SetEnabled(ctx, alice, created.ID, true)
+	require.ErrorIs(t, err, ErrTaskConnectionUnavailable)
+}
+
+func TestServiceFailsClosedWhenCurrentAllowlistNoLongerPermitsConnection(t *testing.T) {
+	ctx := context.Background()
+	repository := newMemoryConnectionRepository()
+	service := testService(t, repository, true, &scriptedProbePort{errors: map[Transport]error{TransportHTTP: nil}})
+	alice := identity.Subject{UserID: "alice", Role: identity.RoleUser}
+	created, err := service.Create(ctx, alice, serviceInput("动态策略连接", ScopePrivate, TransportHTTP))
+	require.NoError(t, err)
+	_, err = service.Probe(ctx, alice, created.ID)
+	require.NoError(t, err)
+	_, err = service.SetEnabled(ctx, alice, created.ID, true)
+	require.NoError(t, err)
+
+	service.policy.allowedCIDRs = nil
+	options, err := service.TaskOptions(ctx, alice)
+	require.NoError(t, err)
+	assert.Empty(t, options)
+	require.ErrorIs(t, service.ValidateTaskConnection(ctx, alice, created.ID), ErrTaskConnectionUnavailable)
+	_, err = service.SetEnabled(ctx, alice, created.ID, false)
+	require.NoError(t, err)
+	_, err = service.SetEnabled(ctx, alice, created.ID, true)
+	require.ErrorIs(t, err, ErrOutboundDenied)
+}
+
+func TestServiceSetEnabledRejectsProbeFailureInterleavedAfterEligibilityRead(t *testing.T) {
+	ctx := context.Background()
+	repository := newMemoryConnectionRepository()
+	service := testService(t, repository, true, &scriptedProbePort{errors: map[Transport]error{}})
+	alice := identity.Subject{UserID: "alice", Role: identity.RoleUser}
+	created, err := service.Create(ctx, alice, serviceInput("交错状态连接", ScopePrivate, TransportHTTP))
+	require.NoError(t, err)
+	repository.versions[created.ID][1].ProbeStatus = ProbeStatusPassed
+	repository.versions[created.ID][1].DetectedTransport = TransportHTTP
+	repository.beforeSetEnabled = func() {
+		require.NoError(t, repository.RecordProbeResult(ctx, created.ID, 1, "", ProbeStatusFailed))
+	}
+
+	_, err = service.SetEnabled(ctx, alice, created.ID, true)
+	require.ErrorIs(t, err, ErrTaskConnectionUnavailable)
+	stored, getErr := repository.GetConfig(ctx, created.ID)
+	require.NoError(t, getErr)
+	assert.False(t, stored.Enabled)
+	version, getErr := repository.GetVersion(ctx, created.ID, 1)
+	require.NoError(t, getErr)
+	assert.Equal(t, ProbeStatusFailed, version.ProbeStatus)
+	assert.Empty(t, version.DetectedTransport)
 }
 
 func TestServiceRestrictsTaskUseToUsersAndAdministrators(t *testing.T) {

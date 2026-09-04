@@ -47,8 +47,15 @@ Header，但用户材料不能改变探测协议本身。
 每个自定义 Header 名必须是经 trim 后不超过 64 字节的 HTTP token；最多 10 个，每个值
 不超过 8 KiB，且名称按大小写无关去重。拒绝 `Host`、`Content-Length`、`Transfer-Encoding`、
 `Connection`、`Keep-Alive`、`Upgrade`、`TE`、`Trailer`、`Proxy-*`、`Content-Type`、`Accept`、
-`Cookie`、`Set-Cookie`、会话控制 Header 以及所有 `MCP-*` 名称。不得以 Header 传入路由、
-会话或协议覆盖；名称和值同样不得被记录、回显或投影到任务/审计页面。
+`Cookie`、`Set-Cookie`、会话控制 Header 以及所有 `MCP-*` 名称。还必须拒绝会影响可信
+代理、来源或路由判定的 `Forwarded`、`X-Forwarded-*`、`X-Real-IP`、`X-Original-URL`、
+`X-Rewrite-URL`、`Via` 与 HTTP method override Header。不得以 Header 传入路由、会话或
+协议覆盖；名称和值同样不得被记录、回显或投影到任务/审计页面。
+
+即使载荷来自已加密的历史连接版本，探测端口也必须在发起任意 HTTP、SSE、initialized
+notification 或 session cleanup 请求前重新规范化并严格验证认证 shape、secret、Header
+数量、名称、值和大小写无关去重。任一旧载荷不合规时不得发起网络请求，并只返回固定的
+探测失败结果；不能因其曾经落库而降低 Header 或认证策略。
 
 ## 运行与可观测性
 
@@ -68,9 +75,17 @@ request context 和响应字节上限约束。
 
 选择 `auto` 时先测试 Streamable HTTP，再测试 legacy SSE；指定 transport 不能回退。探测默认
 最短间隔为 1 分钟，按不透明连接配置 ID 独立限流，不能以 endpoint 作为限流键。只有当前版本
-探测成功、连接已启用且受控 dialer 可用时，连接才可被任务选择。启用操作会在同一锁定事务中
-复核 current version 和 resource revision；若配置在测试/启用之间产生新版本，旧版本不得启用
-新版本，调用方必须重新读取并验证。
+探测成功、连接已启用且受控 dialer 可用时，连接才可被任务选择。真实探测失败（限流除外）
+必须把启动时的不可变版本写为 `failed` 并清空 detected transport；若该版本仍是 current，
+同一事务必须撤销 enabled，避免留下 `enabled + failed` 的误导状态。旧版本的迟到结果只可
+写回旧版本，不能改变 current 配置。
+
+启用与探测结果写回都必须按 config 后 current/version 的顺序加锁。启用事务除了复核 expected
+current version 和 resource revision，还必须锁定并检查该 current version 仍为 `passed` 且具有
+具体 transport；探测失败与启用交错时，最终连接必须保持不可用。任务选项、任务连接验证和
+重新启用还必须解密 current payload，并以**当前** `ValidateServerURL` 允许集/DNS 策略复核
+endpoint：允许集收紧、清空、解析失败或材料不合规时，任务选项静默排除，验证/启用只返回
+固定的 unavailable 或 denied 结果。历史 probe 通过不等于当前仍可使用。
 
 连接名称和说明是受限的展示文本：不得包含 URL、认证/请求头关键词、疑似 token 或控制字符。
 审计员只能读取安全摘要，不能读取任务选项或验证任务连接；任务选项不返回连接说明。

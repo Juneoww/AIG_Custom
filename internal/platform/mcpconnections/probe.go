@@ -152,6 +152,19 @@ type HTTPProbePort struct {
 	maxResponseBytes int64
 }
 
+// validatedProbePayload 只可由 validateProbePayload 构造。它让所有后续 HTTP、
+// SSE、notification 与 session-cleanup 路径在类型层面只能消费已经过严格策略
+// 校验的内存副本，而不能重新接收任意历史解密 payload 或直接 ProbeRequest。
+type validatedProbePayload struct{ ConnectionPayload }
+
+func validateProbePayload(payload ConnectionPayload) (validatedProbePayload, error) {
+	canonical, valid := canonicalConnectionPayload(payload)
+	if !valid {
+		return validatedProbePayload{}, ErrProbeFailed
+	}
+	return validatedProbePayload{ConnectionPayload: canonical}, nil
+}
+
 func NewHTTPProbePort(policy *OutboundPolicy, options HTTPProbeOptions) (*HTTPProbePort, error) {
 	if err := policy.RequireControlledDialer(); err != nil {
 		return nil, err
@@ -175,14 +188,18 @@ func (port *HTTPProbePort) Initialize(ctx context.Context, request ProbeRequest)
 	if request.Transport != TransportHTTP && request.Transport != TransportSSE {
 		return ErrProbeFailed
 	}
-	if err := port.policy.ValidateServerURL(ctx, request.Payload.Endpoint); err != nil {
+	payload, err := validateProbePayload(request.Payload)
+	if err != nil {
+		return ErrProbeFailed
+	}
+	if err := port.policy.ValidateServerURL(ctx, payload.Endpoint); err != nil {
 		return ErrProbeFailed
 	}
 	switch request.Transport {
 	case TransportHTTP:
-		return port.initializeStreamableHTTP(ctx, request.Payload)
+		return port.initializeStreamableHTTP(ctx, payload)
 	case TransportSSE:
-		return port.initializeLegacySSE(ctx, request.Payload)
+		return port.initializeLegacySSE(ctx, payload)
 	default:
 		return ErrProbeFailed
 	}
@@ -191,7 +208,7 @@ func (port *HTTPProbePort) Initialize(ctx context.Context, request ProbeRequest)
 // initializeStreamableHTTP 是 MCP 2025-03-26 的单请求 Streamable HTTP 握手。
 // 该协议允许同一次 POST 以 JSON 或 SSE 返回 initialize 响应，因此响应的媒体
 // 类型不能被误用来推断 legacy SSE transport。
-func (port *HTTPProbePort) initializeStreamableHTTP(ctx context.Context, payload ConnectionPayload) error {
+func (port *HTTPProbePort) initializeStreamableHTTP(ctx context.Context, payload validatedProbePayload) error {
 	body, err := json.Marshal(minimumInitializeRequest())
 	if err != nil {
 		return ErrProbeFailed
@@ -200,7 +217,9 @@ func (port *HTTPProbePort) initializeStreamableHTTP(ctx context.Context, payload
 	if err != nil {
 		return ErrProbeFailed
 	}
-	applyProbeAuthentication(httpRequest, payload)
+	if err := applyProbeAuthentication(httpRequest, payload); err != nil {
+		return ErrProbeFailed
+	}
 	applyStreamableHTTPHeaders(httpRequest, "")
 
 	response, err := port.client.Do(httpRequest)
@@ -240,12 +259,14 @@ func (port *HTTPProbePort) initializeStreamableHTTP(ctx context.Context, payload
 // initializeLegacySSE 实现旧 SSE transport 的真实生命周期：先打开只读 SSE
 // stream，取得同 origin 的 message endpoint，向该 endpoint POST initialize，
 // 再从原 stream 等待匹配 response。绝不把一个 POST + Accept:SSE 冒充旧协议。
-func (port *HTTPProbePort) initializeLegacySSE(ctx context.Context, payload ConnectionPayload) error {
+func (port *HTTPProbePort) initializeLegacySSE(ctx context.Context, payload validatedProbePayload) error {
 	streamRequest, err := http.NewRequestWithContext(ctx, http.MethodGet, payload.Endpoint, nil)
 	if err != nil {
 		return ErrProbeFailed
 	}
-	applyProbeAuthentication(streamRequest, payload)
+	if err := applyProbeAuthentication(streamRequest, payload); err != nil {
+		return ErrProbeFailed
+	}
 	applyLegacySSEStreamHeaders(streamRequest)
 	streamResponse, err := port.client.Do(streamRequest)
 	if err != nil || streamResponse == nil || streamResponse.Body == nil {
@@ -286,7 +307,7 @@ func (port *HTTPProbePort) initializeLegacySSE(ctx context.Context, payload Conn
 	return port.postLegacySSEMessage(ctx, messageEndpoint, payload, initializedNotification())
 }
 
-func (port *HTTPProbePort) sendStreamableInitialized(ctx context.Context, payload ConnectionPayload, sessionID string) error {
+func (port *HTTPProbePort) sendStreamableInitialized(ctx context.Context, payload validatedProbePayload, sessionID string) error {
 	message, err := json.Marshal(initializedNotification())
 	if err != nil {
 		return ErrProbeFailed
@@ -295,7 +316,9 @@ func (port *HTTPProbePort) sendStreamableInitialized(ctx context.Context, payloa
 	if err != nil {
 		return ErrProbeFailed
 	}
-	applyProbeAuthentication(request, payload)
+	if err := applyProbeAuthentication(request, payload); err != nil {
+		return ErrProbeFailed
+	}
 	applyStreamableHTTPHeaders(request, sessionID)
 	response, err := port.client.Do(request)
 	if err != nil || response == nil || response.Body == nil {
@@ -308,7 +331,7 @@ func (port *HTTPProbePort) sendStreamableInitialized(ctx context.Context, payloa
 	return nil
 }
 
-func (port *HTTPProbePort) cleanupStreamableSession(ctx context.Context, payload ConnectionPayload, sessionID string) {
+func (port *HTTPProbePort) cleanupStreamableSession(ctx context.Context, payload validatedProbePayload, sessionID string) {
 	if port == nil || port.client == nil || sessionID == "" {
 		return
 	}
@@ -318,7 +341,9 @@ func (port *HTTPProbePort) cleanupStreamableSession(ctx context.Context, payload
 	if err != nil {
 		return
 	}
-	applyProbeAuthentication(request, payload)
+	if applyProbeAuthentication(request, payload) != nil {
+		return
+	}
 	// session ID 来自握手响应，不能由用户配置覆盖；在认证材料之后固定写入。
 	request.Header.Set("Mcp-Session-Id", sessionID)
 	response, err := port.client.Do(request)
@@ -327,7 +352,7 @@ func (port *HTTPProbePort) cleanupStreamableSession(ctx context.Context, payload
 	}
 }
 
-func (port *HTTPProbePort) postLegacySSEMessage(ctx context.Context, target string, payload ConnectionPayload, message map[string]any) error {
+func (port *HTTPProbePort) postLegacySSEMessage(ctx context.Context, target string, payload validatedProbePayload, message map[string]any) error {
 	body, err := json.Marshal(message)
 	if err != nil {
 		return ErrProbeFailed
@@ -336,7 +361,9 @@ func (port *HTTPProbePort) postLegacySSEMessage(ctx context.Context, target stri
 	if err != nil {
 		return ErrProbeFailed
 	}
-	applyProbeAuthentication(request, payload)
+	if err := applyProbeAuthentication(request, payload); err != nil {
+		return ErrProbeFailed
+	}
 	applyLegacySSEPostHeaders(request)
 	response, err := port.client.Do(request)
 	if err != nil || response == nil || response.Body == nil {
@@ -372,11 +399,18 @@ func initializedNotification() map[string]any {
 	}
 }
 
-func applyProbeAuthentication(request *http.Request, payload ConnectionPayload) {
+func applyProbeAuthentication(request *http.Request, payload validatedProbePayload) error {
+	if request == nil {
+		return ErrProbeFailed
+	}
+	// validatedProbePayload 是私有类型，但同包未来代码仍可手工构造。再次要求
+	// canonical payload，避免绕过 Initialize 的入口校验而把不合法 Header 写入请求。
+	canonical, valid := canonicalConnectionPayload(payload.ConnectionPayload)
+	if !valid || !sameConnectionPayload(canonical, payload.ConnectionPayload) {
+		return ErrProbeFailed
+	}
 	for _, header := range payload.Headers {
-		if header.Name != "" {
-			request.Header.Set(header.Name, header.Value)
-		}
+		request.Header.Set(header.Name, header.Value)
 	}
 	switch payload.Authentication.Kind {
 	case AuthenticationBearer:
@@ -386,6 +420,19 @@ func applyProbeAuthentication(request *http.Request, payload ConnectionPayload) 
 			request.Header.Set(payload.Authentication.HeaderName, payload.Authentication.Secret)
 		}
 	}
+	return nil
+}
+
+func sameConnectionPayload(left, right ConnectionPayload) bool {
+	if left.Endpoint != right.Endpoint || left.Authentication != right.Authentication || len(left.Headers) != len(right.Headers) {
+		return false
+	}
+	for index := range left.Headers {
+		if left.Headers[index] != right.Headers[index] {
+			return false
+		}
+	}
+	return true
 }
 
 // applyStreamableHTTPHeaders 必须在全部用户材料之后调用。保存时的 header 策略

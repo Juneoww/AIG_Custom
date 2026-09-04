@@ -186,6 +186,11 @@ func (service *Service) Probe(ctx context.Context, subject identity.Subject, con
 		if errors.Is(err, ErrProbeRateLimited) {
 			return nil, ErrProbeRateLimited
 		}
+		// 失败同样是当前启动版本的状态结论。仓储会在 version 仍为 current 时
+		// 原子撤销 enabled；若期间已创建新版，则只标记旧版，绝不覆盖新版材料。
+		if recordErr := service.repository.RecordProbeResult(ctx, config.ID, version.Version, "", ProbeStatusFailed); recordErr != nil {
+			return nil, ErrProbeFailed
+		}
 		return nil, ErrProbeFailed
 	}
 	if err := service.repository.RecordProbeResult(ctx, config.ID, version.Version, result.DetectedTransport, ProbeStatusPassed); err != nil {
@@ -211,6 +216,9 @@ func (service *Service) SetEnabled(ctx context.Context, subject identity.Subject
 		}
 		if version.ProbeStatus != ProbeStatusPassed || !concreteProbeTransport(version.DetectedTransport) {
 			return nil, ErrTaskConnectionUnavailable
+		}
+		if _, err := service.currentPayloadPermitted(ctx, config, version); err != nil {
+			return nil, err
 		}
 	}
 	updated, err := service.repository.SetEnabled(ctx, config.ID, version.Version, config.ResourceRevision, enabled)
@@ -250,11 +258,8 @@ func (service *Service) TaskOptions(ctx context.Context, subject identity.Subjec
 		if version.ProbeStatus != ProbeStatusPassed || !concreteProbeTransport(version.DetectedTransport) {
 			continue
 		}
-		if service.keyring == nil {
-			continue
-		}
-		payload, openErr := service.keyring.OpenConnectionPayload(config, version)
-		if openErr != nil {
+		payload, permittedErr := service.currentPayloadPermitted(ctx, config, version)
+		if permittedErr != nil {
 			continue
 		}
 		name, _, displaySafe := safeConnectionDisplayText(config.Name, config.Description, &payload)
@@ -288,7 +293,33 @@ func (service *Service) ValidateTaskConnection(ctx context.Context, subject iden
 	if !config.Enabled || version.ProbeStatus != ProbeStatusPassed || !concreteProbeTransport(version.DetectedTransport) {
 		return ErrTaskConnectionUnavailable
 	}
+	if _, err := service.currentPayloadPermitted(ctx, config, version); err != nil {
+		// 任务创建者只需要知道该连接此刻不可用，不能分辨解密、DNS 或允许集
+		// 的内部原因，更不能由错误文本获得 endpoint 或 header 材料。
+		return ErrTaskConnectionUnavailable
+	}
 	return nil
+}
+
+// currentPayloadPermitted 将当前版本的加密材料重新解密并依照当前 outbound
+// policy 复核，而不是相信历史 probe 的结论。允许集、DNS 解析或材料结构变更后，
+// 资格路径必须 fail closed；调用方只得到固定的 unavailable/denied 错误。
+func (service *Service) currentPayloadPermitted(ctx context.Context, config *ConnectionConfig, version *ConnectionVersion) (ConnectionPayload, error) {
+	if service == nil || service.keyring == nil || service.policy == nil || config == nil || version == nil {
+		return ConnectionPayload{}, ErrTaskConnectionUnavailable
+	}
+	payload, err := service.keyring.OpenConnectionPayload(config, version)
+	if err != nil {
+		return ConnectionPayload{}, ErrTaskConnectionUnavailable
+	}
+	payload, valid := canonicalConnectionPayload(payload)
+	if !valid {
+		return ConnectionPayload{}, ErrTaskConnectionUnavailable
+	}
+	if service.policy.ValidateServerURL(ctx, payload.Endpoint) != nil {
+		return ConnectionPayload{}, ErrOutboundDenied
+	}
+	return payload, nil
 }
 
 func (service *Service) visibleCurrentVersion(ctx context.Context, subject identity.Subject, configID string) (*ConnectionConfig, *ConnectionVersion, error) {
@@ -410,11 +441,30 @@ func validCreateInput(input CreateConnectionInput) bool {
 	if input.Scope != ScopePrivate && input.Scope != ScopeGlobal || !configurableTransport(input.Transport) || strings.TrimSpace(input.ServerURL) == "" {
 		return false
 	}
-	payload := connectionPayloadFromInput(input)
+	payload, validPayload := canonicalConnectionPayload(connectionPayloadFromInput(input))
+	if !validPayload {
+		return false
+	}
 	if _, _, safe := safeConnectionDisplayText(input.Name, input.Description, &payload); !safe {
 		return false
 	}
-	if !validCustomHeaders(payload.Headers) {
+	return true
+}
+
+// canonicalConnectionPayload 是所有已解密或尚未加密连接材料进入受控执行路径前
+// 的唯一规范化边界。历史版本并不天然可信：名称去空白后仍必须满足和新建连接
+// 相同的认证 shape、Header 名/值、大小与去重策略，否则调用方只能 fail closed。
+// 该函数只返回内存副本，绝不记录或包装失败的秘密材料。
+func canonicalConnectionPayload(payload ConnectionPayload) (ConnectionPayload, bool) {
+	canonical := payload
+	canonical.Endpoint = strings.TrimSpace(canonical.Endpoint)
+	canonical.Authentication.HeaderName = strings.TrimSpace(canonical.Authentication.HeaderName)
+	canonical.Headers = normalizedHeaders(canonical.Headers)
+	return canonical, validConnectionPayload(canonical)
+}
+
+func validConnectionPayload(payload ConnectionPayload) bool {
+	if strings.TrimSpace(payload.Endpoint) == "" || !validCustomHeaders(payload.Headers) {
 		return false
 	}
 	authentication := payload.Authentication
@@ -476,12 +526,14 @@ func validCustomHeaderName(name string) bool {
 		return false
 	}
 	name = strings.ToLower(name)
-	if strings.HasPrefix(name, "mcp-") || strings.HasPrefix(name, "proxy-") {
+	if strings.HasPrefix(name, "mcp-") || strings.HasPrefix(name, "proxy-") || strings.HasPrefix(name, "x-forwarded-") {
 		return false
 	}
 	switch name {
 	case "host", "content-length", "transfer-encoding", "connection", "keep-alive", "upgrade", "te", "trailer",
-		"content-type", "accept", "cookie", "set-cookie", "cache-control", "last-event-id":
+		"content-type", "accept", "cookie", "set-cookie", "cache-control", "last-event-id",
+		"forwarded", "via", "x-real-ip", "x-original-url", "x-original-uri", "x-rewrite-url", "x-rewrite-uri",
+		"x-http-method-override", "x-http-method", "x-method-override", "x-url-scheme", "x-forwarded-ssl", "x-arr-ssl":
 		return false
 	default:
 		return true
@@ -720,6 +772,9 @@ func mapServiceRepositoryError(err error) error {
 	}
 	if errors.Is(err, ErrConflict) {
 		return ErrConflict
+	}
+	if errors.Is(err, ErrTaskConnectionUnavailable) {
+		return ErrTaskConnectionUnavailable
 	}
 	return ErrInvalid
 }
