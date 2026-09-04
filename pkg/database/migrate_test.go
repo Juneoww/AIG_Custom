@@ -123,6 +123,15 @@ func TestMigrationAppliesGovernanceAndPlatformTaskSchemaThroughVersionTen(t *tes
 	assert.Equal(t, int64(10), versions[9].Version)
 }
 
+func TestMigrationVersionFiveLeavesRemarkAndTargetCountForVersionTen(t *testing.T) {
+	db := openPostgresTestDB(t)
+	resetPostgresTestDB(t, db)
+	require.NoError(t, migratePlatformTaskSchema(db))
+
+	assert.False(t, db.Migrator().HasColumn("platform_tasks", "remark"))
+	assert.False(t, db.Migrator().HasColumn("platform_tasks", "target_count"))
+}
+
 func TestMigrationUpgradesExistingVersionThreeWithoutRewritingIt(t *testing.T) {
 	db := openPostgresTestDB(t)
 	resetPostgresTestDB(t, db)
@@ -487,6 +496,25 @@ WHERE table_schema = current_schema()
 	require.NoError(t, Migrate(db), "v10 upgrade must remain idempotent")
 	assert.True(t, db.Migrator().HasColumn("platform_tasks", "remark"))
 	assert.True(t, db.Migrator().HasColumn("platform_tasks", "target_count"))
+	var columns []struct {
+		Name          string `gorm:"column:column_name"`
+		IsNullable    string `gorm:"column:is_nullable"`
+		ColumnDefault string `gorm:"column:column_default"`
+	}
+	require.NoError(t, db.Raw(`
+SELECT column_name, is_nullable, column_default
+FROM information_schema.columns
+WHERE table_schema = current_schema()
+  AND table_name = 'platform_tasks'
+  AND column_name IN ('remark', 'target_count')
+ORDER BY column_name ASC`).Scan(&columns).Error)
+	require.Len(t, columns, 2)
+	assert.Equal(t, "NO", columns[0].IsNullable)
+	assert.Equal(t, "remark", columns[0].Name)
+	assert.Contains(t, columns[0].ColumnDefault, "''")
+	assert.Equal(t, "NO", columns[1].IsNullable)
+	assert.Equal(t, "target_count", columns[1].Name)
+	assert.Equal(t, "0", columns[1].ColumnDefault)
 	var row struct {
 		Remark      string `gorm:"column:remark"`
 		TargetCount int    `gorm:"column:target_count"`
