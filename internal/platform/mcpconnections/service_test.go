@@ -160,7 +160,7 @@ func TestServiceEnforcesVisibilityAndSafeConnectionProjections(t *testing.T) {
 	auditor := identity.Subject{UserID: "auditor", Role: identity.RoleAuditor}
 	admin := identity.Subject{UserID: "admin", Role: identity.RoleAdmin}
 
-	private, err := service.Create(ctx, alice, serviceInput("alice-private", ScopePrivate, TransportHTTP))
+	private, err := service.Create(ctx, alice, serviceInput("alice private", ScopePrivate, TransportHTTP))
 	require.NoError(t, err)
 	global, err := service.Create(ctx, admin, serviceInput("global", ScopeGlobal, TransportHTTP))
 	require.NoError(t, err)
@@ -198,7 +198,7 @@ func TestServiceEnforcesVisibilityAndSafeConnectionProjections(t *testing.T) {
 	assert.True(t, detail.CustomHeadersConfigured)
 	_, err = service.GetManagementDetail(ctx, admin, private.ID)
 	require.NoError(t, err)
-	_, err = service.Create(ctx, alice, serviceInput("not-allowed-global", ScopeGlobal, TransportHTTP))
+	_, err = service.Create(ctx, alice, serviceInput("not allowed global", ScopeGlobal, TransportHTTP))
 	require.ErrorIs(t, err, ErrForbidden)
 
 	summary, err := service.GetSummary(ctx, alice, private.ID)
@@ -451,6 +451,93 @@ func TestServiceRejectsDisplayTextBypassesAndConnectionMaterialEchoes(t *testing
 	options, err := service.TaskOptions(ctx, alice)
 	require.NoError(t, err)
 	assert.Empty(t, options, "unsafe legacy text must not be task-selectable")
+}
+
+func TestServiceRejectsEmbeddedConnectionMaterialAndFailsClosedForLegacyText(t *testing.T) {
+	ctx := context.Background()
+	repository := newMemoryConnectionRepository()
+	service := testService(t, repository, true, &scriptedProbePort{errors: map[Transport]error{}})
+	alice := identity.Subject{UserID: "alice", Role: identity.RoleUser}
+	fields := []struct {
+		name string
+		set  func(*CreateConnectionInput, string)
+	}{
+		{name: "name", set: func(input *CreateConnectionInput, value string) { input.Name = value }},
+		{name: "description", set: func(input *CreateConnectionInput, value string) { input.Description = value }},
+	}
+
+	newInput := func() CreateConnectionInput {
+		return CreateConnectionInput{
+			Name:        "生产安全扫描",
+			Description: "用于业务流程验证",
+			Scope:       ScopePrivate,
+			Transport:   TransportHTTP,
+			ServerURL:   "https://mcp.internal.example/mcp",
+			Authentication: Authentication{
+				Kind:       AuthenticationAPIKeyHeader,
+				HeaderName: "X-Env",
+				Secret:     "opaqueauth4729",
+			},
+			Headers: []Header{{Name: "Content-Type", Value: "orchid938"}},
+		}
+	}
+
+	for _, unsafeText := range []string{
+		"生产 MCP mcp.internal.example",
+		"连接 X-Env",
+		"Content-Type",
+		"Trace-Route",
+		"github.internal/team/repo.git",
+		strings.Repeat("a", 31),
+		"目标 mcp.internal.example",
+		"通道 X-Env",
+		"标识 opaqueauth4729",
+		"花园 orchid938",
+	} {
+		for _, field := range fields {
+			t.Run(field.name+"/"+unsafeText, func(t *testing.T) {
+				input := newInput()
+				field.set(&input, unsafeText)
+				_, err := service.Create(ctx, alice, input)
+				require.ErrorIs(t, err, ErrInvalid)
+			})
+		}
+	}
+
+	created, err := service.Create(ctx, alice, newInput())
+	require.NoError(t, err)
+	repository.configs[created.ID].Name = "标识 opaqueauth4729"
+	repository.configs[created.ID].Description = "花园 orchid938"
+
+	list, err := service.List(ctx, alice)
+	require.NoError(t, err)
+	require.Len(t, list, 1)
+	assert.Empty(t, list[0].Name)
+	assert.Empty(t, list[0].Description)
+
+	summary, err := service.GetSummary(ctx, alice, created.ID)
+	require.NoError(t, err)
+	assert.Empty(t, summary.Name)
+	assert.Empty(t, summary.Description)
+
+	detail, err := service.GetManagementDetail(ctx, alice, created.ID)
+	require.NoError(t, err)
+	assert.Empty(t, detail.Name)
+	assert.Empty(t, detail.Description)
+
+	probed, err := service.Probe(ctx, alice, created.ID)
+	require.NoError(t, err)
+	assert.Empty(t, probed.Name)
+	assert.Empty(t, probed.Description)
+
+	enabled, err := service.SetEnabled(ctx, alice, created.ID, true)
+	require.NoError(t, err)
+	assert.Empty(t, enabled.Name)
+	assert.Empty(t, enabled.Description)
+
+	options, err := service.TaskOptions(ctx, alice)
+	require.NoError(t, err)
+	assert.Empty(t, options, "unsafe legacy display text must not be task-selectable")
 }
 
 func TestServiceRejectsBlankIdentityAcrossAuthorizationPaths(t *testing.T) {

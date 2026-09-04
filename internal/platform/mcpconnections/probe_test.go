@@ -144,6 +144,56 @@ func TestHTTPProbePortSendsOnlyInitializeAndBoundsResponseBody(t *testing.T) {
 	assert.NotContains(t, err.Error(), "private-token-value")
 }
 
+func TestHTTPProbePortRequiresMatchingInitializeResponse(t *testing.T) {
+	policy := testPolicy(t, true)
+	tests := []struct {
+		name  string
+		body  string
+		valid bool
+	}{
+		{name: "missing id", body: `{"jsonrpc":"2.0","result":{"protocolVersion":"2025-03-26"}}`},
+		{name: "wrong id", body: `{"jsonrpc":"2.0","id":"another-request","result":{"protocolVersion":"2025-03-26"}}`},
+		{name: "null result", body: `{"jsonrpc":"2.0","id":"mcp-probe","result":null}`},
+		{name: "string result", body: `{"jsonrpc":"2.0","id":"mcp-probe","result":"unexpected"}`},
+		{name: "array result", body: `{"jsonrpc":"2.0","id":"mcp-probe","result":[]}`},
+		{name: "empty result object", body: `{"jsonrpc":"2.0","id":"mcp-probe","result":{}}`},
+		{name: "missing protocol version", body: `{"jsonrpc":"2.0","id":"mcp-probe","result":{"serverInfo":{"name":"test"}}}`},
+		{name: "blank protocol version", body: `{"jsonrpc":"2.0","id":"mcp-probe","result":{"protocolVersion":" "}}`},
+		{name: "matching initialize result", body: `{"jsonrpc":"2.0","id":"mcp-probe","result":{"protocolVersion":"2025-03-26"}}`, valid: true},
+	}
+
+	for _, transport := range []Transport{TransportHTTP, TransportSSE} {
+		for _, test := range tests {
+			t.Run(string(transport)+"/"+test.name, func(t *testing.T) {
+				contentType := "application/json"
+				body := test.body
+				if transport == TransportSSE {
+					contentType = "text/event-stream"
+					body = "data: " + body + "\n\n"
+				}
+				port := newHTTPProbePortWithTestClient(t, policy, &http.Client{Transport: roundTripperFunc(func(request *http.Request) (*http.Response, error) {
+					return &http.Response{
+						StatusCode: http.StatusOK,
+						Header:     http.Header{"Content-Type": []string{contentType}},
+						Body:       io.NopCloser(strings.NewReader(body)),
+						Request:    request,
+					}, nil
+				})}, 512)
+
+				err := port.Initialize(context.Background(), ProbeRequest{
+					Payload:   ConnectionPayload{Endpoint: "https://safe.example.test/mcp"},
+					Transport: transport,
+				})
+				if test.valid {
+					require.NoError(t, err)
+					return
+				}
+				require.ErrorIs(t, err, ErrProbeFailed)
+			})
+		}
+	}
+}
+
 func TestHTTPProbePortRejectsRedirectResponseWithoutFollowingIt(t *testing.T) {
 	policy := testPolicy(t, true)
 	port := newHTTPProbePortWithTestClient(t, policy, &http.Client{Transport: roundTripperFunc(func(request *http.Request) (*http.Response, error) {
@@ -171,7 +221,7 @@ func TestHTTPProbePortAutoRetriesSSEWhenHTTPReceivesEventStream(t *testing.T) {
 		return &http.Response{
 			StatusCode: http.StatusOK,
 			Header:     http.Header{"Content-Type": []string{"text/event-stream"}},
-			Body:       io.NopCloser(strings.NewReader("data: {\"jsonrpc\":\"2.0\",\"result\":{}}\n\n")),
+			Body:       io.NopCloser(strings.NewReader("data: {\"jsonrpc\":\"2.0\",\"id\":\"mcp-probe\",\"result\":{\"protocolVersion\":\"2025-03-26\"}}\n\n")),
 			Request:    request,
 		}, nil
 	})}, 256)
@@ -225,7 +275,7 @@ func TestProbeAutoAcceptsOpenSSEInitializeWithoutWaitingForEOF(t *testing.T) {
 	sseReader, sseWriter := io.Pipe()
 	holdSSEOpen := make(chan struct{})
 	go func() {
-		_, _ = io.WriteString(sseWriter, "data: {\"jsonrpc\":\"2.0\",\"result\":{}}\n\n")
+		_, _ = io.WriteString(sseWriter, "data: {\"jsonrpc\":\"2.0\",\"id\":\"mcp-probe\",\"result\":{\"protocolVersion\":\"2025-03-26\"}}\n\n")
 		<-holdSSEOpen
 		_ = sseWriter.Close()
 	}()

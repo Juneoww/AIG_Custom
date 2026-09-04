@@ -20,7 +20,7 @@ var (
 const (
 	maxConnectionNameRunes        = 80
 	maxConnectionDescriptionRunes = 240
-	maxDisplayTokenRunes          = 32
+	maxDisplayTokenRunes          = 31
 )
 
 // ConnectionRepository 是连接服务使用的最小持久化边界。Task 4 的任务 UoW
@@ -63,6 +63,7 @@ func (service *Service) Create(ctx context.Context, subject identity.Subject, in
 	if !canCreate(subject, input.Scope) {
 		return nil, ErrForbidden
 	}
+	payload := connectionPayloadFromInput(input)
 	if !validCreateInput(input) {
 		return nil, ErrInvalid
 	}
@@ -90,14 +91,13 @@ func (service *Service) Create(ctx context.Context, subject identity.Subject, in
 		ProbeStatus:        ProbeStatusNotTested,
 		CreatedAt:          now,
 	}
-	payload := ConnectionPayload{Endpoint: strings.TrimSpace(input.ServerURL), Authentication: input.Authentication, Headers: cloneHeaders(input.Headers)}
 	if err := service.keyring.SealConnectionPayload(config, version, payload); err != nil {
 		return nil, ErrInvalid
 	}
 	if err := service.repository.Create(ctx, config, version); err != nil {
 		return nil, mapServiceRepositoryError(err)
 	}
-	summary := summaryOf(config, version)
+	summary := summaryOf(config, version, &payload)
 	return &summary, nil
 }
 
@@ -119,7 +119,7 @@ func (service *Service) List(ctx context.Context, subject identity.Subject) ([]C
 		if getErr != nil {
 			return nil, mapServiceRepositoryError(getErr)
 		}
-		items = append(items, summaryOf(&config, version))
+		items = append(items, service.safeSummaryOf(&config, version))
 	}
 	return items, nil
 }
@@ -129,7 +129,7 @@ func (service *Service) GetSummary(ctx context.Context, subject identity.Subject
 	if err != nil {
 		return nil, err
 	}
-	summary := summaryOf(config, version)
+	summary := service.safeSummaryOf(config, version)
 	return &summary, nil
 }
 
@@ -149,7 +149,7 @@ func (service *Service) GetManagementDetail(ctx context.Context, subject identit
 		return nil, ErrInvalid
 	}
 	detail := ConnectionManagementDetail{
-		ConnectionSummary:        summaryOf(config, version),
+		ConnectionSummary:        summaryOf(config, version, &payload),
 		EndpointConfigured:       strings.TrimSpace(payload.Endpoint) != "",
 		AuthenticationConfigured: payload.Authentication.Kind != AuthenticationNone && strings.TrimSpace(payload.Authentication.Secret) != "",
 		AuthenticationKind:       payload.Authentication.Kind,
@@ -190,7 +190,7 @@ func (service *Service) Probe(ctx context.Context, subject identity.Subject, con
 	}
 	version.DetectedTransport = result.DetectedTransport
 	version.ProbeStatus = ProbeStatusPassed
-	summary := summaryOf(config, version)
+	summary := summaryOf(config, version, &payload)
 	return &summary, nil
 }
 
@@ -214,7 +214,7 @@ func (service *Service) SetEnabled(ctx context.Context, subject identity.Subject
 	if err != nil {
 		return nil, mapServiceRepositoryError(err)
 	}
-	summary := summaryOf(updated, version)
+	summary := service.safeSummaryOf(updated, version)
 	return &summary, nil
 }
 
@@ -234,7 +234,7 @@ func (service *Service) TaskOptions(ctx context.Context, subject identity.Subjec
 	options := make([]TaskConnectionOption, 0, len(configs))
 	for index := range configs {
 		config := &configs[index]
-		if !canRead(subject, config) || !config.Enabled || !validDisplayText(config.Name, maxConnectionNameRunes, true) || !validDisplayText(config.Description, maxConnectionDescriptionRunes, false) {
+		if !canRead(subject, config) || !config.Enabled {
 			continue
 		}
 		version, getErr := service.repository.GetVersion(ctx, config.ID, config.CurrentVersion)
@@ -244,10 +244,21 @@ func (service *Service) TaskOptions(ctx context.Context, subject identity.Subjec
 		if version.ProbeStatus != ProbeStatusPassed || !concreteProbeTransport(version.DetectedTransport) {
 			continue
 		}
+		if service.keyring == nil {
+			continue
+		}
+		payload, openErr := service.keyring.OpenConnectionPayload(config, version)
+		if openErr != nil {
+			continue
+		}
+		name, _, displaySafe := safeConnectionDisplayText(config.Name, config.Description, &payload)
+		if !displaySafe {
+			continue
+		}
 		options = append(options, TaskConnectionOption{
 			ConnectionID:      config.ID,
 			ConnectionVersion: version.Version,
-			Name:              safeDisplayText(config.Name, maxConnectionNameRunes, true),
+			Name:              name,
 			Scope:             config.Scope,
 			Transport:         version.DetectedTransport,
 		})
@@ -292,11 +303,23 @@ func (service *Service) visibleCurrentVersion(ctx context.Context, subject ident
 	return config, version, nil
 }
 
-func summaryOf(config *ConnectionConfig, version *ConnectionVersion) ConnectionSummary {
+func (service *Service) safeSummaryOf(config *ConnectionConfig, version *ConnectionVersion) ConnectionSummary {
+	if service == nil || service.keyring == nil {
+		return summaryOf(config, version, nil)
+	}
+	payload, err := service.keyring.OpenConnectionPayload(config, version)
+	if err != nil {
+		return summaryOf(config, version, nil)
+	}
+	return summaryOf(config, version, &payload)
+}
+
+func summaryOf(config *ConnectionConfig, version *ConnectionVersion, payload *ConnectionPayload) ConnectionSummary {
+	name, description, _ := safeConnectionDisplayText(config.Name, config.Description, payload)
 	return ConnectionSummary{
 		ID:                config.ID,
-		Name:              safeDisplayText(config.Name, maxConnectionNameRunes, true),
-		Description:       safeDisplayText(config.Description, maxConnectionDescriptionRunes, false),
+		Name:              name,
+		Description:       description,
 		Scope:             config.Scope,
 		CurrentVersion:    config.CurrentVersion,
 		Enabled:           config.Enabled,
@@ -378,10 +401,11 @@ func hasSubjectUserID(subject identity.Subject) bool {
 }
 
 func validCreateInput(input CreateConnectionInput) bool {
-	if !validDisplayText(input.Name, maxConnectionNameRunes, true) || !validDisplayText(input.Description, maxConnectionDescriptionRunes, false) || input.Scope != ScopePrivate && input.Scope != ScopeGlobal || !configurableTransport(input.Transport) || strings.TrimSpace(input.ServerURL) == "" {
+	if input.Scope != ScopePrivate && input.Scope != ScopeGlobal || !configurableTransport(input.Transport) || strings.TrimSpace(input.ServerURL) == "" {
 		return false
 	}
-	if displayTextEchoesConnectionMaterial(input.Name, input) || displayTextEchoesConnectionMaterial(input.Description, input) {
+	payload := connectionPayloadFromInput(input)
+	if _, _, safe := safeConnectionDisplayText(input.Name, input.Description, &payload); !safe {
 		return false
 	}
 	for _, header := range input.Headers {
@@ -400,6 +424,14 @@ func validCreateInput(input CreateConnectionInput) bool {
 		return input.Authentication.Secret == "" && input.Authentication.HeaderName == "" && len(input.Headers) > 0
 	default:
 		return false
+	}
+}
+
+func connectionPayloadFromInput(input CreateConnectionInput) ConnectionPayload {
+	return ConnectionPayload{
+		Endpoint:       strings.TrimSpace(input.ServerURL),
+		Authentication: input.Authentication,
+		Headers:        cloneHeaders(input.Headers),
 	}
 }
 
@@ -425,17 +457,22 @@ func validDisplayText(value string, maximumRunes int, required bool) bool {
 	return true
 }
 
-func safeDisplayText(value string, maximumRunes int, required bool) string {
-	value = strings.TrimSpace(value)
-	if !validDisplayText(value, maximumRunes, required) {
-		return ""
+// safeConnectionDisplayText 只在文本本身和已解密的当前版本材料均可验证时投影
+// 名称、说明。任一字段或 payload 不安全时两个字段同时清空，避免残余文本成为
+// 间接泄露通道。
+func safeConnectionDisplayText(name string, description string, payload *ConnectionPayload) (string, string, bool) {
+	if payload == nil || !validDisplayText(name, maxConnectionNameRunes, true) || !validDisplayText(description, maxConnectionDescriptionRunes, false) {
+		return "", "", false
 	}
-	return value
+	if displayTextEchoesConnectionMaterial(name, *payload) || displayTextEchoesConnectionMaterial(description, *payload) {
+		return "", "", false
+	}
+	return strings.TrimSpace(name), strings.TrimSpace(description), true
 }
 
 func containsSensitiveDisplayMaterial(value string) bool {
 	lower := strings.ToLower(value)
-	if strings.ContainsAny(value, "/\\@:?#=&%") || strings.Contains(lower, "git@") || looksLikeHost(value) || looksLikeASCIIHeaderName(value) {
+	if strings.ContainsAny(value, "/\\@:?#=&%") || strings.Contains(lower, "git@") || containsHostLikeSegment(value) || containsASCIIHeaderNameSegment(value) {
 		return true
 	}
 	for _, keyword := range []string{
@@ -475,8 +512,8 @@ func containsTokenLikeSegment(value string) bool {
 	return flush()
 }
 
-// looksLikeHost 拒绝无空格的 ASCII 域名/IP 标签组合。显示文本只需要是人可读标签，
-// 因而不应携带可被误认为出站目标的 host；自然语言中的版本号或中文句子不会匹配。
+// looksLikeHost 拒绝 ASCII 域名/IP 标签组合。显示文本只需要是人可读标签，因而不
+// 应携带可被误认为出站目标的 host；宁可把类似版本号的 ASCII 片段保守地拒绝。
 func looksLikeHost(value string) bool {
 	value = strings.TrimSuffix(strings.ToLower(strings.TrimSpace(value)), ".")
 	if value == "" || strings.ContainsAny(value, " \t") {
@@ -499,9 +536,9 @@ func looksLikeHost(value string) bool {
 	return true
 }
 
-// looksLikeASCIIHeaderName 拒绝标准扩展 Header 前缀的 ASCII token，避免把常见
-// X-/Sec- Header 名称伪装成标签；普通英文连字符名称（如 alice-private）仍可显示，
-// 而任意实际 Header 名称还会由 displayTextEchoesConnectionMaterial 单独比对。
+// looksLikeASCIIHeaderName 对任意 ASCII 连字符 Header 形式 fail closed。显示标签
+// 应使用中文或空格分词的人类描述；不能依赖 Header 名称大小写或常见前缀来判断其
+// 是否敏感。
 func looksLikeASCIIHeaderName(value string) bool {
 	value = strings.TrimSpace(value)
 	if !strings.Contains(value, "-") || strings.ContainsAny(value, " \t") {
@@ -515,44 +552,74 @@ func looksLikeASCIIHeaderName(value string) bool {
 	if strings.HasPrefix(value, "-") || strings.HasSuffix(value, "-") {
 		return false
 	}
-	prefix, _, _ := strings.Cut(strings.ToLower(value), "-")
-	return prefix == "x" || prefix == "sec"
+	return true
 }
 
-// displayTextEchoesConnectionMaterial 阻止管理者把当前连接材料原样写进可投影
-// 标签。Header 名称与 host 的比较按大小写无关处理；秘密值必须精确一致才会命中，
-// 避免把普通说明中的短词误判为秘密。
-func displayTextEchoesConnectionMaterial(value string, input CreateConnectionInput) bool {
+func containsHostLikeSegment(value string) bool {
+	return containsASCIISegment(value, func(character rune) bool {
+		return character == '.' || character == '-' || character >= 'A' && character <= 'Z' || character >= 'a' && character <= 'z' || character >= '0' && character <= '9'
+	}, looksLikeHost)
+}
+
+func containsASCIIHeaderNameSegment(value string) bool {
+	return containsASCIISegment(value, func(character rune) bool {
+		return character == '-' || character >= 'A' && character <= 'Z' || character >= 'a' && character <= 'z' || character >= '0' && character <= '9'
+	}, looksLikeASCIIHeaderName)
+}
+
+func containsASCIISegment(value string, permitted func(rune) bool, matches func(string) bool) bool {
+	var segment strings.Builder
+	flush := func() bool {
+		candidate := segment.String()
+		segment.Reset()
+		return candidate != "" && matches(candidate)
+	}
+	for _, character := range value {
+		if permitted(character) {
+			segment.WriteRune(character)
+			continue
+		}
+		if flush() {
+			return true
+		}
+	}
+	return flush()
+}
+
+// displayTextEchoesConnectionMaterial 阻止管理者把当前连接材料嵌入可投影标签。
+// Header 名称与 host 比较按大小写无关处理；秘密和值按原文子串匹配，防止前后附加
+// 普通说明文本绕过校验。
+func displayTextEchoesConnectionMaterial(value string, payload ConnectionPayload) bool {
 	value = strings.TrimSpace(value)
 	if value == "" {
 		return false
 	}
-	if sameDisplayMaterial(value, input.ServerURL, true) {
+	if containsDisplayMaterial(value, payload.Endpoint, true) {
 		return true
 	}
-	if parsed, err := parseHTTPSURL(input.ServerURL); err == nil && sameDisplayMaterial(value, parsed.Hostname(), true) {
+	if parsed, err := parseHTTPSURL(payload.Endpoint); err == nil && containsDisplayMaterial(value, parsed.Hostname(), true) {
 		return true
 	}
-	if sameDisplayMaterial(value, input.Authentication.HeaderName, true) || sameDisplayMaterial(value, input.Authentication.Secret, false) {
+	if containsDisplayMaterial(value, payload.Authentication.HeaderName, true) || containsDisplayMaterial(value, payload.Authentication.Secret, false) {
 		return true
 	}
-	for _, header := range input.Headers {
-		if sameDisplayMaterial(value, header.Name, true) || sameDisplayMaterial(value, header.Value, false) {
+	for _, header := range payload.Headers {
+		if containsDisplayMaterial(value, header.Name, true) || containsDisplayMaterial(value, header.Value, false) {
 			return true
 		}
 	}
 	return false
 }
 
-func sameDisplayMaterial(value, material string, caseInsensitive bool) bool {
+func containsDisplayMaterial(value, material string, caseInsensitive bool) bool {
 	material = strings.TrimSpace(material)
 	if material == "" {
 		return false
 	}
 	if caseInsensitive {
-		return strings.EqualFold(value, material)
+		return strings.Contains(strings.ToLower(value), strings.ToLower(material))
 	}
-	return value == material
+	return strings.Contains(value, material)
 }
 
 func configurableTransport(transport Transport) bool {

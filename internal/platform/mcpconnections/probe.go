@@ -19,6 +19,8 @@ var (
 	ErrProbeRateLimited = errors.New("MCP 连接探测请求过于频繁")
 )
 
+const minimumInitializeRequestID = "mcp-probe"
+
 // ProbeRequest 是探测端口的内部输入，不可直接映射 API DTO。它可携带解密后的
 // 连接材料，但 ProbePort 的实现不得记录、返回或包装其中的 URL/认证信息。
 type ProbeRequest struct {
@@ -211,7 +213,7 @@ func (port *HTTPProbePort) Initialize(ctx context.Context, request ProbeRequest)
 func minimumInitializeRequest() map[string]any {
 	return map[string]any{
 		"jsonrpc": "2.0",
-		"id":      "mcp-probe",
+		"id":      minimumInitializeRequestID,
 		"method":  "initialize",
 		"params": map[string]any{
 			"protocolVersion": "2025-03-26",
@@ -260,13 +262,27 @@ func validJSONInitializeResponse(body []byte) bool {
 	trimmed := strings.TrimSpace(string(body))
 	var response struct {
 		JSONRPC string          `json:"jsonrpc"`
+		ID      string          `json:"id"`
 		Result  json.RawMessage `json:"result"`
 		Error   json.RawMessage `json:"error"`
 	}
 	if err := json.Unmarshal([]byte(trimmed), &response); err != nil {
 		return false
 	}
-	return response.JSONRPC == "2.0" && len(response.Result) > 0 && len(response.Error) == 0
+	if response.JSONRPC != "2.0" || response.ID != minimumInitializeRequestID || len(response.Result) == 0 || len(response.Error) != 0 {
+		return false
+	}
+	result := bytes.TrimSpace(response.Result)
+	if len(result) == 0 || result[0] != '{' {
+		return false
+	}
+	var initializeResult struct {
+		ProtocolVersion string `json:"protocolVersion"`
+	}
+	if err := json.Unmarshal(result, &initializeResult); err != nil {
+		return false
+	}
+	return strings.TrimSpace(initializeResult.ProtocolVersion) != ""
 }
 
 // validSSEInitializeStream 仅解析首个完整的 data event，并在得到合法 initialize
