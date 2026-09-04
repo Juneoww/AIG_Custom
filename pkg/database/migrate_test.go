@@ -61,7 +61,7 @@ type releasedV9PlatformTaskMigration struct {
 	Status             string          `gorm:"not null;column:status"`
 	DispatchError      string          `gorm:"not null;column:dispatch_error"`
 	DispatchAttempts   int             `gorm:"not null;column:dispatch_attempts"`
-	DispatchClaimToken string          `gorm:"not null;column:dispatch_claim_token"`
+	DispatchClaimToken string          `gorm:"not null;default:'';column:dispatch_claim_token"`
 	DispatchLeaseUntil *time.Time      `gorm:"column:dispatch_lease_until"`
 	CreatedAt          time.Time       `gorm:"not null;column:created_at"`
 	UpdatedAt          time.Time       `gorm:"not null;column:updated_at"`
@@ -465,6 +465,14 @@ func TestMigrationUpgradesReleasedVersionNineWithRemarkAndTargetCount(t *testing
 	for version := int64(1); version <= 9; version++ {
 		require.NoError(t, db.Create(&SchemaMigration{Version: version}).Error)
 	}
+	var dispatchClaimDefault string
+	require.NoError(t, db.Raw(`
+SELECT column_default
+FROM information_schema.columns
+WHERE table_schema = current_schema()
+  AND table_name = 'platform_tasks'
+  AND column_name = 'dispatch_claim_token'`).Scan(&dispatchClaimDefault).Error)
+	assert.Contains(t, dispatchClaimDefault, "''", "released v9 dispatch_claim_token must retain its empty-string default")
 	now := time.Date(2026, 9, 4, 0, 0, 0, 0, time.UTC)
 	require.NoError(t, db.Table("platform_tasks").Create(map[string]any{
 		"id": "released-v9-task", "owner_user_id": "owner", "owner_username": "owner", "idempotency_key": "released-v9",
