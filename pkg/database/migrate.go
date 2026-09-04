@@ -47,6 +47,7 @@ var migrations = []migration{
 	{version: 7, apply: migrateReportSchema},
 	{version: 8, apply: migratePlatformTaskDashboardIndexes},
 	{version: 9, apply: migratePlatformAttachmentLifecycle},
+	{version: 10, apply: migratePlatformTaskRemarkAndTargetCount},
 }
 
 const migrationAdvisoryLockKey int64 = 301237729
@@ -276,6 +277,8 @@ type platformTaskMigration struct {
 	DispatchError      string          `gorm:"not null;column:dispatch_error"`
 	DispatchAttempts   int             `gorm:"not null;column:dispatch_attempts"`
 	DispatchLeaseUntil *time.Time      `gorm:"column:dispatch_lease_until"`
+	Remark             string          `gorm:"not null;default:'';column:remark"`
+	TargetCount        int             `gorm:"not null;default:0;column:target_count"`
 	CreatedAt          time.Time       `gorm:"not null;column:created_at"`
 	UpdatedAt          time.Time       `gorm:"not null;column:updated_at"`
 }
@@ -391,4 +394,16 @@ WHERE attachment.state = 'ready'
     ) AS reference(value)
     WHERE reference.value = attachment.id
   )`).Error
+}
+
+func migratePlatformTaskRemarkAndTargetCount(db *gorm.DB) error {
+	for _, statement := range []string{
+		`ALTER TABLE platform_tasks ADD COLUMN IF NOT EXISTS remark text NOT NULL DEFAULT ''`,
+		`ALTER TABLE platform_tasks ADD COLUMN IF NOT EXISTS target_count integer NOT NULL DEFAULT 0`,
+	} {
+		if err := db.Exec(statement).Error; err != nil {
+			return err
+		}
+	}
+	return nil
 }

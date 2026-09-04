@@ -46,6 +46,29 @@ type governanceAuditCompletionV3Fixture struct {
 
 func (governanceAuditCompletionV3Fixture) TableName() string { return "audit_completion_outbox" }
 
+// releasedV9PlatformTaskMigration 固定已发布 v9 的 platform_tasks 结构，不能随当前迁移模型演进。
+type releasedV9PlatformTaskMigration struct {
+	ID                 string          `gorm:"primaryKey;column:id"`
+	OwnerUserID        string          `gorm:"not null;column:owner_user_id"`
+	OwnerUsername      string          `gorm:"not null;column:owner_username"`
+	IdempotencyKey     string          `gorm:"not null;column:idempotency_key"`
+	EngineSessionID    string          `gorm:"not null;column:engine_session_id"`
+	TaskType           string          `gorm:"not null;column:task_type"`
+	Content            string          `gorm:"not null;column:content"`
+	Params             json.RawMessage `gorm:"type:jsonb;not null;column:params"`
+	AttachmentRefs     json.RawMessage `gorm:"type:jsonb;not null;column:attachment_refs"`
+	CountryIsoCode     string          `gorm:"column:country_iso_code"`
+	Status             string          `gorm:"not null;column:status"`
+	DispatchError      string          `gorm:"not null;column:dispatch_error"`
+	DispatchAttempts   int             `gorm:"not null;column:dispatch_attempts"`
+	DispatchClaimToken string          `gorm:"not null;column:dispatch_claim_token"`
+	DispatchLeaseUntil *time.Time      `gorm:"column:dispatch_lease_until"`
+	CreatedAt          time.Time       `gorm:"not null;column:created_at"`
+	UpdatedAt          time.Time       `gorm:"not null;column:updated_at"`
+}
+
+func (releasedV9PlatformTaskMigration) TableName() string { return "platform_tasks" }
+
 func TestMigrationAppliesIdentitySchemaAsVersionTwo(t *testing.T) {
 	db := openPostgresTestDB(t)
 	resetPostgresTestDB(t, db)
@@ -57,7 +80,7 @@ func TestMigrationAppliesIdentitySchemaAsVersionTwo(t *testing.T) {
 
 	var versions []SchemaMigration
 	require.NoError(t, db.Order("version ASC").Find(&versions).Error)
-	require.Len(t, versions, 9)
+	require.Len(t, versions, 10)
 	assert.Equal(t, int64(1), versions[0].Version)
 	assert.Equal(t, int64(2), versions[1].Version)
 	assert.Equal(t, int64(3), versions[2].Version)
@@ -67,9 +90,10 @@ func TestMigrationAppliesIdentitySchemaAsVersionTwo(t *testing.T) {
 	assert.Equal(t, int64(7), versions[6].Version)
 	assert.Equal(t, int64(8), versions[7].Version)
 	assert.Equal(t, int64(9), versions[8].Version)
+	assert.Equal(t, int64(10), versions[9].Version)
 }
 
-func TestMigrationAppliesGovernanceAndPlatformTaskSchemaThroughVersionNine(t *testing.T) {
+func TestMigrationAppliesGovernanceAndPlatformTaskSchemaThroughVersionTen(t *testing.T) {
 	db := openPostgresTestDB(t)
 	resetPostgresTestDB(t, db)
 
@@ -81,12 +105,14 @@ func TestMigrationAppliesGovernanceAndPlatformTaskSchemaThroughVersionNine(t *te
 	assert.True(t, db.Migrator().HasTable("platform_attachments"))
 	assert.True(t, db.Migrator().HasTable("report_snapshots"))
 	assert.True(t, db.Migrator().HasTable("report_brand_settings"))
+	assert.True(t, db.Migrator().HasColumn("platform_tasks", "remark"))
+	assert.True(t, db.Migrator().HasColumn("platform_tasks", "target_count"))
 	assertReportTrendIndexDefinitions(t, db)
 	assertPlatformTaskDashboardIndexDefinitions(t, db)
 
 	var versions []SchemaMigration
 	require.NoError(t, db.Order("version ASC").Find(&versions).Error)
-	require.Len(t, versions, 9)
+	require.Len(t, versions, 10)
 	assert.Equal(t, int64(3), versions[2].Version)
 	assert.Equal(t, int64(4), versions[3].Version)
 	assert.Equal(t, int64(5), versions[4].Version)
@@ -94,6 +120,7 @@ func TestMigrationAppliesGovernanceAndPlatformTaskSchemaThroughVersionNine(t *te
 	assert.Equal(t, int64(7), versions[6].Version)
 	assert.Equal(t, int64(8), versions[7].Version)
 	assert.Equal(t, int64(9), versions[8].Version)
+	assert.Equal(t, int64(10), versions[9].Version)
 }
 
 func TestMigrationUpgradesExistingVersionThreeWithoutRewritingIt(t *testing.T) {
@@ -114,8 +141,8 @@ func TestMigrationUpgradesExistingVersionThreeWithoutRewritingIt(t *testing.T) {
 	require.True(t, db.Migrator().HasTable("audit_completion_outbox"))
 	var versions []SchemaMigration
 	require.NoError(t, db.Order("version ASC").Find(&versions).Error)
-	require.Len(t, versions, 9)
-	assert.Equal(t, []int64{1, 2, 3, 4, 5, 6, 7, 8, 9}, []int64{versions[0].Version, versions[1].Version, versions[2].Version, versions[3].Version, versions[4].Version, versions[5].Version, versions[6].Version, versions[7].Version, versions[8].Version})
+	require.Len(t, versions, 10)
+	assert.Equal(t, []int64{1, 2, 3, 4, 5, 6, 7, 8, 9, 10}, []int64{versions[0].Version, versions[1].Version, versions[2].Version, versions[3].Version, versions[4].Version, versions[5].Version, versions[6].Version, versions[7].Version, versions[8].Version, versions[9].Version})
 }
 
 func TestMigrationVersionFourRepairsDuplicateLegacyCompletionOutboxRows(t *testing.T) {
@@ -228,7 +255,7 @@ func TestMigrationIsIdempotentAndRecordsVersion(t *testing.T) {
 
 	var versions []SchemaMigration
 	require.NoError(t, db.Order("version ASC").Find(&versions).Error)
-	require.Len(t, versions, 9)
+	require.Len(t, versions, 10)
 	assert.Equal(t, int64(1), versions[0].Version)
 	assert.Equal(t, int64(2), versions[1].Version)
 	assert.Equal(t, int64(3), versions[2].Version)
@@ -238,6 +265,7 @@ func TestMigrationIsIdempotentAndRecordsVersion(t *testing.T) {
 	assert.Equal(t, int64(7), versions[6].Version)
 	assert.Equal(t, int64(8), versions[7].Version)
 	assert.Equal(t, int64(9), versions[8].Version)
+	assert.Equal(t, int64(10), versions[9].Version)
 	assert.NotZero(t, versions[0].AppliedAt)
 	assert.NotZero(t, versions[1].AppliedAt)
 	assert.NotZero(t, versions[2].AppliedAt)
@@ -270,7 +298,7 @@ func TestMigrationSerializesConcurrentPostgresCalls(t *testing.T) {
 
 	var versions []SchemaMigration
 	require.NoError(t, first.Order("version ASC").Find(&versions).Error)
-	require.Len(t, versions, 9)
+	require.Len(t, versions, 10)
 	assert.Equal(t, int64(1), versions[0].Version)
 	assert.Equal(t, int64(2), versions[1].Version)
 	assert.Equal(t, int64(3), versions[2].Version)
@@ -280,6 +308,7 @@ func TestMigrationSerializesConcurrentPostgresCalls(t *testing.T) {
 	assert.Equal(t, int64(7), versions[6].Version)
 	assert.Equal(t, int64(8), versions[7].Version)
 	assert.Equal(t, int64(9), versions[8].Version)
+	assert.Equal(t, int64(10), versions[9].Version)
 	assert.True(t, first.Migrator().HasTable(&User{}))
 	assert.True(t, first.Migrator().HasTable(&Session{}))
 	assert.True(t, first.Migrator().HasTable(&TaskMessage{}))
@@ -346,7 +375,7 @@ func TestMigrationUpgradesReleasedVersionFiveWithDispatchClaimColumn(t *testing.
 	require.NoError(t, Migrate(db))
 	require.NoError(t, Migrate(db), "v6 upgrade must remain idempotent")
 	assert.True(t, db.Migrator().HasColumn("platform_tasks", "dispatch_claim_token"))
-	assert.Equal(t, []int64{1, 2, 3, 4, 5, 6, 7, 8, 9}, migrationVersions(t, db))
+	assert.Equal(t, []int64{1, 2, 3, 4, 5, 6, 7, 8, 9, 10}, migrationVersions(t, db))
 }
 
 func TestMigrationUpgradesReleasedVersionSixWithReportTables(t *testing.T) {
@@ -366,12 +395,12 @@ func TestMigrationUpgradesReleasedVersionSixWithReportTables(t *testing.T) {
 	assert.False(t, db.Migrator().HasTable("report_brand_settings"))
 
 	require.NoError(t, Migrate(db))
-	require.NoError(t, Migrate(db), "v7 through v9 upgrades must remain idempotent")
+	require.NoError(t, Migrate(db), "v7 through v10 upgrades must remain idempotent")
 	assert.True(t, db.Migrator().HasTable("report_snapshots"))
 	assert.True(t, db.Migrator().HasTable("report_brand_settings"))
 	assertReportTrendIndexDefinitions(t, db)
 	assertPlatformTaskDashboardIndexDefinitions(t, db)
-	assert.Equal(t, []int64{1, 2, 3, 4, 5, 6, 7, 8, 9}, migrationVersions(t, db))
+	assert.Equal(t, []int64{1, 2, 3, 4, 5, 6, 7, 8, 9, 10}, migrationVersions(t, db))
 }
 
 func TestMigrationUpgradesReleasedVersionSevenWithDashboardTaskIndexes(t *testing.T) {
@@ -397,9 +426,67 @@ func TestMigrationUpgradesReleasedVersionSevenWithDashboardTaskIndexes(t *testin
 	}
 
 	require.NoError(t, Migrate(db))
-	require.NoError(t, Migrate(db), "v8 and v9 upgrades must remain idempotent")
+	require.NoError(t, Migrate(db), "v8 through v10 upgrades must remain idempotent")
 	assertPlatformTaskDashboardIndexDefinitions(t, db)
-	assert.Equal(t, []int64{1, 2, 3, 4, 5, 6, 7, 8, 9}, migrationVersions(t, db))
+	assert.Equal(t, []int64{1, 2, 3, 4, 5, 6, 7, 8, 9, 10}, migrationVersions(t, db))
+}
+
+func TestMigrationUpgradesReleasedVersionNineWithRemarkAndTargetCount(t *testing.T) {
+	db := openPostgresTestDB(t)
+	resetPostgresTestDB(t, db)
+	require.NoError(t, db.AutoMigrate(&SchemaMigration{}))
+	for _, apply := range []func(*gorm.DB) error{
+		migrateInitialSchema,
+		migrateIdentitySchema,
+		migrateGovernanceSchema,
+		migrateAuditCompletionSchema,
+	} {
+		require.NoError(t, apply(db))
+	}
+	require.NoError(t, db.AutoMigrate(&releasedV9PlatformTaskMigration{}, &platformAttachmentMigration{}))
+	for _, statement := range []string{
+		`CREATE UNIQUE INDEX idx_platform_tasks_owner_idempotency ON platform_tasks(owner_user_id, idempotency_key)`,
+		`CREATE UNIQUE INDEX idx_platform_tasks_engine_session ON platform_tasks(engine_session_id)`,
+		`CREATE INDEX idx_platform_tasks_owner_created ON platform_tasks(owner_user_id, created_at DESC)`,
+		`CREATE INDEX idx_platform_tasks_status ON platform_tasks(status)`,
+		`CREATE INDEX idx_platform_attachments_owner_created ON platform_attachments(owner_user_id, created_at DESC)`,
+		`CREATE UNIQUE INDEX idx_platform_attachments_storage_name ON platform_attachments(storage_name)`,
+	} {
+		require.NoError(t, db.Exec(statement).Error)
+	}
+	for _, apply := range []func(*gorm.DB) error{
+		migratePlatformTaskDispatchClaimSchema,
+		migrateReportSchema,
+		migratePlatformTaskDashboardIndexes,
+		migratePlatformAttachmentLifecycle,
+	} {
+		require.NoError(t, apply(db))
+	}
+	for version := int64(1); version <= 9; version++ {
+		require.NoError(t, db.Create(&SchemaMigration{Version: version}).Error)
+	}
+	now := time.Date(2026, 9, 4, 0, 0, 0, 0, time.UTC)
+	require.NoError(t, db.Table("platform_tasks").Create(map[string]any{
+		"id": "released-v9-task", "owner_user_id": "owner", "owner_username": "owner", "idempotency_key": "released-v9",
+		"engine_session_id": "engine-v9", "task_type": "ai_infra_scan", "content": "scan", "params": json.RawMessage(`{}`),
+		"attachment_refs": json.RawMessage(`[]`), "status": "pending", "dispatch_error": "", "dispatch_attempts": 0,
+		"dispatch_claim_token": "", "created_at": now, "updated_at": now,
+	}).Error)
+	assert.False(t, db.Migrator().HasColumn("platform_tasks", "remark"))
+	assert.False(t, db.Migrator().HasColumn("platform_tasks", "target_count"))
+
+	require.NoError(t, Migrate(db))
+	require.NoError(t, Migrate(db), "v10 upgrade must remain idempotent")
+	assert.True(t, db.Migrator().HasColumn("platform_tasks", "remark"))
+	assert.True(t, db.Migrator().HasColumn("platform_tasks", "target_count"))
+	var row struct {
+		Remark      string `gorm:"column:remark"`
+		TargetCount int    `gorm:"column:target_count"`
+	}
+	require.NoError(t, db.Table("platform_tasks").Select("remark", "target_count").Where("id = ?", "released-v9-task").Scan(&row).Error)
+	assert.Equal(t, "", row.Remark)
+	assert.Equal(t, 0, row.TargetCount)
+	assert.Equal(t, []int64{1, 2, 3, 4, 5, 6, 7, 8, 9, 10}, migrationVersions(t, db))
 }
 
 func TestMigrationVersionNineBindsOnlyReadyAttachmentsReferencedByTasks(t *testing.T) {
@@ -446,7 +533,7 @@ func TestMigrationVersionNineBindsOnlyReadyAttachmentsReferencedByTasks(t *testi
 		ID    string
 		State string
 	}{{ID: "referenced-ready", State: "attached"}, {ID: "unbound-ready", State: "ready"}}, states)
-	assert.Equal(t, []int64{1, 2, 3, 4, 5, 6, 7, 8, 9}, migrationVersions(t, db))
+	assert.Equal(t, []int64{1, 2, 3, 4, 5, 6, 7, 8, 9, 10}, migrationVersions(t, db))
 }
 
 func assertReportTrendIndexDefinitions(t *testing.T, db *gorm.DB) {
