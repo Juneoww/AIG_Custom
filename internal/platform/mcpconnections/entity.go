@@ -33,6 +33,14 @@ const (
 	ProbeStatusFailed    ProbeStatus = "failed"
 )
 
+// ProbeAttempt 是一次已持久化探测的内部并发令牌。Token 复用配置的单调
+// resource revision；它只用于条件写回，绝不投影到浏览器或日志。
+type ProbeAttempt struct {
+	ConnectionConfigID string
+	Version            int
+	Token              string
+}
+
 type AuthenticationKind string
 
 const (

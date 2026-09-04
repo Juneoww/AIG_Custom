@@ -49,8 +49,9 @@ Header，但用户材料不能改变探测协议本身。
 `Connection`、`Keep-Alive`、`Upgrade`、`TE`、`Trailer`、`Proxy-*`、`Content-Type`、`Accept`、
 `Cookie`、`Set-Cookie`、会话控制 Header 以及所有 `MCP-*` 名称。还必须拒绝会影响可信
 代理、来源或路由判定的 `Forwarded`、`X-Forwarded-*`、`X-Real-IP`、`X-Original-URL`、
-`X-Rewrite-URL`、`Via` 与 HTTP method override Header。不得以 Header 传入路由、会话或
-协议覆盖；名称和值同样不得被记录、回显或投影到任务/审计页面。
+`X-Rewrite-URL`、`Via` 与 HTTP method override Header。Header 名中一律不允许 `_`，并
+拒绝 `X-Host`/Host override、`X-Original-*`、`X-Rewrite-*` 及受控代理实现的路由别名。
+不得以 Header 传入路由、会话或协议覆盖；名称和值同样不得被记录、回显或投影到任务/审计页面。
 
 即使载荷来自已加密的历史连接版本，探测端口也必须在发起任意 HTTP、SSE、initialized
 notification 或 session cleanup 请求前重新规范化并严格验证认证 shape、secret、Header
@@ -77,12 +78,17 @@ request context 和响应字节上限约束。
 最短间隔为 1 分钟，按不透明连接配置 ID 独立限流，不能以 endpoint 作为限流键。只有当前版本
 探测成功、连接已启用且受控 dialer 可用时，连接才可被任务选择。真实探测失败（限流除外）
 必须把启动时的不可变版本写为 `failed` 并清空 detected transport；若该版本仍是 current，
-同一事务必须撤销 enabled，避免留下 `enabled + failed` 的误导状态。旧版本的迟到结果只可
-写回旧版本，不能改变 current 配置。
+同一事务必须撤销 enabled，避免留下 `enabled + failed` 的误导状态。限流判断必须发生在任何
+持久化状态重置之前。通过限流后，探测启动事务会先按 config → current version 加锁、禁用连接、
+清空旧结果并递增 `resource_revision`，把新 revision 作为不透明 attempt token；结果写回仅在
+config、version 与该 token 仍精确匹配时允许，并在结算时再次推进 revision，使同一结果不能重放。
+新探测、新版本、展示元数据或启用状态变更都会让旧 token 失效；任何跨 Engine/进程的迟到结果
+必须返回安全冲突（或被安全忽略），不得改写任意版本的结果投影。
 
 启用与探测结果写回都必须按 config 后 current/version 的顺序加锁。启用事务除了复核 expected
 current version 和 resource revision，还必须锁定并检查该 current version 仍为 `passed` 且具有
-具体 transport；探测失败与启用交错时，最终连接必须保持不可用。任务选项、任务连接验证和
+具体 transport；若锁内发现 failed/not_tested，防御性禁用必须先提交，再返回 unavailable，不能
+因事务内返回业务错误而回滚该禁用。探测失败与启用交错时，最终连接必须保持不可用。任务选项、任务连接验证和
 重新启用还必须解密 current payload，并以**当前** `ValidateServerURL` 允许集/DNS 策略复核
 endpoint：允许集收紧、清空、解析失败或材料不合规时，任务选项静默排除，验证/启用只返回
 固定的 unavailable 或 denied 结果。历史 probe 通过不等于当前仍可使用。

@@ -88,11 +88,29 @@ func NewProbeEngine(port ProbePort, options ProbeOptions) *ProbeEngine {
 }
 
 func (engine *ProbeEngine) Probe(ctx context.Context, connectionConfigID string, payload ConnectionPayload, selected Transport) (ProbeResult, error) {
+	if err := engine.reserveAttempt(connectionConfigID); err != nil {
+		return ProbeResult{}, err
+	}
+	return engine.probeReserved(ctx, payload, selected)
+}
+
+// reserveAttempt 仅消耗本进程的速率配额。Service 必须先调用它，再持久化
+// StartProbe，确保被本地限流的请求不会把已有 passed 状态重置为 not_tested。
+func (engine *ProbeEngine) reserveAttempt(connectionConfigID string) error {
 	if engine == nil || engine.port == nil {
-		return ProbeResult{}, ErrProbeFailed
+		return ErrProbeFailed
 	}
 	if !engine.allowAttempt(connectionConfigID) {
-		return ProbeResult{}, ErrProbeRateLimited
+		return ErrProbeRateLimited
+	}
+	return nil
+}
+
+// probeReserved 只执行已经获得本地速率配额的真实握手。它不再写任何持久化
+// 状态；调用方负责用 StartProbe 的 token 条件写回结果。
+func (engine *ProbeEngine) probeReserved(ctx context.Context, payload ConnectionPayload, selected Transport) (ProbeResult, error) {
+	if engine == nil || engine.port == nil {
+		return ProbeResult{}, ErrProbeFailed
 	}
 	transports := probeTransportOrder(selected)
 	if len(transports) == 0 {

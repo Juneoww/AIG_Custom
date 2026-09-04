@@ -80,7 +80,40 @@ func (repository *memoryConnectionRepository) ListConfigs(_ context.Context) ([]
 	return configs, nil
 }
 
-func (repository *memoryConnectionRepository) RecordProbeResult(_ context.Context, configID string, version int, transport Transport, status ProbeStatus) error {
+func (repository *memoryConnectionRepository) StartProbe(_ context.Context, configID string, expectedCurrentVersion int, expectedResourceRevision string) (*ProbeAttempt, error) {
+	config, ok := repository.configs[configID]
+	if !ok {
+		return nil, ErrNotFound
+	}
+	if config.CurrentVersion != expectedCurrentVersion || config.ResourceRevision != expectedResourceRevision {
+		return nil, ErrConflict
+	}
+	stored, ok := repository.versions[configID][config.CurrentVersion]
+	if !ok {
+		return nil, ErrNotFound
+	}
+	if !configurableTransport(stored.Transport) {
+		return nil, ErrInvalid
+	}
+	nextRevision, err := incrementRevision(config.ResourceRevision)
+	if err != nil {
+		return nil, err
+	}
+	config.Enabled = false
+	config.ResourceRevision = nextRevision
+	stored.DetectedTransport = ""
+	stored.ProbeStatus = ProbeStatusNotTested
+	return &ProbeAttempt{ConnectionConfigID: configID, Version: stored.Version, Token: nextRevision}, nil
+}
+
+func (repository *memoryConnectionRepository) RecordProbeResult(_ context.Context, configID string, version int, attemptToken string, transport Transport, status ProbeStatus) error {
+	config, ok := repository.configs[configID]
+	if !ok {
+		return ErrNotFound
+	}
+	if config.CurrentVersion != version || config.ResourceRevision != attemptToken {
+		return ErrConflict
+	}
 	stored, err := repository.GetVersion(context.Background(), configID, version)
 	if err != nil {
 		return err
@@ -88,20 +121,20 @@ func (repository *memoryConnectionRepository) RecordProbeResult(_ context.Contex
 	if !validProbeResult(transport, status) {
 		return ErrInvalid
 	}
+	if stored.ProbeStatus != ProbeStatusNotTested || stored.DetectedTransport != "" {
+		return ErrConflict
+	}
+	nextRevision, err := incrementRevision(config.ResourceRevision)
+	if err != nil {
+		return err
+	}
 	stored.DetectedTransport = transport
 	stored.ProbeStatus = status
 	repository.versions[configID][version] = stored
 	if status == ProbeStatusFailed {
-		config, ok := repository.configs[configID]
-		if ok && config.CurrentVersion == version && config.Enabled {
-			nextRevision, revisionErr := incrementRevision(config.ResourceRevision)
-			if revisionErr != nil {
-				return revisionErr
-			}
-			config.Enabled = false
-			config.ResourceRevision = nextRevision
-		}
+		config.Enabled = false
 	}
+	config.ResourceRevision = nextRevision
 	repository.recorded++
 	return nil
 }
@@ -245,6 +278,10 @@ func TestValidCreateInputRejectsUnsafeOrAmbiguousHTTPHeaders(t *testing.T) {
 		{name: "rewrite url", headers: []Header{{Name: "X-Rewrite-URL", Value: "/admin"}}},
 		{name: "via", headers: []Header{{Name: "Via", Value: "1.1 proxy"}}},
 		{name: "method override", headers: []Header{{Name: "X-HTTP-Method-Override", Value: "DELETE"}}},
+		{name: "underscore forwarded", headers: []Header{{Name: "X_Forwarded_For", Value: "127.0.0.1"}}},
+		{name: "underscore mcp", headers: []Header{{Name: "MCP_Protocol_Version", Value: "override"}}},
+		{name: "host alias", headers: []Header{{Name: "X-Host", Value: "internal-route"}}},
+		{name: "host override alias", headers: []Header{{Name: "X-HTTP-Host-Override", Value: "internal-route"}}},
 		{name: "invalid token", headers: []Header{{Name: "X Bad", Value: "opaque"}}},
 		{name: "newline", headers: []Header{{Name: "X-Test\r\nInjected", Value: "opaque"}}},
 		{name: "name too long", headers: []Header{{Name: strings.Repeat("X", 65), Value: "opaque"}}},
@@ -268,17 +305,23 @@ func TestValidCreateInputRejectsUnsafeOrAmbiguousHTTPHeaders(t *testing.T) {
 	}
 	assert.False(t, validCreateInput(tooMany))
 
-	badAPIKeyName := base
-	badAPIKeyName.Headers = nil
-	badAPIKeyName.Authentication = Authentication{Kind: AuthenticationAPIKeyHeader, HeaderName: "Mcp-Session-Id", Secret: "opaque"}
-	assert.False(t, validCreateInput(badAPIKeyName))
-	badAPIKeyName.Authentication.HeaderName = "X-Forwarded-Host"
-	assert.False(t, validCreateInput(badAPIKeyName))
+	for _, headerName := range []string{"Mcp-Session-Id", "X-Forwarded-Host", "X_Forwarded_Host", "X-Host", "X-HTTP-Host-Override"} {
+		badAPIKeyName := base
+		badAPIKeyName.Headers = nil
+		badAPIKeyName.Authentication = Authentication{Kind: AuthenticationAPIKeyHeader, HeaderName: headerName, Secret: "opaque"}
+		assert.False(t, validCreateInput(badAPIKeyName), headerName)
+	}
 
 	badBearerSecret := base
 	badBearerSecret.Headers = nil
 	badBearerSecret.Authentication = Authentication{Kind: AuthenticationBearer, Secret: strings.Repeat("x", 8*1024+1)}
 	assert.False(t, validCreateInput(badBearerSecret))
+}
+
+func TestValidCustomHeaderNameRejectsTrimmedRoutingAliases(t *testing.T) {
+	for _, name := range []string{" X-Host ", "\tX-HTTP-Host-Override\t", " X-Original-URL ", " X-Rewrite-URL "} {
+		assert.False(t, validCustomHeaderName(name), name)
+	}
 }
 
 func TestValidCreateInputAllowsCredentialCombinationsWithSafeCustomHeaders(t *testing.T) {
@@ -427,6 +470,38 @@ func TestServiceRecordsFailedProbeWithoutReturningFailureDetail(t *testing.T) {
 	assert.Equal(t, 1, options[0].ConnectionVersion)
 }
 
+func TestServiceRateLimitedProbeDoesNotInvalidateExistingEligibility(t *testing.T) {
+	ctx := context.Background()
+	repository := newMemoryConnectionRepository()
+	clock := &fixedProbeClock{now: time.Date(2026, 9, 4, 8, 9, 10, 0, time.UTC)}
+	port := &scriptedProbePort{errors: map[Transport]error{TransportHTTP: nil}}
+	service := NewService(repository, testKeyring(t), NewProbeEngine(port, ProbeOptions{
+		Timeout: time.Second, MinimumInterval: time.Hour, Clock: clock,
+	}), testPolicy(t, true))
+	alice := identity.Subject{UserID: "alice", Role: identity.RoleUser}
+	created, err := service.Create(ctx, alice, serviceInput("限流状态保持", ScopePrivate, TransportHTTP))
+	require.NoError(t, err)
+	_, err = service.Probe(ctx, alice, created.ID)
+	require.NoError(t, err)
+	_, err = service.SetEnabled(ctx, alice, created.ID, true)
+	require.NoError(t, err)
+	beforeConfig, err := repository.GetConfig(ctx, created.ID)
+	require.NoError(t, err)
+	beforeVersion, err := repository.GetVersion(ctx, created.ID, beforeConfig.CurrentVersion)
+	require.NoError(t, err)
+
+	_, err = service.Probe(ctx, alice, created.ID)
+	require.ErrorIs(t, err, ErrProbeRateLimited)
+	afterConfig, err := repository.GetConfig(ctx, created.ID)
+	require.NoError(t, err)
+	afterVersion, err := repository.GetVersion(ctx, created.ID, afterConfig.CurrentVersion)
+	require.NoError(t, err)
+	assert.Equal(t, beforeConfig, afterConfig, "rate limiting must happen before StartProbe changes durable state")
+	assert.Equal(t, beforeVersion, afterVersion)
+	assert.Equal(t, 1, repository.recorded)
+	assert.Equal(t, []Transport{TransportHTTP}, port.attempts, "the rate-limited request must not initiate another handshake")
+}
+
 func TestServiceFailedProbeRevokesEnabledTaskEligibility(t *testing.T) {
 	ctx := context.Background()
 	repository := newMemoryConnectionRepository()
@@ -491,11 +566,15 @@ func TestServiceSetEnabledRejectsProbeFailureInterleavedAfterEligibilityRead(t *
 	repository.versions[created.ID][1].ProbeStatus = ProbeStatusPassed
 	repository.versions[created.ID][1].DetectedTransport = TransportHTTP
 	repository.beforeSetEnabled = func() {
-		require.NoError(t, repository.RecordProbeResult(ctx, created.ID, 1, "", ProbeStatusFailed))
+		// 另一进程在外层资格读取之后启动并完成了新的失败探测。启动会推进
+		// revision，因此原 SetEnabled 请求必须以冲突结束，不能重新启用。
+		attempt, startErr := repository.StartProbe(ctx, created.ID, 1, "1")
+		require.NoError(t, startErr)
+		require.NoError(t, repository.RecordProbeResult(ctx, created.ID, 1, attempt.Token, "", ProbeStatusFailed))
 	}
 
 	_, err = service.SetEnabled(ctx, alice, created.ID, true)
-	require.ErrorIs(t, err, ErrTaskConnectionUnavailable)
+	require.ErrorIs(t, err, ErrConflict)
 	stored, getErr := repository.GetConfig(ctx, created.ID)
 	require.NoError(t, getErr)
 	assert.False(t, stored.Enabled)

@@ -211,6 +211,63 @@ func (repository *GormRepository) UpdateDisplayMetadata(ctx context.Context, con
 	return &updated, nil
 }
 
+// StartProbe 在真实网络操作前创建持久化的单调 attempt token。它按 config →
+// current version 加锁，将连接置为不可用并清空旧结果；随后只有携带相同 token
+// 的结果能够写回。任意版本、元数据或 enable 变更都会递增 resource revision，
+// 因而自动使较早 Engine/进程的迟到结果失效。
+func (repository *GormRepository) StartProbe(ctx context.Context, configID string, expectedCurrentVersion int, expectedResourceRevision string) (*ProbeAttempt, error) {
+	if repository == nil || repository.db == nil || strings.TrimSpace(configID) == "" || expectedCurrentVersion < 1 || strings.TrimSpace(expectedResourceRevision) == "" {
+		return nil, ErrInvalid
+	}
+	var attempt ProbeAttempt
+	err := txcontext.Gorm(ctx, repository.db).Transaction(func(transaction *gorm.DB) error {
+		var config ConnectionConfig
+		if err := transaction.Clauses(clause.Locking{Strength: "UPDATE"}).Where("id = ?", configID).First(&config).Error; err != nil {
+			return mapNotFound(err)
+		}
+		if config.CurrentVersion != expectedCurrentVersion || config.ResourceRevision != expectedResourceRevision {
+			return ErrConflict
+		}
+		var version ConnectionVersion
+		if err := transaction.Clauses(clause.Locking{Strength: "UPDATE"}).Where("connection_config_id = ? AND version = ?", configID, config.CurrentVersion).First(&version).Error; err != nil {
+			return mapNotFound(err)
+		}
+		if !configurableTransport(version.Transport) {
+			return ErrInvalid
+		}
+		nextRevision, err := incrementRevision(config.ResourceRevision)
+		if err != nil {
+			return err
+		}
+		now := time.Now().UTC()
+		versionResult := transaction.Model(&ConnectionVersion{}).Where("connection_config_id = ? AND version = ?", configID, version.Version).
+			Updates(map[string]any{"detected_transport": "", "probe_status": ProbeStatusNotTested})
+		if versionResult.Error != nil {
+			return versionResult.Error
+		}
+		if versionResult.RowsAffected != 1 {
+			return ErrNotFound
+		}
+		configResult := transaction.Model(&ConnectionConfig{}).Where("id = ?", configID).Updates(map[string]any{
+			"enabled":           false,
+			"resource_revision": nextRevision,
+			"updated_at":        now,
+		})
+		if configResult.Error != nil {
+			return configResult.Error
+		}
+		if configResult.RowsAffected != 1 {
+			return ErrNotFound
+		}
+		attempt = ProbeAttempt{ConnectionConfigID: config.ID, Version: version.Version, Token: nextRevision}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return &attempt, nil
+}
+
 // SetEnabled 在同一锁定事务内按 config → current version 的顺序复核资格，不能
 // 只信任 Service 在锁外读取到的 passed 结果。若探测失败与启用交错，二者都会先
 // 锁 config，因此最终状态不会保留 enabled + failed 的误导组合。
@@ -219,6 +276,7 @@ func (repository *GormRepository) SetEnabled(ctx context.Context, configID strin
 		return nil, ErrInvalid
 	}
 	var updated ConnectionConfig
+	unavailable := false
 	err := txcontext.Gorm(ctx, repository.db).Transaction(func(transaction *gorm.DB) error {
 		var config ConnectionConfig
 		if err := transaction.Clauses(clause.Locking{Strength: "UPDATE"}).Where("id = ?", configID).First(&config).Error; err != nil {
@@ -235,7 +293,11 @@ func (repository *GormRepository) SetEnabled(ctx context.Context, configID strin
 			if err := disableUnavailableConfig(transaction, &config); err != nil {
 				return err
 			}
-			return ErrTaskConnectionUnavailable
+			// 不能在事务 closure 内返回 unavailable，否则上面的防御性 disable
+			// 会被 GORM 回滚。先正常提交，事务外再返回安全的业务错误。
+			unavailable = true
+			updated = config
+			return nil
 		}
 		nextRevision, err := incrementRevision(config.ResourceRevision)
 		if err != nil {
@@ -262,14 +324,17 @@ func (repository *GormRepository) SetEnabled(ctx context.Context, configID strin
 	if err != nil {
 		return nil, err
 	}
+	if unavailable {
+		return nil, ErrTaskConnectionUnavailable
+	}
 	return &updated, nil
 }
 
-// RecordProbeResult 只修改启动探测时所指定版本的结果投影。它与 SetEnabled 保持
-// config → version 的锁顺序；当前版本变为 failed 时会在同一事务撤销 enabled，
-// 旧版本结果仍可回写自身但绝不改变当前配置。更新列刻意排除密文、nonce 和 key ID。
-func (repository *GormRepository) RecordProbeResult(ctx context.Context, configID string, version int, detectedTransport Transport, status ProbeStatus) error {
-	if repository == nil || repository.db == nil || strings.TrimSpace(configID) == "" || version < 1 || !validProbeResult(detectedTransport, status) {
+// RecordProbeResult 只接受与 StartProbe 返回 token 精确匹配的当前版本结果。它与
+// SetEnabled 保持 config → version 的锁顺序，更新列刻意排除密文、nonce 和 key ID。
+// 过期 Engine 的迟到成功或失败一律返回 ErrConflict，不能重写最新结论。
+func (repository *GormRepository) RecordProbeResult(ctx context.Context, configID string, version int, attemptToken string, detectedTransport Transport, status ProbeStatus) error {
+	if repository == nil || repository.db == nil || strings.TrimSpace(configID) == "" || version < 1 || strings.TrimSpace(attemptToken) == "" || !validProbeResult(detectedTransport, status) {
 		return ErrInvalid
 	}
 	return txcontext.Gorm(ctx, repository.db).Transaction(func(transaction *gorm.DB) error {
@@ -277,10 +342,23 @@ func (repository *GormRepository) RecordProbeResult(ctx context.Context, configI
 		if err := transaction.Clauses(clause.Locking{Strength: "UPDATE"}).Where("id = ?", configID).First(&config).Error; err != nil {
 			return mapNotFound(err)
 		}
+		if config.CurrentVersion != version || config.ResourceRevision != attemptToken {
+			return ErrConflict
+		}
 		var storedVersion ConnectionVersion
 		if err := transaction.Clauses(clause.Locking{Strength: "UPDATE"}).Where("connection_config_id = ? AND version = ?", configID, version).First(&storedVersion).Error; err != nil {
 			return mapNotFound(err)
 		}
+		if storedVersion.ProbeStatus != ProbeStatusNotTested || storedVersion.DetectedTransport != "" {
+			// 同一个 attempt 只能结算一次。开始新 attempt 会将状态重置为
+			// not_tested，但也会换发新的 token；没有 token 的旧结果不能重放。
+			return ErrConflict
+		}
+		nextRevision, err := incrementRevision(config.ResourceRevision)
+		if err != nil {
+			return err
+		}
+		now := time.Now().UTC()
 		result := transaction.Model(&ConnectionVersion{}).Where("connection_config_id = ? AND version = ?", configID, version).
 			Updates(map[string]any{"detected_transport": detectedTransport, "probe_status": status})
 		if result.Error != nil {
@@ -289,8 +367,18 @@ func (repository *GormRepository) RecordProbeResult(ctx context.Context, configI
 		if result.RowsAffected != 1 {
 			return ErrNotFound
 		}
-		if config.CurrentVersion == version && status == ProbeStatusFailed {
-			return disableUnavailableConfig(transaction, &config)
+		// 结果本身也是一次状态变更：无论成功或失败都推进 revision，使重复
+		// delivery 不能再次匹配同一 attempt token；失败时同时撤销 enabled。
+		configResult := transaction.Model(&ConnectionConfig{}).Where("id = ?", configID).Updates(map[string]any{
+			"enabled":           status != ProbeStatusFailed && config.Enabled,
+			"resource_revision": nextRevision,
+			"updated_at":        now,
+		})
+		if configResult.Error != nil {
+			return configResult.Error
+		}
+		if configResult.RowsAffected != 1 {
+			return ErrNotFound
 		}
 		return nil
 	})

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/url"
 	"os"
@@ -11,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Juneoww/AIG_Custom/internal/platform/identity"
 	"github.com/Juneoww/AIG_Custom/pkg/database"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
@@ -18,6 +20,21 @@ import (
 	"gorm.io/driver/postgres"
 	"gorm.io/gorm"
 )
+
+type delayedProbePort struct {
+	started chan<- struct{}
+	release <-chan struct{}
+	result  error
+}
+
+func (port *delayedProbePort) Initialize(_ context.Context, _ ProbeRequest) error {
+	select {
+	case port.started <- struct{}{}:
+	default:
+	}
+	<-port.release
+	return port.result
+}
 
 func TestRepositoryCreatesDisabledUntestedVersionOne(t *testing.T) {
 	ctx := context.Background()
@@ -68,7 +85,9 @@ func TestRepositoryVersionsConnectionMaterialAndLeavesMetadataOutOfHistory(t *te
 	config := testConnectionConfig("config-history-sentinel")
 	first := testConnectionVersion(config.ID, "version-history-one-sentinel", "ciphertext-history-one-sentinel")
 	require.NoError(t, repository.Create(ctx, config, first))
-	require.NoError(t, repository.RecordProbeResult(ctx, config.ID, 1, TransportSSE, ProbeStatusPassed))
+	firstAttempt, err := repository.StartProbe(ctx, config.ID, 1, "1")
+	require.NoError(t, err)
+	require.NoError(t, repository.RecordProbeResult(ctx, config.ID, 1, firstAttempt.Token, TransportSSE, ProbeStatusPassed))
 	testedFirst, err := repository.GetVersion(ctx, config.ID, 1)
 	require.NoError(t, err)
 	firstCiphertext := append([]byte(nil), testedFirst.EncryptedPayload...)
@@ -80,7 +99,7 @@ func TestRepositoryVersionsConnectionMaterialAndLeavesMetadataOutOfHistory(t *te
 	updated, err := repository.CreateNextVersion(ctx, config.ID, second)
 	require.NoError(t, err)
 	assert.Equal(t, 2, updated.CurrentVersion)
-	assert.Equal(t, "2", updated.ResourceRevision)
+	assert.Equal(t, "4", updated.ResourceRevision)
 	assert.False(t, updated.Enabled)
 
 	storedFirst, err := repository.GetVersion(ctx, config.ID, 1)
@@ -95,10 +114,10 @@ func TestRepositoryVersionsConnectionMaterialAndLeavesMetadataOutOfHistory(t *te
 	assert.Empty(t, storedSecond.DetectedTransport)
 	assert.Equal(t, ProbeStatusNotTested, storedSecond.ProbeStatus)
 
-	require.NoError(t, repository.RecordProbeResult(ctx, config.ID, 1, TransportStdio, ProbeStatusPassed))
+	require.ErrorIs(t, repository.RecordProbeResult(ctx, config.ID, 1, firstAttempt.Token, TransportStdio, ProbeStatusPassed), ErrConflict, "a completed or stale attempt cannot be replayed")
 	storedFirst, err = repository.GetVersion(ctx, config.ID, 1)
 	require.NoError(t, err)
-	assert.Equal(t, TransportStdio, storedFirst.DetectedTransport, "a probe result must target the version that began the probe")
+	assert.Equal(t, TransportSSE, storedFirst.DetectedTransport, "a stale result must not overwrite the completed version")
 	storedSecond, err = repository.GetVersion(ctx, config.ID, 2)
 	require.NoError(t, err)
 	assert.Empty(t, storedSecond.DetectedTransport, "a probe result for v1 must not alter the current v2")
@@ -107,7 +126,7 @@ func TestRepositoryVersionsConnectionMaterialAndLeavesMetadataOutOfHistory(t *te
 	metadata, err := repository.UpdateDisplayMetadata(ctx, config.ID, "renamed-sentinel", "redescribed-sentinel")
 	require.NoError(t, err)
 	assert.Equal(t, 2, metadata.CurrentVersion, "display-only changes do not create a connection version")
-	assert.Equal(t, "3", metadata.ResourceRevision)
+	assert.Equal(t, "5", metadata.ResourceRevision)
 	assert.Equal(t, "renamed-sentinel", metadata.Name)
 	assert.Equal(t, "redescribed-sentinel", metadata.Description)
 	versions, err := repository.ListVersions(ctx, config.ID)
@@ -152,6 +171,164 @@ func TestRepositorySetEnabledRequiresPassedCurrentVersionInsideTransaction(t *te
 	assert.False(t, stored.Enabled)
 }
 
+func TestRepositorySetEnabledPersistsDefensiveDisableForFailedCurrentVersion(t *testing.T) {
+	ctx := context.Background()
+	db := openMCPConnectionPostgresDB(t)
+	require.NoError(t, database.Migrate(db))
+	repository := NewGormRepository(db)
+	config := testConnectionConfig("config-enable-persisted-disable-sentinel")
+	version := testConnectionVersion(config.ID, "version-enable-persisted-disable-sentinel", "ciphertext-enable-persisted-disable-sentinel")
+	require.NoError(t, repository.Create(ctx, config, version))
+
+	// 模拟旧进程或故障恢复留下的 enabled + failed 不一致状态；防御性禁用必须
+	// 在返回 unavailable 前提交，不能被 transaction 内的返回错误回滚。
+	require.NoError(t, db.Model(&ConnectionConfig{}).Where("id = ?", config.ID).Update("enabled", true).Error)
+	require.NoError(t, db.Model(&ConnectionVersion{}).
+		Where("connection_config_id = ? AND version = ?", config.ID, 1).
+		Updates(map[string]any{"probe_status": ProbeStatusFailed, "detected_transport": ""}).Error)
+
+	_, err := repository.SetEnabled(ctx, config.ID, 1, "1", true)
+	require.ErrorIs(t, err, ErrTaskConnectionUnavailable)
+	stored, err := repository.GetConfig(ctx, config.ID)
+	require.NoError(t, err)
+	assert.False(t, stored.Enabled)
+	assert.Equal(t, "2", stored.ResourceRevision, "the defensive disable must commit before unavailable is returned")
+}
+
+func TestRepositoryRejectsOutOfOrderProbeResultAcrossPersistentRepositories(t *testing.T) {
+	ctx := context.Background()
+	db := openMCPConnectionPostgresDB(t)
+	require.NoError(t, database.Migrate(db))
+	firstProcess := NewGormRepository(db)
+	secondProcess := NewGormRepository(db)
+	config := testConnectionConfig("config-probe-attempt-order-sentinel")
+	version := testConnectionVersion(config.ID, "version-probe-attempt-order-sentinel", "ciphertext-probe-attempt-order-sentinel")
+	require.NoError(t, firstProcess.Create(ctx, config, version))
+
+	firstAttempt, err := firstProcess.StartProbe(ctx, config.ID, 1, "1")
+	require.NoError(t, err)
+	secondAttempt, err := secondProcess.StartProbe(ctx, config.ID, firstAttempt.Version, firstAttempt.Token)
+	require.NoError(t, err)
+	require.NotEqual(t, firstAttempt.Token, secondAttempt.Token)
+
+	// 第二个 Engine 的较晚失败结论先持久化；第一个 Engine 随后才完成的成功
+	// 结果必须因 attempt token 已失效而被拒绝，不能重新放行此连接。
+	require.NoError(t, secondProcess.RecordProbeResult(ctx, config.ID, secondAttempt.Version, secondAttempt.Token, "", ProbeStatusFailed))
+	require.ErrorIs(t, firstProcess.RecordProbeResult(ctx, config.ID, firstAttempt.Version, firstAttempt.Token, TransportHTTP, ProbeStatusPassed), ErrConflict)
+
+	storedConfig, err := firstProcess.GetConfig(ctx, config.ID)
+	require.NoError(t, err)
+	assert.False(t, storedConfig.Enabled)
+	storedVersion, err := firstProcess.GetVersion(ctx, config.ID, 1)
+	require.NoError(t, err)
+	assert.Equal(t, ProbeStatusFailed, storedVersion.ProbeStatus)
+	assert.Empty(t, storedVersion.DetectedTransport)
+	_, err = firstProcess.SetEnabled(ctx, config.ID, storedConfig.CurrentVersion, storedConfig.ResourceRevision, true)
+	require.ErrorIs(t, err, ErrTaskConnectionUnavailable)
+}
+
+func TestServiceRejectsDelayedSuccessAfterAnotherEnginePersistsFailure(t *testing.T) {
+	ctx := context.Background()
+	db := openMCPConnectionPostgresDB(t)
+	require.NoError(t, database.Migrate(db))
+	firstRepository := NewGormRepository(db)
+	secondRepository := NewGormRepository(db)
+	keyring := testKeyring(t)
+	policy := testPolicy(t, true)
+	alice := identity.Subject{UserID: "probe-order-owner-sentinel", Role: identity.RoleUser}
+
+	started := make(chan struct{}, 1)
+	release := make(chan struct{})
+	firstService := NewService(firstRepository, keyring, NewProbeEngine(&delayedProbePort{started: started, release: release}, ProbeOptions{
+		Timeout: time.Second, MinimumInterval: time.Hour,
+	}), policy)
+	secondService := NewService(secondRepository, keyring, NewProbeEngine(&scriptedProbePort{errors: map[Transport]error{
+		TransportHTTP: errors.New("second probe failure"),
+	}}, ProbeOptions{Timeout: time.Second, MinimumInterval: time.Hour}), policy)
+
+	created, err := firstService.Create(ctx, alice, serviceInput("跨引擎探测", ScopePrivate, TransportHTTP))
+	require.NoError(t, err)
+	firstDone := make(chan error, 1)
+	go func() {
+		_, probeErr := firstService.Probe(ctx, alice, created.ID)
+		firstDone <- probeErr
+	}()
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("the first Engine did not persist and begin its probe")
+	}
+
+	_, err = secondService.Probe(ctx, alice, created.ID)
+	require.ErrorIs(t, err, ErrProbeFailed)
+	close(release)
+	select {
+	case delayedErr := <-firstDone:
+		require.ErrorIs(t, delayedErr, ErrConflict, "the delayed success must not overwrite the later failure")
+	case <-time.After(time.Second):
+		t.Fatal("the delayed probe did not complete")
+	}
+
+	storedConfig, err := firstRepository.GetConfig(ctx, created.ID)
+	require.NoError(t, err)
+	assert.False(t, storedConfig.Enabled)
+	storedVersion, err := firstRepository.GetVersion(ctx, created.ID, storedConfig.CurrentVersion)
+	require.NoError(t, err)
+	assert.Equal(t, ProbeStatusFailed, storedVersion.ProbeStatus)
+	assert.Empty(t, storedVersion.DetectedTransport)
+	_, err = firstService.SetEnabled(ctx, alice, created.ID, true)
+	require.ErrorIs(t, err, ErrTaskConnectionUnavailable)
+}
+
+func TestRepositoryConfigurationMutationInvalidatesStartedProbeAttempt(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		mutate func(context.Context, *GormRepository, *ConnectionConfig, string) error
+	}{
+		{
+			name: "display metadata",
+			mutate: func(ctx context.Context, repository *GormRepository, config *ConnectionConfig, _ string) error {
+				_, err := repository.UpdateDisplayMetadata(ctx, config.ID, "updated-name-sentinel", "updated-description-sentinel")
+				return err
+			},
+		},
+		{
+			name: "new version",
+			mutate: func(ctx context.Context, repository *GormRepository, config *ConnectionConfig, _ string) error {
+				_, err := repository.CreateNextVersion(ctx, config.ID, testConnectionVersion(config.ID, "version-probe-attempt-next-sentinel", "ciphertext-probe-attempt-next-sentinel"))
+				return err
+			},
+		},
+		{
+			name: "enable mutation",
+			mutate: func(ctx context.Context, repository *GormRepository, config *ConnectionConfig, token string) error {
+				_, err := repository.SetEnabled(ctx, config.ID, 1, token, false)
+				return err
+			},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			ctx := context.Background()
+			db := openMCPConnectionPostgresDB(t)
+			require.NoError(t, database.Migrate(db))
+			repository := NewGormRepository(db)
+			config := testConnectionConfig("config-probe-attempt-mutation-" + strings.ReplaceAll(test.name, " ", "-"))
+			version := testConnectionVersion(config.ID, "version-probe-attempt-mutation-"+strings.ReplaceAll(test.name, " ", "-"), "ciphertext-probe-attempt-mutation-"+strings.ReplaceAll(test.name, " ", "-"))
+			require.NoError(t, repository.Create(ctx, config, version))
+
+			attempt, err := repository.StartProbe(ctx, config.ID, 1, "1")
+			require.NoError(t, err)
+			require.NoError(t, test.mutate(ctx, repository, config, attempt.Token))
+			require.ErrorIs(t, repository.RecordProbeResult(ctx, config.ID, attempt.Version, attempt.Token, TransportHTTP, ProbeStatusPassed), ErrConflict)
+
+			startedVersion, err := repository.GetVersion(ctx, config.ID, 1)
+			require.NoError(t, err)
+			assert.Equal(t, ProbeStatusNotTested, startedVersion.ProbeStatus)
+			assert.Empty(t, startedVersion.DetectedTransport)
+		})
+	}
+}
+
 func TestRepositoryFailedCurrentProbeDisablesConnectionAndOldVersionDoesNotChangeCurrent(t *testing.T) {
 	ctx := context.Background()
 	db := openMCPConnectionPostgresDB(t)
@@ -160,12 +337,20 @@ func TestRepositoryFailedCurrentProbeDisablesConnectionAndOldVersionDoesNotChang
 	config := testConnectionConfig("config-probe-failure-state-sentinel")
 	first := testConnectionVersion(config.ID, "version-probe-failure-one-sentinel", "ciphertext-probe-failure-one-sentinel")
 	require.NoError(t, repository.Create(ctx, config, first))
-	require.NoError(t, repository.RecordProbeResult(ctx, config.ID, 1, TransportHTTP, ProbeStatusPassed))
-	_, err := repository.SetEnabled(ctx, config.ID, 1, "1", true)
+	passedAttempt, err := repository.StartProbe(ctx, config.ID, 1, "1")
+	require.NoError(t, err)
+	require.NoError(t, repository.RecordProbeResult(ctx, config.ID, 1, passedAttempt.Token, TransportHTTP, ProbeStatusPassed))
+	stored, err := repository.GetConfig(ctx, config.ID)
+	require.NoError(t, err)
+	_, err = repository.SetEnabled(ctx, config.ID, 1, stored.ResourceRevision, true)
 	require.NoError(t, err)
 
-	require.NoError(t, repository.RecordProbeResult(ctx, config.ID, 1, "", ProbeStatusFailed))
-	stored, err := repository.GetConfig(ctx, config.ID)
+	stored, err = repository.GetConfig(ctx, config.ID)
+	require.NoError(t, err)
+	failedAttempt, err := repository.StartProbe(ctx, config.ID, 1, stored.ResourceRevision)
+	require.NoError(t, err)
+	require.NoError(t, repository.RecordProbeResult(ctx, config.ID, 1, failedAttempt.Token, "", ProbeStatusFailed))
+	stored, err = repository.GetConfig(ctx, config.ID)
 	require.NoError(t, err)
 	assert.False(t, stored.Enabled)
 	failed, err := repository.GetVersion(ctx, config.ID, 1)
@@ -178,7 +363,7 @@ func TestRepositoryFailedCurrentProbeDisablesConnectionAndOldVersionDoesNotChang
 	second := testConnectionVersion(config.ID, "version-probe-failure-two-sentinel", "ciphertext-probe-failure-two-sentinel")
 	_, err = repository.CreateNextVersion(ctx, config.ID, second)
 	require.NoError(t, err)
-	require.NoError(t, repository.RecordProbeResult(ctx, config.ID, 1, "", ProbeStatusFailed), "a stale probe may mark only its own immutable version failed")
+	require.ErrorIs(t, repository.RecordProbeResult(ctx, config.ID, 1, failedAttempt.Token, "", ProbeStatusFailed), ErrConflict, "a stale probe result cannot alter an old version after a new configuration version exists")
 	current, err := repository.GetVersion(ctx, config.ID, 2)
 	require.NoError(t, err)
 	assert.Equal(t, ProbeStatusNotTested, current.ProbeStatus)

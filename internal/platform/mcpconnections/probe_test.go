@@ -215,6 +215,37 @@ func TestHTTPProbePortRejectsUnsafeDirectPayloadBeforeAnyLifecycleRequest(t *tes
 			},
 		},
 		{
+			name: "underscore proxy custom header",
+			payload: ConnectionPayload{
+				Endpoint:       "https://safe.example.test/mcp",
+				Authentication: Authentication{Kind: AuthenticationCustomHeaders},
+				Headers:        []Header{{Name: "X_Forwarded_For", Value: "127.0.0.1"}},
+			},
+		},
+		{
+			name: "underscore mcp custom header",
+			payload: ConnectionPayload{
+				Endpoint:       "https://safe.example.test/mcp",
+				Authentication: Authentication{Kind: AuthenticationCustomHeaders},
+				Headers:        []Header{{Name: "MCP_Protocol_Version", Value: "override"}},
+			},
+		},
+		{
+			name: "host routing custom header",
+			payload: ConnectionPayload{
+				Endpoint:       "https://safe.example.test/mcp",
+				Authentication: Authentication{Kind: AuthenticationCustomHeaders},
+				Headers:        []Header{{Name: "X-Host", Value: "internal-route"}},
+			},
+		},
+		{
+			name: "host override api key header",
+			payload: ConnectionPayload{
+				Endpoint:       "https://safe.example.test/mcp",
+				Authentication: Authentication{Kind: AuthenticationAPIKeyHeader, HeaderName: "X-HTTP-Host-Override", Secret: "opaque"},
+			},
+		},
+		{
 			name: "duplicate custom headers after normalization",
 			payload: ConnectionPayload{
 				Endpoint:       "https://safe.example.test/mcp",

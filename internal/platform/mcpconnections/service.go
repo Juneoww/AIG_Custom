@@ -33,7 +33,8 @@ type ConnectionRepository interface {
 	GetConfig(context.Context, string) (*ConnectionConfig, error)
 	GetVersion(context.Context, string, int) (*ConnectionVersion, error)
 	ListConfigs(context.Context) ([]ConnectionConfig, error)
-	RecordProbeResult(context.Context, string, int, Transport, ProbeStatus) error
+	StartProbe(context.Context, string, int, string) (*ProbeAttempt, error)
+	RecordProbeResult(context.Context, string, int, string, Transport, ProbeStatus) error
 	SetEnabled(context.Context, string, int, string, bool) (*ConnectionConfig, error)
 }
 
@@ -161,8 +162,9 @@ func (service *Service) GetManagementDetail(ctx context.Context, subject identit
 	return &detail, nil
 }
 
-// Probe 不存储失败响应或上游错误。只有当前版本的最小 initialize 成功后，才落库
-// 已探测的具体 transport；这使旧成功记录不能让新版本获得可选资格。
+// Probe 不存储失败响应或上游错误。它先消耗本进程限流配额，再持久化 StartProbe
+// token，随后只允许相同 token 的最小 initialize 结果写回；跨 Engine 的迟到
+// 成功因此不能覆盖较晚失败或配置变更后的最新状态。
 func (service *Service) Probe(ctx context.Context, subject identity.Subject, configID string) (*ConnectionSummary, error) {
 	config, version, err := service.visibleCurrentVersion(ctx, subject, configID)
 	if err != nil {
@@ -177,29 +179,55 @@ func (service *Service) Probe(ctx context.Context, subject identity.Subject, con
 	if service.keyring == nil || service.prober == nil {
 		return nil, ErrProbeFailed
 	}
-	payload, err := service.keyring.OpenConnectionPayload(config, version)
-	if err != nil {
+	if !configurableTransport(version.Transport) {
 		return nil, ErrProbeFailed
 	}
-	result, err := service.prober.Probe(ctx, config.ID, payload, version.Transport)
-	if err != nil {
+	if err := service.prober.reserveAttempt(config.ID); err != nil {
 		if errors.Is(err, ErrProbeRateLimited) {
 			return nil, ErrProbeRateLimited
 		}
-		// 失败同样是当前启动版本的状态结论。仓储会在 version 仍为 current 时
-		// 原子撤销 enabled；若期间已创建新版，则只标记旧版，绝不覆盖新版材料。
-		if recordErr := service.repository.RecordProbeResult(ctx, config.ID, version.Version, "", ProbeStatusFailed); recordErr != nil {
-			return nil, ErrProbeFailed
-		}
 		return nil, ErrProbeFailed
 	}
-	if err := service.repository.RecordProbeResult(ctx, config.ID, version.Version, result.DetectedTransport, ProbeStatusPassed); err != nil {
+	attempt, err := service.repository.StartProbe(ctx, config.ID, version.Version, config.ResourceRevision)
+	if err != nil {
+		return nil, mapServiceRepositoryError(err)
+	}
+	if attempt == nil || attempt.ConnectionConfigID != config.ID || attempt.Version != version.Version || strings.TrimSpace(attempt.Token) == "" {
+		return nil, ErrProbeFailed
+	}
+	// StartProbe 已在同一事务中撤销 enabled 并清空旧结论；更新内存副本使成功
+	// 回应也不会把开始探测前的 enabled/passed 投影给浏览器。
+	config.Enabled = false
+	config.ResourceRevision = attempt.Token
+	version.DetectedTransport = ""
+	version.ProbeStatus = ProbeStatusNotTested
+	payload, err := service.keyring.OpenConnectionPayload(config, version)
+	if err != nil {
+		return service.recordProbeFailure(ctx, attempt)
+	}
+	result, err := service.prober.probeReserved(ctx, payload, version.Transport)
+	if err != nil {
+		return service.recordProbeFailure(ctx, attempt)
+	}
+	if err := service.repository.RecordProbeResult(ctx, config.ID, version.Version, attempt.Token, result.DetectedTransport, ProbeStatusPassed); err != nil {
 		return nil, mapServiceRepositoryError(err)
 	}
 	version.DetectedTransport = result.DetectedTransport
 	version.ProbeStatus = ProbeStatusPassed
 	summary := summaryOf(config, version, &payload)
 	return &summary, nil
+}
+
+// recordProbeFailure 将不带上游详情的失败结论条件写回。仅过期 token 不能写入；
+// 此时返回的冲突同样不含端点、Header 或认证材料。
+func (service *Service) recordProbeFailure(ctx context.Context, attempt *ProbeAttempt) (*ConnectionSummary, error) {
+	if service == nil || service.repository == nil || attempt == nil || strings.TrimSpace(attempt.ConnectionConfigID) == "" || attempt.Version < 1 || strings.TrimSpace(attempt.Token) == "" {
+		return nil, ErrProbeFailed
+	}
+	if err := service.repository.RecordProbeResult(ctx, attempt.ConnectionConfigID, attempt.Version, attempt.Token, "", ProbeStatusFailed); err != nil {
+		return nil, mapServiceRepositoryError(err)
+	}
+	return nil, ErrProbeFailed
 }
 
 func (service *Service) SetEnabled(ctx context.Context, subject identity.Subject, configID string, enabled bool) (*ConnectionSummary, error) {
@@ -525,14 +553,25 @@ func validCustomHeaderName(name string) bool {
 	if !validHTTPHeaderName(name) {
 		return false
 	}
-	name = strings.ToLower(name)
-	if strings.HasPrefix(name, "mcp-") || strings.HasPrefix(name, "proxy-") || strings.HasPrefix(name, "x-forwarded-") {
+	name = strings.ToLower(strings.TrimSpace(name))
+	// '_' 是 HTTP token 中的合法字符，却会让下游代理的 "X-Forwarded-*"
+	// 等规则出现不一致解释。MCP 连接没有必须使用下划线 Header 的协议需求，
+	// 因而统一拒绝，避免连字符黑名单被等价变体绕过。
+	if strings.Contains(name, "_") {
+		return false
+	}
+	if strings.HasPrefix(name, "mcp-") || strings.HasPrefix(name, "proxy-") ||
+		strings.HasPrefix(name, "x-forwarded-") || strings.HasPrefix(name, "x-host-") ||
+		strings.HasPrefix(name, "x-http-host-") || strings.HasPrefix(name, "x-original-") ||
+		strings.HasPrefix(name, "x-rewrite-") || strings.HasPrefix(name, "x-envoy-") ||
+		strings.HasPrefix(name, "x-accel-") {
 		return false
 	}
 	switch name {
 	case "host", "content-length", "transfer-encoding", "connection", "keep-alive", "upgrade", "te", "trailer",
 		"content-type", "accept", "cookie", "set-cookie", "cache-control", "last-event-id",
 		"forwarded", "via", "x-real-ip", "x-original-url", "x-original-uri", "x-rewrite-url", "x-rewrite-uri",
+		"x-host", "x-http-host", "host-override", "http-host-override", "x-host-override", "x-http-host-override",
 		"x-http-method-override", "x-http-method", "x-method-override", "x-url-scheme", "x-forwarded-ssl", "x-arr-ssl":
 		return false
 	default:
