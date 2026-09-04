@@ -106,12 +106,14 @@ func TestTaskCreateAcceptedAIInfraResponseUsesSafeModelIDDetailWire(t *testing.T
 
 	response := performTaskJSON(t, router, tokens["alice"], http.MethodPost, "/tasks", "safe-ai-infra-model-create", map[string]any{
 		"task_type": "ai_infra_scan", "content": "first-target\nsecond-target", "country_iso_code": "zh",
+		"remark": "  上线前复核  ",
 		"params": map[string]any{"model_id": "model-opaque-1", "timeout": 300, "port_scan_mode": "fixed_ai"},
 	})
 	require.Equal(t, http.StatusAccepted, response.Code, response.Body.String())
 
 	assertSafeTaskCreateDetail(t, response.Body.Bytes(), map[string]any{
 		"task_type": "ai_infra_scan",
+		"remark":    "上线前复核",
 		"input_summary": map[string]any{
 			"language": "zh", "model_id": "model-opaque-1", "timeout": float64(300), "target_count": float64(2), "port_scan_mode": "fixed_ai",
 		},
@@ -153,7 +155,7 @@ func TestTaskCreateDispatchFailureUsesFixedErrorAndSafeTaskWire(t *testing.T) {
 	router, tokens := newTaskHandlerFixtureWithEngine(t, engine)
 
 	response := performTaskJSON(t, router, tokens["alice"], http.MethodPost, "/tasks", "safe-create-unavailable", map[string]any{
-		"task_type": "mcp_scan", "content": "failure-content-sentinel",
+		"task_type": "mcp_scan", "content": "failure-content-sentinel", "remark": "  调度失败时仍可见  ",
 		"params": map[string]any{"thread": 4},
 	})
 	require.Equal(t, http.StatusServiceUnavailable, response.Code, response.Body.String())
@@ -168,6 +170,7 @@ func TestTaskCreateDispatchFailureUsesFixedErrorAndSafeTaskWire(t *testing.T) {
 	require.NoError(t, err)
 	assertSafeTaskCreateDetail(t, encoded, map[string]any{
 		"task_type":     "mcp_scan",
+		"remark":        "调度失败时仍可见",
 		"input_summary": map[string]any{"thread": float64(4)},
 	}, "user-alice", "failure-content-sentinel", "dispatch-error-sentinel")
 	assert.Zero(t, engine.statusReads.Load(), "rendering the response must not read the engine")
@@ -429,11 +432,16 @@ func assertSafeTaskCreateDetail(t *testing.T, encoded []byte, expected map[strin
 	t.Helper()
 	var task map[string]any
 	require.NoError(t, json.Unmarshal(encoded, &task))
-	require.ElementsMatch(t, []string{"id", "owner", "task_type", "status", "created_at", "updated_at", "input_summary"}, mapKeys(task))
+	expectedKeys := []string{"id", "owner", "task_type", "status", "created_at", "updated_at", "input_summary"}
+	if expectedRemark, ok := expected["remark"]; ok {
+		expectedKeys = append(expectedKeys, "remark")
+		assert.Equal(t, expectedRemark, task["remark"])
+	}
+	require.ElementsMatch(t, expectedKeys, mapKeys(task))
 	assert.Equal(t, "alice", task["owner"])
 	assert.Equal(t, expected["task_type"], task["task_type"])
 	assert.Equal(t, expected["input_summary"], task["input_summary"])
-	for _, forbidden := range []string{"owner_user_id", "owner_username", "content", "params", "attachment_ids", "engine_session_id", "dispatch_error", "dispatch_attempts", "country_iso_code"} {
+	for _, forbidden := range []string{"owner_user_id", "owner_username", "content", "params", "attachment_ids", "engine_session_id", "dispatch_error", "dispatch_attempts", "country_iso_code", "target_count"} {
 		assert.NotContains(t, task, forbidden)
 	}
 	body := string(encoded)

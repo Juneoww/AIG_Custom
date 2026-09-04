@@ -5,6 +5,7 @@ import (
 	"regexp"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/Juneoww/AIG_Custom/common/runner"
 )
@@ -106,8 +107,8 @@ func taskDetailFromFields(fields taskDetailFields) TaskDetail {
 			Params: fields.Params, CountryIsoCode: fields.CountryIsoCode,
 		}),
 	}
-	if fields.Remark != "" {
-		detail.Remark = fields.Remark
+	if remark := safeTaskRemark(fields.Remark); remark != "" {
+		detail.Remark = remark
 	}
 	return detail
 }
@@ -134,8 +135,13 @@ func safeInputSummary(task *Task) TaskInputSummary {
 		}
 	case "ai_infra_scan":
 		targetCount := task.TargetCount
-		if targetCount < 1 || targetCount > runner.MaxTargetExpressions {
+		if targetCount == 0 {
 			targetCount = nonEmptyLineCount(task.Content)
+			if targetCount > runner.MaxTargetExpressions {
+				targetCount = 0
+			}
+		} else if targetCount < 1 || targetCount > runner.MaxTargetExpressions {
+			targetCount = 0
 		}
 		summary := TaskInputSummary{
 			Language:    safeLanguage(task.CountryIsoCode),
@@ -157,6 +163,14 @@ func safeInputSummary(task *Task) TaskInputSummary {
 	default:
 		return TaskInputSummary{}
 	}
+}
+
+func safeTaskRemark(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" || !utf8.ValidString(value) || utf8.RuneCountInString(value) > MaxTaskRemarkRuneCount {
+		return ""
+	}
+	return value
 }
 
 func safeModelID(value string) string {
