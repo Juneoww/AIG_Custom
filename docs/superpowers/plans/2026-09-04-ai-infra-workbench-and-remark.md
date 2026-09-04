@@ -151,7 +151,7 @@
   }
   ```
 
-  Raise `LatestSchemaVersion` to `10`, add `"remark"` and `"target_count"` to `requiredRuntimeColumns["platform_tasks"]`, and add matching `Remark string`/`TargetCount int` fields to the migration-local `platformTaskMigration` model so future schema inspection stays accurate. Do not add an index.
+  Raise `LatestSchemaVersion` to `10` and add `"remark"`/`"target_count"` to `requiredRuntimeColumns["platform_tasks"]`. Keep the migration-local `platformTaskMigration` faithful to the released v5 shape: it is used by v5 `AutoMigrate`, so adding v10 fields there would create them early on a clean database. The v10 explicit SQL is the only creation path for the two new columns. Do not add an index.
 
 - [ ] **Step 4: Re-run migration and schema tests.**
 
