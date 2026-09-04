@@ -242,11 +242,13 @@ func (service *Service) SetEnabled(ctx context.Context, subject identity.Subject
 		if service.policy == nil || service.policy.RequireControlledDialer() != nil {
 			return nil, ErrControlledEgressRequired
 		}
-		if version.ProbeStatus != ProbeStatusPassed || !concreteProbeTransport(version.DetectedTransport) {
-			return nil, ErrTaskConnectionUnavailable
-		}
-		if _, err := service.currentPayloadPermitted(ctx, config, version); err != nil {
-			return nil, err
+		// 已通过且具有具体 transport 的版本仍须在锁外重解密并按当前策略复验；
+		// 其余状态不能在这里提前返回，必须由 repository.SetEnabled 在 config →
+		// version 锁内复核并提交历史 enabled + unavailable 状态的防御性禁用。
+		if version.ProbeStatus == ProbeStatusPassed && concreteProbeTransport(version.DetectedTransport) {
+			if _, err := service.currentPayloadPermitted(ctx, config, version); err != nil {
+				return nil, err
+			}
 		}
 	}
 	updated, err := service.repository.SetEnabled(ctx, config.ID, version.Version, config.ResourceRevision, enabled)
@@ -571,6 +573,7 @@ func validCustomHeaderName(name string) bool {
 	case "host", "content-length", "transfer-encoding", "connection", "keep-alive", "upgrade", "te", "trailer",
 		"content-type", "accept", "cookie", "set-cookie", "cache-control", "last-event-id",
 		"forwarded", "via", "x-real-ip", "x-original-url", "x-original-uri", "x-rewrite-url", "x-rewrite-uri",
+		"x-request-url", "x-request-uri",
 		"x-host", "x-http-host", "host-override", "http-host-override", "x-host-override", "x-http-host-override",
 		"x-http-method-override", "x-http-method", "x-method-override", "x-url-scheme", "x-forwarded-ssl", "x-arr-ssl":
 		return false

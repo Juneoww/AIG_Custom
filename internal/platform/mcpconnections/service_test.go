@@ -276,6 +276,8 @@ func TestValidCreateInputRejectsUnsafeOrAmbiguousHTTPHeaders(t *testing.T) {
 		{name: "real ip", headers: []Header{{Name: "X-Real-IP", Value: "127.0.0.1"}}},
 		{name: "original url", headers: []Header{{Name: "X-Original-URL", Value: "/admin"}}},
 		{name: "rewrite url", headers: []Header{{Name: "X-Rewrite-URL", Value: "/admin"}}},
+		{name: "request URI", headers: []Header{{Name: "X-Request-URI", Value: "/admin"}}},
+		{name: "request URL", headers: []Header{{Name: "X-Request-URL", Value: "/admin"}}},
 		{name: "via", headers: []Header{{Name: "Via", Value: "1.1 proxy"}}},
 		{name: "method override", headers: []Header{{Name: "X-HTTP-Method-Override", Value: "DELETE"}}},
 		{name: "underscore forwarded", headers: []Header{{Name: "X_Forwarded_For", Value: "127.0.0.1"}}},
@@ -305,7 +307,7 @@ func TestValidCreateInputRejectsUnsafeOrAmbiguousHTTPHeaders(t *testing.T) {
 	}
 	assert.False(t, validCreateInput(tooMany))
 
-	for _, headerName := range []string{"Mcp-Session-Id", "X-Forwarded-Host", "X_Forwarded_Host", "X-Host", "X-HTTP-Host-Override"} {
+	for _, headerName := range []string{"Mcp-Session-Id", "X-Forwarded-Host", "X_Forwarded_Host", "X-Host", "X-HTTP-Host-Override", "X-Request-URI", "X-Request-URL"} {
 		badAPIKeyName := base
 		badAPIKeyName.Headers = nil
 		badAPIKeyName.Authentication = Authentication{Kind: AuthenticationAPIKeyHeader, HeaderName: headerName, Secret: "opaque"}
@@ -319,7 +321,7 @@ func TestValidCreateInputRejectsUnsafeOrAmbiguousHTTPHeaders(t *testing.T) {
 }
 
 func TestValidCustomHeaderNameRejectsTrimmedRoutingAliases(t *testing.T) {
-	for _, name := range []string{" X-Host ", "\tX-HTTP-Host-Override\t", " X-Original-URL ", " X-Rewrite-URL "} {
+	for _, name := range []string{" X-Host ", "\tX-HTTP-Host-Override\t", " X-Original-URL ", " X-Rewrite-URL ", " X-Request-URI ", " X-Request-URL "} {
 		assert.False(t, validCustomHeaderName(name), name)
 	}
 }

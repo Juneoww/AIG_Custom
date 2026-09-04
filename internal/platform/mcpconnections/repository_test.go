@@ -195,6 +195,33 @@ func TestRepositorySetEnabledPersistsDefensiveDisableForFailedCurrentVersion(t *
 	assert.Equal(t, "2", stored.ResourceRevision, "the defensive disable must commit before unavailable is returned")
 }
 
+func TestServiceSetEnabledPersistsDefensiveDisableForHistoricalFailedCurrentVersion(t *testing.T) {
+	ctx := context.Background()
+	db := openMCPConnectionPostgresDB(t)
+	require.NoError(t, database.Migrate(db))
+	repository := NewGormRepository(db)
+	config := testConnectionConfig("config-service-enable-persisted-disable-sentinel")
+	config.OwnerUserID = "owner-service-enable-persisted-disable-sentinel"
+	version := testConnectionVersion(config.ID, "version-service-enable-persisted-disable-sentinel", "ciphertext-service-enable-persisted-disable-sentinel")
+	require.NoError(t, repository.Create(ctx, config, version))
+
+	// 模拟旧进程或故障恢复留下的 enabled + failed 不一致状态。公开 Service
+	// 路径必须进入仓储层锁内防御性禁用，不能在锁外资格预检直接返回。
+	require.NoError(t, db.Model(&ConnectionConfig{}).Where("id = ?", config.ID).Update("enabled", true).Error)
+	require.NoError(t, db.Model(&ConnectionVersion{}).
+		Where("connection_config_id = ? AND version = ?", config.ID, 1).
+		Updates(map[string]any{"probe_status": ProbeStatusFailed, "detected_transport": ""}).Error)
+
+	service := NewService(repository, testKeyring(t), nil, testPolicy(t, true))
+	_, err := service.SetEnabled(ctx, identity.Subject{UserID: config.OwnerUserID, Role: identity.RoleUser}, config.ID, true)
+	require.ErrorIs(t, err, ErrTaskConnectionUnavailable)
+
+	stored, err := repository.GetConfig(ctx, config.ID)
+	require.NoError(t, err)
+	assert.False(t, stored.Enabled)
+	assert.Equal(t, "2", stored.ResourceRevision, "the public service path must commit defensive disable before unavailable is returned")
+}
+
 func TestRepositoryRejectsOutOfOrderProbeResultAcrossPersistentRepositories(t *testing.T) {
 	ctx := context.Background()
 	db := openMCPConnectionPostgresDB(t)

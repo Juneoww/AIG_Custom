@@ -49,8 +49,9 @@ Header，但用户材料不能改变探测协议本身。
 `Connection`、`Keep-Alive`、`Upgrade`、`TE`、`Trailer`、`Proxy-*`、`Content-Type`、`Accept`、
 `Cookie`、`Set-Cookie`、会话控制 Header 以及所有 `MCP-*` 名称。还必须拒绝会影响可信
 代理、来源或路由判定的 `Forwarded`、`X-Forwarded-*`、`X-Real-IP`、`X-Original-URL`、
-`X-Rewrite-URL`、`Via` 与 HTTP method override Header。Header 名中一律不允许 `_`，并
-拒绝 `X-Host`/Host override、`X-Original-*`、`X-Rewrite-*` 及受控代理实现的路由别名。
+`X-Rewrite-URL`、`X-Request-URL`、`X-Request-URI`、`Via` 与 HTTP method override Header。
+Header 名中一律不允许 `_`，并拒绝 `X-Host`/Host override、`X-Original-*`、`X-Rewrite-*`
+及受控代理实现的路由别名。
 不得以 Header 传入路由、会话或协议覆盖；名称和值同样不得被记录、回显或投影到任务/审计页面。
 
 即使载荷来自已加密的历史连接版本，探测端口也必须在发起任意 HTTP、SSE、initialized

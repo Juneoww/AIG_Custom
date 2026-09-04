@@ -215,6 +215,21 @@ func TestHTTPProbePortRejectsUnsafeDirectPayloadBeforeAnyLifecycleRequest(t *tes
 			},
 		},
 		{
+			name: "request URI custom header",
+			payload: ConnectionPayload{
+				Endpoint:       "https://safe.example.test/mcp",
+				Authentication: Authentication{Kind: AuthenticationCustomHeaders},
+				Headers:        []Header{{Name: "X-Request-URI", Value: "/admin"}},
+			},
+		},
+		{
+			name: "request URL api key header",
+			payload: ConnectionPayload{
+				Endpoint:       "https://safe.example.test/mcp",
+				Authentication: Authentication{Kind: AuthenticationAPIKeyHeader, HeaderName: "X-Request-URL", Secret: "opaque"},
+			},
+		},
+		{
 			name: "underscore proxy custom header",
 			payload: ConnectionPayload{
 				Endpoint:       "https://safe.example.test/mcp",
