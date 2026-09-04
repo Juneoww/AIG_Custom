@@ -39,6 +39,7 @@ const TASK_STATUSES = new Set<TaskStatus>([
 ])
 const TERMINAL_STATUSES = new Set<TaskStatus>(['succeeded', 'failed', 'cancelled'])
 const MAX_POLL_COUNT = 8
+const MAX_TASK_REMARK_CODE_POINTS = 2_000
 
 function recordOf(value: unknown): Record<string, unknown> | undefined {
   return typeof value === 'object' && value !== null ? (value as Record<string, unknown>) : undefined
@@ -66,6 +67,27 @@ function safeInteger(value: unknown, maximum = Number.MAX_SAFE_INTEGER): number 
   return Number.isSafeInteger(value) && (value as number) >= 0 && (value as number) <= maximum
     ? (value as number)
     : undefined
+}
+
+function isWellFormedUnicode(value: string): boolean {
+  for (let index = 0; index < value.length; index += 1) {
+    const unit = value.charCodeAt(index)
+    if (unit >= 0xD800 && unit <= 0xDBFF) {
+      const next = value.charCodeAt(index + 1)
+      if (next < 0xDC00 || next > 0xDFFF) return false
+      index += 1
+      continue
+    }
+    if (unit >= 0xDC00 && unit <= 0xDFFF) return false
+  }
+  return true
+}
+
+function safeTaskRemark(value: unknown): string | undefined {
+  if (typeof value !== 'string' || !isWellFormedUnicode(value)) return undefined
+  const normalized = value.trim()
+  if (!normalized || !isWellFormedUnicode(normalized) || [...normalized].length > MAX_TASK_REMARK_CODE_POINTS) return undefined
+  return normalized
 }
 
 function parseTaskSummary(value: unknown): TaskSummary | undefined {
@@ -114,10 +136,17 @@ function parseInputSummary(value: unknown): TaskInputSummary | undefined {
 }
 
 export function parseTaskDetail(value: unknown): TaskDetail {
+  const source = recordOf(value)
   const summary = parseTaskSummary(value)
-  const inputSummary = parseInputSummary(recordOf(value)?.input_summary)
+  const inputSummary = parseInputSummary(source?.input_summary)
   if (!summary || !inputSummary) throw new ApiError('unexpected-response', 200)
-  return { ...summary, input_summary: inputSummary }
+  const detail: TaskDetail = { ...summary, input_summary: inputSummary }
+  if (source?.remark !== undefined) {
+    const remark = safeTaskRemark(source.remark)
+    if (!remark) throw new ApiError('unexpected-response', 200)
+    detail.remark = remark
+  }
+  return detail
 }
 
 function parseTaskList(value: unknown): TaskListResponse {

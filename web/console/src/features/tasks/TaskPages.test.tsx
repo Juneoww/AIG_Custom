@@ -445,6 +445,66 @@ describe('任务页面', () => {
     expect(screen.queryByText('user-1')).not.toBeInTheDocument()
   })
 
+  it('专属 AI 基础设施详情显示任务备注', async () => {
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(jsonResponse({ ...aiInfraDetail, remark: '变更窗口前的授权扫描' }))
+      .mockResolvedValueOnce(jsonResponse({ items: [catalogModel()], total: 1, page: 1, page_size: 100 }))
+    vi.stubGlobal('fetch', fetchMock)
+    renderPage(
+      <TaskDetailPage expectedTaskType="ai_infra_scan" />,
+      { id: 'user-1', username: 'alice', role: 'user', must_change_password: false },
+      '/tasks/ai-infra/task-ai-infra-1',
+      '/tasks/ai-infra/:taskId',
+    )
+
+    expect(await screen.findByText('变更窗口前的授权扫描')).toBeInTheDocument()
+    expect(screen.getByText('任务说明')).toBeInTheDocument()
+  })
+
+  it('通用任务详情不显示备注', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(jsonResponse({ ...aiInfraDetail, remark: '只允许专属详情显示' })))
+    renderPage(
+      <TaskDetailPage />,
+      { id: 'user-1', username: 'alice', role: 'user', must_change_password: false },
+      '/tasks/task-ai-infra-1',
+      '/tasks/:taskId',
+    )
+
+    expect(await screen.findByRole('region', { name: '任务安全摘要' })).toBeInTheDocument()
+    expect(screen.queryByText('任务说明')).not.toBeInTheDocument()
+    expect(screen.queryByText('只允许专属详情显示')).not.toBeInTheDocument()
+  })
+
+  it('非 AI 任务即使携带备注也不会在专属详情显示', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(jsonResponse({ ...task, remark: '不应显示' })))
+    renderPage(
+      <TaskDetailPage expectedTaskType="ai_infra_scan" />,
+      { id: 'user-1', username: 'alice', role: 'user', must_change_password: false },
+      '/tasks/ai-infra/task-opaque-1',
+      '/tasks/ai-infra/:taskId',
+    )
+
+    expect(await screen.findByText('该任务不属于 AI 基础设施扫描')).toBeInTheDocument()
+    expect(screen.queryByText('任务说明')).not.toBeInTheDocument()
+    expect(screen.queryByText('不应显示')).not.toBeInTheDocument()
+  })
+
+  it('专属 AI 基础设施详情在备注缺省时不显示任务说明', async () => {
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(jsonResponse(aiInfraDetail))
+      .mockResolvedValueOnce(jsonResponse({ items: [catalogModel()], total: 1, page: 1, page_size: 100 }))
+    vi.stubGlobal('fetch', fetchMock)
+    renderPage(
+      <TaskDetailPage expectedTaskType="ai_infra_scan" />,
+      { id: 'user-1', username: 'alice', role: 'user', must_change_password: false },
+      '/tasks/ai-infra/task-ai-infra-1',
+      '/tasks/ai-infra/:taskId',
+    )
+
+    expect(await screen.findByRole('region', { name: '任务安全摘要' })).toBeInTheDocument()
+    expect(screen.queryByText('任务说明')).not.toBeInTheDocument()
+  })
+
   it('专属 AI 基础设施详情为第二页模型自动继续请求目录', async () => {
     const fetchMock = vi.fn()
       .mockResolvedValueOnce(jsonResponse(aiInfraDetail))

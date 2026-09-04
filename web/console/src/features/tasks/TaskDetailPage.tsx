@@ -183,6 +183,9 @@ export function TaskDetailPage({ expectedTaskType, returnTo }: TaskDetailPagePro
             {query.data.input_summary.target_count ? <div className={styles.fact}><Text className={styles.label}>目标数量</Text><Text>{query.data.input_summary.target_count}</Text></div> : null}
             {query.data.input_summary.num_prompts ? <div className={styles.fact}><Text className={styles.label}>提示词数量</Text><Text>{query.data.input_summary.num_prompts}</Text></div> : null}
             {expectedTaskType === 'ai_infra_scan' && query.data.task_type === 'ai_infra_scan' && query.data.input_summary.model_id ? <div className={styles.fact}><Text className={styles.label}>扫描模型</Text><RestoredModelName modelID={query.data.input_summary.model_id} /></div> : null}
+            {expectedTaskType === 'ai_infra_scan' && query.data.task_type === 'ai_infra_scan' && query.data.remark ? (
+              <div className={styles.fact}><Text className={styles.label}>任务说明</Text><Text>{query.data.remark}</Text></div>
+            ) : null}
           </div>
         </Card>
       ) : null}

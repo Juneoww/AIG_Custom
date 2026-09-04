@@ -83,6 +83,7 @@ export interface TaskInputSummary {
 
 export interface TaskDetail extends TaskSummary {
   input_summary: TaskInputSummary
+  remark?: string
 }
 
 export interface TaskListResponse {
@@ -95,6 +96,7 @@ export interface TaskListResponse {
 export interface TaskCreateRequest {
   task_type: Exclude<TaskType, 'unknown'>
   content: string
+  remark?: string
   params: {
     model_id?: string | string[]
     eval_model_id?: string
