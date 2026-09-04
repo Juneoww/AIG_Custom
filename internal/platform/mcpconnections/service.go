@@ -5,6 +5,8 @@ import (
 	"errors"
 	"strings"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/Juneoww/AIG_Custom/internal/platform/identity"
 	"github.com/google/uuid"
@@ -13,6 +15,11 @@ import (
 var (
 	ErrForbidden                 = errors.New("MCP 连接操作无权访问")
 	ErrTaskConnectionUnavailable = errors.New("MCP 连接当前不可用于创建任务")
+)
+
+const (
+	maxConnectionNameRunes        = 80
+	maxConnectionDescriptionRunes = 240
 )
 
 // ConnectionRepository 是连接服务使用的最小持久化边界。Task 4 的任务 UoW
@@ -213,7 +220,7 @@ func (service *Service) SetEnabled(ctx context.Context, subject identity.Subject
 // TaskOptions 是未来 Task 4 的只读输入。缺少受控 dialer 时返回空集而非把未受
 // 验证配置泄露给浏览器；实际创建前仍必须调用 ValidateTaskConnection。
 func (service *Service) TaskOptions(ctx context.Context, subject identity.Subject) ([]TaskConnectionOption, error) {
-	if service == nil || service.repository == nil || !validReader(subject) {
+	if service == nil || service.repository == nil || !canUseForTask(subject) {
 		return nil, ErrForbidden
 	}
 	if service.policy == nil || service.policy.RequireControlledDialer() != nil {
@@ -226,7 +233,7 @@ func (service *Service) TaskOptions(ctx context.Context, subject identity.Subjec
 	options := make([]TaskConnectionOption, 0, len(configs))
 	for index := range configs {
 		config := &configs[index]
-		if !canRead(subject, config) || !config.Enabled {
+		if !canRead(subject, config) || !config.Enabled || !validDisplayText(config.Name, maxConnectionNameRunes, true) || !validDisplayText(config.Description, maxConnectionDescriptionRunes, false) {
 			continue
 		}
 		version, getErr := service.repository.GetVersion(ctx, config.ID, config.CurrentVersion)
@@ -239,8 +246,7 @@ func (service *Service) TaskOptions(ctx context.Context, subject identity.Subjec
 		options = append(options, TaskConnectionOption{
 			ConnectionID:      config.ID,
 			ConnectionVersion: version.Version,
-			Name:              config.Name,
-			Description:       config.Description,
+			Name:              safeDisplayText(config.Name, maxConnectionNameRunes, true),
 			Scope:             config.Scope,
 			Transport:         version.DetectedTransport,
 		})
@@ -251,7 +257,10 @@ func (service *Service) TaskOptions(ctx context.Context, subject identity.Subjec
 // ValidateTaskConnection 仅执行未来任务创建需要的资格验证；它不创建任务、绑定或
 // UoW，避免在 Task 3 越过 Task 4 的持久化职责。
 func (service *Service) ValidateTaskConnection(ctx context.Context, subject identity.Subject, configID string) error {
-	if service == nil || service.policy == nil || service.policy.RequireControlledDialer() != nil {
+	if service == nil || !canUseForTask(subject) {
+		return ErrForbidden
+	}
+	if service.policy == nil || service.policy.RequireControlledDialer() != nil {
 		return ErrControlledEgressRequired
 	}
 	config, version, err := service.visibleCurrentVersion(ctx, subject, configID)
@@ -285,8 +294,8 @@ func (service *Service) visibleCurrentVersion(ctx context.Context, subject ident
 func summaryOf(config *ConnectionConfig, version *ConnectionVersion) ConnectionSummary {
 	return ConnectionSummary{
 		ID:                config.ID,
-		Name:              config.Name,
-		Description:       config.Description,
+		Name:              safeDisplayText(config.Name, maxConnectionNameRunes, true),
+		Description:       safeDisplayText(config.Description, maxConnectionDescriptionRunes, false),
 		Scope:             config.Scope,
 		CurrentVersion:    config.CurrentVersion,
 		Enabled:           config.Enabled,
@@ -321,6 +330,19 @@ func validReader(subject identity.Subject) bool {
 	}
 }
 
+// canUseForTask 与只读审计视图分离：审计员可看经过脱敏的摘要，但不能选择连接或
+// 验证任务可用性，以免读权限间接变成任务执行权限。
+func canUseForTask(subject identity.Subject) bool {
+	switch subject.Role {
+	case identity.RoleAdmin:
+		return true
+	case identity.RoleUser:
+		return strings.TrimSpace(subject.UserID) != ""
+	default:
+		return false
+	}
+}
+
 func canRead(subject identity.Subject, config *ConnectionConfig) bool {
 	if config == nil || !validReader(subject) {
 		return false
@@ -345,7 +367,7 @@ func canManage(subject identity.Subject, config *ConnectionConfig) bool {
 }
 
 func validCreateInput(input CreateConnectionInput) bool {
-	if strings.TrimSpace(input.Name) == "" || input.Scope != ScopePrivate && input.Scope != ScopeGlobal || !configurableTransport(input.Transport) || strings.TrimSpace(input.ServerURL) == "" {
+	if !validDisplayText(input.Name, maxConnectionNameRunes, true) || !validDisplayText(input.Description, maxConnectionDescriptionRunes, false) || input.Scope != ScopePrivate && input.Scope != ScopeGlobal || !configurableTransport(input.Transport) || strings.TrimSpace(input.ServerURL) == "" {
 		return false
 	}
 	for _, header := range input.Headers {
@@ -365,6 +387,87 @@ func validCreateInput(input CreateConnectionInput) bool {
 	default:
 		return false
 	}
+}
+
+func validDisplayText(value string, maximumRunes int, required bool) bool {
+	if maximumRunes <= 0 || !utf8.ValidString(value) {
+		return false
+	}
+	for _, character := range value {
+		if unicode.IsControl(character) {
+			return false
+		}
+	}
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return !required
+	}
+	if utf8.RuneCountInString(value) > maximumRunes {
+		return false
+	}
+	if containsSensitiveDisplayMaterial(value) {
+		return false
+	}
+	return true
+}
+
+func safeDisplayText(value string, maximumRunes int, required bool) string {
+	value = strings.TrimSpace(value)
+	if !validDisplayText(value, maximumRunes, required) {
+		return ""
+	}
+	return value
+}
+
+func containsSensitiveDisplayMaterial(value string) bool {
+	lower := strings.ToLower(value)
+	if strings.Contains(lower, "://") || strings.Contains(lower, "git@") {
+		return true
+	}
+	for _, keyword := range []string{
+		"token", "cookie", "authorization", "header", "bearer", "api_key", "apikey", "secret", "password",
+		"令牌", "凭据", "密钥", "授权", "请求头",
+	} {
+		if strings.Contains(lower, keyword) {
+			return true
+		}
+	}
+	return containsTokenLikeSegment(value)
+}
+
+func containsTokenLikeSegment(value string) bool {
+	length := 0
+	hasUpper := false
+	hasLower := false
+	hasDigit := false
+	flush := func() bool {
+		matched := length >= 32 && hasUpper && hasLower && hasDigit
+		length = 0
+		hasUpper = false
+		hasLower = false
+		hasDigit = false
+		return matched
+	}
+	for _, character := range value {
+		switch {
+		case character >= 'A' && character <= 'Z':
+			length++
+			hasUpper = true
+		case character >= 'a' && character <= 'z':
+			length++
+			hasLower = true
+		case character >= '0' && character <= '9':
+			length++
+			hasDigit = true
+		case character == '-' || character == '_' || character == '.':
+			length++
+		default:
+			if flush() {
+				return true
+			}
+		}
+	}
+	return flush()
 }
 
 func configurableTransport(transport Transport) bool {

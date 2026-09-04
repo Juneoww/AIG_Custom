@@ -6,6 +6,7 @@ import (
 	"errors"
 	"net"
 	"sort"
+	"strings"
 	"testing"
 	"time"
 
@@ -131,7 +132,7 @@ func testPolicy(t *testing.T, controlled bool) *OutboundPolicy {
 
 func testService(t *testing.T, repository *memoryConnectionRepository, controlled bool, port *scriptedProbePort) *Service {
 	t.Helper()
-	return NewService(repository, testKeyring(t), NewProbeEngine(port, ProbeOptions{Timeout: time.Second}), testPolicy(t, controlled))
+	return NewService(repository, testKeyring(t), NewProbeEngine(port, ProbeOptions{Timeout: time.Second, MinimumInterval: time.Nanosecond}), testPolicy(t, controlled))
 }
 
 func serviceInput(name string, scope Scope, transport Transport) CreateConnectionInput {
@@ -223,6 +224,8 @@ func TestServiceFailsClosedWithoutControlledGateway(t *testing.T) {
 	alice := identity.Subject{UserID: "alice", Role: identity.RoleUser}
 	created, err := service.Create(ctx, alice, serviceInput("private", ScopePrivate, TransportHTTP))
 	require.NoError(t, err)
+	assert.False(t, created.Enabled)
+	assert.Equal(t, ProbeStatusNotTested, created.ProbeStatus)
 
 	_, err = service.Probe(ctx, alice, created.ID)
 	require.ErrorIs(t, err, ErrControlledEgressRequired)
@@ -272,4 +275,109 @@ func TestServiceStoresOnlySuccessfulProbeAndNeverReturnsProbeFailureDetail(t *te
 	require.Len(t, options, 1)
 	assert.Equal(t, created.ID, options[0].ConnectionID)
 	assert.Equal(t, 1, options[0].ConnectionVersion)
+}
+
+func TestServiceRestrictsTaskUseToUsersAndAdministrators(t *testing.T) {
+	ctx := context.Background()
+	repository := newMemoryConnectionRepository()
+	service := testService(t, repository, true, &scriptedProbePort{errors: map[Transport]error{}})
+	admin := identity.Subject{UserID: "admin", Role: identity.RoleAdmin}
+	alice := identity.Subject{UserID: "alice", Role: identity.RoleUser}
+	auditor := identity.Subject{UserID: "auditor", Role: identity.RoleAuditor}
+	created, err := service.Create(ctx, admin, serviceInput("global", ScopeGlobal, TransportHTTP))
+	require.NoError(t, err)
+	_, err = service.Probe(ctx, admin, created.ID)
+	require.NoError(t, err)
+	_, err = service.SetEnabled(ctx, admin, created.ID, true)
+	require.NoError(t, err)
+
+	options, err := service.TaskOptions(ctx, alice)
+	require.NoError(t, err)
+	require.Len(t, options, 1, "an ordinary user can use a visible global connection")
+	_, err = service.TaskOptions(ctx, auditor)
+	require.ErrorIs(t, err, ErrForbidden)
+	require.ErrorIs(t, service.ValidateTaskConnection(ctx, auditor, created.ID), ErrForbidden)
+}
+
+func TestServiceRejectsUnsafeDisplayTextAndOmitsDescriptionFromTaskOptions(t *testing.T) {
+	ctx := context.Background()
+	repository := newMemoryConnectionRepository()
+	service := testService(t, repository, true, &scriptedProbePort{errors: map[Transport]error{}})
+	alice := identity.Subject{UserID: "alice", Role: identity.RoleUser}
+
+	for _, unsafeText := range []string{
+		"连接 https://example.invalid/mcp",
+		"Git 来源 https://git.example.invalid/org/repo.git",
+		"token 标记",
+		"cookie 标记",
+		"authorization 标记",
+		"header 标记",
+		"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdef0123456789",
+		"控制字符\x00",
+		"行尾换行\n",
+		strings.Repeat("过长", 200),
+	} {
+		for _, field := range []struct {
+			name string
+			set  func(*CreateConnectionInput, string)
+		}{
+			{name: "name", set: func(input *CreateConnectionInput, value string) { input.Name = value }},
+			{name: "description", set: func(input *CreateConnectionInput, value string) { input.Description = value }},
+		} {
+			t.Run(field.name+"/"+unsafeText, func(t *testing.T) {
+				input := serviceInput("正常连接", ScopePrivate, TransportHTTP)
+				field.set(&input, unsafeText)
+				_, err := service.Create(ctx, alice, input)
+				require.ErrorIs(t, err, ErrInvalid)
+			})
+		}
+	}
+
+	input := serviceInput("生产环境 MCP", ScopePrivate, TransportHTTP)
+	input.Description = "用于业务流程安全扫描"
+	created, err := service.Create(ctx, alice, input)
+	require.NoError(t, err)
+	_, err = service.Probe(ctx, alice, created.ID)
+	require.NoError(t, err)
+	_, err = service.SetEnabled(ctx, alice, created.ID, true)
+	require.NoError(t, err)
+	options, err := service.TaskOptions(ctx, alice)
+	require.NoError(t, err)
+	require.Len(t, options, 1)
+	encoded, err := json.Marshal(options[0])
+	require.NoError(t, err)
+	assert.NotContains(t, string(encoded), "description")
+	summary, err := service.GetSummary(ctx, alice, created.ID)
+	require.NoError(t, err)
+	encoded, err = json.Marshal(summary)
+	require.NoError(t, err)
+	for _, forbidden := range []string{"safe.example.test", "X-Private-Header-Name", "X-Custom-Secret-Header", "private-token-value", "custom-secret-value"} {
+		assert.NotContains(t, string(encoded), forbidden)
+	}
+}
+
+func TestServiceDoesNotProjectUnsafeLegacyDisplayText(t *testing.T) {
+	ctx := context.Background()
+	repository := newMemoryConnectionRepository()
+	service := testService(t, repository, true, &scriptedProbePort{errors: map[Transport]error{}})
+	alice := identity.Subject{UserID: "alice", Role: identity.RoleUser}
+	created, err := service.Create(ctx, alice, serviceInput("安全连接", ScopePrivate, TransportHTTP))
+	require.NoError(t, err)
+
+	// 模拟版本升级前已落库的自由文本；读取与任务选择仍不能把它投影给浏览器。
+	repository.configs[created.ID].Name = "https://legacy.example.invalid/mcp"
+	repository.configs[created.ID].Description = "header reference"
+	repository.configs[created.ID].Enabled = true
+	repository.versions[created.ID][1].ProbeStatus = ProbeStatusPassed
+	repository.versions[created.ID][1].DetectedTransport = TransportHTTP
+
+	summary, err := service.GetSummary(ctx, alice, created.ID)
+	require.NoError(t, err)
+	encoded, err := json.Marshal(summary)
+	require.NoError(t, err)
+	assert.NotContains(t, string(encoded), "legacy.example.invalid")
+	assert.NotContains(t, string(encoded), "header")
+	options, err := service.TaskOptions(ctx, alice)
+	require.NoError(t, err)
+	assert.Empty(t, options, "unsafe legacy display text must not be task-selectable")
 }

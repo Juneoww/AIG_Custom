@@ -43,7 +43,6 @@ type TaskConnectionOption struct {
 	ConnectionID      string    `json:"connection_id"`
 	ConnectionVersion int       `json:"connection_version"`
 	Name              string    `json:"name"`
-	Description       string    `json:"description"`
 	Scope             Scope     `json:"scope"`
 	Transport         Transport `json:"transport"`
 }

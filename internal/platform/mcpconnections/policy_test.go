@@ -240,6 +240,15 @@ func TestPolicyBlocksAllSpecialDNSAnswersAndGitRebinding(t *testing.T) {
 		require.ErrorIs(t, policy.ValidateServerURL(context.Background(), "https://"+host+"/mcp"), ErrOutboundDenied)
 	}
 
+	metadataV6Policy, err := NewOutboundPolicy(OutboundPolicyConfig{
+		AllowedCIDRs: []string{"::/0"},
+		Resolver: policyResolver(func(context.Context, string) ([]net.IPAddr, error) {
+			return []net.IPAddr{{IP: net.ParseIP("fd00:ec2::254")}}, nil
+		}),
+	})
+	require.NoError(t, err)
+	require.ErrorIs(t, metadataV6Policy.ValidateServerURL(context.Background(), "https://metadata-v6.example.test/mcp"), ErrOutboundDenied)
+
 	queries := 0
 	dialer := &policyDialer{}
 	gitPolicy, err := NewOutboundPolicy(OutboundPolicyConfig{

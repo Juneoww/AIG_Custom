@@ -352,6 +352,7 @@ func forbiddenIP(address netip.Addr) bool {
 		netip.MustParseAddr("169.254.169.254"),
 		netip.MustParseAddr("100.100.100.200"),
 		netip.MustParseAddr("100.100.100.100"),
+		netip.MustParseAddr("fd00:ec2::254"),
 	} {
 		if address == metadata {
 			return true

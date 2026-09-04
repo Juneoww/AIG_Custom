@@ -29,7 +29,7 @@ closed：连接不能探测、不能启用、不能进入任务选项，也不�
 
 每次请求和每次真实拨号前均须重新解析并校验目标地址。仅允许 HTTPS URL，拒绝
 UserInfo、query 和 fragment；解析结果必须同时满足相应 CIDR 允许集，并拒绝 loopback、
-link-local、multicast、unspecified、云元数据地址及其他不在允许集内的地址。受控
+link-local、multicast、unspecified、云元数据地址（包括 `fd00:ec2::254`）及其他不在允许集内的地址。受控
 dialer 应将已验证 IP 作为实际目标并保留原主机的 TLS SNI，防止 DNS rebinding。
 
 HTTP 探测和 gateway 转发必须禁用重定向、环境代理、TLS 跳过验证和自定义 CA 绕过，
@@ -39,9 +39,13 @@ HTTP 探测和 gateway 转发必须禁用重定向、环境代理、TLS 跳过�
 
 ## 运行与可观测性
 
-探测仅执行最小 `initialize` 握手，不调用 MCP tools。选择 `auto` 时先测试 streamable
-HTTP，再测试 SSE；指定 transport 不能回退。只有当前版本探测成功、连接已启用且受控
-dialer 可用时，连接才可被任务选择。
+探测仅执行最小 `initialize` 握手，不调用 MCP tools。HTTP 探测只接受
+`application/json` 请求和响应；SSE 探测只接受 `text/event-stream` 与合法的 `data:` JSON
+事件。选择 `auto` 时先测试 streamable HTTP，再测试 SSE；指定 transport 不能回退。探测默认
+最短间隔为 1 分钟。只有当前版本探测成功、连接已启用且受控 dialer 可用时，连接才可被任务选择。
+
+连接名称和说明是受限的展示文本：不得包含 URL、认证/请求头关键词、疑似 token 或控制字符。
+审计员只能读取安全摘要，不能读取任务选项或验证任务连接；任务选项不返回连接说明。
 
 日志、审计记录和错误响应只能记录不透明的配置/任务标识、版本和策略结果；不得记录
 真实 URL、主机、Header 名称或值、响应体、Cookie、Token、Git URL 或认证失败详情。

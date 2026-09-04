@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"mime"
 	"net/http"
 	"strings"
 	"sync"
@@ -63,6 +64,9 @@ func NewProbeEngine(port ProbePort, options ProbeOptions) *ProbeEngine {
 	if options.Timeout <= 0 {
 		options.Timeout = 10 * time.Second
 	}
+	if options.MinimumInterval <= 0 {
+		options.MinimumInterval = time.Minute
+	}
 	if options.Clock == nil {
 		options.Clock = systemProbeClock{}
 	}
@@ -97,9 +101,6 @@ func (engine *ProbeEngine) Probe(ctx context.Context, payload ConnectionPayload,
 }
 
 func (engine *ProbeEngine) allowAttempt() bool {
-	if engine.minimumInterval <= 0 {
-		return true
-	}
 	engine.mu.Lock()
 	defer engine.mu.Unlock()
 	now := engine.clock.Now()
@@ -123,9 +124,6 @@ func probeTransportOrder(selected Transport) []Transport {
 }
 
 type HTTPProbeOptions struct {
-	// Client 仅用于受控 transport 的依赖注入（例如 gateway adapter 或低层测试）。
-	// 即使注入，该 port 仍强制要求 policy 声明受控 dialer 可用。
-	Client           *http.Client
 	MaxResponseBytes int64
 	HTTPClientConfig ControlledHTTPClientConfig
 }
@@ -140,21 +138,11 @@ func NewHTTPProbePort(policy *OutboundPolicy, options HTTPProbeOptions) (*HTTPPr
 	if err := policy.RequireControlledDialer(); err != nil {
 		return nil, err
 	}
-	client := options.Client
-	if client == nil {
-		var err error
-		client, err = NewControlledHTTPClient(policy, options.HTTPClientConfig)
-		if err != nil {
-			return nil, err
-		}
-	} else {
-		// 不修改调用者共享的 client，同时为注入 client 保留请求总体超时和禁止跳转。
-		copy := *client
-		client = &copy
-		if client.Timeout <= 0 {
-			client.Timeout = options.HTTPClientConfig.normalized().RequestTimeout
-		}
-		client.CheckRedirect = func(_ *http.Request, _ []*http.Request) error { return ErrOutboundRedirectDenied }
+	// 探测端口永远由受控策略构造 client。不能接受外部 *http.Client，否则代理、
+	// DNS rebinding 防护或 TLS 校验都可能被调用方 transport 绕过。
+	client, err := NewControlledHTTPClient(policy, options.HTTPClientConfig)
+	if err != nil {
+		return nil, err
 	}
 	if options.MaxResponseBytes <= 0 {
 		options.MaxResponseBytes = 64 << 10
@@ -184,7 +172,7 @@ func (port *HTTPProbePort) Initialize(ctx context.Context, request ProbeRequest)
 	if request.Transport == TransportSSE {
 		httpRequest.Header.Set("Accept", "text/event-stream")
 	} else {
-		httpRequest.Header.Set("Accept", "application/json, text/event-stream")
+		httpRequest.Header.Set("Accept", "application/json")
 	}
 	applyProbeAuthentication(httpRequest, request.Payload)
 
@@ -197,7 +185,7 @@ func (port *HTTPProbePort) Initialize(ctx context.Context, request ProbeRequest)
 		return ErrProbeFailed
 	}
 	responseBody, err := readLimitedBody(response.Body, port.maxResponseBytes)
-	if err != nil || !validInitializeResponse(responseBody) {
+	if err != nil || !validProbeResponse(request.Transport, response.Header.Get("Content-Type"), responseBody) {
 		return ErrProbeFailed
 	}
 	return nil
@@ -246,11 +234,24 @@ func readLimitedBody(body io.Reader, limit int64) ([]byte, error) {
 	return data, nil
 }
 
-func validInitializeResponse(body []byte) bool {
-	trimmed := strings.TrimSpace(string(body))
-	if strings.HasPrefix(trimmed, "data:") {
-		trimmed = strings.TrimSpace(strings.TrimPrefix(trimmed, "data:"))
+func validProbeResponse(transport Transport, contentType string, body []byte) bool {
+	switch transport {
+	case TransportHTTP:
+		return hasMediaType(contentType, "application/json") && validJSONInitializeResponse(body)
+	case TransportSSE:
+		return hasMediaType(contentType, "text/event-stream") && validSSEInitializeResponse(body)
+	default:
+		return false
 	}
+}
+
+func hasMediaType(contentType, expected string) bool {
+	mediaType, _, err := mime.ParseMediaType(contentType)
+	return err == nil && strings.EqualFold(mediaType, expected)
+}
+
+func validJSONInitializeResponse(body []byte) bool {
+	trimmed := strings.TrimSpace(string(body))
 	var response struct {
 		JSONRPC string          `json:"jsonrpc"`
 		Result  json.RawMessage `json:"result"`
@@ -260,4 +261,36 @@ func validInitializeResponse(body []byte) bool {
 		return false
 	}
 	return response.JSONRPC == "2.0" && len(response.Result) > 0 && len(response.Error) == 0
+}
+
+func validSSEInitializeResponse(body []byte) bool {
+	lines := strings.Split(strings.ReplaceAll(string(body), "\r\n", "\n"), "\n")
+	dataLines := make([]string, 0, 1)
+	for _, line := range lines {
+		if line == "" {
+			if len(dataLines) > 0 {
+				return validJSONInitializeResponse([]byte(strings.Join(dataLines, "\n")))
+			}
+			continue
+		}
+		if strings.HasPrefix(line, ":") {
+			continue
+		}
+		field, value, found := strings.Cut(line, ":")
+		if !found {
+			return false
+		}
+		if strings.HasPrefix(value, " ") {
+			value = value[1:]
+		}
+		switch field {
+		case "data":
+			dataLines = append(dataLines, value)
+		case "event", "id", "retry":
+			// 这些是 SSE framing 元数据；initialize 响应仍必须来自 data 字段。
+		default:
+			return false
+		}
+	}
+	return len(dataLines) > 0 && validJSONInitializeResponse([]byte(strings.Join(dataLines, "\n")))
 }
