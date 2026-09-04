@@ -239,13 +239,17 @@ func (service *Service) SetEnabled(ctx context.Context, subject identity.Subject
 		return nil, ErrForbidden
 	}
 	if enabled {
-		if service.policy == nil || service.policy.RequireControlledDialer() != nil {
-			return nil, ErrControlledEgressRequired
-		}
 		// 已通过且具有具体 transport 的版本仍须在锁外重解密并按当前策略复验；
 		// 其余状态不能在这里提前返回，必须由 repository.SetEnabled 在 config →
 		// version 锁内复核并提交历史 enabled + unavailable 状态的防御性禁用。
-		if version.ProbeStatus == ProbeStatusPassed && concreteProbeTransport(version.DetectedTransport) {
+		probeEligible := version.ProbeStatus == ProbeStatusPassed && concreteProbeTransport(version.DetectedTransport)
+		historicalUnavailable := config.Enabled && !probeEligible
+		// 历史不一致状态没有真实出站路径；即使 gateway 当前缺席，也必须交给
+		// repository 在锁内先落库禁用。其余启用请求仍要求受控 dialer。
+		if !historicalUnavailable && (service.policy == nil || service.policy.RequireControlledDialer() != nil) {
+			return nil, ErrControlledEgressRequired
+		}
+		if probeEligible {
 			if _, err := service.currentPayloadPermitted(ctx, config, version); err != nil {
 				return nil, err
 			}

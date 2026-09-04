@@ -222,6 +222,68 @@ func TestServiceSetEnabledPersistsDefensiveDisableForHistoricalFailedCurrentVers
 	assert.Equal(t, "2", stored.ResourceRevision, "the public service path must commit defensive disable before unavailable is returned")
 }
 
+func TestServiceSetEnabledWithoutControlledDialerDefensivelyDisablesHistoricalUnavailableConfig(t *testing.T) {
+	for _, test := range []struct {
+		name        string
+		probeStatus ProbeStatus
+	}{
+		{name: "failed", probeStatus: ProbeStatusFailed},
+		{name: "not tested", probeStatus: ProbeStatusNotTested},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			ctx := context.Background()
+			db := openMCPConnectionPostgresDB(t)
+			require.NoError(t, database.Migrate(db))
+			repository := NewGormRepository(db)
+			config := testConnectionConfig("config-service-no-gateway-historical-" + strings.ReplaceAll(test.name, " ", "-"))
+			config.OwnerUserID = "owner-service-no-gateway-historical-" + strings.ReplaceAll(test.name, " ", "-")
+			version := testConnectionVersion(config.ID, "version-service-no-gateway-historical-"+strings.ReplaceAll(test.name, " ", "-"), "ciphertext-service-no-gateway-historical-"+strings.ReplaceAll(test.name, " ", "-"))
+			require.NoError(t, repository.Create(ctx, config, version))
+
+			// 模拟旧进程或故障恢复遗留的 enabled + unavailable 组合。即使本次
+			// 部署没有受控网关，Service 也必须让仓储层在锁内修复此状态。
+			require.NoError(t, db.Model(&ConnectionConfig{}).Where("id = ?", config.ID).Update("enabled", true).Error)
+			require.NoError(t, db.Model(&ConnectionVersion{}).
+				Where("connection_config_id = ? AND version = ?", config.ID, 1).
+				Updates(map[string]any{"probe_status": test.probeStatus, "detected_transport": ""}).Error)
+
+			service := NewService(repository, testKeyring(t), nil, testPolicy(t, false))
+			_, err := service.SetEnabled(ctx, identity.Subject{UserID: config.OwnerUserID, Role: identity.RoleUser}, config.ID, true)
+			require.ErrorIs(t, err, ErrTaskConnectionUnavailable)
+
+			stored, err := repository.GetConfig(ctx, config.ID)
+			require.NoError(t, err)
+			assert.False(t, stored.Enabled)
+			assert.Equal(t, "2", stored.ResourceRevision, "the defensive disable must be committed before unavailable is returned")
+		})
+	}
+}
+
+func TestServiceSetEnabledWithoutControlledDialerLeavesNewUntestedConfigUntouched(t *testing.T) {
+	ctx := context.Background()
+	db := openMCPConnectionPostgresDB(t)
+	require.NoError(t, database.Migrate(db))
+	repository := NewGormRepository(db)
+	config := testConnectionConfig("config-service-no-gateway-new-untested")
+	config.OwnerUserID = "owner-service-no-gateway-new-untested"
+	version := testConnectionVersion(config.ID, "version-service-no-gateway-new-untested", "ciphertext-service-no-gateway-new-untested")
+	require.NoError(t, repository.Create(ctx, config, version))
+
+	before, err := repository.GetConfig(ctx, config.ID)
+	require.NoError(t, err)
+	assert.False(t, before.Enabled)
+	assert.Equal(t, "1", before.ResourceRevision)
+
+	service := NewService(repository, testKeyring(t), nil, testPolicy(t, false))
+	_, err = service.SetEnabled(ctx, identity.Subject{UserID: config.OwnerUserID, Role: identity.RoleUser}, config.ID, true)
+	require.ErrorIs(t, err, ErrControlledEgressRequired)
+
+	after, err := repository.GetConfig(ctx, config.ID)
+	require.NoError(t, err)
+	assert.False(t, after.Enabled)
+	assert.Equal(t, before.ResourceRevision, after.ResourceRevision, "a normal disabled connection must not be mutated when no controlled gateway is available")
+}
+
 func TestRepositoryRejectsOutOfOrderProbeResultAcrossPersistentRepositories(t *testing.T) {
 	ctx := context.Background()
 	db := openMCPConnectionPostgresDB(t)

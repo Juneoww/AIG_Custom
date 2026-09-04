@@ -26,6 +26,9 @@ Git 凭据。网络防火墙规则应与这些允许集保持一致，但不能�
 gateway 和 Fetcher 必须使用受控 `DialContext`/dialer；没有该实现时，平台必须 fail
 closed：连接不能探测、不能启用、不能进入任务选项，也不能创建使用该连接的任务。DNS
 预检不等同于 egress 控制，绝不能退化为普通 `net.Dialer`、环境代理或 Agent 直连。
+唯一的状态修复例外是：若旧进程或故障恢复遗留了 `enabled + failed/not_tested` 的不一致
+记录，启用请求可以进入仓储锁内将其防御性禁用，然后只返回 `unavailable`；该路径绝不启用
+连接，也不会发起任何出站请求。
 
 每次请求和每次真实拨号前均须重新解析并校验目标地址。仅允许 HTTPS URL，拒绝
 UserInfo、query 和 fragment；解析结果必须同时满足相应 CIDR 允许集，并拒绝 loopback、
