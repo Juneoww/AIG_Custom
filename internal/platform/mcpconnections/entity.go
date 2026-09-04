@@ -15,6 +15,9 @@ const (
 type Transport string
 
 const (
+	// TransportAuto 仅表示保存的协商偏好；探测成功后 DetectedTransport 必须收敛为
+	// 具体 HTTP 或 SSE，不能把 auto 当作实际执行协议。
+	TransportAuto  Transport = "auto"
 	TransportHTTP  Transport = "http"
 	TransportSSE   Transport = "sse"
 	TransportStdio Transport = "stdio"

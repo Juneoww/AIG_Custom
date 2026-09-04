@@ -95,6 +95,17 @@ func (repository *GormRepository) GetVersion(ctx context.Context, configID strin
 	return &record, nil
 }
 
+// ListConfigs 返回不含任何版本密文的配置元数据。服务层仍需逐项根据 Subject
+// 执行 private/global 可见性过滤，仓储不能把数据库全表结果直接投影到浏览器。
+func (repository *GormRepository) ListConfigs(ctx context.Context) ([]ConnectionConfig, error) {
+	if repository == nil || repository.db == nil {
+		return nil, ErrInvalid
+	}
+	var configs []ConnectionConfig
+	err := txcontext.Gorm(ctx, repository.db).Order("created_at ASC, id ASC").Find(&configs).Error
+	return configs, err
+}
+
 func (repository *GormRepository) ListVersions(ctx context.Context, configID string) ([]ConnectionVersion, error) {
 	if repository == nil || repository.db == nil || strings.TrimSpace(configID) == "" {
 		return nil, ErrInvalid
@@ -188,6 +199,46 @@ func (repository *GormRepository) UpdateDisplayMetadata(ctx context.Context, con
 		}
 		config.Name = name
 		config.Description = description
+		config.ResourceRevision = nextRevision
+		config.UpdatedAt = now
+		updated = config
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return &updated, nil
+}
+
+// SetEnabled 仅修改当前配置行的可选开关；是否允许打开由 Service 根据当前版本
+// probe 与受控 gateway 判定。仓储本身不拥有出站能力，不能自行放宽该前置条件。
+func (repository *GormRepository) SetEnabled(ctx context.Context, configID string, enabled bool) (*ConnectionConfig, error) {
+	if repository == nil || repository.db == nil || strings.TrimSpace(configID) == "" {
+		return nil, ErrInvalid
+	}
+	var updated ConnectionConfig
+	err := txcontext.Gorm(ctx, repository.db).Transaction(func(transaction *gorm.DB) error {
+		var config ConnectionConfig
+		if err := transaction.Clauses(clause.Locking{Strength: "UPDATE"}).Where("id = ?", configID).First(&config).Error; err != nil {
+			return mapNotFound(err)
+		}
+		nextRevision, err := incrementRevision(config.ResourceRevision)
+		if err != nil {
+			return err
+		}
+		now := time.Now().UTC()
+		result := transaction.Model(&ConnectionConfig{}).Where("id = ?", configID).Updates(map[string]any{
+			"enabled":           enabled,
+			"resource_revision": nextRevision,
+			"updated_at":        now,
+		})
+		if result.Error != nil {
+			return result.Error
+		}
+		if result.RowsAffected != 1 {
+			return ErrNotFound
+		}
+		config.Enabled = enabled
 		config.ResourceRevision = nextRevision
 		config.UpdatedAt = now
 		updated = config

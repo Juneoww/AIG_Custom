@@ -1,0 +1,275 @@
+package mcpconnections
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"net"
+	"sort"
+	"testing"
+	"time"
+
+	"github.com/Juneoww/AIG_Custom/internal/platform/identity"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+)
+
+// memoryConnectionRepository 保留真实仓储所需的状态语义，而将 PostgreSQL 留给
+// 已有的 repository 集成测试；服务测试只替换持久化边界，不替换授权或安全投影。
+type memoryConnectionRepository struct {
+	configs  map[string]*ConnectionConfig
+	versions map[string]map[int]*ConnectionVersion
+	recorded int
+}
+
+func newMemoryConnectionRepository() *memoryConnectionRepository {
+	return &memoryConnectionRepository{
+		configs:  map[string]*ConnectionConfig{},
+		versions: map[string]map[int]*ConnectionVersion{},
+	}
+}
+
+func (repository *memoryConnectionRepository) Create(_ context.Context, config *ConnectionConfig, version *ConnectionVersion) error {
+	if config == nil || version == nil {
+		return ErrInvalid
+	}
+	if _, ok := repository.configs[config.ID]; ok {
+		return ErrInvalid
+	}
+	storedConfig := cloneConnectionConfig(config)
+	storedVersion := cloneConnectionVersionRecord(version)
+	storedConfig.CurrentVersion = 1
+	storedConfig.Enabled = false
+	storedVersion.Version = 1
+	storedVersion.ProbeStatus = ProbeStatusNotTested
+	storedVersion.DetectedTransport = ""
+	repository.configs[config.ID] = storedConfig
+	repository.versions[config.ID] = map[int]*ConnectionVersion{1: storedVersion}
+	return nil
+}
+
+func (repository *memoryConnectionRepository) GetConfig(_ context.Context, id string) (*ConnectionConfig, error) {
+	config, ok := repository.configs[id]
+	if !ok {
+		return nil, ErrNotFound
+	}
+	return cloneConnectionConfig(config), nil
+}
+
+func (repository *memoryConnectionRepository) GetVersion(_ context.Context, configID string, version int) (*ConnectionVersion, error) {
+	versions, ok := repository.versions[configID]
+	if !ok {
+		return nil, ErrNotFound
+	}
+	stored, ok := versions[version]
+	if !ok {
+		return nil, ErrNotFound
+	}
+	return cloneConnectionVersionRecord(stored), nil
+}
+
+func (repository *memoryConnectionRepository) ListConfigs(_ context.Context) ([]ConnectionConfig, error) {
+	configs := make([]ConnectionConfig, 0, len(repository.configs))
+	for _, config := range repository.configs {
+		configs = append(configs, *cloneConnectionConfig(config))
+	}
+	sort.Slice(configs, func(left, right int) bool { return configs[left].ID < configs[right].ID })
+	return configs, nil
+}
+
+func (repository *memoryConnectionRepository) RecordProbeResult(_ context.Context, configID string, version int, transport Transport, status ProbeStatus) error {
+	stored, err := repository.GetVersion(context.Background(), configID, version)
+	if err != nil {
+		return err
+	}
+	stored.DetectedTransport = transport
+	stored.ProbeStatus = status
+	repository.versions[configID][version] = stored
+	repository.recorded++
+	return nil
+}
+
+func (repository *memoryConnectionRepository) SetEnabled(_ context.Context, configID string, enabled bool) (*ConnectionConfig, error) {
+	stored, ok := repository.configs[configID]
+	if !ok {
+		return nil, ErrNotFound
+	}
+	stored.Enabled = enabled
+	return cloneConnectionConfig(stored), nil
+}
+
+type scriptedProbePort struct {
+	attempts []Transport
+	errors   map[Transport]error
+}
+
+func (port *scriptedProbePort) Initialize(_ context.Context, request ProbeRequest) error {
+	port.attempts = append(port.attempts, request.Transport)
+	return port.errors[request.Transport]
+}
+
+func testKeyring(t *testing.T) *Keyring {
+	t.Helper()
+	keyring, err := NewKeyring("test-key", []byte("01234567890123456789012345678901"), nil)
+	require.NoError(t, err)
+	return keyring
+}
+
+func testPolicy(t *testing.T, controlled bool) *OutboundPolicy {
+	t.Helper()
+	policy, err := NewOutboundPolicy(OutboundPolicyConfig{
+		AllowedCIDRs: []string{"203.0.113.0/24"},
+		Resolver: policyResolver(func(context.Context, string) ([]net.IPAddr, error) {
+			return []net.IPAddr{{IP: net.ParseIP("203.0.113.44")}}, nil
+		}),
+		Dialer:                    &policyDialer{},
+		ControlledDialerAvailable: controlled,
+	})
+	require.NoError(t, err)
+	return policy
+}
+
+func testService(t *testing.T, repository *memoryConnectionRepository, controlled bool, port *scriptedProbePort) *Service {
+	t.Helper()
+	return NewService(repository, testKeyring(t), NewProbeEngine(port, ProbeOptions{Timeout: time.Second}), testPolicy(t, controlled))
+}
+
+func serviceInput(name string, scope Scope, transport Transport) CreateConnectionInput {
+	return CreateConnectionInput{
+		Name:        name,
+		Description: "safe description",
+		Scope:       scope,
+		Transport:   transport,
+		ServerURL:   "https://safe.example.test/mcp",
+		Authentication: Authentication{
+			Kind:       AuthenticationAPIKeyHeader,
+			HeaderName: "X-Private-Header-Name",
+			Secret:     "private-token-value",
+		},
+		Headers: []Header{{Name: "X-Custom-Secret-Header", Value: "custom-secret-value"}},
+	}
+}
+
+func TestServiceEnforcesVisibilityAndSafeConnectionProjections(t *testing.T) {
+	ctx := context.Background()
+	repository := newMemoryConnectionRepository()
+	service := testService(t, repository, true, &scriptedProbePort{})
+	alice := identity.Subject{UserID: "alice", Role: identity.RoleUser}
+	bob := identity.Subject{UserID: "bob", Role: identity.RoleUser}
+	auditor := identity.Subject{UserID: "auditor", Role: identity.RoleAuditor}
+	admin := identity.Subject{UserID: "admin", Role: identity.RoleAdmin}
+
+	private, err := service.Create(ctx, alice, serviceInput("alice-private", ScopePrivate, TransportHTTP))
+	require.NoError(t, err)
+	global, err := service.Create(ctx, admin, serviceInput("global", ScopeGlobal, TransportHTTP))
+	require.NoError(t, err)
+
+	for _, expectation := range []struct {
+		name    string
+		subject identity.Subject
+		count   int
+	}{
+		{name: "owner sees private and global summaries", subject: alice, count: 2},
+		{name: "other user sees global summary only", subject: bob, count: 1},
+		{name: "auditor sees global read-only summary", subject: auditor, count: 1},
+		{name: "administrator sees all summaries", subject: admin, count: 2},
+	} {
+		t.Run(expectation.name, func(t *testing.T) {
+			items, err := service.List(ctx, expectation.subject)
+			require.NoError(t, err)
+			assert.Len(t, items, expectation.count)
+		})
+	}
+
+	_, err = service.GetSummary(ctx, bob, private.ID)
+	require.ErrorIs(t, err, ErrNotFound, "private resources must be invisible rather than merely forbidden")
+	_, err = service.GetSummary(ctx, auditor, private.ID)
+	require.ErrorIs(t, err, ErrNotFound)
+	_, err = service.GetManagementDetail(ctx, auditor, global.ID)
+	require.ErrorIs(t, err, ErrForbidden, "visible global summary does not grant management detail")
+	_, err = service.GetManagementDetail(ctx, bob, global.ID)
+	require.ErrorIs(t, err, ErrForbidden)
+
+	detail, err := service.GetManagementDetail(ctx, alice, private.ID)
+	require.NoError(t, err)
+	assert.True(t, detail.EndpointConfigured)
+	assert.True(t, detail.AuthenticationConfigured)
+	assert.True(t, detail.CustomHeadersConfigured)
+	_, err = service.GetManagementDetail(ctx, admin, private.ID)
+	require.NoError(t, err)
+	_, err = service.Create(ctx, alice, serviceInput("not-allowed-global", ScopeGlobal, TransportHTTP))
+	require.ErrorIs(t, err, ErrForbidden)
+
+	summary, err := service.GetSummary(ctx, alice, private.ID)
+	require.NoError(t, err)
+	options, err := service.TaskOptions(ctx, alice)
+	require.NoError(t, err)
+	for _, projection := range []any{summary, detail, options} {
+		encoded, err := json.Marshal(projection)
+		require.NoError(t, err)
+		assert.NotContains(t, string(encoded), "safe.example.test")
+		assert.NotContains(t, string(encoded), "X-Private-Header-Name")
+		assert.NotContains(t, string(encoded), "X-Custom-Secret-Header")
+		assert.NotContains(t, string(encoded), "private-token-value")
+		assert.NotContains(t, string(encoded), "custom-secret-value")
+	}
+}
+
+func TestServiceFailsClosedWithoutControlledGateway(t *testing.T) {
+	ctx := context.Background()
+	repository := newMemoryConnectionRepository()
+	port := &scriptedProbePort{errors: map[Transport]error{}}
+	service := testService(t, repository, false, port)
+	alice := identity.Subject{UserID: "alice", Role: identity.RoleUser}
+	created, err := service.Create(ctx, alice, serviceInput("private", ScopePrivate, TransportHTTP))
+	require.NoError(t, err)
+
+	_, err = service.Probe(ctx, alice, created.ID)
+	require.ErrorIs(t, err, ErrControlledEgressRequired)
+	assert.Empty(t, port.attempts)
+	_, err = service.SetEnabled(ctx, alice, created.ID, true)
+	require.ErrorIs(t, err, ErrControlledEgressRequired)
+	options, err := service.TaskOptions(ctx, alice)
+	require.NoError(t, err)
+	assert.Empty(t, options)
+	require.ErrorIs(t, service.ValidateTaskConnection(ctx, alice, created.ID), ErrControlledEgressRequired)
+}
+
+func TestServiceStoresOnlySuccessfulProbeAndNeverReturnsProbeFailureDetail(t *testing.T) {
+	ctx := context.Background()
+	repository := newMemoryConnectionRepository()
+	port := &scriptedProbePort{errors: map[Transport]error{
+		TransportHTTP: errors.New("upstream said https://safe.example.test/mcp X-Private-Header-Name private-token-value"),
+		TransportSSE:  errors.New("second upstream failure"),
+	}}
+	service := testService(t, repository, true, port)
+	alice := identity.Subject{UserID: "alice", Role: identity.RoleUser}
+	created, err := service.Create(ctx, alice, serviceInput("auto", ScopePrivate, TransportAuto))
+	require.NoError(t, err)
+
+	_, err = service.Probe(ctx, alice, created.ID)
+	require.ErrorIs(t, err, ErrProbeFailed)
+	assert.NotContains(t, err.Error(), "safe.example.test")
+	assert.NotContains(t, err.Error(), "X-Private-Header-Name")
+	assert.NotContains(t, err.Error(), "private-token-value")
+	assert.Equal(t, []Transport{TransportHTTP, TransportSSE}, port.attempts)
+	assert.Zero(t, repository.recorded, "failed probe bodies and errors must not be persisted")
+	version, err := repository.GetVersion(ctx, created.ID, 1)
+	require.NoError(t, err)
+	assert.Equal(t, ProbeStatusNotTested, version.ProbeStatus)
+
+	port.errors = map[Transport]error{TransportHTTP: nil}
+	port.attempts = nil
+	probed, err := service.Probe(ctx, alice, created.ID)
+	require.NoError(t, err)
+	assert.Equal(t, ProbeStatusPassed, probed.ProbeStatus)
+	assert.Equal(t, TransportHTTP, probed.DetectedTransport)
+	assert.Equal(t, 1, repository.recorded)
+	_, err = service.SetEnabled(ctx, alice, created.ID, true)
+	require.NoError(t, err)
+	options, err := service.TaskOptions(ctx, alice)
+	require.NoError(t, err)
+	require.Len(t, options, 1)
+	assert.Equal(t, created.ID, options[0].ConnectionID)
+	assert.Equal(t, 1, options[0].ConnectionVersion)
+}
