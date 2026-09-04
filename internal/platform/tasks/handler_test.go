@@ -119,6 +119,18 @@ func TestTaskCreateAcceptedAIInfraResponseUsesSafeModelIDDetailWire(t *testing.T
 	assert.Zero(t, engine.statusReads.Load(), "rendering the response must not read the engine")
 }
 
+func TestProtectedTaskCreateRejectsEmptyAIInfraTargetsWithFixedBadRequest(t *testing.T) {
+	router, tokens, engine := newTaskHandlerFixture(t)
+
+	response := performTaskJSON(t, router, tokens["alice"], http.MethodPost, "/tasks", "empty-ai-infra-targets", map[string]any{
+		"task_type": "ai_infra_scan", "content": "",
+	})
+
+	assert.Equal(t, http.StatusBadRequest, response.Code)
+	assert.JSONEq(t, `{"error":"invalid task request"}`, response.Body.String())
+	assert.Zero(t, engine.submits.Load())
+}
+
 func TestTaskCreateRejectsOversizedJSONWithFixedBadRequest(t *testing.T) {
 	router, tokens, engine := newTaskHandlerFixture(t)
 	payload := `{"task_type":"mcp_scan","content":"` + strings.Repeat("x", 300<<10) + `"}`

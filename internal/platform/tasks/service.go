@@ -36,6 +36,7 @@ const (
 	MaxTaskParamsLength                          = 64 << 10
 	MaxTaskAttachmentCount                       = 10
 	MaxTaskReferenceLength                       = 128
+	MaxTaskRemarkRuneCount                       = 2_000
 	maxInfrastructureTargetAttachmentBytes int64 = 1 << 20
 	dispatchLeaseDuration                        = 30 * time.Second
 )
@@ -130,12 +131,13 @@ func (service *Service) SetReportSnapshotService(snapshotter reportSnapshotter) 
 }
 
 func (service *Service) Create(ctx context.Context, subject identity.Subject, input CreateInput) (View, error) {
+	input.Remark = strings.TrimSpace(input.Remark)
 	input.IdempotencyKey = strings.TrimSpace(input.IdempotencyKey)
 	input.TaskType = strings.TrimSpace(input.TaskType)
 	if subject.Role != identity.RoleUser && subject.Role != identity.RoleAdmin || subject.UserID == "" ||
 		input.IdempotencyKey == "" || len(input.IdempotencyKey) > MaxIdempotencyKeyLength ||
 		!isBrowserTaskType(input.TaskType) || len(input.Content) > MaxTaskContentLength ||
-		!validTaskCountry(input.CountryIsoCode) || !validTaskAttachmentIDs(input.AttachmentIDs) {
+		!validTaskRemark(input.Remark) || !validTaskCountry(input.CountryIsoCode) || !validTaskAttachmentIDs(input.AttachmentIDs) {
 		return View{}, ErrInvalid
 	}
 	params := input.Params
@@ -192,7 +194,8 @@ func (service *Service) createLocked(
 	candidate := &Task{
 		ID: taskID, OwnerUserID: subject.UserID, OwnerUsername: subject.Username,
 		IdempotencyKey: input.IdempotencyKey, EngineSessionID: taskID, TaskType: input.TaskType,
-		Content: input.Content, Params: append(json.RawMessage(nil), params...), AttachmentRefs: attachmentRefs,
+		Content: input.Content, Remark: input.Remark, TargetCount: 0,
+		Params: append(json.RawMessage(nil), params...), AttachmentRefs: attachmentRefs,
 		CountryIsoCode: input.CountryIsoCode, Status: StatusPending, CreatedAt: now, UpdatedAt: now,
 	}
 	existing, getErr := service.repository.Get(ctx, taskID)
@@ -221,9 +224,11 @@ func (service *Service) createLocked(
 			}
 		}
 		if input.TaskType == "ai_infra_scan" {
-			if validateErr := service.validateInfrastructureTargets(ctx, subject.UserID, input.Content, input.AttachmentIDs); validateErr != nil {
+			targetCount, validateErr := service.validateInfrastructureTargets(ctx, subject.UserID, input.Content, input.AttachmentIDs)
+			if validateErr != nil {
 				return nil, validateErr
 			}
+			candidate.TargetCount = targetCount
 		}
 	}
 
@@ -258,31 +263,33 @@ func (service *Service) createLocked(
 	return persisted, nil
 }
 
-func (service *Service) validateInfrastructureTargets(ctx context.Context, ownerUserID, content string, attachmentIDs []string) error {
+func (service *Service) validateInfrastructureTargets(ctx context.Context, ownerUserID, content string, attachmentIDs []string) (int, error) {
 	expressions, err := runner.AppendTargetExpressionLines(nil, content)
 	if err != nil {
-		return ErrInvalid
+		return 0, ErrInvalid
 	}
 	if len(attachmentIDs) > 0 {
 		if service.attachments == nil {
-			return ErrInvalid
+			return 0, ErrInvalid
 		}
 		attachmentExpressions, err := service.attachments.ReadReadyTargetExpressions(ctx, ownerUserID, attachmentIDs, expressions)
 		if err != nil {
-			return ErrInvalid
+			return 0, ErrInvalid
 		}
 		expressions = attachmentExpressions
 	}
-	if _, err := runner.ParseTargets(expressions); err != nil {
-		return ErrInvalid
+	expanded, err := runner.ParseTargets(expressions)
+	if err != nil || len(expanded) == 0 {
+		return 0, ErrInvalid
 	}
-	return nil
+	return len(expanded), nil
 }
 
 func sameCreateRequest(persisted, candidate *Task) bool {
 	if persisted == nil || candidate == nil || persisted.OwnerUserID != candidate.OwnerUserID ||
 		persisted.IdempotencyKey != candidate.IdempotencyKey || persisted.TaskType != candidate.TaskType ||
-		persisted.Content != candidate.Content || persisted.CountryIsoCode != candidate.CountryIsoCode {
+		persisted.Content != candidate.Content || persisted.Remark != candidate.Remark ||
+		persisted.CountryIsoCode != candidate.CountryIsoCode {
 		return false
 	}
 	persistedRaw, candidateRaw := persisted.Params, candidate.Params
@@ -556,6 +563,10 @@ func exactJSONStructFields(targetType reflect.Type) map[string]reflect.Type {
 
 func validTaskCountry(country string) bool {
 	return country == "" || country == "zh" || country == "zh_CN" || country == "en"
+}
+
+func validTaskRemark(remark string) bool {
+	return utf8.ValidString(remark) && utf8.RuneCountInString(remark) <= MaxTaskRemarkRuneCount
 }
 
 func validTaskAttachmentIDs(ids []string) bool {
