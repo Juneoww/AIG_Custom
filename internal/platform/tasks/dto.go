@@ -5,6 +5,8 @@ import (
 	"regexp"
 	"strings"
 	"time"
+
+	"github.com/Juneoww/AIG_Custom/common/runner"
 )
 
 var safeModelIDPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$`)
@@ -44,6 +46,7 @@ type TaskDetail struct {
 	Owner        string           `json:"owner"`
 	TaskType     string           `json:"task_type"`
 	Status       Status           `json:"status"`
+	Remark       string           `json:"remark,omitempty"`
 	CreatedAt    time.Time        `json:"created_at"`
 	UpdatedAt    time.Time        `json:"updated_at"`
 	InputSummary TaskInputSummary `json:"input_summary"`
@@ -62,10 +65,11 @@ type TaskCreateBadRequestResponse struct {
 }
 
 type taskDetailFields struct {
-	ID, Owner, TaskType, Content, CountryIsoCode string
-	Status                                       Status
-	Params                                       json.RawMessage
-	CreatedAt, UpdatedAt                         time.Time
+	ID, Owner, TaskType, Content, Remark, CountryIsoCode string
+	Status                                               Status
+	TargetCount                                          int
+	Params                                               json.RawMessage
+	CreatedAt, UpdatedAt                                 time.Time
 }
 
 func taskSummaryOf(task *Task) TaskSummary {
@@ -78,7 +82,8 @@ func taskSummaryOf(task *Task) TaskSummary {
 func taskDetailOf(task *Task) TaskDetail {
 	return taskDetailFromFields(taskDetailFields{
 		ID: task.ID, Owner: task.OwnerUsername, TaskType: task.TaskType, Status: task.Status,
-		Content: task.Content, Params: task.Params, CountryIsoCode: task.CountryIsoCode,
+		Content: task.Content, Remark: task.Remark, TargetCount: task.TargetCount,
+		Params: task.Params, CountryIsoCode: task.CountryIsoCode,
 		CreatedAt: task.CreatedAt, UpdatedAt: task.UpdatedAt,
 	})
 }
@@ -86,19 +91,25 @@ func taskDetailOf(task *Task) TaskDetail {
 func taskDetailOfView(view View) TaskDetail {
 	return taskDetailFromFields(taskDetailFields{
 		ID: view.ID, Owner: view.OwnerUsername, TaskType: view.TaskType, Status: view.Status,
-		Content: view.Content, Params: view.Params, CountryIsoCode: view.CountryIsoCode,
+		Content: view.Content, Remark: view.Remark, TargetCount: view.TargetCount,
+		Params: view.Params, CountryIsoCode: view.CountryIsoCode,
 		CreatedAt: view.CreatedAt, UpdatedAt: view.UpdatedAt,
 	})
 }
 
 func taskDetailFromFields(fields taskDetailFields) TaskDetail {
-	return TaskDetail{
+	detail := TaskDetail{
 		ID: fields.ID, Owner: fields.Owner, TaskType: canonicalTaskType(fields.TaskType), Status: fields.Status,
 		CreatedAt: fields.CreatedAt, UpdatedAt: fields.UpdatedAt,
 		InputSummary: safeInputSummary(&Task{
-			TaskType: fields.TaskType, Content: fields.Content, Params: fields.Params, CountryIsoCode: fields.CountryIsoCode,
+			TaskType: fields.TaskType, Content: fields.Content, TargetCount: fields.TargetCount,
+			Params: fields.Params, CountryIsoCode: fields.CountryIsoCode,
 		}),
 	}
+	if fields.Remark != "" {
+		detail.Remark = fields.Remark
+	}
+	return detail
 }
 
 func safeInputSummary(task *Task) TaskInputSummary {
@@ -122,11 +133,15 @@ func safeInputSummary(task *Task) TaskInputSummary {
 			Thread:   safePositiveInt(params.Thread, 1024),
 		}
 	case "ai_infra_scan":
+		targetCount := task.TargetCount
+		if targetCount < 1 || targetCount > runner.MaxTargetExpressions {
+			targetCount = nonEmptyLineCount(task.Content)
+		}
 		summary := TaskInputSummary{
 			Language:    safeLanguage(task.CountryIsoCode),
 			ModelID:     safeModelID(params.ModelID),
 			Timeout:     safePositiveInt(params.Timeout, 86400),
-			TargetCount: nonEmptyLineCount(task.Content),
+			TargetCount: targetCount,
 		}
 		if mode, valid := normalizedInfrastructurePortScanMode(task.Params); valid {
 			summary.PortScanMode = string(mode)
