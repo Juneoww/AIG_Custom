@@ -44,15 +44,19 @@ const (
 
 const MaskedSecret = "********"
 
-// Header 仅在待加密的连接载荷中使用；Value 不得投影到管理端视图。
+// Header 仅在待加密的连接载荷中使用；名称和值都不得投影到管理端视图。
 type Header struct {
 	Name  string `json:"name"`
 	Value string `json:"value"`
 }
 
 // MarshalJSON 让 Header 作为独立公开类型使用时同样默认安全，不能依赖外层
-// ConnectionPayload 的脱敏逻辑来保护 Value。
+// ConnectionPayload 的脱敏逻辑来保护名称和值。
 func (header Header) MarshalJSON() ([]byte, error) {
+	name := header.Name
+	if name != "" {
+		name = MaskedSecret
+	}
 	value := header.Value
 	if value != "" {
 		value = MaskedSecret
@@ -60,19 +64,24 @@ func (header Header) MarshalJSON() ([]byte, error) {
 	return json.Marshal(struct {
 		Name  string `json:"name"`
 		Value string `json:"value"`
-	}{Name: header.Name, Value: value})
+	}{Name: name, Value: value})
 }
 
-// Authentication 是待加密的认证材料。HeaderName 可以作为未来管理详情的
-// 最小元数据，但 Secret 永远只能存在于加密载荷的解密结果中。
+// Authentication 是待加密的认证材料。认证 Header 名称和 Secret 都只能存在于
+// 加密载荷的解密结果中；管理详情只表达是否已配置，不能读取其中任一材料。
 type Authentication struct {
 	Kind       AuthenticationKind `json:"kind"`
 	HeaderName string             `json:"header_name,omitempty"`
 	Secret     string             `json:"secret,omitempty"`
 }
 
-// MarshalJSON 让认证材料脱离 ConnectionPayload 被序列化时仍不暴露 Secret。
+// MarshalJSON 让认证材料脱离 ConnectionPayload 被序列化时仍不暴露 HeaderName
+// 或 Secret。
 func (authentication Authentication) MarshalJSON() ([]byte, error) {
+	headerName := authentication.HeaderName
+	if headerName != "" {
+		headerName = MaskedSecret
+	}
 	secret := authentication.Secret
 	if secret != "" {
 		secret = MaskedSecret
@@ -81,7 +90,7 @@ func (authentication Authentication) MarshalJSON() ([]byte, error) {
 		Kind       AuthenticationKind `json:"kind"`
 		HeaderName string             `json:"header_name,omitempty"`
 		Secret     string             `json:"secret,omitempty"`
-	}{Kind: authentication.Kind, HeaderName: authentication.HeaderName, Secret: secret})
+	}{Kind: authentication.Kind, HeaderName: headerName, Secret: secret})
 }
 
 // ConnectionPayload 是连接版本的明文工作对象，持久化前必须由 Keyring 加密。
@@ -92,8 +101,8 @@ type ConnectionPayload struct {
 	Headers        []Header       `json:"headers,omitempty"`
 }
 
-// MarshalJSON 是明文工作对象的最后一道日志/响应保护。它只保留 Header 名等
-// 管理端允许使用的最小元数据，endpoint、认证材料和 Header 值均须脱敏。
+// MarshalJSON 是明文工作对象的最后一道日志/响应保护。endpoint、认证 Header
+// 名称/Secret 和自定义 Header 名称/值均须脱敏；管理端可读状态必须走专用 DTO。
 // 加密实现使用专用 wire 类型绕过该方法保存完整明文到密文中。
 func (payload ConnectionPayload) MarshalJSON() ([]byte, error) {
 	authentication := payload.Authentication

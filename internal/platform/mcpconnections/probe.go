@@ -9,6 +9,7 @@ import (
 	"io"
 	"mime"
 	"net/http"
+	"net/url"
 	"strings"
 	"sync"
 	"time"
@@ -19,7 +20,11 @@ var (
 	ErrProbeRateLimited = errors.New("MCP 连接探测请求过于频繁")
 )
 
-const minimumInitializeRequestID = "mcp-probe"
+const (
+	minimumInitializeRequestID       = "mcp-probe"
+	minimumInitializeProtocolVersion = "2025-03-26"
+	maxProbeSessionIDBytes           = 4 * 1024
+)
 
 // ProbeRequest 是探测端口的内部输入，不可直接映射 API DTO。它可携带解密后的
 // 连接材料，但 ProbePort 的实现不得记录、返回或包装其中的 URL/认证信息。
@@ -60,7 +65,7 @@ type ProbeEngine struct {
 	minimumInterval time.Duration
 	clock           ProbeClock
 	mu              sync.Mutex
-	lastAttempt     time.Time
+	lastAttempts    map[string]time.Time
 }
 
 func NewProbeEngine(port ProbePort, options ProbeOptions) *ProbeEngine {
@@ -78,14 +83,15 @@ func NewProbeEngine(port ProbePort, options ProbeOptions) *ProbeEngine {
 		timeout:         options.Timeout,
 		minimumInterval: options.MinimumInterval,
 		clock:           options.Clock,
+		lastAttempts:    make(map[string]time.Time),
 	}
 }
 
-func (engine *ProbeEngine) Probe(ctx context.Context, payload ConnectionPayload, selected Transport) (ProbeResult, error) {
+func (engine *ProbeEngine) Probe(ctx context.Context, connectionConfigID string, payload ConnectionPayload, selected Transport) (ProbeResult, error) {
 	if engine == nil || engine.port == nil {
 		return ProbeResult{}, ErrProbeFailed
 	}
-	if !engine.allowAttempt() {
+	if !engine.allowAttempt(connectionConfigID) {
 		return ProbeResult{}, ErrProbeRateLimited
 	}
 	transports := probeTransportOrder(selected)
@@ -103,14 +109,23 @@ func (engine *ProbeEngine) Probe(ctx context.Context, payload ConnectionPayload,
 	return ProbeResult{}, ErrProbeFailed
 }
 
-func (engine *ProbeEngine) allowAttempt() bool {
+func (engine *ProbeEngine) allowAttempt(connectionConfigID string) bool {
+	connectionConfigID = strings.TrimSpace(connectionConfigID)
+	if connectionConfigID == "" {
+		return false
+	}
 	engine.mu.Lock()
 	defer engine.mu.Unlock()
 	now := engine.clock.Now()
-	if !engine.lastAttempt.IsZero() && now.Sub(engine.lastAttempt) < engine.minimumInterval {
+	for id, attemptedAt := range engine.lastAttempts {
+		if !attemptedAt.IsZero() && now.Sub(attemptedAt) >= engine.minimumInterval {
+			delete(engine.lastAttempts, id)
+		}
+	}
+	if attemptedAt, exists := engine.lastAttempts[connectionConfigID]; exists && now.Sub(attemptedAt) < engine.minimumInterval {
 		return false
 	}
-	engine.lastAttempt = now
+	engine.lastAttempts[connectionConfigID] = now
 	return true
 }
 
@@ -163,51 +178,175 @@ func (port *HTTPProbePort) Initialize(ctx context.Context, request ProbeRequest)
 	if err := port.policy.ValidateServerURL(ctx, request.Payload.Endpoint); err != nil {
 		return ErrProbeFailed
 	}
+	switch request.Transport {
+	case TransportHTTP:
+		return port.initializeStreamableHTTP(ctx, request.Payload)
+	case TransportSSE:
+		return port.initializeLegacySSE(ctx, request.Payload)
+	default:
+		return ErrProbeFailed
+	}
+}
+
+// initializeStreamableHTTP 是 MCP 2025-03-26 的单请求 Streamable HTTP 握手。
+// 该协议允许同一次 POST 以 JSON 或 SSE 返回 initialize 响应，因此响应的媒体
+// 类型不能被误用来推断 legacy SSE transport。
+func (port *HTTPProbePort) initializeStreamableHTTP(ctx context.Context, payload ConnectionPayload) error {
 	body, err := json.Marshal(minimumInitializeRequest())
 	if err != nil {
 		return ErrProbeFailed
 	}
-	httpRequest, err := http.NewRequestWithContext(ctx, http.MethodPost, request.Payload.Endpoint, bytes.NewReader(body))
+	httpRequest, err := http.NewRequestWithContext(ctx, http.MethodPost, payload.Endpoint, bytes.NewReader(body))
 	if err != nil {
 		return ErrProbeFailed
 	}
-	httpRequest.Header.Set("Content-Type", "application/json")
-	if request.Transport == TransportSSE {
-		httpRequest.Header.Set("Accept", "text/event-stream")
-	} else {
-		httpRequest.Header.Set("Accept", "application/json")
-	}
-	applyProbeAuthentication(httpRequest, request.Payload)
+	applyProbeAuthentication(httpRequest, payload)
+	applyStreamableHTTPHeaders(httpRequest, "")
 
 	response, err := port.client.Do(httpRequest)
 	if err != nil || response == nil || response.Body == nil {
 		return ErrProbeFailed
 	}
+	sessionID := usableProbeSessionID(response.Header.Get("Mcp-Session-Id"))
+	if sessionID != "" {
+		// defer 在通知或解析失败时同样执行。cleanup 不能把 session、URL 或上游错误
+		// 写入任何返回值；它只是经相同受控 client 做尽力而为的资源释放。
+		defer port.cleanupStreamableSession(ctx, payload, sessionID)
+	}
 	defer response.Body.Close()
 	if response.StatusCode < http.StatusOK || response.StatusCode >= http.StatusMultipleChoices {
 		return ErrProbeFailed
 	}
-	contentType := response.Header.Get("Content-Type")
-	switch request.Transport {
-	case TransportHTTP:
-		// 先确认固定 HTTP transport 得到的是 JSON，再读取有限响应。若服务端实际
-		// 返回持续的 SSE 流，自动协商应立刻尝试 SSE，而不能等待流关闭。
-		if !hasMediaType(contentType, "application/json") {
-			return ErrProbeFailed
-		}
+
+	valid := false
+	switch {
+	case hasMediaType(response.Header.Get("Content-Type"), "application/json"):
 		responseBody, readErr := readLimitedBody(response.Body, port.maxResponseBytes)
-		if readErr != nil || !validJSONInitializeResponse(responseBody) {
-			return ErrProbeFailed
-		}
-		return nil
-	case TransportSSE:
-		if !hasMediaType(contentType, "text/event-stream") || !validSSEInitializeStream(ctx, response.Body, port.maxResponseBytes) {
-			return ErrProbeFailed
-		}
-		return nil
+		valid = readErr == nil && validJSONInitializeResponse(responseBody)
+	case hasMediaType(response.Header.Get("Content-Type"), "text/event-stream"):
+		valid = validSSEInitializeStream(ctx, response.Body, port.maxResponseBytes)
 	default:
+		valid = false
+	}
+	// 尽早释放 JSON 或 streamable SSE 响应体，避免 initialized notification 因
+	// 上游每 host 连接限制而等待旧流关闭。
+	_ = response.Body.Close()
+	if !valid {
 		return ErrProbeFailed
 	}
+	return port.sendStreamableInitialized(ctx, payload, sessionID)
+}
+
+// initializeLegacySSE 实现旧 SSE transport 的真实生命周期：先打开只读 SSE
+// stream，取得同 origin 的 message endpoint，向该 endpoint POST initialize，
+// 再从原 stream 等待匹配 response。绝不把一个 POST + Accept:SSE 冒充旧协议。
+func (port *HTTPProbePort) initializeLegacySSE(ctx context.Context, payload ConnectionPayload) error {
+	streamRequest, err := http.NewRequestWithContext(ctx, http.MethodGet, payload.Endpoint, nil)
+	if err != nil {
+		return ErrProbeFailed
+	}
+	applyProbeAuthentication(streamRequest, payload)
+	applyLegacySSEStreamHeaders(streamRequest)
+	streamResponse, err := port.client.Do(streamRequest)
+	if err != nil || streamResponse == nil || streamResponse.Body == nil {
+		return ErrProbeFailed
+	}
+	defer streamResponse.Body.Close()
+	if streamResponse.StatusCode != http.StatusOK || !hasMediaType(streamResponse.Header.Get("Content-Type"), "text/event-stream") {
+		return ErrProbeFailed
+	}
+
+	stopClosingBody := closeReaderWhenContextDone(ctx, streamResponse.Body)
+	defer stopClosingBody()
+	stream := newProbeSSEReader(streamResponse.Body, port.maxResponseBytes)
+	endpointEvent, err := stream.next(ctx)
+	if err != nil || endpointEvent.event != "endpoint" {
+		return ErrProbeFailed
+	}
+	messageEndpoint, err := legacySSEMessageEndpoint(payload.Endpoint, endpointEvent.data)
+	if err != nil {
+		return ErrProbeFailed
+	}
+	if err := port.postLegacySSEMessage(ctx, messageEndpoint, payload, minimumInitializeRequest()); err != nil {
+		return ErrProbeFailed
+	}
+
+	for {
+		responseEvent, responseErr := stream.next(ctx)
+		if responseErr != nil || responseEvent.event != "message" {
+			return ErrProbeFailed
+		}
+		if validJSONInitializeResponse([]byte(responseEvent.data)) {
+			break
+		}
+		if !validJSONRPCNotification([]byte(responseEvent.data)) {
+			return ErrProbeFailed
+		}
+	}
+	return port.postLegacySSEMessage(ctx, messageEndpoint, payload, initializedNotification())
+}
+
+func (port *HTTPProbePort) sendStreamableInitialized(ctx context.Context, payload ConnectionPayload, sessionID string) error {
+	message, err := json.Marshal(initializedNotification())
+	if err != nil {
+		return ErrProbeFailed
+	}
+	request, err := http.NewRequestWithContext(ctx, http.MethodPost, payload.Endpoint, bytes.NewReader(message))
+	if err != nil {
+		return ErrProbeFailed
+	}
+	applyProbeAuthentication(request, payload)
+	applyStreamableHTTPHeaders(request, sessionID)
+	response, err := port.client.Do(request)
+	if err != nil || response == nil || response.Body == nil {
+		return ErrProbeFailed
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK && response.StatusCode != http.StatusAccepted {
+		return ErrProbeFailed
+	}
+	return nil
+}
+
+func (port *HTTPProbePort) cleanupStreamableSession(ctx context.Context, payload ConnectionPayload, sessionID string) {
+	if port == nil || port.client == nil || sessionID == "" {
+		return
+	}
+	cleanupContext, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+	defer cancel()
+	request, err := http.NewRequestWithContext(cleanupContext, http.MethodDelete, payload.Endpoint, nil)
+	if err != nil {
+		return
+	}
+	applyProbeAuthentication(request, payload)
+	// session ID 来自握手响应，不能由用户配置覆盖；在认证材料之后固定写入。
+	request.Header.Set("Mcp-Session-Id", sessionID)
+	response, err := port.client.Do(request)
+	if err == nil && response != nil && response.Body != nil {
+		_ = response.Body.Close()
+	}
+}
+
+func (port *HTTPProbePort) postLegacySSEMessage(ctx context.Context, target string, payload ConnectionPayload, message map[string]any) error {
+	body, err := json.Marshal(message)
+	if err != nil {
+		return ErrProbeFailed
+	}
+	request, err := http.NewRequestWithContext(ctx, http.MethodPost, target, bytes.NewReader(body))
+	if err != nil {
+		return ErrProbeFailed
+	}
+	applyProbeAuthentication(request, payload)
+	applyLegacySSEPostHeaders(request)
+	response, err := port.client.Do(request)
+	if err != nil || response == nil || response.Body == nil {
+		return ErrProbeFailed
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK && response.StatusCode != http.StatusAccepted {
+		return ErrProbeFailed
+	}
+	return nil
 }
 
 func minimumInitializeRequest() map[string]any {
@@ -216,7 +355,7 @@ func minimumInitializeRequest() map[string]any {
 		"id":      minimumInitializeRequestID,
 		"method":  "initialize",
 		"params": map[string]any{
-			"protocolVersion": "2025-03-26",
+			"protocolVersion": minimumInitializeProtocolVersion,
 			"capabilities":    map[string]any{},
 			"clientInfo": map[string]string{
 				"name":    "ai-infra-guard-probe",
@@ -226,7 +365,19 @@ func minimumInitializeRequest() map[string]any {
 	}
 }
 
+func initializedNotification() map[string]any {
+	return map[string]any{
+		"jsonrpc": "2.0",
+		"method":  "notifications/initialized",
+	}
+}
+
 func applyProbeAuthentication(request *http.Request, payload ConnectionPayload) {
+	for _, header := range payload.Headers {
+		if header.Name != "" {
+			request.Header.Set(header.Name, header.Value)
+		}
+	}
 	switch payload.Authentication.Kind {
 	case AuthenticationBearer:
 		request.Header.Set("Authorization", "Bearer "+payload.Authentication.Secret)
@@ -235,11 +386,39 @@ func applyProbeAuthentication(request *http.Request, payload ConnectionPayload) 
 			request.Header.Set(payload.Authentication.HeaderName, payload.Authentication.Secret)
 		}
 	}
-	for _, header := range payload.Headers {
-		if header.Name != "" {
-			request.Header.Set(header.Name, header.Value)
-		}
+}
+
+// applyStreamableHTTPHeaders 必须在全部用户材料之后调用。保存时的 header 策略
+// 已拒绝协议和会话名；这里仍以固定值覆盖，作为解密载荷意外绕过写入校验时的第二道
+// 边界。2025-03-26 要求 Streamable HTTP POST 同时接受 JSON 与 SSE 响应。
+func applyStreamableHTTPHeaders(request *http.Request, sessionID string) {
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("Accept", "application/json, text/event-stream")
+	if sessionID != "" {
+		request.Header.Set("Mcp-Session-Id", sessionID)
+	} else {
+		request.Header.Del("Mcp-Session-Id")
 	}
+}
+
+func applyLegacySSEStreamHeaders(request *http.Request) {
+	request.Header.Del("Content-Type")
+	request.Header.Del("Mcp-Session-Id")
+	request.Header.Set("Accept", "text/event-stream")
+	request.Header.Set("Cache-Control", "no-cache")
+}
+
+func applyLegacySSEPostHeaders(request *http.Request) {
+	request.Header.Del("Mcp-Session-Id")
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("Accept", "application/json")
+}
+
+func usableProbeSessionID(sessionID string) string {
+	if strings.TrimSpace(sessionID) == "" || len(sessionID) > maxProbeSessionIDBytes || !validHTTPHeaderValue(sessionID) {
+		return ""
+	}
+	return sessionID
 }
 
 func readLimitedBody(body io.Reader, limit int64) ([]byte, error) {
@@ -277,12 +456,33 @@ func validJSONInitializeResponse(body []byte) bool {
 		return false
 	}
 	var initializeResult struct {
-		ProtocolVersion string `json:"protocolVersion"`
+		ProtocolVersion string          `json:"protocolVersion"`
+		Capabilities    json.RawMessage `json:"capabilities"`
+		ServerInfo      json.RawMessage `json:"serverInfo"`
 	}
 	if err := json.Unmarshal(result, &initializeResult); err != nil {
 		return false
 	}
-	return strings.TrimSpace(initializeResult.ProtocolVersion) != ""
+	if initializeResult.ProtocolVersion != minimumInitializeProtocolVersion || !validJSONObject(initializeResult.Capabilities) || !validJSONObject(initializeResult.ServerInfo) {
+		return false
+	}
+	var serverInfo struct {
+		Name    string `json:"name"`
+		Version string `json:"version"`
+	}
+	if err := json.Unmarshal(initializeResult.ServerInfo, &serverInfo); err != nil {
+		return false
+	}
+	return strings.TrimSpace(serverInfo.Name) != "" && strings.TrimSpace(serverInfo.Version) != ""
+}
+
+func validJSONObject(raw json.RawMessage) bool {
+	value := bytes.TrimSpace(raw)
+	if len(value) == 0 || value[0] != '{' {
+		return false
+	}
+	var object map[string]json.RawMessage
+	return json.Unmarshal(value, &object) == nil
 }
 
 // validSSEInitializeStream 仅解析首个完整的 data event，并在得到合法 initialize
@@ -294,50 +494,136 @@ func validSSEInitializeStream(ctx context.Context, body io.Reader, limit int64) 
 	}
 	stopClosingBody := closeReaderWhenContextDone(ctx, body)
 	defer stopClosingBody()
-	reader := bufio.NewReader(io.LimitReader(body, limit+1))
+	reader := newProbeSSEReader(body, limit)
+	for {
+		event, err := reader.next(ctx)
+		if err != nil {
+			return false
+		}
+		if validJSONInitializeResponse([]byte(event.data)) {
+			return true
+		}
+		if !validJSONRPCNotification([]byte(event.data)) {
+			return false
+		}
+	}
+}
+
+func validJSONRPCNotification(body []byte) bool {
+	var notification struct {
+		JSONRPC string          `json:"jsonrpc"`
+		ID      json.RawMessage `json:"id"`
+		Method  string          `json:"method"`
+	}
+	if err := json.Unmarshal(bytes.TrimSpace(body), &notification); err != nil || notification.JSONRPC != "2.0" || strings.TrimSpace(notification.Method) == "" {
+		return false
+	}
+	id := bytes.TrimSpace(notification.ID)
+	return len(id) == 0 || bytes.Equal(id, []byte("null"))
+}
+
+type probeSSEEvent struct {
+	event string
+	data  string
+}
+
+type probeSSEReader struct {
+	reader    *bufio.Reader
+	limit     int64
+	readBytes int64
+}
+
+func newProbeSSEReader(body io.Reader, limit int64) *probeSSEReader {
+	return &probeSSEReader{reader: bufio.NewReader(io.LimitReader(body, limit+1)), limit: limit}
+}
+
+func (reader *probeSSEReader) next(ctx context.Context) (probeSSEEvent, error) {
+	if reader == nil || reader.reader == nil || reader.limit <= 0 || ctx == nil || ctx.Err() != nil {
+		return probeSSEEvent{}, ErrProbeFailed
+	}
+	var eventType string
 	dataLines := make([]string, 0, 1)
-	var readBytes int64
 	for {
 		if ctx.Err() != nil {
-			return false
+			return probeSSEEvent{}, ErrProbeFailed
 		}
-		line, err := reader.ReadString('\n')
-		readBytes += int64(len(line))
-		if readBytes > limit {
-			return false
+		line, err := reader.reader.ReadString('\n')
+		reader.readBytes += int64(len(line))
+		if reader.readBytes > reader.limit {
+			return probeSSEEvent{}, ErrProbeFailed
 		}
-
 		line = strings.TrimSuffix(line, "\n")
 		line = strings.TrimSuffix(line, "\r")
 		if line == "" {
 			if len(dataLines) > 0 {
-				return validJSONInitializeResponse([]byte(strings.Join(dataLines, "\n")))
+				if eventType == "" {
+					eventType = "message"
+				}
+				return probeSSEEvent{event: eventType, data: strings.Join(dataLines, "\n")}, nil
 			}
-		} else if strings.HasPrefix(line, ":") {
-			// SSE keepalive 注释不构成 initialize 响应。
-		} else {
-			field, value, found := strings.Cut(line, ":")
-			if !found {
-				return false
+			if err != nil {
+				return probeSSEEvent{}, ErrProbeFailed
 			}
-			if strings.HasPrefix(value, " ") {
-				value = value[1:]
-			}
-			switch field {
-			case "data":
-				dataLines = append(dataLines, value)
-			case "event", "id", "retry":
-				// 初始化响应只能来自 data 字段，其他字段只是 SSE framing 元数据。
-			default:
-				return false
-			}
+			continue
 		}
-
 		if err != nil {
-			// EOF 前没有结束空行代表 event 不完整；其他 reader 错误同样 fail closed。
-			return false
+			// EOF 前未以空行结束的 event 不是完整 SSE framing。
+			return probeSSEEvent{}, ErrProbeFailed
+		}
+		if strings.HasPrefix(line, ":") {
+			continue
+		}
+		field, value, found := strings.Cut(line, ":")
+		if !found {
+			return probeSSEEvent{}, ErrProbeFailed
+		}
+		if strings.HasPrefix(value, " ") {
+			value = value[1:]
+		}
+		switch field {
+		case "data":
+			dataLines = append(dataLines, value)
+		case "event":
+			eventType = value
+		case "id", "retry":
+			// 这些 framing 元数据不影响最小 initialize 验证。
+		default:
+			return probeSSEEvent{}, ErrProbeFailed
 		}
 	}
+}
+
+func legacySSEMessageEndpoint(baseRaw, eventData string) (string, error) {
+	base, err := parseHTTPSURL(baseRaw)
+	if err != nil {
+		return "", ErrProbeFailed
+	}
+	eventData = strings.TrimSpace(eventData)
+	if eventData == "" || strings.ContainsAny(eventData, "\r\n") {
+		return "", ErrProbeFailed
+	}
+	reference, err := url.Parse(eventData)
+	if err != nil || reference == nil || reference.User != nil || reference.Fragment != "" {
+		return "", ErrProbeFailed
+	}
+	target := base.ResolveReference(reference)
+	if target == nil || target.Opaque != "" || target.User != nil || target.Fragment != "" || target.Scheme != base.Scheme || canonicalHost(target.Hostname()) != canonicalHost(base.Hostname()) || originPort(target) != originPort(base) {
+		return "", ErrProbeFailed
+	}
+	return target.String(), nil
+}
+
+func originPort(target *url.URL) string {
+	if target == nil {
+		return ""
+	}
+	if port := target.Port(); port != "" {
+		return port
+	}
+	if strings.EqualFold(target.Scheme, "https") {
+		return "443"
+	}
+	return ""
 }
 
 // closeReaderWhenContextDone 让自定义或测试 transport 的流 body 也遵守 request

@@ -190,7 +190,7 @@ func TestSealAndOpenConnectionPayloadAllowsGlobalScopeWithoutOwner(t *testing.T)
 	}
 }
 
-func TestSealPayloadJSONMasksSensitiveFields(t *testing.T) {
+func TestSealPayloadJSONMasksAllConnectionMaterial(t *testing.T) {
 	payload := ConnectionPayload{
 		Endpoint:       "endpoint-json-sentinel",
 		Authentication: Authentication{Kind: AuthenticationAPIKeyHeader, HeaderName: "X-Sentinel-Key", Secret: "api-key-json-sentinel"},
@@ -205,8 +205,10 @@ func TestSealPayloadJSONMasksSensitiveFields(t *testing.T) {
 			t.Fatalf("connection payload JSON leaked %q: %s", secret, encoded)
 		}
 	}
-	if !bytes.Contains(encoded, []byte("X-Sentinel-Key")) || !bytes.Contains(encoded, []byte("X-Sentinel-Custom")) {
-		t.Fatalf("connection payload JSON must retain safe header-name metadata: %s", encoded)
+	for _, material := range []string{"X-Sentinel-Key", "X-Sentinel-Custom"} {
+		if bytes.Contains(encoded, []byte(material)) {
+			t.Fatalf("connection payload JSON leaked header material %q: %s", material, encoded)
+		}
 	}
 
 	snapshot := RepositorySourceSnapshot{RepositoryURL: "repository-json-sentinel"}
@@ -219,7 +221,7 @@ func TestSealPayloadJSONMasksSensitiveFields(t *testing.T) {
 	}
 }
 
-func TestSealLeafJSONMasksSecretsWhileRoundTripKeepsPlaintext(t *testing.T) {
+func TestSealLeafJSONMasksConnectionMaterialWhileRoundTripKeepsPlaintext(t *testing.T) {
 	header := Header{Name: "X-Leaf-Sentinel", Value: "header-value-leaf-sentinel"}
 	authentication := Authentication{Kind: AuthenticationAPIKeyHeader, HeaderName: header.Name, Secret: "authentication-leaf-sentinel"}
 	for _, value := range []any{header, authentication} {
@@ -227,9 +229,9 @@ func TestSealLeafJSONMasksSecretsWhileRoundTripKeepsPlaintext(t *testing.T) {
 		if err != nil {
 			t.Fatalf("marshal leaf value: %v", err)
 		}
-		for _, secret := range []string{"header-value-leaf-sentinel", "authentication-leaf-sentinel"} {
-			if bytes.Contains(encoded, []byte(secret)) {
-				t.Fatalf("leaf JSON leaked %q: %s", secret, encoded)
+		for _, material := range []string{"X-Leaf-Sentinel", "header-value-leaf-sentinel", "authentication-leaf-sentinel"} {
+			if bytes.Contains(encoded, []byte(material)) {
+				t.Fatalf("leaf JSON leaked %q: %s", material, encoded)
 			}
 		}
 	}
@@ -250,6 +252,29 @@ func TestSealLeafJSONMasksSecretsWhileRoundTripKeepsPlaintext(t *testing.T) {
 	}
 	if !reflect.DeepEqual(payload, opened) {
 		t.Fatalf("leaf payload round-trip mismatch: got %#v want %#v", opened, payload)
+	}
+}
+
+func TestCreateConnectionInputJSONIsSafeButStillDecodesCredentials(t *testing.T) {
+	const endpoint = "https://mcp-input-sentinel.example.test/mcp"
+	const headerName = "X-Input-Sentinel"
+	const secret = "input-secret-sentinel"
+	raw := `{"name":"安全连接","description":"","scope":"private","transport":"http","server_url":"` + endpoint + `","authentication":{"kind":"api_key_header","header_name":"` + headerName + `","secret":"` + secret + `"},"headers":[{"name":"X-Custom-Sentinel","value":"custom-secret-sentinel"}]}`
+	var input CreateConnectionInput
+	if err := json.Unmarshal([]byte(raw), &input); err != nil {
+		t.Fatalf("decode protected write input: %v", err)
+	}
+	if input.ServerURL != endpoint || input.Authentication.HeaderName != headerName || input.Authentication.Secret != secret {
+		t.Fatalf("write input lost credential material after decode: %#v", input)
+	}
+	encoded, err := json.Marshal(input)
+	if err != nil {
+		t.Fatalf("marshal write input: %v", err)
+	}
+	for _, material := range []string{endpoint, headerName, secret, "X-Custom-Sentinel", "custom-secret-sentinel"} {
+		if bytes.Contains(encoded, []byte(material)) {
+			t.Fatalf("write input JSON leaked %q: %s", material, encoded)
+		}
 	}
 }
 

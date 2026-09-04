@@ -6,6 +6,7 @@ import (
 	"errors"
 	"net"
 	"sort"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -18,9 +19,10 @@ import (
 // memoryConnectionRepository 保留真实仓储所需的状态语义，而将 PostgreSQL 留给
 // 已有的 repository 集成测试；服务测试只替换持久化边界，不替换授权或安全投影。
 type memoryConnectionRepository struct {
-	configs  map[string]*ConnectionConfig
-	versions map[string]map[int]*ConnectionVersion
-	recorded int
+	configs          map[string]*ConnectionConfig
+	versions         map[string]map[int]*ConnectionVersion
+	recorded         int
+	beforeSetEnabled func()
 }
 
 func newMemoryConnectionRepository() *memoryConnectionRepository {
@@ -90,13 +92,56 @@ func (repository *memoryConnectionRepository) RecordProbeResult(_ context.Contex
 	return nil
 }
 
-func (repository *memoryConnectionRepository) SetEnabled(_ context.Context, configID string, enabled bool) (*ConnectionConfig, error) {
+func (repository *memoryConnectionRepository) SetEnabled(_ context.Context, configID string, expectedCurrentVersion int, expectedResourceRevision string, enabled bool) (*ConnectionConfig, error) {
+	if repository.beforeSetEnabled != nil {
+		hook := repository.beforeSetEnabled
+		repository.beforeSetEnabled = nil
+		hook()
+	}
 	stored, ok := repository.configs[configID]
 	if !ok {
 		return nil, ErrNotFound
 	}
+	if stored.CurrentVersion != expectedCurrentVersion || stored.ResourceRevision != expectedResourceRevision {
+		return nil, ErrConflict
+	}
+	nextRevision, err := incrementRevision(stored.ResourceRevision)
+	if err != nil {
+		return nil, err
+	}
 	stored.Enabled = enabled
+	stored.ResourceRevision = nextRevision
 	return cloneConnectionConfig(stored), nil
+}
+
+func TestServiceSetEnabledRejectsVersionAdvancedAfterEligibilityRead(t *testing.T) {
+	ctx := context.Background()
+	repository := newMemoryConnectionRepository()
+	service := testService(t, repository, true, &scriptedProbePort{errors: map[Transport]error{}})
+	alice := identity.Subject{UserID: "alice", Role: identity.RoleUser}
+	created, err := service.Create(ctx, alice, serviceInput("安全连接", ScopePrivate, TransportHTTP))
+	require.NoError(t, err)
+	repository.versions[created.ID][1].ProbeStatus = ProbeStatusPassed
+	repository.versions[created.ID][1].DetectedTransport = TransportHTTP
+
+	repository.beforeSetEnabled = func() {
+		config := repository.configs[created.ID]
+		config.CurrentVersion = 2
+		config.ResourceRevision = "2"
+		config.Enabled = false
+		next := cloneConnectionVersionRecord(repository.versions[created.ID][1])
+		next.Version = 2
+		next.ProbeStatus = ProbeStatusNotTested
+		next.DetectedTransport = ""
+		repository.versions[created.ID][2] = next
+	}
+
+	_, err = service.SetEnabled(ctx, alice, created.ID, true)
+	require.ErrorIs(t, err, ErrConflict)
+	stored, getErr := repository.GetConfig(ctx, created.ID)
+	require.NoError(t, getErr)
+	assert.False(t, stored.Enabled)
+	assert.Equal(t, 2, stored.CurrentVersion)
 }
 
 type scriptedProbePort struct {
@@ -149,6 +194,72 @@ func serviceInput(name string, scope Scope, transport Transport) CreateConnectio
 		},
 		Headers: []Header{{Name: "X-Custom-Secret-Header", Value: "custom-secret-value"}},
 	}
+}
+
+func TestValidCreateInputRejectsUnsafeOrAmbiguousHTTPHeaders(t *testing.T) {
+	base := serviceInput("安全连接", ScopePrivate, TransportHTTP)
+	invalidHeaders := []struct {
+		name    string
+		headers []Header
+	}{
+		{name: "reserved content type", headers: []Header{{Name: "Content-Type", Value: "application/problem+json"}}},
+		{name: "reserved accept", headers: []Header{{Name: "Accept", Value: "text/plain"}}},
+		{name: "routing host", headers: []Header{{Name: "Host", Value: "other.example.test"}}},
+		{name: "hop by hop", headers: []Header{{Name: "Connection", Value: "close"}}},
+		{name: "cookie", headers: []Header{{Name: "Cookie", Value: "session=value"}}},
+		{name: "proxy", headers: []Header{{Name: "Proxy-Authorization", Value: "opaque"}}},
+		{name: "mcp session", headers: []Header{{Name: "mCp-Session-Id", Value: "opaque"}}},
+		{name: "invalid token", headers: []Header{{Name: "X Bad", Value: "opaque"}}},
+		{name: "newline", headers: []Header{{Name: "X-Test\r\nInjected", Value: "opaque"}}},
+		{name: "name too long", headers: []Header{{Name: strings.Repeat("X", 65), Value: "opaque"}}},
+		{name: "value too long", headers: []Header{{Name: "X-Test", Value: strings.Repeat("x", 8*1024+1)}}},
+		{name: "duplicate case insensitive", headers: []Header{{Name: "X-Duplicate", Value: "one"}, {Name: "x-duplicate", Value: "two"}}},
+	}
+	for _, test := range invalidHeaders {
+		t.Run(test.name, func(t *testing.T) {
+			input := base
+			input.Authentication = Authentication{Kind: AuthenticationCustomHeaders}
+			input.Headers = test.headers
+			assert.False(t, validCreateInput(input))
+		})
+	}
+
+	tooMany := base
+	tooMany.Authentication = Authentication{Kind: AuthenticationCustomHeaders}
+	tooMany.Headers = make([]Header, 11)
+	for index := range tooMany.Headers {
+		tooMany.Headers[index] = Header{Name: "X-Header-" + strconv.Itoa(index), Value: "opaque"}
+	}
+	assert.False(t, validCreateInput(tooMany))
+
+	badAPIKeyName := base
+	badAPIKeyName.Headers = nil
+	badAPIKeyName.Authentication = Authentication{Kind: AuthenticationAPIKeyHeader, HeaderName: "Mcp-Session-Id", Secret: "opaque"}
+	assert.False(t, validCreateInput(badAPIKeyName))
+
+	badBearerSecret := base
+	badBearerSecret.Headers = nil
+	badBearerSecret.Authentication = Authentication{Kind: AuthenticationBearer, Secret: strings.Repeat("x", 8*1024+1)}
+	assert.False(t, validCreateInput(badBearerSecret))
+}
+
+func TestValidCreateInputAllowsCredentialCombinationsWithSafeCustomHeaders(t *testing.T) {
+	custom := serviceInput("安全连接", ScopePrivate, TransportHTTP)
+	custom.Authentication = Authentication{Kind: AuthenticationCustomHeaders}
+	custom.Headers = []Header{{Name: " Authorization ", Value: "Custom internal credential"}, {Name: "X-Environment", Value: "intranet"}}
+	require.True(t, validCreateInput(custom))
+	payload := connectionPayloadFromInput(custom)
+	assert.Equal(t, "Authorization", payload.Headers[0].Name)
+
+	bearer := serviceInput("安全连接", ScopePrivate, TransportHTTP)
+	bearer.Authentication = Authentication{Kind: AuthenticationBearer, Secret: "managed-token"}
+	bearer.Headers = []Header{{Name: "Authorization", Value: "custom-token"}, {Name: "X-Environment", Value: "intranet"}}
+	assert.True(t, validCreateInput(bearer), "bearer credentials may carry independent internal headers and override the custom Authorization value at send time")
+
+	apiKey := serviceInput("安全连接", ScopePrivate, TransportHTTP)
+	apiKey.Authentication = Authentication{Kind: AuthenticationAPIKeyHeader, HeaderName: "Authorization", Secret: "managed-api-key"}
+	apiKey.Headers = []Header{{Name: "Authorization", Value: "custom-token"}, {Name: "X-Environment", Value: "intranet"}}
+	assert.True(t, validCreateInput(apiKey), "API-key credentials may intentionally override a same-name custom header")
 }
 
 func TestServiceEnforcesVisibilityAndSafeConnectionProjections(t *testing.T) {
@@ -478,7 +589,7 @@ func TestServiceRejectsEmbeddedConnectionMaterialAndFailsClosedForLegacyText(t *
 				HeaderName: "X-Env",
 				Secret:     "opaqueauth4729",
 			},
-			Headers: []Header{{Name: "Content-Type", Value: "orchid938"}},
+			Headers: []Header{{Name: "X-Environment", Value: "orchid938"}},
 		}
 	}
 

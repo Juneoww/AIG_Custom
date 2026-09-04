@@ -21,6 +21,9 @@ const (
 	maxConnectionNameRunes        = 80
 	maxConnectionDescriptionRunes = 240
 	maxDisplayTokenRunes          = 31
+	maxCustomHeaders              = 10
+	maxHTTPHeaderNameBytes        = 64
+	maxHTTPHeaderValueBytes       = 8 * 1024
 )
 
 // ConnectionRepository 是连接服务使用的最小持久化边界。Task 4 的任务 UoW
@@ -31,7 +34,7 @@ type ConnectionRepository interface {
 	GetVersion(context.Context, string, int) (*ConnectionVersion, error)
 	ListConfigs(context.Context) ([]ConnectionConfig, error)
 	RecordProbeResult(context.Context, string, int, Transport, ProbeStatus) error
-	SetEnabled(context.Context, string, bool) (*ConnectionConfig, error)
+	SetEnabled(context.Context, string, int, string, bool) (*ConnectionConfig, error)
 }
 
 type Service struct {
@@ -151,7 +154,7 @@ func (service *Service) GetManagementDetail(ctx context.Context, subject identit
 	detail := ConnectionManagementDetail{
 		ConnectionSummary:        summaryOf(config, version, &payload),
 		EndpointConfigured:       strings.TrimSpace(payload.Endpoint) != "",
-		AuthenticationConfigured: payload.Authentication.Kind != AuthenticationNone && strings.TrimSpace(payload.Authentication.Secret) != "",
+		AuthenticationConfigured: authenticationConfigured(payload),
 		AuthenticationKind:       payload.Authentication.Kind,
 		CustomHeadersConfigured:  len(payload.Headers) > 0,
 	}
@@ -178,7 +181,7 @@ func (service *Service) Probe(ctx context.Context, subject identity.Subject, con
 	if err != nil {
 		return nil, ErrProbeFailed
 	}
-	result, err := service.prober.Probe(ctx, payload, version.Transport)
+	result, err := service.prober.Probe(ctx, config.ID, payload, version.Transport)
 	if err != nil {
 		if errors.Is(err, ErrProbeRateLimited) {
 			return nil, ErrProbeRateLimited
@@ -210,9 +213,12 @@ func (service *Service) SetEnabled(ctx context.Context, subject identity.Subject
 			return nil, ErrTaskConnectionUnavailable
 		}
 	}
-	updated, err := service.repository.SetEnabled(ctx, config.ID, enabled)
+	updated, err := service.repository.SetEnabled(ctx, config.ID, version.Version, config.ResourceRevision, enabled)
 	if err != nil {
 		return nil, mapServiceRepositoryError(err)
+	}
+	if updated == nil || updated.CurrentVersion != version.Version {
+		return nil, ErrConflict
 	}
 	summary := service.safeSummaryOf(updated, version)
 	return &summary, nil
@@ -408,31 +414,97 @@ func validCreateInput(input CreateConnectionInput) bool {
 	if _, _, safe := safeConnectionDisplayText(input.Name, input.Description, &payload); !safe {
 		return false
 	}
-	for _, header := range input.Headers {
-		if strings.TrimSpace(header.Name) == "" || strings.ContainsAny(header.Name, "\r\n") {
-			return false
-		}
+	if !validCustomHeaders(payload.Headers) {
+		return false
 	}
-	switch input.Authentication.Kind {
+	authentication := payload.Authentication
+	switch authentication.Kind {
 	case AuthenticationNone:
-		return input.Authentication.Secret == "" && input.Authentication.HeaderName == ""
+		return authentication.Secret == "" && authentication.HeaderName == "" && len(payload.Headers) == 0
 	case AuthenticationBearer:
-		return strings.TrimSpace(input.Authentication.Secret) != "" && input.Authentication.HeaderName == ""
+		return strings.TrimSpace(authentication.Secret) != "" && validHTTPHeaderValue(authentication.Secret) && authentication.HeaderName == ""
 	case AuthenticationAPIKeyHeader:
-		return strings.TrimSpace(input.Authentication.Secret) != "" && strings.TrimSpace(input.Authentication.HeaderName) != "" && !strings.ContainsAny(input.Authentication.HeaderName, "\r\n")
+		return strings.TrimSpace(authentication.Secret) != "" && validHTTPHeaderValue(authentication.Secret) && validCustomHeaderName(authentication.HeaderName)
 	case AuthenticationCustomHeaders:
-		return input.Authentication.Secret == "" && input.Authentication.HeaderName == "" && len(input.Headers) > 0
+		return authentication.Secret == "" && authentication.HeaderName == "" && len(payload.Headers) > 0
 	default:
 		return false
 	}
 }
 
 func connectionPayloadFromInput(input CreateConnectionInput) ConnectionPayload {
+	authentication := input.Authentication
+	authentication.HeaderName = strings.TrimSpace(authentication.HeaderName)
 	return ConnectionPayload{
 		Endpoint:       strings.TrimSpace(input.ServerURL),
-		Authentication: input.Authentication,
-		Headers:        cloneHeaders(input.Headers),
+		Authentication: authentication,
+		Headers:        normalizedHeaders(input.Headers),
 	}
+}
+
+func authenticationConfigured(payload ConnectionPayload) bool {
+	switch payload.Authentication.Kind {
+	case AuthenticationBearer, AuthenticationAPIKeyHeader:
+		return strings.TrimSpace(payload.Authentication.Secret) != ""
+	case AuthenticationCustomHeaders:
+		return len(payload.Headers) > 0
+	default:
+		return false
+	}
+}
+
+func validCustomHeaders(headers []Header) bool {
+	if len(headers) > maxCustomHeaders {
+		return false
+	}
+	seen := make(map[string]struct{}, len(headers))
+	for _, header := range headers {
+		if !validCustomHeaderName(header.Name) || !validHTTPHeaderValue(header.Value) {
+			return false
+		}
+		key := strings.ToLower(header.Name)
+		if _, exists := seen[key]; exists {
+			return false
+		}
+		seen[key] = struct{}{}
+	}
+	return true
+}
+
+func validCustomHeaderName(name string) bool {
+	if !validHTTPHeaderName(name) {
+		return false
+	}
+	name = strings.ToLower(name)
+	if strings.HasPrefix(name, "mcp-") || strings.HasPrefix(name, "proxy-") {
+		return false
+	}
+	switch name {
+	case "host", "content-length", "transfer-encoding", "connection", "keep-alive", "upgrade", "te", "trailer",
+		"content-type", "accept", "cookie", "set-cookie", "cache-control", "last-event-id":
+		return false
+	default:
+		return true
+	}
+}
+
+func validHTTPHeaderName(name string) bool {
+	name = strings.TrimSpace(name)
+	if name == "" || len(name) > maxHTTPHeaderNameBytes || strings.ContainsAny(name, "\r\n") {
+		return false
+	}
+	for index := 0; index < len(name); index++ {
+		character := name[index]
+		if character >= '0' && character <= '9' || character >= 'A' && character <= 'Z' || character >= 'a' && character <= 'z' || strings.ContainsRune("!#$%&'*+-.^_`|~", rune(character)) {
+			continue
+		}
+		return false
+	}
+	return true
+}
+
+func validHTTPHeaderValue(value string) bool {
+	return len(value) <= maxHTTPHeaderValueBytes && !strings.ContainsAny(value, "\r\n")
 }
 
 func validDisplayText(value string, maximumRunes int, required bool) bool {
@@ -634,9 +706,20 @@ func cloneHeaders(headers []Header) []Header {
 	return append([]Header(nil), headers...)
 }
 
+func normalizedHeaders(headers []Header) []Header {
+	normalized := cloneHeaders(headers)
+	for index := range normalized {
+		normalized[index].Name = strings.TrimSpace(normalized[index].Name)
+	}
+	return normalized
+}
+
 func mapServiceRepositoryError(err error) error {
 	if errors.Is(err, ErrNotFound) {
 		return ErrNotFound
+	}
+	if errors.Is(err, ErrConflict) {
+		return ErrConflict
 	}
 	return ErrInvalid
 }

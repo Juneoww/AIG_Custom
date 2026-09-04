@@ -115,6 +115,27 @@ func TestRepositoryVersionsConnectionMaterialAndLeavesMetadataOutOfHistory(t *te
 	assert.Len(t, versions, 2)
 }
 
+func TestRepositorySetEnabledRejectsStaleCurrentVersion(t *testing.T) {
+	ctx := context.Background()
+	db := openMCPConnectionPostgresDB(t)
+	require.NoError(t, database.Migrate(db))
+	repository := NewGormRepository(db)
+	config := testConnectionConfig("config-enable-stale-sentinel")
+	first := testConnectionVersion(config.ID, "version-enable-stale-one-sentinel", "ciphertext-enable-stale-one-sentinel")
+	require.NoError(t, repository.Create(ctx, config, first))
+
+	second := testConnectionVersion(config.ID, "version-enable-stale-two-sentinel", "ciphertext-enable-stale-two-sentinel")
+	_, err := repository.CreateNextVersion(ctx, config.ID, second)
+	require.NoError(t, err)
+
+	_, err = repository.SetEnabled(ctx, config.ID, 1, "1", true)
+	require.ErrorIs(t, err, ErrConflict)
+	stored, err := repository.GetConfig(ctx, config.ID)
+	require.NoError(t, err)
+	assert.False(t, stored.Enabled)
+	assert.Equal(t, 2, stored.CurrentVersion)
+}
+
 func TestRepositoryPersistsOnlyEncryptedRepositorySourceBinding(t *testing.T) {
 	ctx := context.Background()
 	db := openMCPConnectionPostgresDB(t)

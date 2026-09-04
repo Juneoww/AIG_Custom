@@ -16,6 +16,7 @@ import (
 var (
 	ErrNotFound = errors.New("MCP 连接配置不存在")
 	ErrInvalid  = errors.New("MCP 连接配置无效")
+	ErrConflict = errors.New("MCP 连接配置版本冲突")
 )
 
 // GormRepository 只操作已由 v10 迁移创建的 MCP 专用表；它不会自动建表，
@@ -210,10 +211,11 @@ func (repository *GormRepository) UpdateDisplayMetadata(ctx context.Context, con
 	return &updated, nil
 }
 
-// SetEnabled 仅修改当前配置行的可选开关；是否允许打开由 Service 根据当前版本
-// probe 与受控 gateway 判定。仓储本身不拥有出站能力，不能自行放宽该前置条件。
-func (repository *GormRepository) SetEnabled(ctx context.Context, configID string, enabled bool) (*ConnectionConfig, error) {
-	if repository == nil || repository.db == nil || strings.TrimSpace(configID) == "" {
+// SetEnabled 在同一锁定事务内确认 Service 校验的 current version 与 resource
+// revision 仍然成立。若 CreateNextVersion 已推进当前版本，旧探测结论不得把新版本
+// 错误启用；调用方必须重新读取并验证新 current version。
+func (repository *GormRepository) SetEnabled(ctx context.Context, configID string, expectedCurrentVersion int, expectedResourceRevision string, enabled bool) (*ConnectionConfig, error) {
+	if repository == nil || repository.db == nil || strings.TrimSpace(configID) == "" || expectedCurrentVersion < 1 || strings.TrimSpace(expectedResourceRevision) == "" {
 		return nil, ErrInvalid
 	}
 	var updated ConnectionConfig
@@ -221,6 +223,9 @@ func (repository *GormRepository) SetEnabled(ctx context.Context, configID strin
 		var config ConnectionConfig
 		if err := transaction.Clauses(clause.Locking{Strength: "UPDATE"}).Where("id = ?", configID).First(&config).Error; err != nil {
 			return mapNotFound(err)
+		}
+		if config.CurrentVersion != expectedCurrentVersion || config.ResourceRevision != expectedResourceRevision {
+			return ErrConflict
 		}
 		nextRevision, err := incrementRevision(config.ResourceRevision)
 		if err != nil {
