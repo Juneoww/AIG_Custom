@@ -20,6 +20,7 @@ var (
 const (
 	maxConnectionNameRunes        = 80
 	maxConnectionDescriptionRunes = 240
+	maxDisplayTokenRunes          = 32
 )
 
 // ConnectionRepository 是连接服务使用的最小持久化边界。Task 4 的任务 UoW
@@ -306,7 +307,7 @@ func summaryOf(config *ConnectionConfig, version *ConnectionVersion) ConnectionS
 }
 
 func canCreate(subject identity.Subject, scope Scope) bool {
-	if subject.UserID == "" {
+	if !hasSubjectUserID(subject) {
 		return false
 	}
 	switch subject.Role {
@@ -320,11 +321,14 @@ func canCreate(subject identity.Subject, scope Scope) bool {
 }
 
 func validReader(subject identity.Subject) bool {
+	if !hasSubjectUserID(subject) {
+		return false
+	}
 	switch subject.Role {
 	case identity.RoleAdmin, identity.RoleAuditor:
 		return true
 	case identity.RoleUser:
-		return strings.TrimSpace(subject.UserID) != ""
+		return true
 	default:
 		return false
 	}
@@ -333,18 +337,21 @@ func validReader(subject identity.Subject) bool {
 // canUseForTask 与只读审计视图分离：审计员可看经过脱敏的摘要，但不能选择连接或
 // 验证任务可用性，以免读权限间接变成任务执行权限。
 func canUseForTask(subject identity.Subject) bool {
+	if !hasSubjectUserID(subject) {
+		return false
+	}
 	switch subject.Role {
 	case identity.RoleAdmin:
 		return true
 	case identity.RoleUser:
-		return strings.TrimSpace(subject.UserID) != ""
+		return true
 	default:
 		return false
 	}
 }
 
 func canRead(subject identity.Subject, config *ConnectionConfig) bool {
-	if config == nil || !validReader(subject) {
+	if config == nil || !hasSubjectUserID(subject) || !validReader(subject) {
 		return false
 	}
 	if subject.Role == identity.RoleAdmin {
@@ -357,7 +364,7 @@ func canRead(subject identity.Subject, config *ConnectionConfig) bool {
 }
 
 func canManage(subject identity.Subject, config *ConnectionConfig) bool {
-	if config == nil {
+	if config == nil || !hasSubjectUserID(subject) {
 		return false
 	}
 	if subject.Role == identity.RoleAdmin {
@@ -366,8 +373,15 @@ func canManage(subject identity.Subject, config *ConnectionConfig) bool {
 	return subject.Role == identity.RoleUser && config.Scope == ScopePrivate && subject.UserID != "" && subject.UserID == config.OwnerUserID
 }
 
+func hasSubjectUserID(subject identity.Subject) bool {
+	return strings.TrimSpace(subject.UserID) != ""
+}
+
 func validCreateInput(input CreateConnectionInput) bool {
 	if !validDisplayText(input.Name, maxConnectionNameRunes, true) || !validDisplayText(input.Description, maxConnectionDescriptionRunes, false) || input.Scope != ScopePrivate && input.Scope != ScopeGlobal || !configurableTransport(input.Transport) || strings.TrimSpace(input.ServerURL) == "" {
+		return false
+	}
+	if displayTextEchoesConnectionMaterial(input.Name, input) || displayTextEchoesConnectionMaterial(input.Description, input) {
 		return false
 	}
 	for _, header := range input.Headers {
@@ -421,12 +435,12 @@ func safeDisplayText(value string, maximumRunes int, required bool) string {
 
 func containsSensitiveDisplayMaterial(value string) bool {
 	lower := strings.ToLower(value)
-	if strings.Contains(lower, "://") || strings.Contains(lower, "git@") {
+	if strings.ContainsAny(value, "/\\@:?#=&%") || strings.Contains(lower, "git@") || looksLikeHost(value) || looksLikeASCIIHeaderName(value) {
 		return true
 	}
 	for _, keyword := range []string{
-		"token", "cookie", "authorization", "header", "bearer", "api_key", "apikey", "secret", "password",
-		"令牌", "凭据", "密钥", "授权", "请求头",
+		"token", "cookie", "authorization", "header", "bearer", "api_key", "apikey", "secret", "password", "credential", "endpoint",
+		"令牌", "凭据", "密钥", "授权", "请求头", "端点",
 	} {
 		if strings.Contains(lower, keyword) {
 			return true
@@ -437,29 +451,20 @@ func containsSensitiveDisplayMaterial(value string) bool {
 
 func containsTokenLikeSegment(value string) bool {
 	length := 0
-	hasUpper := false
-	hasLower := false
-	hasDigit := false
 	flush := func() bool {
-		matched := length >= 32 && hasUpper && hasLower && hasDigit
+		matched := length >= maxDisplayTokenRunes
 		length = 0
-		hasUpper = false
-		hasLower = false
-		hasDigit = false
 		return matched
 	}
 	for _, character := range value {
 		switch {
 		case character >= 'A' && character <= 'Z':
 			length++
-			hasUpper = true
 		case character >= 'a' && character <= 'z':
 			length++
-			hasLower = true
 		case character >= '0' && character <= '9':
 			length++
-			hasDigit = true
-		case character == '-' || character == '_' || character == '.':
+		case character == '-' || character == '_':
 			length++
 		default:
 			if flush() {
@@ -468,6 +473,86 @@ func containsTokenLikeSegment(value string) bool {
 		}
 	}
 	return flush()
+}
+
+// looksLikeHost 拒绝无空格的 ASCII 域名/IP 标签组合。显示文本只需要是人可读标签，
+// 因而不应携带可被误认为出站目标的 host；自然语言中的版本号或中文句子不会匹配。
+func looksLikeHost(value string) bool {
+	value = strings.TrimSuffix(strings.ToLower(strings.TrimSpace(value)), ".")
+	if value == "" || strings.ContainsAny(value, " \t") {
+		return false
+	}
+	labels := strings.Split(value, ".")
+	if len(labels) < 2 {
+		return false
+	}
+	for _, label := range labels {
+		if label == "" || label[0] == '-' || label[len(label)-1] == '-' {
+			return false
+		}
+		for _, character := range label {
+			if character != '-' && (character < 'a' || character > 'z') && (character < '0' || character > '9') {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+// looksLikeASCIIHeaderName 拒绝标准扩展 Header 前缀的 ASCII token，避免把常见
+// X-/Sec- Header 名称伪装成标签；普通英文连字符名称（如 alice-private）仍可显示，
+// 而任意实际 Header 名称还会由 displayTextEchoesConnectionMaterial 单独比对。
+func looksLikeASCIIHeaderName(value string) bool {
+	value = strings.TrimSpace(value)
+	if !strings.Contains(value, "-") || strings.ContainsAny(value, " \t") {
+		return false
+	}
+	for _, character := range value {
+		if character != '-' && (character < 'A' || character > 'Z') && (character < 'a' || character > 'z') && (character < '0' || character > '9') {
+			return false
+		}
+	}
+	if strings.HasPrefix(value, "-") || strings.HasSuffix(value, "-") {
+		return false
+	}
+	prefix, _, _ := strings.Cut(strings.ToLower(value), "-")
+	return prefix == "x" || prefix == "sec"
+}
+
+// displayTextEchoesConnectionMaterial 阻止管理者把当前连接材料原样写进可投影
+// 标签。Header 名称与 host 的比较按大小写无关处理；秘密值必须精确一致才会命中，
+// 避免把普通说明中的短词误判为秘密。
+func displayTextEchoesConnectionMaterial(value string, input CreateConnectionInput) bool {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return false
+	}
+	if sameDisplayMaterial(value, input.ServerURL, true) {
+		return true
+	}
+	if parsed, err := parseHTTPSURL(input.ServerURL); err == nil && sameDisplayMaterial(value, parsed.Hostname(), true) {
+		return true
+	}
+	if sameDisplayMaterial(value, input.Authentication.HeaderName, true) || sameDisplayMaterial(value, input.Authentication.Secret, false) {
+		return true
+	}
+	for _, header := range input.Headers {
+		if sameDisplayMaterial(value, header.Name, true) || sameDisplayMaterial(value, header.Value, false) {
+			return true
+		}
+	}
+	return false
+}
+
+func sameDisplayMaterial(value, material string, caseInsensitive bool) bool {
+	material = strings.TrimSpace(material)
+	if material == "" {
+		return false
+	}
+	if caseInsensitive {
+		return strings.EqualFold(value, material)
+	}
+	return value == material
 }
 
 func configurableTransport(transport Transport) bool {

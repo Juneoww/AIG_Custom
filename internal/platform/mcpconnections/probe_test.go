@@ -218,3 +218,102 @@ func TestHTTPProbePortFixedSSERejectsJSONResponse(t *testing.T) {
 	})
 	require.ErrorIs(t, err, ErrProbeFailed)
 }
+
+func TestProbeAutoAcceptsOpenSSEInitializeWithoutWaitingForEOF(t *testing.T) {
+	policy := testPolicy(t, true)
+	firstReader, firstWriter := io.Pipe()
+	sseReader, sseWriter := io.Pipe()
+	holdSSEOpen := make(chan struct{})
+	go func() {
+		_, _ = io.WriteString(sseWriter, "data: {\"jsonrpc\":\"2.0\",\"result\":{}}\n\n")
+		<-holdSSEOpen
+		_ = sseWriter.Close()
+	}()
+	defer func() {
+		_ = firstWriter.Close()
+		close(holdSSEOpen)
+		_ = sseWriter.Close()
+	}()
+
+	accepts := make([]string, 0, 2)
+	port := newHTTPProbePortWithTestClient(t, policy, &http.Client{Transport: roundTripperFunc(func(request *http.Request) (*http.Response, error) {
+		accepts = append(accepts, request.Header.Get("Accept"))
+		if len(accepts) == 1 {
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Header:     http.Header{"Content-Type": []string{"text/event-stream"}},
+				Body:       firstReader,
+				Request:    request,
+			}, nil
+		}
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     http.Header{"Content-Type": []string{"text/event-stream"}},
+			Body:       sseReader,
+			Request:    request,
+		}, nil
+	})}, 256)
+	engine := NewProbeEngine(port, ProbeOptions{Timeout: time.Second})
+
+	type result struct {
+		value ProbeResult
+		err   error
+	}
+	done := make(chan result, 1)
+	go func() {
+		value, err := engine.Probe(context.Background(), ConnectionPayload{Endpoint: "https://safe.example.test/mcp"}, TransportAuto)
+		done <- result{value: value, err: err}
+	}()
+
+	select {
+	case outcome := <-done:
+		require.NoError(t, outcome.err)
+		assert.Equal(t, TransportSSE, outcome.value.DetectedTransport)
+		assert.Equal(t, []string{"application/json", "text/event-stream"}, accepts)
+	case <-time.After(200 * time.Millisecond):
+		t.Fatal("the SSE initialize event must be accepted without waiting for the stream to close")
+	}
+}
+
+func TestProbeSSEContextCancellationClosesStreamingBody(t *testing.T) {
+	policy := testPolicy(t, true)
+	reader, writer := io.Pipe()
+	defer func() { _ = writer.Close() }()
+	port := newHTTPProbePortWithTestClient(t, policy, &http.Client{Transport: roundTripperFunc(func(request *http.Request) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     http.Header{"Content-Type": []string{"text/event-stream"}},
+			Body:       reader,
+			Request:    request,
+		}, nil
+	})}, 256)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	readStarted := make(chan struct{})
+	go func() {
+		_, _ = io.WriteString(writer, "data: ")
+		close(readStarted)
+	}()
+	done := make(chan error, 1)
+	go func() {
+		done <- port.Initialize(ctx, ProbeRequest{
+			Payload:   ConnectionPayload{Endpoint: "https://safe.example.test/mcp"},
+			Transport: TransportSSE,
+		})
+	}()
+
+	select {
+	case <-readStarted:
+	case <-time.After(200 * time.Millisecond):
+		t.Fatal("the streaming probe did not begin reading the event")
+	}
+	cancel()
+	select {
+	case err := <-done:
+		require.ErrorIs(t, err, ErrProbeFailed)
+		assert.NotContains(t, err.Error(), "safe.example.test")
+	case <-time.After(200 * time.Millisecond):
+		t.Fatal("the SSE probe must fail closed when its context is cancelled")
+	}
+}

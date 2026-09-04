@@ -1,6 +1,7 @@
 package mcpconnections
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -184,11 +185,27 @@ func (port *HTTPProbePort) Initialize(ctx context.Context, request ProbeRequest)
 	if response.StatusCode < http.StatusOK || response.StatusCode >= http.StatusMultipleChoices {
 		return ErrProbeFailed
 	}
-	responseBody, err := readLimitedBody(response.Body, port.maxResponseBytes)
-	if err != nil || !validProbeResponse(request.Transport, response.Header.Get("Content-Type"), responseBody) {
+	contentType := response.Header.Get("Content-Type")
+	switch request.Transport {
+	case TransportHTTP:
+		// 先确认固定 HTTP transport 得到的是 JSON，再读取有限响应。若服务端实际
+		// 返回持续的 SSE 流，自动协商应立刻尝试 SSE，而不能等待流关闭。
+		if !hasMediaType(contentType, "application/json") {
+			return ErrProbeFailed
+		}
+		responseBody, readErr := readLimitedBody(response.Body, port.maxResponseBytes)
+		if readErr != nil || !validJSONInitializeResponse(responseBody) {
+			return ErrProbeFailed
+		}
+		return nil
+	case TransportSSE:
+		if !hasMediaType(contentType, "text/event-stream") || !validSSEInitializeStream(ctx, response.Body, port.maxResponseBytes) {
+			return ErrProbeFailed
+		}
+		return nil
+	default:
 		return ErrProbeFailed
 	}
-	return nil
 }
 
 func minimumInitializeRequest() map[string]any {
@@ -234,17 +251,6 @@ func readLimitedBody(body io.Reader, limit int64) ([]byte, error) {
 	return data, nil
 }
 
-func validProbeResponse(transport Transport, contentType string, body []byte) bool {
-	switch transport {
-	case TransportHTTP:
-		return hasMediaType(contentType, "application/json") && validJSONInitializeResponse(body)
-	case TransportSSE:
-		return hasMediaType(contentType, "text/event-stream") && validSSEInitializeResponse(body)
-	default:
-		return false
-	}
-}
-
 func hasMediaType(contentType, expected string) bool {
 	mediaType, _, err := mime.ParseMediaType(contentType)
 	return err == nil && strings.EqualFold(mediaType, expected)
@@ -263,34 +269,75 @@ func validJSONInitializeResponse(body []byte) bool {
 	return response.JSONRPC == "2.0" && len(response.Result) > 0 && len(response.Error) == 0
 }
 
-func validSSEInitializeResponse(body []byte) bool {
-	lines := strings.Split(strings.ReplaceAll(string(body), "\r\n", "\n"), "\n")
+// validSSEInitializeStream 仅解析首个完整的 data event，并在得到合法 initialize
+// 响应后立即返回。SSE 连接本来可以长期保持，因此不能等待 EOF；读取的字节数仍
+// 受到上限约束，任何截断、无效 framing 或取消都按失败处理。
+func validSSEInitializeStream(ctx context.Context, body io.Reader, limit int64) bool {
+	if body == nil || limit <= 0 || ctx == nil || ctx.Err() != nil {
+		return false
+	}
+	stopClosingBody := closeReaderWhenContextDone(ctx, body)
+	defer stopClosingBody()
+	reader := bufio.NewReader(io.LimitReader(body, limit+1))
 	dataLines := make([]string, 0, 1)
-	for _, line := range lines {
+	var readBytes int64
+	for {
+		if ctx.Err() != nil {
+			return false
+		}
+		line, err := reader.ReadString('\n')
+		readBytes += int64(len(line))
+		if readBytes > limit {
+			return false
+		}
+
+		line = strings.TrimSuffix(line, "\n")
+		line = strings.TrimSuffix(line, "\r")
 		if line == "" {
 			if len(dataLines) > 0 {
 				return validJSONInitializeResponse([]byte(strings.Join(dataLines, "\n")))
 			}
-			continue
+		} else if strings.HasPrefix(line, ":") {
+			// SSE keepalive 注释不构成 initialize 响应。
+		} else {
+			field, value, found := strings.Cut(line, ":")
+			if !found {
+				return false
+			}
+			if strings.HasPrefix(value, " ") {
+				value = value[1:]
+			}
+			switch field {
+			case "data":
+				dataLines = append(dataLines, value)
+			case "event", "id", "retry":
+				// 初始化响应只能来自 data 字段，其他字段只是 SSE framing 元数据。
+			default:
+				return false
+			}
 		}
-		if strings.HasPrefix(line, ":") {
-			continue
-		}
-		field, value, found := strings.Cut(line, ":")
-		if !found {
-			return false
-		}
-		if strings.HasPrefix(value, " ") {
-			value = value[1:]
-		}
-		switch field {
-		case "data":
-			dataLines = append(dataLines, value)
-		case "event", "id", "retry":
-			// 这些是 SSE framing 元数据；initialize 响应仍必须来自 data 字段。
-		default:
+
+		if err != nil {
+			// EOF 前没有结束空行代表 event 不完整；其他 reader 错误同样 fail closed。
 			return false
 		}
 	}
-	return len(dataLines) > 0 && validJSONInitializeResponse([]byte(strings.Join(dataLines, "\n")))
+}
+
+// closeReaderWhenContextDone 让自定义或测试 transport 的流 body 也遵守 request
+// context；标准 net/http transport 已会这样处理，但探测端口不能依赖调用方实现。
+func closeReaderWhenContextDone(ctx context.Context, body io.Reader) func() {
+	closer, ok := body.(io.Closer)
+	if !ok {
+		return func() {}
+	}
+	done := make(chan struct{})
+	go func() {
+		select {
+		case <-ctx.Done():
+			_ = closer.Close()
+		case <-done:
+		}
+	}()
+	return func() { close(done) }
 }

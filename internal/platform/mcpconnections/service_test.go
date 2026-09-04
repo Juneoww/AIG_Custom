@@ -381,3 +381,123 @@ func TestServiceDoesNotProjectUnsafeLegacyDisplayText(t *testing.T) {
 	require.NoError(t, err)
 	assert.Empty(t, options, "unsafe legacy display text must not be task-selectable")
 }
+
+func TestServiceRejectsDisplayTextBypassesAndConnectionMaterialEchoes(t *testing.T) {
+	ctx := context.Background()
+	repository := newMemoryConnectionRepository()
+	service := testService(t, repository, true, &scriptedProbePort{errors: map[Transport]error{}})
+	alice := identity.Subject{UserID: "alice", Role: identity.RoleUser}
+	fields := []struct {
+		name string
+		set  func(*CreateConnectionInput, string)
+	}{
+		{name: "name", set: func(input *CreateConnectionInput, value string) { input.Name = value }},
+		{name: "description", set: func(input *CreateConnectionInput, value string) { input.Description = value }},
+	}
+
+	for _, unsafeText := range []string{
+		"mcp.internal.example",
+		"X-Env",
+		"github.internal/team/repo.git",
+		strings.Repeat("a", 40),
+	} {
+		for _, field := range fields {
+			t.Run("bypass/"+field.name+"/"+unsafeText, func(t *testing.T) {
+				input := serviceInput("正常连接", ScopePrivate, TransportHTTP)
+				field.set(&input, unsafeText)
+				_, err := service.Create(ctx, alice, input)
+				require.ErrorIs(t, err, ErrInvalid)
+			})
+		}
+	}
+
+	for _, material := range []string{
+		"https://safe.example.test/mcp",
+		"safe.example.test",
+		"X-Env",
+		"X-Trace",
+		"v4lue92",
+		"other88",
+	} {
+		for _, field := range fields {
+			t.Run("connection-material/"+field.name+"/"+material, func(t *testing.T) {
+				input := serviceInput("正常连接", ScopePrivate, TransportHTTP)
+				input.Authentication = Authentication{Kind: AuthenticationAPIKeyHeader, HeaderName: "X-Env", Secret: "v4lue92"}
+				input.Headers = []Header{{Name: "X-Trace", Value: "other88"}}
+				field.set(&input, material)
+				_, err := service.Create(ctx, alice, input)
+				require.ErrorIs(t, err, ErrInvalid)
+			})
+		}
+	}
+
+	normal := serviceInput("生产环境 MCP", ScopePrivate, TransportHTTP)
+	normal.Description = "仅用于业务流程中的安全扫描"
+	_, err := service.Create(ctx, alice, normal)
+	require.NoError(t, err, "ordinary Chinese connection labels and descriptions remain supported")
+
+	legacy, err := service.Create(ctx, alice, serviceInput("安全连接", ScopePrivate, TransportHTTP))
+	require.NoError(t, err)
+	repository.configs[legacy.ID].Name = "mcp.internal.example"
+	repository.configs[legacy.ID].Description = "X-Env"
+	repository.configs[legacy.ID].Enabled = true
+	repository.versions[legacy.ID][1].ProbeStatus = ProbeStatusPassed
+	repository.versions[legacy.ID][1].DetectedTransport = TransportHTTP
+
+	summary, err := service.GetSummary(ctx, alice, legacy.ID)
+	require.NoError(t, err)
+	assert.Empty(t, summary.Name)
+	assert.Empty(t, summary.Description)
+	options, err := service.TaskOptions(ctx, alice)
+	require.NoError(t, err)
+	assert.Empty(t, options, "unsafe legacy text must not be task-selectable")
+}
+
+func TestServiceRejectsBlankIdentityAcrossAuthorizationPaths(t *testing.T) {
+	ctx := context.Background()
+	repository := newMemoryConnectionRepository()
+	service := testService(t, repository, true, &scriptedProbePort{errors: map[Transport]error{}})
+	alice := identity.Subject{UserID: "alice", Role: identity.RoleUser}
+	created, err := service.Create(ctx, alice, serviceInput("安全连接", ScopePrivate, TransportHTTP))
+	require.NoError(t, err)
+	config := repository.configs[created.ID]
+
+	for _, subject := range []identity.Subject{
+		{Role: identity.RoleAdmin},
+		{UserID: " \t", Role: identity.RoleAdmin},
+		{Role: identity.RoleAuditor},
+		{UserID: " \t", Role: identity.RoleAuditor},
+	} {
+		t.Run(string(subject.Role)+"/blank-user-id", func(t *testing.T) {
+			assert.False(t, validReader(subject))
+			assert.False(t, canUseForTask(subject))
+			assert.False(t, canRead(subject, config))
+			assert.False(t, canManage(subject, config))
+			assert.False(t, canCreate(subject, ScopePrivate))
+
+			_, err := service.Create(ctx, subject, serviceInput("无效身份", ScopePrivate, TransportHTTP))
+			require.ErrorIs(t, err, ErrForbidden)
+			_, err = service.TaskOptions(ctx, subject)
+			require.ErrorIs(t, err, ErrForbidden)
+			require.ErrorIs(t, service.ValidateTaskConnection(ctx, subject, created.ID), ErrForbidden)
+			_, err = service.GetSummary(ctx, subject, created.ID)
+			require.ErrorIs(t, err, ErrNotFound)
+			_, err = service.GetManagementDetail(ctx, subject, created.ID)
+			require.ErrorIs(t, err, ErrNotFound)
+			_, err = service.SetEnabled(ctx, subject, created.ID, false)
+			require.ErrorIs(t, err, ErrNotFound)
+		})
+	}
+
+	admin := identity.Subject{UserID: "admin", Role: identity.RoleAdmin}
+	assert.True(t, validReader(admin))
+	assert.True(t, canUseForTask(admin))
+	assert.True(t, canRead(admin, config))
+	assert.True(t, canManage(admin, config))
+	assert.True(t, canCreate(admin, ScopeGlobal))
+	assert.True(t, validReader(alice))
+	assert.True(t, canUseForTask(alice))
+	assert.True(t, canRead(alice, config))
+	assert.True(t, canManage(alice, config))
+	assert.True(t, canCreate(alice, ScopePrivate))
+}
