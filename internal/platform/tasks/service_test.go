@@ -16,6 +16,7 @@ import (
 
 	"github.com/Juneoww/AIG_Custom/internal/platform/audit"
 	"github.com/Juneoww/AIG_Custom/internal/platform/identity"
+	"github.com/Juneoww/AIG_Custom/internal/platform/txcontext"
 	"github.com/Juneoww/AIG_Custom/pkg/database"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
@@ -2747,4 +2748,112 @@ func TestAttachmentConfigHasSafeDefaultsAndRejectsInvalidValues(t *testing.T) {
 	t.Setenv("AIG_ATTACHMENT_UPLOAD_TTL", "0s")
 	_, err = LoadAttachmentConfigFromEnv(uploadDir)
 	require.Error(t, err)
+}
+
+func TestMCPCreateUnitOfWorkPortCreatesSafeTaskWithoutNestedAuditOrDispatch(t *testing.T) {
+	ctx := context.Background()
+	repository := NewMemoryRepository()
+	auditRepository := audit.NewMemoryRepository()
+	engine := &recordingEngine{}
+	service := NewService(repository, engine, audit.NewService(auditRepository))
+	subject := identity.Subject{UserID: "mcp-owner", Username: "mcp-owner-name", Role: identity.RoleUser}
+
+	task, err := service.CreateSpecializedInUnitOfWork(ctx, subject, SpecializedCreateInput{
+		TaskID: "01e5f3a4-ec5b-4a15-9d07-0161d42f0d01",
+		Params: json.RawMessage(`{"source_kind":"service","authorization_confirmed":true,"model_id":"governed-model"}`),
+	})
+	require.NoError(t, err)
+	require.NotNil(t, task)
+	assert.Equal(t, "01e5f3a4-ec5b-4a15-9d07-0161d42f0d01", task.ID)
+	assert.Equal(t, task.ID, task.IdempotencyKey)
+	assert.Equal(t, "mcp_scan", task.TaskType)
+	assert.Empty(t, task.Content)
+	assert.Equal(t, "zh_CN", task.CountryIsoCode)
+	assert.Equal(t, StatusPending, task.Status)
+	assert.JSONEq(t, `{"source_kind":"service","authorization_confirmed":true,"model_id":"governed-model"}`, string(task.Params))
+	assert.JSONEq(t, `[]`, string(task.AttachmentRefs))
+	assert.Zero(t, engine.submits.Load(), "the specialized port must not dispatch before its outer UoW commits")
+	events, listErr := auditRepository.List(ctx, audit.Filter{})
+	require.NoError(t, listErr)
+	assert.Empty(t, events, "the specialized port must not begin a nested audit mutation")
+}
+
+func TestMCPCreateUnitOfWorkPortBindsReadyAttachments(t *testing.T) {
+	ctx := context.Background()
+	repository := NewMemoryRepository()
+	auditService := audit.NewService(audit.NewMemoryRepository())
+	attachments, err := NewAttachmentService(repository, AttachmentConfig{
+		UploadDir: t.TempDir(), MaxFileBytes: 16, MaxChunkBytes: 8,
+	}, auditService)
+	require.NoError(t, err)
+	service := NewService(repository, &recordingEngine{}, auditService)
+	service.SetAttachmentService(attachments)
+	subject := identity.Subject{UserID: "mcp-attachment-owner", Username: "mcp-owner-name", Role: identity.RoleUser}
+	attachment := &Attachment{
+		ID: "mcp-ready-attachment", OwnerUserID: subject.UserID, OriginalName: "private-source.zip", StorageName: "opaque-storage",
+		Size: 8, State: AttachmentStateReady, CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC(),
+	}
+	require.NoError(t, repository.CreateAttachment(ctx, attachment))
+
+	task, err := service.CreateSpecializedInUnitOfWork(ctx, subject, SpecializedCreateInput{
+		TaskID: "01e5f3a4-ec5b-4a15-9d07-0161d42f0d02", Params: json.RawMessage(`{"source_kind":"repository"}`), AttachmentIDs: []string{attachment.ID},
+	})
+	require.NoError(t, err)
+	assert.Empty(t, task.Content)
+	assert.JSONEq(t, fmt.Sprintf(`["%s"]`, attachment.ID), string(task.AttachmentRefs))
+	storedAttachment, err := repository.GetAttachment(ctx, attachment.ID)
+	require.NoError(t, err)
+	assert.Equal(t, AttachmentStateAttached, storedAttachment.State)
+}
+
+func TestMCPCreateUnitOfWorkPortRejectsUnsafeInputBeforeWrite(t *testing.T) {
+	ctx := context.Background()
+	for name, input := range map[string]SpecializedCreateInput{
+		"invalid task id": {
+			TaskID: "not-a-task-id", Params: json.RawMessage(`{"source_kind":"repository"}`),
+		},
+		"service without confirmation": {
+			TaskID: "01e5f3a4-ec5b-4a15-9d07-0161d42f0d03", Params: json.RawMessage(`{"source_kind":"service","authorization_confirmed":false}`),
+		},
+		"connection id must stay out of task params": {
+			TaskID: "01e5f3a4-ec5b-4a15-9d07-0161d42f0d04", Params: json.RawMessage(`{"source_kind":"service","authorization_confirmed":true,"connection_config_id":"connection-secret"}`),
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			repository := NewMemoryRepository()
+			engine := &recordingEngine{}
+			service := NewService(repository, engine, audit.NewService(audit.NewMemoryRepository()))
+			_, err := service.CreateSpecializedInUnitOfWork(ctx, identity.Subject{UserID: "mcp-owner", Role: identity.RoleUser}, input)
+			require.ErrorIs(t, err, ErrInvalid)
+			stored, listErr := repository.List(ctx)
+			require.NoError(t, listErr)
+			assert.Empty(t, stored)
+			assert.Zero(t, engine.submits.Load())
+		})
+	}
+}
+
+func TestMCPCreateUnitOfWorkPortRequiresExplicitGormTransaction(t *testing.T) {
+	ctx := context.Background()
+	db := openTaskSnapshotPostgresDB(t)
+	repository := NewGormRepository(db)
+	service := NewService(repository, &recordingEngine{}, audit.NewService(audit.NewMemoryRepository()))
+	subject := identity.Subject{UserID: "mcp-gorm-owner", Role: identity.RoleUser}
+	input := SpecializedCreateInput{
+		TaskID: "01e5f3a4-ec5b-4a15-9d07-0161d42f0d05", Params: json.RawMessage(`{"source_kind":"repository"}`),
+	}
+
+	_, err := service.CreateSpecializedInUnitOfWork(ctx, subject, input)
+	require.ErrorIs(t, err, ErrInvalid)
+	var count int64
+	require.NoError(t, db.Model(&Task{}).Count(&count).Error)
+	assert.Zero(t, count)
+
+	require.NoError(t, db.Transaction(func(transaction *gorm.DB) error {
+		_, createErr := service.CreateSpecializedInUnitOfWork(txcontext.WithGorm(ctx, transaction), subject, input)
+		return createErr
+	}))
+	stored, err := repository.Get(ctx, input.TaskID)
+	require.NoError(t, err)
+	assert.Equal(t, "mcp_scan", stored.TaskType)
 }

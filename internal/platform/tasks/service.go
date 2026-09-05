@@ -242,6 +242,92 @@ func (service *Service) Create(ctx context.Context, subject identity.Subject, in
 	return viewOf(current), err
 }
 
+// CreateSpecializedInUnitOfWork is the sole task-domain write port for the
+// MCP scan UoW. Its caller must already own the governing audit transaction;
+// this method deliberately starts neither a nested audit mutation nor engine
+// dispatch. It persists only the safe MCP task projection and binds ready
+// attachments through the transaction carried in ctx.
+func (service *Service) CreateSpecializedInUnitOfWork(ctx context.Context, subject identity.Subject, input SpecializedCreateInput) (*Task, error) {
+	if service == nil || service.repository == nil ||
+		(subject.Role != identity.RoleUser && subject.Role != identity.RoleAdmin) || strings.TrimSpace(subject.UserID) == "" ||
+		!validSpecializedMCPTaskID(input.TaskID) || len(input.Params) == 0 || len(input.Params) > MaxTaskParamsLength ||
+		!validTaskAttachmentIDs(input.AttachmentIDs) {
+		return nil, ErrInvalid
+	}
+	if _, usesGormRepository := service.repository.(*GormRepository); usesGormRepository && !hasExplicitGormTransaction(ctx) {
+		return nil, ErrInvalid
+	}
+	attachmentIDs := append([]string{}, input.AttachmentIDs...)
+	params, valid := normalizeMCPTaskParams(input.Params)
+	if !valid || !validSpecializedMCPSource(params, attachmentIDs) {
+		return nil, ErrInvalid
+	}
+	attachmentRefs, err := json.Marshal(attachmentIDs)
+	if err != nil {
+		return nil, ErrInvalid
+	}
+	if len(attachmentIDs) > 0 {
+		if service.attachments == nil {
+			return nil, ErrInvalid
+		}
+		if _, err := service.attachments.ResolveReady(ctx, subject.UserID, attachmentIDs); err != nil {
+			return nil, err
+		}
+	}
+	now := service.now()
+	candidate := &Task{
+		ID: input.TaskID, OwnerUserID: subject.UserID, OwnerUsername: subject.Username,
+		IdempotencyKey: input.TaskID, EngineSessionID: input.TaskID, TaskType: "mcp_scan",
+		Content: "", Params: append(json.RawMessage(nil), params...), AttachmentRefs: attachmentRefs,
+		CountryIsoCode: "zh_CN", Status: StatusPending, CreatedAt: now, UpdatedAt: now,
+	}
+	persisted, created, err := service.repository.CreateOrGet(ctx, candidate)
+	if err != nil {
+		return nil, err
+	}
+	if !sameCreateRequest(persisted, candidate) {
+		return nil, ErrInvalid
+	}
+	if created && len(attachmentIDs) > 0 {
+		if err := service.attachments.repository.BindReadyAttachments(ctx, subject.UserID, attachmentIDs, now); err != nil {
+			return nil, err
+		}
+	}
+	return persisted, nil
+}
+
+func validSpecializedMCPTaskID(value string) bool {
+	parsed, err := uuid.Parse(strings.TrimSpace(value))
+	return err == nil && parsed.String() == value
+}
+
+func validSpecializedMCPSource(raw json.RawMessage, attachmentIDs []string) bool {
+	params, valid := decodeMCPTaskParams(raw)
+	if !valid {
+		return false
+	}
+	switch params.SourceKind {
+	case "repository":
+		return params.AuthorizationConfirmed == nil
+	case "service":
+		return len(attachmentIDs) == 0 && params.AuthorizationConfirmed != nil && *params.AuthorizationConfirmed
+	default:
+		return false
+	}
+}
+
+func hasExplicitGormTransaction(ctx context.Context) bool {
+	database, carried := txcontext.FromGorm(ctx)
+	if !carried || database == nil || database.Statement == nil || database.Statement.ConnPool == nil {
+		return false
+	}
+	_, transactional := database.Statement.ConnPool.(interface {
+		Commit() error
+		Rollback() error
+	})
+	return transactional
+}
+
 func (service *Service) createLocked(
 	ctx context.Context,
 	subject identity.Subject,
