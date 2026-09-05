@@ -145,7 +145,14 @@ func (service *Service) IssueRuntime(ctx context.Context, taskID string) (Runtim
 // request. Only the latest unexpired record for the exact task can authorize
 // a proxy operation; an older assignment token is revoked by rotation.
 func (service *Service) VerifyCapability(ctx context.Context, taskID, rawCapability string) error {
-	if service == nil || service.capabilities == nil || strings.TrimSpace(taskID) == "" || !validRawCapability(rawCapability) {
+	if service == nil || service.tasks == nil || service.capabilities == nil || strings.TrimSpace(taskID) == "" || !validRawCapability(rawCapability) {
+		return ErrCapabilityDenied
+	}
+	// A task can become cancelled or terminal after its Agent received a short-
+	// lived token. Recheck its state for every upstream request so terminal work
+	// loses egress immediately instead of waiting for the token TTL to expire.
+	task, err := service.tasks.Get(ctx, taskID)
+	if err != nil || !isMCPTask(task) {
 		return ErrCapabilityDenied
 	}
 	latest, err := service.capabilities.Latest(ctx, taskID)

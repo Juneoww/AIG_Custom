@@ -191,6 +191,17 @@ func TestIssueRuntimeRefusesTerminalTask(t *testing.T) {
 	assert.ErrorIs(t, latestErr, ErrCapabilityNotFound)
 }
 
+func TestVerifyCapabilityRejectsTokenAfterTaskBecomesTerminal(t *testing.T) {
+	ctx := context.Background()
+	service, taskID := newServiceRuntimeFixture(t)
+	service.newCapability = func() (string, error) { return "terminal-transition-capability", nil }
+	issued, err := service.IssueRuntime(ctx, taskID)
+	require.NoError(t, err)
+
+	service.tasks.(*memoryTaskReader).records[taskID].Status = tasks.StatusCancelled
+	assert.ErrorIs(t, service.VerifyCapability(ctx, taskID, issued.TaskCapability), ErrCapabilityDenied)
+}
+
 func TestIssueRuntimeForRepositoryReturnsOnlyOpaqueArchiveReference(t *testing.T) {
 	ctx := context.Background()
 	const (
