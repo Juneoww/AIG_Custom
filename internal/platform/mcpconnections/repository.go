@@ -116,10 +116,11 @@ func (repository *GormRepository) ListVersions(ctx context.Context, configID str
 	return versions, err
 }
 
-// CreateNextVersion 只追加新的连接材料，不修改既有版本行。对配置行加锁可串行化
-// 并发写入，使版本号在事务内单调递增，避免两个调用写入同一版本。
-func (repository *GormRepository) CreateNextVersion(ctx context.Context, configID string, version *ConnectionVersion) (*ConnectionConfig, error) {
-	if repository == nil || repository.db == nil || strings.TrimSpace(configID) == "" || !validVersionMaterial(version) || version.ConnectionConfigID != configID {
+// CreateNextVersion 只追加新的连接材料，不修改既有版本行。调用方必须在密封前取得
+// current version/resource revision 快照，并以该快照和明确的 next version 密封 AAD。
+// 锁内会复核快照和版本，绝不在密封后重写 version.Version。
+func (repository *GormRepository) CreateNextVersion(ctx context.Context, configID string, expectedCurrentVersion int, expectedResourceRevision string, version *ConnectionVersion) (*ConnectionConfig, error) {
+	if repository == nil || repository.db == nil || strings.TrimSpace(configID) == "" || expectedCurrentVersion < 1 || strings.TrimSpace(expectedResourceRevision) == "" || !validVersionMaterial(version) || version.ConnectionConfigID != configID {
 		return nil, ErrInvalid
 	}
 	storedVersion := cloneConnectionVersionRecord(version)
@@ -129,11 +130,16 @@ func (repository *GormRepository) CreateNextVersion(ctx context.Context, configI
 		if err := transaction.Clauses(clause.Locking{Strength: "UPDATE"}).Where("id = ?", configID).First(&config).Error; err != nil {
 			return mapNotFound(err)
 		}
+		if config.CurrentVersion != expectedCurrentVersion || config.ResourceRevision != expectedResourceRevision {
+			return ErrConflict
+		}
+		if storedVersion.Version != config.CurrentVersion+1 {
+			return ErrConflict
+		}
 		nextRevision, err := incrementRevision(config.ResourceRevision)
 		if err != nil {
 			return err
 		}
-		storedVersion.Version = config.CurrentVersion + 1
 		storedVersion.DetectedTransport = ""
 		storedVersion.ProbeStatus = ProbeStatusNotTested
 		if storedVersion.CreatedAt.IsZero() {

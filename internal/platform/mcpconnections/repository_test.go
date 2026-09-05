@@ -93,10 +93,10 @@ func TestRepositoryVersionsConnectionMaterialAndLeavesMetadataOutOfHistory(t *te
 	firstCiphertext := append([]byte(nil), testedFirst.EncryptedPayload...)
 
 	second := testConnectionVersion(config.ID, "version-history-two-sentinel", "ciphertext-history-two-sentinel")
-	second.Version = 999
+	second.Version = 2
 	second.DetectedTransport = TransportSSE
 	second.ProbeStatus = ProbeStatusPassed
-	updated, err := repository.CreateNextVersion(ctx, config.ID, second)
+	updated, err := repository.CreateNextVersion(ctx, config.ID, 1, "3", second)
 	require.NoError(t, err)
 	assert.Equal(t, 2, updated.CurrentVersion)
 	assert.Equal(t, "4", updated.ResourceRevision)
@@ -134,6 +134,56 @@ func TestRepositoryVersionsConnectionMaterialAndLeavesMetadataOutOfHistory(t *te
 	assert.Len(t, versions, 2)
 }
 
+func TestRepositoryCreateNextVersionPreservesSealedVersionAndRejectsStaleSnapshot(t *testing.T) {
+	ctx := context.Background()
+	db := openMCPConnectionPostgresDB(t)
+	require.NoError(t, database.Migrate(db))
+	repository := NewGormRepository(db)
+	keyring, err := NewKeyring("aes-gcm-version-contract", bytes.Repeat([]byte{0x41}, 32), nil)
+	require.NoError(t, err)
+
+	config := testConnectionConfig("config-sealed-version-contract")
+	first := testConnectionVersion(config.ID, "version-sealed-version-one", "placeholder-version-one")
+	firstPayload := ConnectionPayload{Endpoint: "https://service.example.test/mcp", Authentication: Authentication{Kind: AuthenticationNone}}
+	require.NoError(t, keyring.SealConnectionPayload(config, first, firstPayload))
+	require.NoError(t, repository.Create(ctx, config, first))
+
+	wrongNext := testConnectionVersion(config.ID, "version-sealed-version-wrong-next", "placeholder-version-wrong-next")
+	wrongNext.Version = 3
+	require.NoError(t, keyring.SealConnectionPayload(config, wrongNext, firstPayload))
+	_, err = repository.CreateNextVersion(ctx, config.ID, 1, "1", wrongNext)
+	require.ErrorIs(t, err, ErrConflict, "the repository must not rewrite a sealed version to make it fit")
+
+	second := testConnectionVersion(config.ID, "version-sealed-version-two", "placeholder-version-two")
+	second.Version = 2
+	secondPayload := ConnectionPayload{
+		Endpoint:       "https://service.example.test/rotated",
+		Authentication: Authentication{Kind: AuthenticationBearer, Secret: "rotated-secret"},
+		Headers:        []Header{{Name: "X-Internal-Route", Value: "tenant-a"}},
+	}
+	require.NoError(t, keyring.SealConnectionPayload(config, second, secondPayload))
+
+	updated, err := repository.CreateNextVersion(ctx, config.ID, 1, "1", second)
+	require.NoError(t, err)
+	require.Equal(t, 2, updated.CurrentVersion)
+	storedConfig, err := repository.GetConfig(ctx, config.ID)
+	require.NoError(t, err)
+	storedSecond, err := repository.GetVersion(ctx, config.ID, 2)
+	require.NoError(t, err)
+	opened, err := keyring.OpenConnectionPayload(storedConfig, storedSecond)
+	require.NoError(t, err, "the version used to seal AAD must be the version stored by the repository")
+	assert.Equal(t, secondPayload, opened)
+
+	stale := testConnectionVersion(config.ID, "version-sealed-version-three", "placeholder-version-three")
+	stale.Version = 3
+	require.NoError(t, keyring.SealConnectionPayload(config, stale, secondPayload))
+	_, err = repository.CreateNextVersion(ctx, config.ID, 1, "1", stale)
+	require.ErrorIs(t, err, ErrConflict)
+	storedConfig, err = repository.GetConfig(ctx, config.ID)
+	require.NoError(t, err)
+	assert.Equal(t, 2, storedConfig.CurrentVersion)
+}
+
 func TestRepositorySetEnabledRejectsStaleCurrentVersion(t *testing.T) {
 	ctx := context.Background()
 	db := openMCPConnectionPostgresDB(t)
@@ -144,7 +194,8 @@ func TestRepositorySetEnabledRejectsStaleCurrentVersion(t *testing.T) {
 	require.NoError(t, repository.Create(ctx, config, first))
 
 	second := testConnectionVersion(config.ID, "version-enable-stale-two-sentinel", "ciphertext-enable-stale-two-sentinel")
-	_, err := repository.CreateNextVersion(ctx, config.ID, second)
+	second.Version = 2
+	_, err := repository.CreateNextVersion(ctx, config.ID, 1, "1", second)
 	require.NoError(t, err)
 
 	_, err = repository.SetEnabled(ctx, config.ID, 1, "1", true)
@@ -383,8 +434,10 @@ func TestRepositoryConfigurationMutationInvalidatesStartedProbeAttempt(t *testin
 		},
 		{
 			name: "new version",
-			mutate: func(ctx context.Context, repository *GormRepository, config *ConnectionConfig, _ string) error {
-				_, err := repository.CreateNextVersion(ctx, config.ID, testConnectionVersion(config.ID, "version-probe-attempt-next-sentinel", "ciphertext-probe-attempt-next-sentinel"))
+			mutate: func(ctx context.Context, repository *GormRepository, config *ConnectionConfig, token string) error {
+				next := testConnectionVersion(config.ID, "version-probe-attempt-next-sentinel", "ciphertext-probe-attempt-next-sentinel")
+				next.Version = 2
+				_, err := repository.CreateNextVersion(ctx, config.ID, 1, token, next)
 				return err
 			},
 		},
@@ -450,7 +503,8 @@ func TestRepositoryFailedCurrentProbeDisablesConnectionAndOldVersionDoesNotChang
 	require.ErrorIs(t, err, ErrTaskConnectionUnavailable)
 
 	second := testConnectionVersion(config.ID, "version-probe-failure-two-sentinel", "ciphertext-probe-failure-two-sentinel")
-	_, err = repository.CreateNextVersion(ctx, config.ID, second)
+	second.Version = 2
+	_, err = repository.CreateNextVersion(ctx, config.ID, stored.CurrentVersion, stored.ResourceRevision, second)
 	require.NoError(t, err)
 	require.ErrorIs(t, repository.RecordProbeResult(ctx, config.ID, 1, failedAttempt.Token, "", ProbeStatusFailed), ErrConflict, "a stale probe result cannot alter an old version after a new configuration version exists")
 	current, err := repository.GetVersion(ctx, config.ID, 2)
