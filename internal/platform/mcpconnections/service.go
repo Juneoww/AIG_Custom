@@ -311,11 +311,15 @@ func (service *Service) TaskOptions(ctx context.Context, subject identity.Subjec
 	return options, nil
 }
 
-// ValidateTaskConnection 仅执行未来任务创建需要的资格验证；它不创建任务、绑定或
-// UoW，避免在 Task 3 越过 Task 4 的持久化职责。
-func (service *Service) ValidateTaskConnection(ctx context.Context, subject identity.Subject, configID string) error {
+// ValidateTaskConnection 仅执行未来任务创建需要的资格验证；任务必须提交其在选项中
+// 看到的不可变连接版本，轮换后的 current version 不能被静默替换使用。它不创建
+// 任务、绑定或 UoW，避免在 Task 3 越过 Task 4 的持久化职责。
+func (service *Service) ValidateTaskConnection(ctx context.Context, subject identity.Subject, configID string, expectedConnectionVersion int) error {
 	if service == nil || !canUseForTask(subject) {
 		return ErrForbidden
+	}
+	if expectedConnectionVersion < 1 {
+		return ErrInvalid
 	}
 	if service.policy == nil || service.policy.RequireControlledDialer() != nil {
 		return ErrControlledEgressRequired
@@ -323,6 +327,9 @@ func (service *Service) ValidateTaskConnection(ctx context.Context, subject iden
 	config, version, err := service.visibleCurrentVersion(ctx, subject, configID)
 	if err != nil {
 		return err
+	}
+	if version.Version != expectedConnectionVersion {
+		return ErrConflict
 	}
 	if !config.Enabled || version.ProbeStatus != ProbeStatusPassed || !concreteProbeTransport(version.DetectedTransport) {
 		return ErrTaskConnectionUnavailable

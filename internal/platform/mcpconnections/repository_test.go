@@ -184,6 +184,51 @@ func TestRepositoryCreateNextVersionPreservesSealedVersionAndRejectsStaleSnapsho
 	assert.Equal(t, 2, storedConfig.CurrentVersion)
 }
 
+func TestServiceValidateTaskConnectionRejectsStaleSelectedVersion(t *testing.T) {
+	ctx := context.Background()
+	db := openMCPConnectionPostgresDB(t)
+	require.NoError(t, database.Migrate(db))
+	repository := NewGormRepository(db)
+	keyring := testKeyring(t)
+	service := NewService(repository, keyring, NewProbeEngine(&scriptedProbePort{errors: map[Transport]error{TransportHTTP: nil}}, ProbeOptions{
+		Timeout: time.Second, MinimumInterval: time.Hour,
+	}), testPolicy(t, true))
+	alice := identity.Subject{UserID: "task-version-owner", Role: identity.RoleUser}
+
+	created, err := service.Create(ctx, alice, serviceInput("任务版本快照", ScopePrivate, TransportHTTP))
+	require.NoError(t, err)
+	_, err = service.Probe(ctx, alice, created.ID)
+	require.NoError(t, err)
+	_, err = service.SetEnabled(ctx, alice, created.ID, true)
+	require.NoError(t, err)
+	options, err := service.TaskOptions(ctx, alice)
+	require.NoError(t, err)
+	require.Len(t, options, 1)
+	selected := options[0]
+	require.Equal(t, 1, selected.ConnectionVersion)
+	require.NoError(t, service.ValidateTaskConnection(ctx, alice, selected.ConnectionID, selected.ConnectionVersion))
+
+	config, err := repository.GetConfig(ctx, created.ID)
+	require.NoError(t, err)
+	current, err := repository.GetVersion(ctx, created.ID, config.CurrentVersion)
+	require.NoError(t, err)
+	payload, err := keyring.OpenConnectionPayload(config, current)
+	require.NoError(t, err)
+	next := &ConnectionVersion{
+		ID:                 "task-version-rotation-v2",
+		ConnectionConfigID: config.ID,
+		Version:            2,
+		Transport:          current.Transport,
+		CreatedAt:          time.Now().UTC(),
+	}
+	require.NoError(t, keyring.SealConnectionPayload(config, next, payload))
+	_, err = repository.CreateNextVersion(ctx, config.ID, config.CurrentVersion, config.ResourceRevision, next)
+	require.NoError(t, err)
+
+	require.ErrorIs(t, service.ValidateTaskConnection(ctx, alice, selected.ConnectionID, selected.ConnectionVersion), ErrConflict)
+	require.ErrorIs(t, service.ValidateTaskConnection(ctx, alice, selected.ConnectionID, 2), ErrTaskConnectionUnavailable)
+}
+
 func TestRepositorySetEnabledRejectsStaleCurrentVersion(t *testing.T) {
 	ctx := context.Background()
 	db := openMCPConnectionPostgresDB(t)

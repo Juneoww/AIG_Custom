@@ -429,7 +429,7 @@ func TestServiceFailsClosedWithoutControlledGateway(t *testing.T) {
 	options, err := service.TaskOptions(ctx, alice)
 	require.NoError(t, err)
 	assert.Empty(t, options)
-	require.ErrorIs(t, service.ValidateTaskConnection(ctx, alice, created.ID), ErrControlledEgressRequired)
+	require.ErrorIs(t, service.ValidateTaskConnection(ctx, alice, created.ID, 1), ErrControlledEgressRequired)
 }
 
 func TestServiceRecordsFailedProbeWithoutReturningFailureDetail(t *testing.T) {
@@ -530,7 +530,7 @@ func TestServiceFailedProbeRevokesEnabledTaskEligibility(t *testing.T) {
 	options, err := service.TaskOptions(ctx, alice)
 	require.NoError(t, err)
 	assert.Empty(t, options)
-	require.ErrorIs(t, service.ValidateTaskConnection(ctx, alice, created.ID), ErrTaskConnectionUnavailable)
+	require.ErrorIs(t, service.ValidateTaskConnection(ctx, alice, created.ID, 1), ErrTaskConnectionUnavailable)
 	_, err = service.SetEnabled(ctx, alice, created.ID, true)
 	require.ErrorIs(t, err, ErrTaskConnectionUnavailable)
 }
@@ -551,7 +551,7 @@ func TestServiceFailsClosedWhenCurrentAllowlistNoLongerPermitsConnection(t *test
 	options, err := service.TaskOptions(ctx, alice)
 	require.NoError(t, err)
 	assert.Empty(t, options)
-	require.ErrorIs(t, service.ValidateTaskConnection(ctx, alice, created.ID), ErrTaskConnectionUnavailable)
+	require.ErrorIs(t, service.ValidateTaskConnection(ctx, alice, created.ID, 1), ErrTaskConnectionUnavailable)
 	_, err = service.SetEnabled(ctx, alice, created.ID, false)
 	require.NoError(t, err)
 	_, err = service.SetEnabled(ctx, alice, created.ID, true)
@@ -605,7 +605,7 @@ func TestServiceRestrictsTaskUseToUsersAndAdministrators(t *testing.T) {
 	require.Len(t, options, 1, "an ordinary user can use a visible global connection")
 	_, err = service.TaskOptions(ctx, auditor)
 	require.ErrorIs(t, err, ErrForbidden)
-	require.ErrorIs(t, service.ValidateTaskConnection(ctx, auditor, created.ID), ErrForbidden)
+	require.ErrorIs(t, service.ValidateTaskConnection(ctx, auditor, created.ID, 1), ErrForbidden)
 }
 
 func TestServiceRejectsUnsafeDisplayTextAndOmitsDescriptionFromTaskOptions(t *testing.T) {
@@ -875,7 +875,7 @@ func TestServiceRejectsBlankIdentityAcrossAuthorizationPaths(t *testing.T) {
 			require.ErrorIs(t, err, ErrForbidden)
 			_, err = service.TaskOptions(ctx, subject)
 			require.ErrorIs(t, err, ErrForbidden)
-			require.ErrorIs(t, service.ValidateTaskConnection(ctx, subject, created.ID), ErrForbidden)
+			require.ErrorIs(t, service.ValidateTaskConnection(ctx, subject, created.ID, 1), ErrForbidden)
 			_, err = service.GetSummary(ctx, subject, created.ID)
 			require.ErrorIs(t, err, ErrNotFound)
 			_, err = service.GetManagementDetail(ctx, subject, created.ID)
