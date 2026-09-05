@@ -14,6 +14,7 @@
 
 - [架构演进](architecture/evolution.md)
 - [企业控制台设计](architecture/enterprise-console.md)
+- [AI 基础设施扫描开发说明与四类扫描接入规范](architecture/scan-workbench-development.md)：已实现页面、前后端合同、组件复用，以及 MCP、模型红队和 Agent 专属工作台的开发与验收基线。
 - [文档治理设计](architecture/documentation.md)
 
 ## API
