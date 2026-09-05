@@ -240,7 +240,17 @@ func validArchiveReference(value string) bool {
 }
 
 func isMCPTask(task *tasks.Task) bool {
-	return task != nil && (task.TaskType == "mcp_scan" || task.TaskType == "Mcp-Scan") && strings.TrimSpace(task.ID) != "" && strings.TrimSpace(task.OwnerUserID) != ""
+	return task != nil && (task.TaskType == "mcp_scan" || task.TaskType == "Mcp-Scan") &&
+		strings.TrimSpace(task.ID) != "" && strings.TrimSpace(task.OwnerUserID) != "" && activeRuntimeStatus(task.Status)
+}
+
+func activeRuntimeStatus(status tasks.Status) bool {
+	switch status {
+	case tasks.StatusPending, tasks.StatusDispatching, tasks.StatusDispatchUnknown, tasks.StatusRunning:
+		return true
+	default:
+		return false
+	}
 }
 
 func concreteTransport(transport mcpconnections.Transport) bool {

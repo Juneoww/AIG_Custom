@@ -126,7 +126,7 @@ func TestIssueRuntimeForServiceKeepsTargetOnlyInGateway(t *testing.T) {
 	versionValue := version.Version
 	service := NewService(ServiceDependencies{
 		Tasks: &memoryTaskReader{records: map[string]*tasks.Task{
-			taskID: {ID: taskID, OwnerUserID: config.OwnerUserID, TaskType: "mcp_scan"},
+			taskID: {ID: taskID, OwnerUserID: config.OwnerUserID, TaskType: "mcp_scan", Status: tasks.StatusPending},
 		}},
 		Bindings: &memoryBindingReader{
 			bindings: map[string]*mcpconnections.TaskBinding{
@@ -179,6 +179,17 @@ func TestIssueRuntimeRotatesThePriorCapability(t *testing.T) {
 	require.NoError(t, service.VerifyCapability(ctx, taskID, second.TaskCapability))
 }
 
+func TestIssueRuntimeRefusesTerminalTask(t *testing.T) {
+	ctx := context.Background()
+	service, taskID := newServiceRuntimeFixture(t)
+	service.tasks.(*memoryTaskReader).records[taskID].Status = tasks.StatusSucceeded
+
+	_, err := service.IssueRuntime(ctx, taskID)
+	assert.ErrorIs(t, err, ErrRuntimeUnavailable)
+	_, latestErr := service.capabilities.Latest(ctx, taskID)
+	assert.ErrorIs(t, latestErr, ErrCapabilityNotFound)
+}
+
 func TestIssueRuntimeForRepositoryReturnsOnlyOpaqueArchiveReference(t *testing.T) {
 	ctx := context.Background()
 	const (
@@ -193,7 +204,7 @@ func TestIssueRuntimeForRepositoryReturnsOnlyOpaqueArchiveReference(t *testing.T
 	fetcher := &recordingRepositoryFetcher{archive: "archive:opaque-runtime-reference"}
 	service := NewService(ServiceDependencies{
 		Tasks: &memoryTaskReader{records: map[string]*tasks.Task{
-			taskID: {ID: taskID, OwnerUserID: "repository-owner", TaskType: "mcp_scan"},
+			taskID: {ID: taskID, OwnerUserID: "repository-owner", TaskType: "mcp_scan", Status: tasks.StatusPending},
 		}},
 		Bindings: &memoryBindingReader{bindings: map[string]*mcpconnections.TaskBinding{taskID: binding}},
 		Keyring:  keyring, Capabilities: NewMemoryCapabilityRepository(), Policy: testEgressPolicy(t), Fetcher: fetcher,
@@ -242,7 +253,7 @@ func newServiceRuntimeFixture(t *testing.T) (*Service, string) {
 	versionValue := version.Version
 	return NewService(ServiceDependencies{
 		Tasks: &memoryTaskReader{records: map[string]*tasks.Task{
-			taskID: {ID: taskID, OwnerUserID: config.OwnerUserID, TaskType: "mcp_scan"},
+			taskID: {ID: taskID, OwnerUserID: config.OwnerUserID, TaskType: "mcp_scan", Status: tasks.StatusPending},
 		}},
 		Bindings: &memoryBindingReader{
 			bindings: map[string]*mcpconnections.TaskBinding{
