@@ -100,6 +100,28 @@ func (repository *GormRepository) GetVersion(ctx context.Context, configID strin
 	return &record, nil
 }
 
+// LockCurrentForTask holds the config and its current immutable version under
+// the caller's business transaction. Config writers follow this same lock
+// order, preventing a task from binding a stale/disabled/probe-invalid version
+// after it has passed service validation.
+func (repository *GormRepository) LockCurrentForTask(ctx context.Context, configID string) (*ConnectionConfig, *ConnectionVersion, error) {
+	if repository == nil || repository.db == nil || strings.TrimSpace(configID) == "" || !hasExplicitGormTransaction(ctx) {
+		return nil, nil, ErrInvalid
+	}
+	database := txcontext.Gorm(ctx, repository.db)
+	var config ConnectionConfig
+	if err := database.Clauses(clause.Locking{Strength: "UPDATE"}).Where("id = ?", configID).First(&config).Error; err != nil {
+		return nil, nil, mapNotFound(err)
+	}
+	var version ConnectionVersion
+	if err := database.Clauses(clause.Locking{Strength: "UPDATE"}).
+		Where("connection_config_id = ? AND version = ?", config.ID, config.CurrentVersion).
+		First(&version).Error; err != nil {
+		return nil, nil, mapNotFound(err)
+	}
+	return &config, &version, nil
+}
+
 // ListConfigs 返回不含任何版本密文的配置元数据。服务层仍需逐项根据 Subject
 // 执行 private/global 可见性过滤，仓储不能把数据库全表结果直接投影到浏览器。
 func (repository *GormRepository) ListConfigs(ctx context.Context) ([]ConnectionConfig, error) {
@@ -522,6 +544,18 @@ func mapNotFound(err error) error {
 		return ErrNotFound
 	}
 	return err
+}
+
+func hasExplicitGormTransaction(ctx context.Context) bool {
+	database, carried := txcontext.FromGorm(ctx)
+	if !carried || database == nil || database.Statement == nil || database.Statement.ConnPool == nil {
+		return false
+	}
+	_, transactional := database.Statement.ConnPool.(interface {
+		Commit() error
+		Rollback() error
+	})
+	return transactional
 }
 
 func cloneConnectionConfig(config *ConnectionConfig) *ConnectionConfig {

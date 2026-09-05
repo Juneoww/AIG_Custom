@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/Juneoww/AIG_Custom/internal/platform/identity"
+	"github.com/Juneoww/AIG_Custom/internal/platform/txcontext"
 	"github.com/Juneoww/AIG_Custom/pkg/database"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
@@ -87,6 +88,33 @@ func TestRepositoryCreatesDisabledUntestedVersionOne(t *testing.T) {
 	assert.Equal(t, TransportHTTP, storedVersion.Transport)
 	assert.Empty(t, storedVersion.DetectedTransport)
 	assert.Equal(t, ProbeStatusNotTested, storedVersion.ProbeStatus)
+}
+
+func TestRepositoryLockCurrentForTaskRequiresExplicitTransaction(t *testing.T) {
+	ctx := context.Background()
+	db := openMCPConnectionPostgresDB(t)
+	require.NoError(t, database.Migrate(db))
+	repository := NewGormRepository(db)
+	config := testConnectionConfig("lock-current-task-config")
+	version := testConnectionVersion(config.ID, "lock-current-task-version", "lock-current-task-ciphertext")
+	require.NoError(t, repository.Create(ctx, config, version))
+
+	_, _, err := repository.LockCurrentForTask(ctx, config.ID)
+	require.ErrorIs(t, err, ErrInvalid)
+
+	var lockedConfig *ConnectionConfig
+	var lockedVersion *ConnectionVersion
+	require.NoError(t, db.Transaction(func(transaction *gorm.DB) error {
+		var lockErr error
+		lockedConfig, lockedVersion, lockErr = repository.LockCurrentForTask(txcontext.WithGorm(ctx, transaction), config.ID)
+		return lockErr
+	}))
+	require.NotNil(t, lockedConfig)
+	require.NotNil(t, lockedVersion)
+	assert.Equal(t, config.ID, lockedConfig.ID)
+	assert.Equal(t, 1, lockedConfig.CurrentVersion)
+	assert.Equal(t, config.ID, lockedVersion.ConnectionConfigID)
+	assert.Equal(t, 1, lockedVersion.Version)
 }
 
 func TestRepositoryCreatePreservesSealedVersionOnePayload(t *testing.T) {

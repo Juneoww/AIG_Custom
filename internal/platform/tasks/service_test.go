@@ -2929,6 +2929,22 @@ func TestMCPCreateUnitOfWorkPortRequiresExplicitGormTransaction(t *testing.T) {
 	assert.Equal(t, "mcp_scan", stored.TaskType)
 }
 
+func TestGormAttachmentLockReadyRequiresExplicitTransaction(t *testing.T) {
+	ctx := context.Background()
+	db := openTaskSnapshotPostgresDB(t)
+	repository := NewGormRepository(db)
+	attachment := &Attachment{
+		ID: "mcp-lock-ready-attachment", OwnerUserID: "mcp-lock-ready-owner", OriginalName: "private-source.zip", StorageName: "opaque-lock-ready-storage",
+		Size: 8, State: AttachmentStateReady, CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC(),
+	}
+	require.NoError(t, repository.CreateAttachment(ctx, attachment))
+
+	require.ErrorIs(t, repository.LockReadyAttachments(ctx, attachment.OwnerUserID, []string{attachment.ID}), ErrInvalid)
+	require.NoError(t, db.Transaction(func(transaction *gorm.DB) error {
+		return repository.LockReadyAttachments(txcontext.WithGorm(ctx, transaction), attachment.OwnerUserID, []string{attachment.ID})
+	}))
+}
+
 func runMCPTaskAuditMutation(
 	ctx context.Context,
 	auditService *audit.Service,

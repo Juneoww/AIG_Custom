@@ -38,6 +38,22 @@ type ConnectionRepository interface {
 	SetEnabled(context.Context, string, int, string, bool) (*ConnectionConfig, error)
 }
 
+// TaskConnectionLockRepository is the transaction-scoped read boundary used
+// only while creating an MCP service-source task. Implementations must lock
+// the config row before its current version row and must not open a nested
+// transaction, so the caller retains both locks through binding creation.
+type TaskConnectionLockRepository interface {
+	LockCurrentForTask(context.Context, string) (*ConnectionConfig, *ConnectionVersion, error)
+}
+
+// TaskConnectionReference is the only connection information the MCP task
+// UoW may retain after validation. In particular, it deliberately excludes
+// endpoint, authentication, headers, display metadata, and encrypted payload.
+type TaskConnectionReference struct {
+	ConnectionConfigID      string
+	ConnectionConfigVersion int
+}
+
 type Service struct {
 	repository ConnectionRepository
 	keyring    *Keyring
@@ -340,6 +356,45 @@ func (service *Service) ValidateTaskConnection(ctx context.Context, subject iden
 		return ErrTaskConnectionUnavailable
 	}
 	return nil
+}
+
+// LockTaskConnectionForCreate revalidates a service-source choice under the
+// caller's already-active business transaction. It cannot reuse the regular
+// read-only validation path because an update, probe, or disable between that
+// read and task binding creation would otherwise create a TOCTOU window.
+func (service *Service) LockTaskConnectionForCreate(ctx context.Context, subject identity.Subject, configID string, expectedConnectionVersion int) (TaskConnectionReference, error) {
+	if service == nil || service.repository == nil || !canUseForTask(subject) {
+		return TaskConnectionReference{}, ErrForbidden
+	}
+	if expectedConnectionVersion < 1 {
+		return TaskConnectionReference{}, ErrInvalid
+	}
+	if service.policy == nil || service.policy.RequireControlledDialer() != nil {
+		return TaskConnectionReference{}, ErrControlledEgressRequired
+	}
+	repository, ok := service.repository.(TaskConnectionLockRepository)
+	if !ok {
+		return TaskConnectionReference{}, ErrInvalid
+	}
+	config, version, err := repository.LockCurrentForTask(ctx, configID)
+	if err != nil {
+		return TaskConnectionReference{}, mapServiceRepositoryError(err)
+	}
+	if !canRead(subject, config) {
+		return TaskConnectionReference{}, ErrNotFound
+	}
+	if config.CurrentVersion != expectedConnectionVersion || version.Version != expectedConnectionVersion {
+		return TaskConnectionReference{}, ErrConflict
+	}
+	if !config.Enabled || version.ProbeStatus != ProbeStatusPassed || !concreteProbeTransport(version.DetectedTransport) {
+		return TaskConnectionReference{}, ErrTaskConnectionUnavailable
+	}
+	if _, err := service.currentPayloadPermitted(ctx, config, version); err != nil {
+		// The UoW must not disclose a decrypt, DNS, allowlist, or endpoint detail
+		// merely because a previously selectable connection became unavailable.
+		return TaskConnectionReference{}, ErrTaskConnectionUnavailable
+	}
+	return TaskConnectionReference{ConnectionConfigID: config.ID, ConnectionConfigVersion: version.Version}, nil
 }
 
 // currentPayloadPermitted 将当前版本的加密材料重新解密并依照当前 outbound

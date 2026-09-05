@@ -72,6 +72,18 @@ func (repository *memoryConnectionRepository) GetVersion(_ context.Context, conf
 	return cloneConnectionVersionRecord(stored), nil
 }
 
+func (repository *memoryConnectionRepository) LockCurrentForTask(ctx context.Context, configID string) (*ConnectionConfig, *ConnectionVersion, error) {
+	config, err := repository.GetConfig(ctx, configID)
+	if err != nil {
+		return nil, nil, err
+	}
+	version, err := repository.GetVersion(ctx, config.ID, config.CurrentVersion)
+	if err != nil {
+		return nil, nil, err
+	}
+	return config, version, nil
+}
+
 func (repository *memoryConnectionRepository) ListConfigs(_ context.Context) ([]ConnectionConfig, error) {
 	configs := make([]ConnectionConfig, 0, len(repository.configs))
 	for _, config := range repository.configs {
@@ -628,6 +640,32 @@ func TestServiceRestrictsTaskUseToUsersAndAdministrators(t *testing.T) {
 	_, err = service.TaskOptions(ctx, auditor)
 	require.ErrorIs(t, err, ErrForbidden)
 	require.ErrorIs(t, service.ValidateTaskConnection(ctx, auditor, created.ID, 1), ErrForbidden)
+}
+
+func TestServiceLockTaskConnectionForCreateValidatesTheLockedCurrentVersion(t *testing.T) {
+	ctx := context.Background()
+	repository := newMemoryConnectionRepository()
+	service := testService(t, repository, true, &scriptedProbePort{errors: map[Transport]error{}})
+	alice := identity.Subject{UserID: "lock-task-alice", Role: identity.RoleUser}
+	created, err := service.Create(ctx, alice, serviceInput("锁定任务连接", ScopePrivate, TransportHTTP))
+	require.NoError(t, err)
+	repository.configs[created.ID].Enabled = true
+	repository.versions[created.ID][1].ProbeStatus = ProbeStatusPassed
+	repository.versions[created.ID][1].DetectedTransport = TransportHTTP
+
+	reference, err := service.LockTaskConnectionForCreate(ctx, alice, created.ID, 1)
+	require.NoError(t, err)
+	assert.Equal(t, created.ID, reference.ConnectionConfigID)
+	assert.Equal(t, 1, reference.ConnectionConfigVersion)
+
+	_, err = service.LockTaskConnectionForCreate(ctx, alice, created.ID, 2)
+	require.ErrorIs(t, err, ErrConflict)
+	_, err = service.LockTaskConnectionForCreate(ctx, identity.Subject{UserID: "other-user", Role: identity.RoleUser}, created.ID, 1)
+	require.ErrorIs(t, err, ErrNotFound)
+
+	repository.configs[created.ID].Enabled = false
+	_, err = service.LockTaskConnectionForCreate(ctx, alice, created.ID, 1)
+	require.ErrorIs(t, err, ErrTaskConnectionUnavailable)
 }
 
 func TestServiceRejectsUnsafeDisplayTextAndOmitsDescriptionFromTaskOptions(t *testing.T) {

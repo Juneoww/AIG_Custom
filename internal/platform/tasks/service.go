@@ -294,7 +294,7 @@ func (service *Service) CreateSpecializedInUnitOfWork(ctx context.Context, subje
 		if service.attachments == nil {
 			return nil, ErrInvalid
 		}
-		if _, err := service.attachments.ResolveReady(ctx, subject.UserID, attachmentIDs); err != nil {
+		if err := service.attachments.LockReady(ctx, subject.UserID, attachmentIDs); err != nil {
 			return nil, err
 		}
 	}
@@ -1986,6 +1986,35 @@ func (repository *GormRepository) MarkAttachmentReady(ctx context.Context, id, o
 	return affectedTaskError(result)
 }
 
+// LockReadyAttachments holds all requested ready rows in deterministic ID
+// order until the caller's transaction commits. MCP create uses this before
+// writing the task, so a competing transaction cannot consume the same source
+// attachment between readiness validation and BindReadyAttachments.
+func (repository *GormRepository) LockReadyAttachments(ctx context.Context, owner string, ids []string) error {
+	if repository == nil || repository.db == nil || strings.TrimSpace(owner) == "" || !validTaskAttachmentIDs(ids) {
+		return ErrInvalid
+	}
+	if len(ids) == 0 {
+		return nil
+	}
+	if !hasExplicitGormTransaction(ctx) {
+		return ErrInvalid
+	}
+	lockedIDs := append([]string(nil), ids...)
+	sort.Strings(lockedIDs)
+	var attachments []Attachment
+	err := txcontext.Gorm(ctx, repository.db).Clauses(clause.Locking{Strength: "UPDATE"}).
+		Where("owner_user_id = ? AND id IN ? AND state = ?", owner, lockedIDs, AttachmentStateReady).
+		Order("id ASC").Find(&attachments).Error
+	if err != nil {
+		return err
+	}
+	if len(attachments) != len(lockedIDs) {
+		return ErrAttachmentNotReady
+	}
+	return nil
+}
+
 func (repository *GormRepository) BindReadyAttachments(ctx context.Context, owner string, ids []string, now time.Time) error {
 	if len(ids) == 0 {
 		return nil
@@ -2106,6 +2135,7 @@ type AttachmentRepository interface {
 	GetAttachment(context.Context, string) (*Attachment, error)
 	AddAttachmentChunkBytes(context.Context, string, string, int64, int64, time.Time) error
 	MarkAttachmentReady(context.Context, string, string, int64, time.Time) error
+	LockReadyAttachments(context.Context, string, []string) error
 	BindReadyAttachments(context.Context, string, []string, time.Time) error
 	ListAttachmentCleanupCandidates(context.Context, time.Time, int) ([]Attachment, error)
 	MarkAttachmentDeleting(context.Context, string, string, time.Time, time.Time) (bool, error)
@@ -2602,6 +2632,15 @@ func classifyAttachmentStorageError(err error) error {
 
 func (service *AttachmentService) ResolveReady(ctx context.Context, ownerUserID string, ids []string) ([]string, error) {
 	return service.resolveWithState(ctx, ownerUserID, ids, AttachmentStateReady)
+}
+
+// LockReady validates and locks attachments for a state-changing MCP UoW.
+// Callers that only need a read view must keep using ResolveReady instead.
+func (service *AttachmentService) LockReady(ctx context.Context, ownerUserID string, ids []string) error {
+	if service == nil || service.repository == nil || strings.TrimSpace(ownerUserID) == "" || !validTaskAttachmentIDs(ids) {
+		return ErrInvalid
+	}
+	return service.repository.LockReadyAttachments(ctx, ownerUserID, ids)
 }
 
 func (service *AttachmentService) ResolveAttached(ctx context.Context, ownerUserID string, ids []string) ([]string, error) {
@@ -3168,6 +3207,21 @@ func (repository *MemoryRepository) MarkAttachmentReady(_ context.Context, id, o
 		return ErrForbidden
 	}
 	attachment.State, attachment.Size, attachment.UpdatedAt = AttachmentStateReady, size, now
+	return nil
+}
+
+func (repository *MemoryRepository) LockReadyAttachments(_ context.Context, owner string, ids []string) error {
+	if repository == nil || strings.TrimSpace(owner) == "" || !validTaskAttachmentIDs(ids) {
+		return ErrInvalid
+	}
+	repository.mu.Lock()
+	defer repository.mu.Unlock()
+	for _, id := range ids {
+		attachment, exists := repository.attachments[id]
+		if !exists || attachment.OwnerUserID != owner || attachment.State != AttachmentStateReady {
+			return ErrAttachmentNotReady
+		}
+	}
 	return nil
 }
 
