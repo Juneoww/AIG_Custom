@@ -1,5 +1,5 @@
 /**
- * 功能：定义 AI 基础设施扫描专属工作台的响应式视觉骨架。
+ * 功能：定义 AI 基础设施与 Skills 专属工作台共用的响应式视觉骨架。
  * 实现：仅使用 Fluent 主题令牌组织页面、指标、状态标签和表格容器，不影响通用任务页面。
  * 输入：Fluent UI 当前浅色或深色主题令牌。
  * 输出：专属工作台组件共享的 Griffel 样式类。
@@ -68,6 +68,7 @@ export const useAIInfraWorkbenchStyles = makeStyles({
     '@media (max-width: 720px)': { width: '100%' },
   },
   primaryAction: {
+    boxSizing: 'border-box',
     display: 'inline-flex',
     alignItems: 'center',
     justifyContent: 'center',
@@ -367,6 +368,8 @@ export const useAIInfraWorkbenchStyles = makeStyles({
     color: tokens.colorNeutralForeground1,
     fontWeight: tokens.fontWeightSemibold,
     fontVariantNumeric: 'tabular-nums',
+    whiteSpace: 'normal',
+    overflowWrap: 'anywhere',
   },
   taskLink: {
     color: tokens.colorBrandForegroundLink,

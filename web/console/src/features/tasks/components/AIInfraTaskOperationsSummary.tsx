@@ -1,7 +1,7 @@
 /**
- * 功能：展示 AI 基础设施扫描当前查询与当前页的真实运行态势。
+ * 功能：为专属扫描工作台展示当前查询与当前页的真实运行态势。
  * 实现：按受限任务状态派生四项指标，始终呈现零值且明确统计范围。
- * 输入：当前页安全任务摘要和服务端当前查询匹配总数。
+ * 输入：当前页安全任务摘要、服务端当前查询匹配总数与可选业务名称。
  * 输出：带语义图标和可访问名称的四张指标卡。
  * 依赖：React、Fluent UI、Fluent Icons、任务 DTO 与共享工作台样式。
  */
@@ -46,6 +46,7 @@ export function deriveAIInfraTaskMetrics(tasks: readonly TaskSummary[], total: n
 interface AIInfraTaskOperationsSummaryProps {
   tasks: readonly TaskSummary[]
   total: number
+  taskLabel?: string
 }
 
 interface MetricCardProps {
@@ -81,12 +82,12 @@ function MetricCard({ label, scope, value, icon: Icon, tone }: MetricCardProps) 
   )
 }
 
-export function AIInfraTaskOperationsSummary({ tasks, total }: AIInfraTaskOperationsSummaryProps) {
+export function AIInfraTaskOperationsSummary({ tasks, total, taskLabel = 'AI 基础设施扫描' }: AIInfraTaskOperationsSummaryProps) {
   const styles = useAIInfraWorkbenchStyles()
   const metrics = deriveAIInfraTaskMetrics(tasks, total)
 
   return (
-    <section className={styles.surface} role="region" aria-label="AI 基础设施扫描运行态势">
+    <section className={styles.surface} role="region" aria-label={`${taskLabel}运行态势`}>
       <h2 className={styles.sectionHeading}>任务运行态势</h2>
       <div className={styles.metrics}>
         <MetricCard label="匹配任务" scope="当前查询" value={metrics.matching} icon={ClipboardTaskRegular} tone="matching" />

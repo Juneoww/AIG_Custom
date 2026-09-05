@@ -47,7 +47,7 @@ func riskTaskType(taskType string) (string, bool) {
 	switch taskType {
 	case "AI-Infra-Scan", "ai_infra_scan":
 		return "ai", true
-	case "Mcp-Scan", "mcp_scan":
+	case "Mcp-Scan", "mcp_scan", "Skills-Scan", "skills_scan":
 		return "mcp", true
 	case "Agent-Scan", "agent_scan":
 		return "agent", true

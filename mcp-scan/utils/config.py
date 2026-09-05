@@ -28,7 +28,7 @@ try:
     from dotenv import load_dotenv
 
     env_file = Path(base_dir) / ".env"
-    if env_file.exists():
+    if os.environ.get("AIG_SCAN_MODE") != "skills" and env_file.exists():
         load_dotenv(env_file)
 except ImportError:
     # python-dotenv 未安装，跳过

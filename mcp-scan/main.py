@@ -17,17 +17,23 @@
 # Tencent Zhuque Lab (https://github.com/Tencent/AI-Infra-Guard) in its
 # documentation or user interface, as detailed in the NOTICE file.
 
-"""
-Agent Framework - 主入口文件
-
-这是一个模仿 Claude Code / Gemini CLI 的 Agent 框架。
-Agent 可以自动调用工具完成任务。
+"""功能：启动 MCP 扫描或 Skills 只读静态扫描。
+实现：按 mode 分流；Skills 使用专用边界、固定模型环境和严格结果校验。
+输入：命令行、模型环境变量与目标路径。输出：扫描事件及最终结果；失败非零退出。
+依赖：requirements.txt；Skills 示例：python main.py --mode skills --repo /path/to/skill。
 """
 
 import argparse
 import asyncio
 import os
 import sys
+
+# 在导入配置和日志模块之前确定模式，Skills 不加载本地 .env 或调试文件日志。
+_mode_parser = argparse.ArgumentParser(add_help=False)
+_mode_parser.add_argument("--mode", choices=["mcp", "skills"], default="mcp")
+_early_mode, _ = _mode_parser.parse_known_args()
+if _early_mode.mode == "skills":
+    os.environ["AIG_SCAN_MODE"] = "skills"
 
 from agent.agent import Agent
 from utils import config
@@ -50,6 +56,7 @@ def parse_args():
     )
 
     # 必需参数
+    parser.add_argument("--mode", choices=["mcp", "skills"], default="mcp", help="扫描模式")
     parser.add_argument("--repo", default="", help="要扫描的项目文件夹路径")
 
     # 可选参数
@@ -102,6 +109,10 @@ async def main():
     """主函数"""
     # 解析命令行参数
     args = parse_args()
+
+    if args.mode == "skills":
+        await run_skills(args)
+        return
 
     # 获取 API Key（优先使用命令行参数，否则从环境变量读取）
     api_key = args.api_key or os.environ.get("OPENROUTER_API_KEY")
@@ -193,6 +204,26 @@ async def main():
         # 确保关闭资源
         if hasattr(agent, "dispatcher"):
             await agent.dispatcher.close()
+
+
+async def run_skills(args):
+    """Skills 配置只能来自本任务受治理环境；不接受动态扫描或调试参数。"""
+    from agent.skills_agent import SkillsAgent, create_skills_llm, validate_skill_root
+
+    scanner = None
+    try:
+        if args.debug or args.server_url or args.headers or args.prompt:
+            raise ValueError("Skills mode only supports local static analysis")
+        root = validate_skill_root(args.repo)
+        scanner = SkillsAgent(create_skills_llm(), language=args.language)
+        await scanner.scan(root)
+    except (Exception, KeyboardInterrupt):
+        # 异常内容可能带有模型服务返回的凭据或请求信息，不输出 traceback。
+        mcpLogger.error_log("Skills 静态扫描失败，未生成有效报告")
+        raise SystemExit(1) from None
+    finally:
+        if scanner is not None and scanner.dispatcher is not None:
+            await scanner.dispatcher.close()
 
 
 if __name__ == "__main__":

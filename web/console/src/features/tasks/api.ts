@@ -26,7 +26,7 @@ export interface TaskListFilters {
   taskType?: Exclude<TaskType, 'unknown'>
 }
 
-const TASK_TYPES = new Set<TaskType>(['mcp_scan', 'ai_infra_scan', 'model_redteam_report', 'agent_scan', 'unknown'])
+const TASK_TYPES = new Set<TaskType>(['mcp_scan', 'ai_infra_scan', 'skills_scan', 'model_redteam_report', 'agent_scan', 'unknown'])
 const TASK_STATUSES = new Set<TaskStatus>([
   'pending',
   'dispatching',
@@ -105,7 +105,7 @@ function parseTaskSummary(value: unknown): TaskSummary | undefined {
   return { id, owner, task_type: taskType, status, created_at: createdAt, updated_at: updatedAt }
 }
 
-function parseInputSummary(value: unknown): TaskInputSummary | undefined {
+function parseInputSummary(value: unknown, taskType?: TaskType): TaskInputSummary | undefined {
   const source = recordOf(value)
   if (!source) return undefined
   const result: TaskInputSummary = {}
@@ -117,6 +117,13 @@ function parseInputSummary(value: unknown): TaskInputSummary | undefined {
   if (source.language !== undefined) {
     if (source.language !== 'zh' && source.language !== 'en') return undefined
     result.language = source.language
+  }
+  if (taskType === 'skills_scan') {
+    if (source.scan_mode !== undefined) {
+      if (source.scan_mode !== 'static') return undefined
+      result.scan_mode = source.scan_mode
+    }
+    return result
   }
   if (source.port_scan_mode !== undefined) {
     if (source.port_scan_mode !== 'fixed_ai' && source.port_scan_mode !== 'full_tcp') return undefined
@@ -139,7 +146,7 @@ function parseInputSummary(value: unknown): TaskInputSummary | undefined {
 export function parseTaskDetail(value: unknown): TaskDetail {
   const source = recordOf(value)
   const summary = parseTaskSummary(value)
-  const inputSummary = parseInputSummary(source?.input_summary)
+  const inputSummary = parseInputSummary(source?.input_summary, summary?.task_type)
   if (!summary || !inputSummary) throw new ApiError('unexpected-response', 200)
   const detail: TaskDetail = { ...summary, input_summary: inputSummary }
   if (source?.remark !== undefined) {

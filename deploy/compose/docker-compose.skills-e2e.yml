@@ -1,0 +1,49 @@
+# 功能：叠加现有控制台 E2E 环境，验证真实 Skills Agent 与 Python 执行链路。
+# 输入：本分支代码和专用测试账号；所有模型响应来自隔离网络中的固定协议夹具。
+# 输出：成功报告、损坏结果失败、运行中取消的 Playwright 断言。
+# 用法：与 docker-compose.console-e2e.yml 共同使用，使用独立 Compose 项目名。
+x-skills-fixture: &skills-fixture
+  image: python:3.12-slim
+  volumes:
+    - ../../mcp-scan/pytests/skills_model_fixture.py:/fixture.py:ro
+  healthcheck:
+    test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:9911/health')"]
+    interval: 2s
+    timeout: 3s
+    retries: 30
+
+services:
+  skills-model-fixture:
+    <<: *skills-fixture
+    command: ["python", "/fixture.py", "--host", "0.0.0.0", "--port", "9911", "--scenario", "high"]
+  skills-model-invalid:
+    <<: *skills-fixture
+    command: ["python", "/fixture.py", "--host", "0.0.0.0", "--port", "9911", "--scenario", "malformed"]
+  skills-model-slow:
+    <<: *skills-fixture
+    command: ["python", "/fixture.py", "--host", "0.0.0.0", "--port", "9911", "--scenario", "high", "--delay", "20"]
+  skills-agent-e2e:
+    image: aig-skills-e2e-agent
+    build: { context: ../.., dockerfile: Dockerfile_Agent }
+    environment:
+      AIG_SERVER: platform-e2e:8088
+      AIG_AGENT_TOKEN: e2e-agent-token
+      AIG_MCP_SCAN_DIR: /app/mcp-scan
+    depends_on:
+      platform-e2e: { condition: service_healthy }
+      skills-model-fixture: { condition: service_healthy }
+      skills-model-invalid: { condition: service_healthy }
+      skills-model-slow: { condition: service_healthy }
+  console-e2e:
+    # localhost 是安全上下文，使浏览器可使用真实 crypto.randomUUID；无需放宽浏览器安全设置。
+    network_mode: service:console-vite
+    volumes:
+      - ../../internal/platform/reports/assets/DroidSansFallbackFull.ttf:/usr/share/fonts/truetype/aig/DroidSansFallbackFull.ttf:ro
+    environment:
+      PLAYWRIGHT_BASE_URL: http://127.0.0.1:4173
+      SKILLS_E2E_MODEL_URL: http://skills-model-fixture:9911/v1
+      SKILLS_E2E_INVALID_MODEL_URL: http://skills-model-invalid:9911/v1
+      SKILLS_E2E_SLOW_MODEL_URL: http://skills-model-slow:9911/v1
+    command: ["/bin/sh", "-ec", "corepack enable && pnpm install --frozen-lockfile && pnpm exec playwright test e2e/skills.spec.ts --workers=1"]
+    depends_on:
+      skills-agent-e2e: { condition: service_started }
