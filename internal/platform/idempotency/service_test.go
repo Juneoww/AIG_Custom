@@ -243,6 +243,9 @@ func TestGormServiceSerializesConcurrentMCPKeysAndPersistsOnlySafeFields(t *test
 	}
 	started := make(chan struct{})
 	release := make(chan struct{})
+	var releaseOnce sync.Once
+	releaseFirst := func() { releaseOnce.Do(func() { close(release) }) }
+	t.Cleanup(releaseFirst)
 	var callbacks int
 	var callbacksMu sync.Mutex
 	type execution struct {
@@ -294,7 +297,7 @@ func TestGormServiceSerializesConcurrentMCPKeysAndPersistsOnlySafeFields(t *test
 	secondAttempt := <-secondLockAttempt
 	require.NoError(t, secondAttempt.err)
 	waitForAdvisoryLockWaiter(t, db, lockBackendPID, secondAttempt.backendPID)
-	close(release)
+	releaseFirst()
 	firstResult := <-firstDone
 	secondResult := <-secondDone
 	require.NoError(t, firstResult.err)
