@@ -208,6 +208,33 @@ func TestCreateUnitOfWorkSealsRepositorySourceAndReplaysWithoutRedispatch(t *tes
 	assert.Len(t, events, 2, "only the first mutation writes audit intent and completion")
 }
 
+func TestCreateUnitOfWorkReplaysBeforeRepositoryPolicyCheck(t *testing.T) {
+	ctx := context.Background()
+	fixture := newUnitOfWorkFixture(t)
+	subject := identity.Subject{UserID: "replay-policy-owner", Username: "replay-policy-user", Role: identity.RoleUser}
+	input := CreateInput{
+		IdempotencyKey: "replay-before-policy-key", SourceKind: SourceKindRepository,
+		RepositoryURL: "https://git.allowed.example.test/team/replay-repository.git",
+	}
+
+	first, err := fixture.workflow.Create(ctx, subject, input)
+	require.NoError(t, err)
+	assert.False(t, first.Replay)
+	assert.Equal(t, 1, fixture.policy.requireCalls)
+
+	// A previously committed, safe replay must not depend on the current
+	// gateway/DNS policy. That policy governs a fresh source binding only.
+	fixture.policy.requireErr = mcpconnections.ErrControlledEgressRequired
+	replayed, err := fixture.workflow.Create(ctx, subject, input)
+	require.NoError(t, err)
+	assert.True(t, replayed.Replay)
+	assert.Equal(t, first.TaskID, replayed.TaskID)
+	assert.Equal(t, 1, fixture.policy.requireCalls)
+	assert.Equal(t, 1, fixture.tasks.calls)
+	assert.Equal(t, 1, fixture.bindings.calls)
+	assert.Equal(t, 1, fixture.dispatcher.calls)
+}
+
 func TestCreateUnitOfWorkUsesLockedServiceConnectionReferenceOnly(t *testing.T) {
 	ctx := context.Background()
 	fixture := newUnitOfWorkFixture(t)

@@ -104,24 +104,8 @@ func (workflow *CreateUnitOfWork) Create(ctx context.Context, subject identity.S
 	if err != nil {
 		return CreateResult{}, err
 	}
-	if workflow == nil || workflow.idempotency == nil || workflow.audits == nil || workflow.tasks == nil || workflow.bindings == nil ||
+	if workflow == nil || workflow.idempotency == nil ||
 		(subject.Role != identity.RoleUser && subject.Role != identity.RoleAdmin) || strings.TrimSpace(subject.UserID) == "" {
-		return CreateResult{}, ErrInvalidCreate
-	}
-	if normalized.SourceKind == SourceKindRepository {
-		if workflow.policy == nil || workflow.policy.RequireControlledDialer() != nil {
-			return CreateResult{}, mcpconnections.ErrControlledEgressRequired
-		}
-		if normalized.RepositoryURL != "" {
-			if err := workflow.policy.ValidateGitURL(ctx, normalized.RepositoryURL); err != nil {
-				return CreateResult{}, err
-			}
-		}
-	}
-	if normalized.SourceKind == SourceKindService && workflow.connections == nil {
-		return CreateResult{}, ErrInvalidCreate
-	}
-	if normalized.SourceKind == SourceKindRepository && workflow.keyring == nil {
 		return CreateResult{}, ErrInvalidCreate
 	}
 
@@ -132,6 +116,29 @@ func (workflow *CreateUnitOfWork) Create(ctx context.Context, subject identity.S
 	result, err := workflow.idempotency.Execute(ctx, subject, idempotency.Operation{
 		Scope: idempotency.ScopePrivate, Method: "POST", Path: CreateOperationPath, Key: normalized.IdempotencyKey, Payload: payload,
 	}, func(lockedContext context.Context, claim *idempotency.Claim) error {
+		// Everything below is required for a fresh write only. Keeping mutable
+		// policy and source eligibility inside the winner callback ensures a
+		// previously committed safe response can always replay without being
+		// blocked by a later DNS/gateway/configuration change.
+		if workflow.audits == nil || workflow.tasks == nil || workflow.bindings == nil {
+			return ErrInvalidCreate
+		}
+		if normalized.SourceKind == SourceKindRepository {
+			if workflow.policy == nil || workflow.policy.RequireControlledDialer() != nil {
+				return mcpconnections.ErrControlledEgressRequired
+			}
+			if normalized.RepositoryURL != "" {
+				if err := workflow.policy.ValidateGitURL(lockedContext, normalized.RepositoryURL); err != nil {
+					return err
+				}
+			}
+			if workflow.keyring == nil {
+				return ErrInvalidCreate
+			}
+		}
+		if normalized.SourceKind == SourceKindService && workflow.connections == nil {
+			return ErrInvalidCreate
+		}
 		taskID := workflow.newID()
 		if _, parseErr := uuid.Parse(taskID); parseErr != nil || taskID != strings.ToLower(taskID) {
 			return ErrInvalidCreate
