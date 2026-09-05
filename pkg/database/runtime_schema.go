@@ -23,7 +23,7 @@ import (
 
 // LatestSchemaVersion is the schema version required by the running server.
 // Schema changes are applied only by the explicit `aig migrate` command.
-const LatestSchemaVersion int64 = 10
+const LatestSchemaVersion int64 = 11
 
 var requiredRuntimeTables = []string{
 	"users",
@@ -57,7 +57,7 @@ var requiredRuntimeColumns = map[string][]string{
 		"product_name", "primary_color", "logo", "logo_mime", "watermark", "updated_by", "updated_at",
 	},
 	"platform_mcp_connection_configs": {
-		"id", "owner_user_id", "scope", "name", "description", "current_version", "resource_revision", "enabled", "created_at", "updated_at",
+		"id", "owner_user_id", "scope", "name", "description", "current_version", "resource_revision", "enabled", "last_probe_started_at", "created_at", "updated_at",
 	},
 	"platform_mcp_connection_versions": {
 		"id", "connection_config_id", "version", "encrypted_payload", "payload_nonce", "key_id", "transport", "detected_transport", "probe_status", "created_at",

@@ -33,7 +33,7 @@ type ConnectionRepository interface {
 	GetConfig(context.Context, string) (*ConnectionConfig, error)
 	GetVersion(context.Context, string, int) (*ConnectionVersion, error)
 	ListConfigs(context.Context) ([]ConnectionConfig, error)
-	StartProbe(context.Context, string, int, string) (*ProbeAttempt, error)
+	StartProbe(context.Context, string, int, string, time.Duration) (*ProbeAttempt, error)
 	RecordProbeResult(context.Context, string, int, string, Transport, ProbeStatus) error
 	SetEnabled(context.Context, string, int, string, bool) (*ConnectionConfig, error)
 }
@@ -188,7 +188,7 @@ func (service *Service) Probe(ctx context.Context, subject identity.Subject, con
 		}
 		return nil, ErrProbeFailed
 	}
-	attempt, err := service.repository.StartProbe(ctx, config.ID, version.Version, config.ResourceRevision)
+	attempt, err := service.repository.StartProbe(ctx, config.ID, version.Version, config.ResourceRevision, service.prober.minimumInterval)
 	if err != nil {
 		return nil, mapServiceRepositoryError(err)
 	}
@@ -825,6 +825,9 @@ func mapServiceRepositoryError(err error) error {
 	}
 	if errors.Is(err, ErrConflict) {
 		return ErrConflict
+	}
+	if errors.Is(err, ErrProbeRateLimited) {
+		return ErrProbeRateLimited
 	}
 	if errors.Is(err, ErrTaskConnectionUnavailable) {
 		return ErrTaskConnectionUnavailable

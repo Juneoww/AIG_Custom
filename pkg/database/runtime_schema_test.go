@@ -110,6 +110,23 @@ func TestRuntimeSchemaRejectsVersionNineWithoutMCPConnectionSchemaDDL(t *testing
 	assert.Equal(t, beforeTables, mcpConnectionRuntimeTablePresence(db), "runtime validation must not create MCP schema tables")
 }
 
+func TestRuntimeSchemaRejectsMissingMCPProbeRateLimitColumnWithoutDDL(t *testing.T) {
+	db := openPostgresTestDB(t)
+	resetPostgresTestDB(t, db)
+	require.NoError(t, Migrate(db))
+	require.NoError(t, db.Exec("ALTER TABLE platform_mcp_connection_configs DROP COLUMN last_probe_started_at").Error)
+	t.Cleanup(func() {
+		_ = db.Exec("ALTER TABLE platform_mcp_connection_configs ADD COLUMN IF NOT EXISTS last_probe_started_at TIMESTAMPTZ").Error
+	})
+	beforeVersions := migrationVersions(t, db)
+
+	err := ValidateRuntimeSchema(db)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "platform_mcp_connection_configs.last_probe_started_at")
+	assert.Equal(t, beforeVersions, migrationVersions(t, db), "runtime validation must not update migration history")
+	assert.False(t, db.Migrator().HasColumn("platform_mcp_connection_configs", "last_probe_started_at"), "runtime validation must not repair the v11 column")
+}
+
 func TestRuntimeSchemaRejectsIncompatibleMCPIndexesWithoutDDL(t *testing.T) {
 	db := openPostgresTestDB(t)
 	for _, requirement := range mcpConnectionSchemaTestIndexRequirements {

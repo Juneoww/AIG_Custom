@@ -19,7 +19,7 @@ var (
 	ErrConflict = errors.New("MCP 连接配置版本冲突")
 )
 
-// GormRepository 只操作已由 v10 迁移创建的 MCP 专用表；它不会自动建表，
+// GormRepository 只操作由 v10 创建并由 v11 扩展的 MCP 专用表；它不会自动建表，
 // 从而保证运行时不能绕过显式的 aig migrate 流程。
 type GormRepository struct{ db *gorm.DB }
 
@@ -38,6 +38,9 @@ func (repository *GormRepository) Init() error {
 			return fmt.Errorf("MCP 连接数据库尚未迁移，请先运行 aig migrate：缺少表 %s", table)
 		}
 	}
+	if !repository.db.Migrator().HasColumn((ConnectionConfig{}).TableName(), "last_probe_started_at") {
+		return errors.New("MCP 连接数据库尚未迁移，请先运行 aig migrate：缺少列 platform_mcp_connection_configs.last_probe_started_at")
+	}
 	return nil
 }
 
@@ -49,6 +52,8 @@ func (repository *GormRepository) Create(ctx context.Context, config *Connection
 	}
 	storedConfig := cloneConnectionConfig(config)
 	storedVersion := cloneConnectionVersionRecord(version)
+	// 探测限流状态只能由 StartProbe 的锁定事务写入，创建请求不得预占或伪造它。
+	storedConfig.LastProbeStartedAt = nil
 	now := time.Now().UTC()
 	if storedConfig.CreatedAt.IsZero() {
 		storedConfig.CreatedAt = now
@@ -218,11 +223,10 @@ func (repository *GormRepository) UpdateDisplayMetadata(ctx context.Context, con
 }
 
 // StartProbe 在真实网络操作前创建持久化的单调 attempt token。它按 config →
-// current version 加锁，将连接置为不可用并清空旧结果；随后只有携带相同 token
-// 的结果能够写回。任意版本、元数据或 enable 变更都会递增 resource revision，
-// 因而自动使较早 Engine/进程的迟到结果失效。
-func (repository *GormRepository) StartProbe(ctx context.Context, configID string, expectedCurrentVersion int, expectedResourceRevision string) (*ProbeAttempt, error) {
-	if repository == nil || repository.db == nil || strings.TrimSpace(configID) == "" || expectedCurrentVersion < 1 || strings.TrimSpace(expectedResourceRevision) == "" {
+// current version 加锁，在锁内先核对快照和跨进程的 config-ID 限流，再将连接置为
+// 不可用并清空旧结果；随后只有携带相同 token 的结果能够写回。
+func (repository *GormRepository) StartProbe(ctx context.Context, configID string, expectedCurrentVersion int, expectedResourceRevision string, minimumInterval time.Duration) (*ProbeAttempt, error) {
+	if repository == nil || repository.db == nil || strings.TrimSpace(configID) == "" || expectedCurrentVersion < 1 || strings.TrimSpace(expectedResourceRevision) == "" || minimumInterval <= 0 {
 		return nil, ErrInvalid
 	}
 	var attempt ProbeAttempt
@@ -241,11 +245,14 @@ func (repository *GormRepository) StartProbe(ctx context.Context, configID strin
 		if !configurableTransport(version.Transport) {
 			return ErrInvalid
 		}
+		now := time.Now().UTC()
+		if config.LastProbeStartedAt != nil && now.Sub(*config.LastProbeStartedAt) < minimumInterval {
+			return ErrProbeRateLimited
+		}
 		nextRevision, err := incrementRevision(config.ResourceRevision)
 		if err != nil {
 			return err
 		}
-		now := time.Now().UTC()
 		versionResult := transaction.Model(&ConnectionVersion{}).Where("connection_config_id = ? AND version = ?", configID, version.Version).
 			Updates(map[string]any{"detected_transport": "", "probe_status": ProbeStatusNotTested})
 		if versionResult.Error != nil {
@@ -255,9 +262,10 @@ func (repository *GormRepository) StartProbe(ctx context.Context, configID strin
 			return ErrNotFound
 		}
 		configResult := transaction.Model(&ConnectionConfig{}).Where("id = ?", configID).Updates(map[string]any{
-			"enabled":           false,
-			"resource_revision": nextRevision,
-			"updated_at":        now,
+			"enabled":               false,
+			"resource_revision":     nextRevision,
+			"last_probe_started_at": now,
+			"updated_at":            now,
 		})
 		if configResult.Error != nil {
 			return configResult.Error
@@ -514,6 +522,10 @@ func mapNotFound(err error) error {
 
 func cloneConnectionConfig(config *ConnectionConfig) *ConnectionConfig {
 	copy := *config
+	if config.LastProbeStartedAt != nil {
+		value := *config.LastProbeStartedAt
+		copy.LastProbeStartedAt = &value
+	}
 	return &copy
 }
 

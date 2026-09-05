@@ -59,7 +59,7 @@ func TestMigrationAppliesIdentitySchemaAsVersionTwo(t *testing.T) {
 
 	var versions []SchemaMigration
 	require.NoError(t, db.Order("version ASC").Find(&versions).Error)
-	require.Len(t, versions, 10)
+	require.Len(t, versions, 11)
 	assert.Equal(t, int64(1), versions[0].Version)
 	assert.Equal(t, int64(2), versions[1].Version)
 	assert.Equal(t, int64(3), versions[2].Version)
@@ -70,9 +70,10 @@ func TestMigrationAppliesIdentitySchemaAsVersionTwo(t *testing.T) {
 	assert.Equal(t, int64(8), versions[7].Version)
 	assert.Equal(t, int64(9), versions[8].Version)
 	assert.Equal(t, int64(10), versions[9].Version)
+	assert.Equal(t, int64(11), versions[10].Version)
 }
 
-func TestMigrationAppliesGovernanceAndPlatformTaskSchemaThroughVersionTen(t *testing.T) {
+func TestMigrationAppliesGovernanceAndPlatformTaskSchemaThroughVersionEleven(t *testing.T) {
 	db := openPostgresTestDB(t)
 	resetPostgresTestDB(t, db)
 
@@ -89,7 +90,7 @@ func TestMigrationAppliesGovernanceAndPlatformTaskSchemaThroughVersionTen(t *tes
 
 	var versions []SchemaMigration
 	require.NoError(t, db.Order("version ASC").Find(&versions).Error)
-	require.Len(t, versions, 10)
+	require.Len(t, versions, 11)
 	assert.Equal(t, int64(3), versions[2].Version)
 	assert.Equal(t, int64(4), versions[3].Version)
 	assert.Equal(t, int64(5), versions[4].Version)
@@ -98,9 +99,10 @@ func TestMigrationAppliesGovernanceAndPlatformTaskSchemaThroughVersionTen(t *tes
 	assert.Equal(t, int64(8), versions[7].Version)
 	assert.Equal(t, int64(9), versions[8].Version)
 	assert.Equal(t, int64(10), versions[9].Version)
+	assert.Equal(t, int64(11), versions[10].Version)
 }
 
-func TestMigrationAppliesMCPConnectionSchemaAsVersionTen(t *testing.T) {
+func TestMigrationAppliesMCPConnectionSchemaThroughVersionEleven(t *testing.T) {
 	db := openPostgresTestDB(t)
 	resetPostgresTestDB(t, db)
 	dropMCPConnectionSchemaTables(t, db)
@@ -110,10 +112,28 @@ func TestMigrationAppliesMCPConnectionSchemaAsVersionTen(t *testing.T) {
 
 	require.NoError(t, Migrate(db))
 	assertMCPConnectionSchema(t, db)
-	assert.Equal(t, []int64{1, 2, 3, 4, 5, 6, 7, 8, 9, 10}, migrationVersions(t, db))
+	assert.Equal(t, []int64{1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11}, migrationVersions(t, db))
 
-	require.NoError(t, Migrate(db), "v10 migration must remain idempotent")
+	require.NoError(t, Migrate(db), "v11 migration must remain idempotent")
 	assertMCPConnectionSchema(t, db)
+}
+
+func TestMigrationVersionElevenAddsProbeTimestampToExistingVersionTenSchema(t *testing.T) {
+	db := openPostgresTestDB(t)
+	resetPostgresTestDB(t, db)
+	require.NoError(t, Migrate(db))
+	require.NoError(t, db.Exec("ALTER TABLE platform_mcp_connection_configs DROP COLUMN last_probe_started_at").Error)
+	require.NoError(t, db.Where("version = ?", int64(11)).Delete(&SchemaMigration{}).Error)
+	assert.False(t, db.Migrator().HasColumn("platform_mcp_connection_configs", "last_probe_started_at"))
+
+	// v10 only validates its released table layout. It must not secretly recreate the v11 column.
+	require.NoError(t, migratePlatformMCPConnectionSchema(db))
+	assert.False(t, db.Migrator().HasColumn("platform_mcp_connection_configs", "last_probe_started_at"))
+
+	require.NoError(t, Migrate(db))
+	require.NoError(t, Migrate(db), "v11 probe timestamp migration must remain idempotent")
+	assert.True(t, db.Migrator().HasColumn("platform_mcp_connection_configs", "last_probe_started_at"))
+	assert.Equal(t, []int64{1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11}, migrationVersions(t, db))
 }
 
 func TestMigrationVersionTenRejectsIncompatibleExistingMCPIndexes(t *testing.T) {
@@ -125,12 +145,12 @@ func TestMigrationVersionTenRejectsIncompatibleExistingMCPIndexes(t *testing.T) 
 			require.NoError(t, Migrate(db))
 			require.NoError(t, db.Exec("DROP INDEX "+requirement.name).Error)
 			require.NoError(t, db.Exec(requirement.incompatibleCreateStatement()).Error)
-			require.NoError(t, db.Where("version = ?", LatestSchemaVersion).Delete(&SchemaMigration{}).Error)
+			require.NoError(t, db.Where("version >= ?", int64(10)).Delete(&SchemaMigration{}).Error)
 
 			err := Migrate(db)
 			require.Error(t, err)
 			assert.Contains(t, err.Error(), requirement.name)
-			assert.NotContains(t, migrationVersions(t, db), LatestSchemaVersion)
+			assert.NotContains(t, migrationVersions(t, db), int64(10))
 		})
 	}
 }
@@ -147,12 +167,12 @@ func TestMigrationVersionTenRejectsDeferrableUniqueMCPIndexes(t *testing.T) {
 			t.Cleanup(func() { dropMCPConnectionSchemaTables(t, db) })
 			require.NoError(t, Migrate(db))
 			replaceMCPIndexWithDeferrableUniqueConstraint(t, db, requirement)
-			require.NoError(t, db.Where("version = ?", LatestSchemaVersion).Delete(&SchemaMigration{}).Error)
+			require.NoError(t, db.Where("version >= ?", int64(10)).Delete(&SchemaMigration{}).Error)
 
 			err := Migrate(db)
 			require.Error(t, err)
 			assert.Contains(t, err.Error(), requirement.name)
-			assert.NotContains(t, migrationVersions(t, db), LatestSchemaVersion)
+			assert.NotContains(t, migrationVersions(t, db), int64(10))
 		})
 	}
 }
@@ -175,8 +195,8 @@ func TestMigrationUpgradesExistingVersionThreeWithoutRewritingIt(t *testing.T) {
 	require.True(t, db.Migrator().HasTable("audit_completion_outbox"))
 	var versions []SchemaMigration
 	require.NoError(t, db.Order("version ASC").Find(&versions).Error)
-	require.Len(t, versions, 10)
-	assert.Equal(t, []int64{1, 2, 3, 4, 5, 6, 7, 8, 9, 10}, []int64{versions[0].Version, versions[1].Version, versions[2].Version, versions[3].Version, versions[4].Version, versions[5].Version, versions[6].Version, versions[7].Version, versions[8].Version, versions[9].Version})
+	require.Len(t, versions, 11)
+	assert.Equal(t, []int64{1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11}, []int64{versions[0].Version, versions[1].Version, versions[2].Version, versions[3].Version, versions[4].Version, versions[5].Version, versions[6].Version, versions[7].Version, versions[8].Version, versions[9].Version, versions[10].Version})
 }
 
 func TestMigrationVersionFourRepairsDuplicateLegacyCompletionOutboxRows(t *testing.T) {
@@ -289,7 +309,7 @@ func TestMigrationIsIdempotentAndRecordsVersion(t *testing.T) {
 
 	var versions []SchemaMigration
 	require.NoError(t, db.Order("version ASC").Find(&versions).Error)
-	require.Len(t, versions, 10)
+	require.Len(t, versions, 11)
 	assert.Equal(t, int64(1), versions[0].Version)
 	assert.Equal(t, int64(2), versions[1].Version)
 	assert.Equal(t, int64(3), versions[2].Version)
@@ -300,6 +320,7 @@ func TestMigrationIsIdempotentAndRecordsVersion(t *testing.T) {
 	assert.Equal(t, int64(8), versions[7].Version)
 	assert.Equal(t, int64(9), versions[8].Version)
 	assert.Equal(t, int64(10), versions[9].Version)
+	assert.Equal(t, int64(11), versions[10].Version)
 	assert.NotZero(t, versions[0].AppliedAt)
 	assert.NotZero(t, versions[1].AppliedAt)
 	assert.NotZero(t, versions[2].AppliedAt)
@@ -332,7 +353,7 @@ func TestMigrationSerializesConcurrentPostgresCalls(t *testing.T) {
 
 	var versions []SchemaMigration
 	require.NoError(t, first.Order("version ASC").Find(&versions).Error)
-	require.Len(t, versions, 10)
+	require.Len(t, versions, 11)
 	assert.Equal(t, int64(1), versions[0].Version)
 	assert.Equal(t, int64(2), versions[1].Version)
 	assert.Equal(t, int64(3), versions[2].Version)
@@ -343,6 +364,7 @@ func TestMigrationSerializesConcurrentPostgresCalls(t *testing.T) {
 	assert.Equal(t, int64(8), versions[7].Version)
 	assert.Equal(t, int64(9), versions[8].Version)
 	assert.Equal(t, int64(10), versions[9].Version)
+	assert.Equal(t, int64(11), versions[10].Version)
 	assert.True(t, first.Migrator().HasTable(&User{}))
 	assert.True(t, first.Migrator().HasTable(&Session{}))
 	assert.True(t, first.Migrator().HasTable(&TaskMessage{}))
@@ -409,7 +431,7 @@ func TestMigrationUpgradesReleasedVersionFiveWithDispatchClaimColumn(t *testing.
 	require.NoError(t, Migrate(db))
 	require.NoError(t, Migrate(db), "v6 upgrade must remain idempotent")
 	assert.True(t, db.Migrator().HasColumn("platform_tasks", "dispatch_claim_token"))
-	assert.Equal(t, []int64{1, 2, 3, 4, 5, 6, 7, 8, 9, 10}, migrationVersions(t, db))
+	assert.Equal(t, []int64{1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11}, migrationVersions(t, db))
 }
 
 func TestMigrationUpgradesReleasedVersionSixWithReportTables(t *testing.T) {
@@ -429,12 +451,12 @@ func TestMigrationUpgradesReleasedVersionSixWithReportTables(t *testing.T) {
 	assert.False(t, db.Migrator().HasTable("report_brand_settings"))
 
 	require.NoError(t, Migrate(db))
-	require.NoError(t, Migrate(db), "v7 through v10 upgrades must remain idempotent")
+	require.NoError(t, Migrate(db), "v7 through v11 upgrades must remain idempotent")
 	assert.True(t, db.Migrator().HasTable("report_snapshots"))
 	assert.True(t, db.Migrator().HasTable("report_brand_settings"))
 	assertReportTrendIndexDefinitions(t, db)
 	assertPlatformTaskDashboardIndexDefinitions(t, db)
-	assert.Equal(t, []int64{1, 2, 3, 4, 5, 6, 7, 8, 9, 10}, migrationVersions(t, db))
+	assert.Equal(t, []int64{1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11}, migrationVersions(t, db))
 }
 
 func TestMigrationUpgradesReleasedVersionSevenWithDashboardTaskIndexes(t *testing.T) {
@@ -460,9 +482,9 @@ func TestMigrationUpgradesReleasedVersionSevenWithDashboardTaskIndexes(t *testin
 	}
 
 	require.NoError(t, Migrate(db))
-	require.NoError(t, Migrate(db), "v8 through v10 upgrades must remain idempotent")
+	require.NoError(t, Migrate(db), "v8 through v11 upgrades must remain idempotent")
 	assertPlatformTaskDashboardIndexDefinitions(t, db)
-	assert.Equal(t, []int64{1, 2, 3, 4, 5, 6, 7, 8, 9, 10}, migrationVersions(t, db))
+	assert.Equal(t, []int64{1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11}, migrationVersions(t, db))
 }
 
 func TestMigrationVersionNineBindsOnlyReadyAttachmentsReferencedByTasks(t *testing.T) {
@@ -509,7 +531,7 @@ func TestMigrationVersionNineBindsOnlyReadyAttachmentsReferencedByTasks(t *testi
 		ID    string
 		State string
 	}{{ID: "referenced-ready", State: "attached"}, {ID: "unbound-ready", State: "ready"}}, states)
-	assert.Equal(t, []int64{1, 2, 3, 4, 5, 6, 7, 8, 9, 10}, migrationVersions(t, db))
+	assert.Equal(t, []int64{1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11}, migrationVersions(t, db))
 }
 
 func assertReportTrendIndexDefinitions(t *testing.T, db *gorm.DB) {
@@ -651,7 +673,7 @@ func assertMCPConnectionSchema(t *testing.T, db *gorm.DB) {
 	t.Helper()
 	for table, columns := range map[string][]string{
 		"platform_mcp_connection_configs": {
-			"id", "owner_user_id", "scope", "name", "description", "current_version", "resource_revision", "enabled", "created_at", "updated_at",
+			"id", "owner_user_id", "scope", "name", "description", "current_version", "resource_revision", "enabled", "last_probe_started_at", "created_at", "updated_at",
 		},
 		"platform_mcp_connection_versions": {
 			"id", "connection_config_id", "version", "encrypted_payload", "payload_nonce", "key_id", "transport", "detected_transport", "probe_status", "created_at",

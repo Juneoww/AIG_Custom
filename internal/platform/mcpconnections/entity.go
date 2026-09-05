@@ -161,16 +161,17 @@ func (snapshot RepositorySourceSnapshot) MarshalJSON() ([]byte, error) {
 }
 
 type ConnectionConfig struct {
-	ID               string    `gorm:"primaryKey;column:id" json:"id"`
-	OwnerUserID      string    `gorm:"not null;column:owner_user_id" json:"owner_user_id"`
-	Scope            Scope     `gorm:"not null;column:scope" json:"scope"`
-	Name             string    `gorm:"not null;column:name" json:"name"`
-	Description      string    `gorm:"not null;column:description" json:"description"`
-	CurrentVersion   int       `gorm:"not null;column:current_version" json:"current_version"`
-	ResourceRevision string    `gorm:"not null;column:resource_revision" json:"resource_revision"`
-	Enabled          bool      `gorm:"not null;column:enabled" json:"enabled"`
-	CreatedAt        time.Time `gorm:"not null;column:created_at" json:"created_at"`
-	UpdatedAt        time.Time `gorm:"not null;column:updated_at" json:"updated_at"`
+	ID                 string     `gorm:"primaryKey;column:id" json:"id"`
+	OwnerUserID        string     `gorm:"not null;column:owner_user_id" json:"owner_user_id"`
+	Scope              Scope      `gorm:"not null;column:scope" json:"scope"`
+	Name               string     `gorm:"not null;column:name" json:"name"`
+	Description        string     `gorm:"not null;column:description" json:"description"`
+	CurrentVersion     int        `gorm:"not null;column:current_version" json:"current_version"`
+	ResourceRevision   string     `gorm:"not null;column:resource_revision" json:"resource_revision"`
+	Enabled            bool       `gorm:"not null;column:enabled" json:"enabled"`
+	LastProbeStartedAt *time.Time `gorm:"column:last_probe_started_at" json:"-"`
+	CreatedAt          time.Time  `gorm:"not null;column:created_at" json:"created_at"`
+	UpdatedAt          time.Time  `gorm:"not null;column:updated_at" json:"updated_at"`
 }
 
 func (ConnectionConfig) TableName() string { return "platform_mcp_connection_configs" }

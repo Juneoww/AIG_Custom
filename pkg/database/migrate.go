@@ -48,6 +48,7 @@ var migrations = []migration{
 	{version: 8, apply: migratePlatformTaskDashboardIndexes},
 	{version: 9, apply: migratePlatformAttachmentLifecycle},
 	{version: 10, apply: migratePlatformMCPConnectionSchema},
+	{version: 11, apply: migratePlatformMCPProbeRateLimitSchema},
 }
 
 const migrationAdvisoryLockKey int64 = 301237729
@@ -590,6 +591,25 @@ func migratePlatformMCPConnectionSchema(db *gorm.DB) error {
 		if !valid {
 			return fmt.Errorf("索引 %s 与 v10 定义不兼容", requirement.name)
 		}
+	}
+	return nil
+}
+
+// migratePlatformMCPProbeRateLimitSchema 仅升级已发布的 v10 MCP 配置表。不能把
+// 该列回填到 v10 建表路径，否则已经部署的 v10 数据库无法获得显式升级记录。
+func migratePlatformMCPProbeRateLimitSchema(db *gorm.DB) error {
+	if db == nil {
+		return fmt.Errorf("MCP 探测限流迁移数据库不能为空")
+	}
+	const table = "platform_mcp_connection_configs"
+	if !db.Migrator().HasTable(table) {
+		return fmt.Errorf("v11 MCP 探测限流迁移缺少表 %s", table)
+	}
+	if err := db.Exec(`ALTER TABLE platform_mcp_connection_configs ADD COLUMN IF NOT EXISTS last_probe_started_at TIMESTAMPTZ`).Error; err != nil {
+		return fmt.Errorf("添加 MCP 探测限流列失败: %w", err)
+	}
+	if !db.Migrator().HasColumn(table, "last_probe_started_at") {
+		return fmt.Errorf("%s 缺少列 last_probe_started_at", table)
 	}
 	return nil
 }

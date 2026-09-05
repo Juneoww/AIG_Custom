@@ -79,15 +79,18 @@ initialize，并在原 SSE 流中等待匹配的 `message` response，随后发�
 request context 和响应字节上限约束。
 
 选择 `auto` 时先测试 Streamable HTTP，再测试 legacy SSE；指定 transport 不能回退。探测默认
-最短间隔为 1 分钟，按不透明连接配置 ID 独立限流，不能以 endpoint 作为限流键。只有当前版本
-探测成功、连接已启用且受控 dialer 可用时，连接才可被任务选择。真实探测失败（限流除外）
-必须把启动时的不可变版本写为 `failed` 并清空 detected transport；若该版本仍是 current，
-同一事务必须撤销 enabled，避免留下 `enabled + failed` 的误导状态。限流判断必须发生在任何
-持久化状态重置之前。通过限流后，探测启动事务会先按 config → current version 加锁、禁用连接、
-清空旧结果并递增 `resource_revision`，把新 revision 作为不透明 attempt token；结果写回仅在
-config、version 与该 token 仍精确匹配时允许，并在结算时再次推进 revision，使同一结果不能重放。
-新探测、新版本、展示元数据或启用状态变更都会让旧 token 失效；任何跨 Engine/进程的迟到结果
-必须返回安全冲突（或被安全忽略），不得改写任意版本的结果投影。
+最短间隔为 1 分钟，按不透明连接配置 ID 独立限流，不能以 endpoint 作为限流键。该时间戳持久化
+在 MCP 连接配置中，因此多个服务进程、重启后的进程和不同 `ProbeEngine` 都共享限流；
+`ProbeEngine` 的本地记录仅用于提前拒绝同进程的重复请求，不能替代数据库事务。只有当前版本
+探测成功、连接已启用且受控 dialer 可用时，连接才可被任务选择。真实探测失败也会保留本次启动
+时间并占用间隔；限流请求本身不得清空既有结果、改变 revision 或发起网络请求。
+
+通过本地预检后，探测启动事务会先按 config → current version 加锁并核验版本/revision 快照，再在
+任何状态重置前检查持久化的启动时间。通过检查时，事务原子地写入启动时间、禁用连接、清空旧结果
+并递增 `resource_revision`，把新 revision 作为不透明 attempt token；结果写回仅在 config、version
+与该 token 仍精确匹配时允许，并在结算时再次推进 revision，使同一结果不能重放。新探测、新版本、
+展示元数据或启用状态变更都会让旧 token 失效；任何跨 Engine/进程的迟到结果必须返回安全冲突
+（或被安全忽略），不得改写任意版本的结果投影。
 
 启用与探测结果写回都必须按 config 后 current/version 的顺序加锁。启用事务除了复核 expected
 current version 和 resource revision，还必须锁定并检查该 current version 仍为 `passed` 且具有

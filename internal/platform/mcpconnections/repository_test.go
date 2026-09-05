@@ -27,6 +27,18 @@ type delayedProbePort struct {
 	result  error
 }
 
+type endpointCountingProbePort struct {
+	calls     int
+	endpoints []string
+	result    error
+}
+
+func (port *endpointCountingProbePort) Initialize(_ context.Context, request ProbeRequest) error {
+	port.calls++
+	port.endpoints = append(port.endpoints, request.Payload.Endpoint)
+	return port.result
+}
+
 func (port *delayedProbePort) Initialize(_ context.Context, _ ProbeRequest) error {
 	select {
 	case port.started <- struct{}{}:
@@ -45,10 +57,11 @@ func TestRepositoryCreatesDisabledUntestedVersionOne(t *testing.T) {
 	require.NoError(t, repository.Init())
 
 	createdAt := time.Date(2026, 9, 3, 1, 2, 3, 0, time.UTC)
+	ignoredLastProbeAt := createdAt.Add(-time.Hour)
 	config := &ConnectionConfig{
 		ID: "config-version-one-sentinel", OwnerUserID: "owner-version-one-sentinel", Scope: ScopePrivate,
 		Name: "connection-name-sentinel", Description: "connection-description-sentinel", Enabled: true,
-		CreatedAt: createdAt, UpdatedAt: createdAt,
+		LastProbeStartedAt: &ignoredLastProbeAt, CreatedAt: createdAt, UpdatedAt: createdAt,
 	}
 	version := &ConnectionVersion{
 		ID: "version-one-sentinel", ConnectionConfigID: config.ID, Version: 99, Transport: TransportHTTP,
@@ -62,6 +75,7 @@ func TestRepositoryCreatesDisabledUntestedVersionOne(t *testing.T) {
 	assert.Equal(t, 1, storedConfig.CurrentVersion)
 	assert.Equal(t, "1", storedConfig.ResourceRevision)
 	assert.False(t, storedConfig.Enabled, "new connections cannot be enabled before a trusted test")
+	assert.Nil(t, storedConfig.LastProbeStartedAt, "Create must ignore caller-supplied probe rate-limit state")
 
 	storedVersion, err := repository.GetVersion(ctx, config.ID, 1)
 	require.NoError(t, err)
@@ -75,6 +89,89 @@ func TestRepositoryCreatesDisabledUntestedVersionOne(t *testing.T) {
 	assert.Equal(t, ProbeStatusNotTested, storedVersion.ProbeStatus)
 }
 
+func TestRepositoryStartProbeRateLimitPersistsAcrossRepositories(t *testing.T) {
+	ctx := context.Background()
+	db := openMCPConnectionPostgresDB(t)
+	require.NoError(t, database.Migrate(db))
+	firstProcess := NewGormRepository(db)
+	secondProcess := NewGormRepository(db)
+	config := testConnectionConfig("config-persistent-probe-rate-limit")
+	version := testConnectionVersion(config.ID, "version-persistent-probe-rate-limit", "ciphertext-persistent-probe-rate-limit")
+	require.NoError(t, firstProcess.Create(ctx, config, version))
+
+	firstAttempt, err := firstProcess.StartProbe(ctx, config.ID, 1, "1", time.Minute)
+	require.NoError(t, err)
+	require.NoError(t, firstProcess.RecordProbeResult(ctx, config.ID, firstAttempt.Version, firstAttempt.Token, "", ProbeStatusFailed))
+	beforeConfig, err := firstProcess.GetConfig(ctx, config.ID)
+	require.NoError(t, err)
+	beforeVersion, err := firstProcess.GetVersion(ctx, config.ID, beforeConfig.CurrentVersion)
+	require.NoError(t, err)
+	require.NotNil(t, beforeConfig.LastProbeStartedAt)
+	encodedConfig, err := json.Marshal(beforeConfig)
+	require.NoError(t, err)
+	assert.NotContains(t, string(encodedConfig), "last_probe_started_at")
+
+	_, err = secondProcess.StartProbe(ctx, config.ID, beforeConfig.CurrentVersion, beforeConfig.ResourceRevision, time.Minute)
+	require.ErrorIs(t, err, ErrProbeRateLimited)
+	afterConfig, err := firstProcess.GetConfig(ctx, config.ID)
+	require.NoError(t, err)
+	afterVersion, err := firstProcess.GetVersion(ctx, config.ID, afterConfig.CurrentVersion)
+	require.NoError(t, err)
+	assert.Equal(t, beforeConfig, afterConfig, "a rate-limited start must not change revision or configuration state")
+	assert.Equal(t, beforeVersion, afterVersion, "a rate-limited start must not clear a persisted probe result")
+}
+
+func TestServiceProbeRateLimitPersistsAcrossIndependentEnginesBeforeNetwork(t *testing.T) {
+	ctx := context.Background()
+	db := openMCPConnectionPostgresDB(t)
+	require.NoError(t, database.Migrate(db))
+	firstRepository := NewGormRepository(db)
+	secondRepository := NewGormRepository(db)
+	firstPort := &endpointCountingProbePort{result: errors.New("first upstream failure")}
+	secondPort := &endpointCountingProbePort{}
+	firstService := NewService(firstRepository, testKeyring(t), NewProbeEngine(firstPort, ProbeOptions{
+		Timeout: time.Second, MinimumInterval: time.Minute,
+	}), testPolicy(t, true))
+	secondService := NewService(secondRepository, testKeyring(t), NewProbeEngine(secondPort, ProbeOptions{
+		Timeout: time.Second, MinimumInterval: time.Minute,
+	}), testPolicy(t, true))
+	alice := identity.Subject{UserID: "persistent-rate-limit-owner", Role: identity.RoleUser}
+
+	firstInput := serviceInput("跨进程限流一", ScopePrivate, TransportHTTP)
+	firstInput.ServerURL = "https://first.example.test/mcp"
+	first, err := firstService.Create(ctx, alice, firstInput)
+	require.NoError(t, err)
+	_, err = firstService.Probe(ctx, alice, first.ID)
+	require.ErrorIs(t, err, ErrProbeFailed)
+	require.Equal(t, 1, firstPort.calls)
+	require.Equal(t, []string{"https://first.example.test/mcp"}, firstPort.endpoints)
+
+	// 不同配置和不同 endpoint 不共享限流键；第二个 Engine 正常探测它自己的连接。
+	secondInput := serviceInput("跨进程限流二", ScopePrivate, TransportHTTP)
+	secondInput.ServerURL = "https://second.example.test/mcp"
+	second, err := secondService.Create(ctx, alice, secondInput)
+	require.NoError(t, err)
+	_, err = secondService.Probe(ctx, alice, second.ID)
+	require.NoError(t, err)
+	require.Equal(t, 1, secondPort.calls)
+	require.Equal(t, []string{"https://second.example.test/mcp"}, secondPort.endpoints)
+
+	beforeConfig, err := firstRepository.GetConfig(ctx, first.ID)
+	require.NoError(t, err)
+	beforeVersion, err := firstRepository.GetVersion(ctx, first.ID, beforeConfig.CurrentVersion)
+	require.NoError(t, err)
+	_, err = secondService.Probe(ctx, alice, first.ID)
+	require.ErrorIs(t, err, ErrProbeRateLimited)
+	assert.Equal(t, 1, secondPort.calls, "the second Engine must not call its probe port for the rate-limited configuration")
+	assert.Equal(t, []string{"https://second.example.test/mcp"}, secondPort.endpoints, "the second Engine must be rejected before its probe port sees the first endpoint")
+	afterConfig, err := firstRepository.GetConfig(ctx, first.ID)
+	require.NoError(t, err)
+	afterVersion, err := firstRepository.GetVersion(ctx, first.ID, afterConfig.CurrentVersion)
+	require.NoError(t, err)
+	assert.Equal(t, beforeConfig, afterConfig)
+	assert.Equal(t, beforeVersion, afterVersion)
+}
+
 func TestRepositoryVersionsConnectionMaterialAndLeavesMetadataOutOfHistory(t *testing.T) {
 	ctx := context.Background()
 	db := openMCPConnectionPostgresDB(t)
@@ -85,7 +182,7 @@ func TestRepositoryVersionsConnectionMaterialAndLeavesMetadataOutOfHistory(t *te
 	config := testConnectionConfig("config-history-sentinel")
 	first := testConnectionVersion(config.ID, "version-history-one-sentinel", "ciphertext-history-one-sentinel")
 	require.NoError(t, repository.Create(ctx, config, first))
-	firstAttempt, err := repository.StartProbe(ctx, config.ID, 1, "1")
+	firstAttempt, err := repository.StartProbe(ctx, config.ID, 1, "1", time.Minute)
 	require.NoError(t, err)
 	require.NoError(t, repository.RecordProbeResult(ctx, config.ID, 1, firstAttempt.Token, TransportSSE, ProbeStatusPassed))
 	testedFirst, err := repository.GetVersion(ctx, config.ID, 1)
@@ -390,9 +487,10 @@ func TestRepositoryRejectsOutOfOrderProbeResultAcrossPersistentRepositories(t *t
 	version := testConnectionVersion(config.ID, "version-probe-attempt-order-sentinel", "ciphertext-probe-attempt-order-sentinel")
 	require.NoError(t, firstProcess.Create(ctx, config, version))
 
-	firstAttempt, err := firstProcess.StartProbe(ctx, config.ID, 1, "1")
+	firstAttempt, err := firstProcess.StartProbe(ctx, config.ID, 1, "1", time.Hour)
 	require.NoError(t, err)
-	secondAttempt, err := secondProcess.StartProbe(ctx, config.ID, firstAttempt.Version, firstAttempt.Token)
+	require.NoError(t, db.Model(&ConnectionConfig{}).Where("id = ?", config.ID).Update("last_probe_started_at", time.Now().UTC().Add(-2*time.Hour)).Error)
+	secondAttempt, err := secondProcess.StartProbe(ctx, config.ID, firstAttempt.Version, firstAttempt.Token, time.Hour)
 	require.NoError(t, err)
 	require.NotEqual(t, firstAttempt.Token, secondAttempt.Token)
 
@@ -412,7 +510,7 @@ func TestRepositoryRejectsOutOfOrderProbeResultAcrossPersistentRepositories(t *t
 	require.ErrorIs(t, err, ErrTaskConnectionUnavailable)
 }
 
-func TestServiceRejectsDelayedSuccessAfterAnotherEnginePersistsFailure(t *testing.T) {
+func TestServiceRateLimitsSecondEngineWithoutInvalidatingInFlightProbe(t *testing.T) {
 	ctx := context.Background()
 	db := openMCPConnectionPostgresDB(t)
 	require.NoError(t, database.Migrate(db))
@@ -427,9 +525,10 @@ func TestServiceRejectsDelayedSuccessAfterAnotherEnginePersistsFailure(t *testin
 	firstService := NewService(firstRepository, keyring, NewProbeEngine(&delayedProbePort{started: started, release: release}, ProbeOptions{
 		Timeout: time.Second, MinimumInterval: time.Hour,
 	}), policy)
-	secondService := NewService(secondRepository, keyring, NewProbeEngine(&scriptedProbePort{errors: map[Transport]error{
+	secondPort := &scriptedProbePort{errors: map[Transport]error{
 		TransportHTTP: errors.New("second probe failure"),
-	}}, ProbeOptions{Timeout: time.Second, MinimumInterval: time.Hour}), policy)
+	}}
+	secondService := NewService(secondRepository, keyring, NewProbeEngine(secondPort, ProbeOptions{Timeout: time.Second, MinimumInterval: time.Hour}), policy)
 
 	created, err := firstService.Create(ctx, alice, serviceInput("跨引擎探测", ScopePrivate, TransportHTTP))
 	require.NoError(t, err)
@@ -445,11 +544,12 @@ func TestServiceRejectsDelayedSuccessAfterAnotherEnginePersistsFailure(t *testin
 	}
 
 	_, err = secondService.Probe(ctx, alice, created.ID)
-	require.ErrorIs(t, err, ErrProbeFailed)
+	require.ErrorIs(t, err, ErrProbeRateLimited)
+	assert.Empty(t, secondPort.attempts, "the durable rate limit must reject the second Engine before network")
 	close(release)
 	select {
 	case delayedErr := <-firstDone:
-		require.ErrorIs(t, delayedErr, ErrConflict, "the delayed success must not overwrite the later failure")
+		require.NoError(t, delayedErr, "a rate-limited second Engine must not invalidate the in-flight probe")
 	case <-time.After(time.Second):
 		t.Fatal("the delayed probe did not complete")
 	}
@@ -459,10 +559,10 @@ func TestServiceRejectsDelayedSuccessAfterAnotherEnginePersistsFailure(t *testin
 	assert.False(t, storedConfig.Enabled)
 	storedVersion, err := firstRepository.GetVersion(ctx, created.ID, storedConfig.CurrentVersion)
 	require.NoError(t, err)
-	assert.Equal(t, ProbeStatusFailed, storedVersion.ProbeStatus)
-	assert.Empty(t, storedVersion.DetectedTransport)
+	assert.Equal(t, ProbeStatusPassed, storedVersion.ProbeStatus)
+	assert.Equal(t, TransportHTTP, storedVersion.DetectedTransport)
 	_, err = firstService.SetEnabled(ctx, alice, created.ID, true)
-	require.ErrorIs(t, err, ErrTaskConnectionUnavailable)
+	require.NoError(t, err)
 }
 
 func TestRepositoryConfigurationMutationInvalidatesStartedProbeAttempt(t *testing.T) {
@@ -503,7 +603,7 @@ func TestRepositoryConfigurationMutationInvalidatesStartedProbeAttempt(t *testin
 			version := testConnectionVersion(config.ID, "version-probe-attempt-mutation-"+strings.ReplaceAll(test.name, " ", "-"), "ciphertext-probe-attempt-mutation-"+strings.ReplaceAll(test.name, " ", "-"))
 			require.NoError(t, repository.Create(ctx, config, version))
 
-			attempt, err := repository.StartProbe(ctx, config.ID, 1, "1")
+			attempt, err := repository.StartProbe(ctx, config.ID, 1, "1", time.Minute)
 			require.NoError(t, err)
 			require.NoError(t, test.mutate(ctx, repository, config, attempt.Token))
 			require.ErrorIs(t, repository.RecordProbeResult(ctx, config.ID, attempt.Version, attempt.Token, TransportHTTP, ProbeStatusPassed), ErrConflict)
@@ -524,7 +624,7 @@ func TestRepositoryFailedCurrentProbeDisablesConnectionAndOldVersionDoesNotChang
 	config := testConnectionConfig("config-probe-failure-state-sentinel")
 	first := testConnectionVersion(config.ID, "version-probe-failure-one-sentinel", "ciphertext-probe-failure-one-sentinel")
 	require.NoError(t, repository.Create(ctx, config, first))
-	passedAttempt, err := repository.StartProbe(ctx, config.ID, 1, "1")
+	passedAttempt, err := repository.StartProbe(ctx, config.ID, 1, "1", time.Minute)
 	require.NoError(t, err)
 	require.NoError(t, repository.RecordProbeResult(ctx, config.ID, 1, passedAttempt.Token, TransportHTTP, ProbeStatusPassed))
 	stored, err := repository.GetConfig(ctx, config.ID)
@@ -534,7 +634,8 @@ func TestRepositoryFailedCurrentProbeDisablesConnectionAndOldVersionDoesNotChang
 
 	stored, err = repository.GetConfig(ctx, config.ID)
 	require.NoError(t, err)
-	failedAttempt, err := repository.StartProbe(ctx, config.ID, 1, stored.ResourceRevision)
+	require.NoError(t, db.Model(&ConnectionConfig{}).Where("id = ?", config.ID).Update("last_probe_started_at", time.Now().UTC().Add(-2*time.Minute)).Error)
+	failedAttempt, err := repository.StartProbe(ctx, config.ID, 1, stored.ResourceRevision, time.Minute)
 	require.NoError(t, err)
 	require.NoError(t, repository.RecordProbeResult(ctx, config.ID, 1, failedAttempt.Token, "", ProbeStatusFailed))
 	stored, err = repository.GetConfig(ctx, config.ID)

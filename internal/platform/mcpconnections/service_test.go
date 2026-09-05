@@ -41,6 +41,7 @@ func (repository *memoryConnectionRepository) Create(_ context.Context, config *
 	}
 	storedConfig := cloneConnectionConfig(config)
 	storedVersion := cloneConnectionVersionRecord(version)
+	storedConfig.LastProbeStartedAt = nil
 	storedConfig.CurrentVersion = 1
 	storedConfig.Enabled = false
 	storedVersion.Version = 1
@@ -80,7 +81,10 @@ func (repository *memoryConnectionRepository) ListConfigs(_ context.Context) ([]
 	return configs, nil
 }
 
-func (repository *memoryConnectionRepository) StartProbe(_ context.Context, configID string, expectedCurrentVersion int, expectedResourceRevision string) (*ProbeAttempt, error) {
+func (repository *memoryConnectionRepository) StartProbe(_ context.Context, configID string, expectedCurrentVersion int, expectedResourceRevision string, minimumInterval time.Duration) (*ProbeAttempt, error) {
+	if minimumInterval <= 0 {
+		return nil, ErrInvalid
+	}
 	config, ok := repository.configs[configID]
 	if !ok {
 		return nil, ErrNotFound
@@ -95,12 +99,17 @@ func (repository *memoryConnectionRepository) StartProbe(_ context.Context, conf
 	if !configurableTransport(stored.Transport) {
 		return nil, ErrInvalid
 	}
+	now := time.Now().UTC()
+	if config.LastProbeStartedAt != nil && now.Sub(*config.LastProbeStartedAt) < minimumInterval {
+		return nil, ErrProbeRateLimited
+	}
 	nextRevision, err := incrementRevision(config.ResourceRevision)
 	if err != nil {
 		return nil, err
 	}
 	config.Enabled = false
 	config.ResourceRevision = nextRevision
+	config.LastProbeStartedAt = &now
 	stored.DetectedTransport = ""
 	stored.ProbeStatus = ProbeStatusNotTested
 	return &ProbeAttempt{ConnectionConfigID: configID, Version: stored.Version, Token: nextRevision}, nil
@@ -570,7 +579,7 @@ func TestServiceSetEnabledRejectsProbeFailureInterleavedAfterEligibilityRead(t *
 	repository.beforeSetEnabled = func() {
 		// 另一进程在外层资格读取之后启动并完成了新的失败探测。启动会推进
 		// revision，因此原 SetEnabled 请求必须以冲突结束，不能重新启用。
-		attempt, startErr := repository.StartProbe(ctx, created.ID, 1, "1")
+		attempt, startErr := repository.StartProbe(ctx, created.ID, 1, "1", time.Nanosecond)
 		require.NoError(t, startErr)
 		require.NoError(t, repository.RecordProbeResult(ctx, created.ID, 1, attempt.Token, "", ProbeStatusFailed))
 	}

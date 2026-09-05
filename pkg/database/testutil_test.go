@@ -72,7 +72,7 @@ func TestResetPostgresTestDBClearsMCPConnectionSchemaFixtures(t *testing.T) {
 	const indexName = "ux_platform_mcp_connection_versions_config_version"
 	require.NoError(t, db.Exec("DROP INDEX "+indexName).Error)
 	require.NoError(t, db.Exec("CREATE UNIQUE INDEX "+indexName+" ON platform_mcp_connection_versions(id)").Error)
-	require.NoError(t, db.Where("version = ?", LatestSchemaVersion).Delete(&SchemaMigration{}).Error)
+	require.NoError(t, db.Where("version >= ?", int64(10)).Delete(&SchemaMigration{}).Error)
 	require.Equal(t, []int64{1, 2, 3, 4, 5, 6, 7, 8, 9}, migrationVersions(t, db))
 
 	resetPostgresTestDB(t, db)
@@ -84,7 +84,7 @@ func TestResetPostgresTestDBClearsMCPConnectionSchemaFixtures(t *testing.T) {
 
 	require.NoError(t, Migrate(db), "the next test run must not inherit stale v10 objects")
 	assertMCPConnectionSchema(t, db)
-	require.Equal(t, []int64{1, 2, 3, 4, 5, 6, 7, 8, 9, 10}, migrationVersions(t, db))
+	require.Equal(t, []int64{1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11}, migrationVersions(t, db))
 }
 
 func testPostgresDSN(t *testing.T) string {
