@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"math/big"
 	"net/url"
 	"path"
 	"strings"
@@ -199,7 +200,7 @@ func normalizePath(raw string) (string, error) {
 	if err != nil || parsed.IsAbs() || parsed.Host != "" || parsed.Fragment != "" || !strings.HasPrefix(parsed.Path, "/") {
 		return "", ErrInvalid
 	}
-	cleaned := path.Clean(parsed.EscapedPath())
+	cleaned := path.Clean(parsed.Path)
 	if cleaned == "." || !strings.HasPrefix(cleaned, "/") {
 		return "", ErrInvalid
 	}
@@ -208,6 +209,9 @@ func normalizePath(raw string) (string, error) {
 
 func canonicalPayload(raw json.RawMessage) ([]byte, error) {
 	if len(raw) == 0 || len(raw) > maxPayloadBytes {
+		return nil, ErrInvalid
+	}
+	if err := validateUniqueJSONMembers(raw); err != nil {
 		return nil, ErrInvalid
 	}
 	decoder := json.NewDecoder(bytes.NewReader(raw))
@@ -219,11 +223,164 @@ func canonicalPayload(raw json.RawMessage) ([]byte, error) {
 	if err := decoder.Decode(&struct{}{}); err != io.EOF {
 		return nil, ErrInvalid
 	}
-	canonical, err := json.Marshal(value)
+	canonicalValue, err := canonicalizeJSONValue(value)
+	if err != nil {
+		return nil, ErrInvalid
+	}
+	canonical, err := json.Marshal(canonicalValue)
 	if err != nil {
 		return nil, ErrInvalid
 	}
 	return canonical, nil
+}
+
+// validateUniqueJSONMembers rejects ambiguous object members before the
+// canonical decoder turns them into a map. This keeps the digest aligned with
+// strict DTO parsing instead of silently choosing one duplicate value.
+func validateUniqueJSONMembers(raw json.RawMessage) error {
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder.UseNumber()
+	if err := validateJSONValue(decoder); err != nil {
+		return err
+	}
+	if err := decoder.Decode(&struct{}{}); err != io.EOF {
+		return ErrInvalid
+	}
+	return nil
+}
+
+func validateJSONValue(decoder *json.Decoder) error {
+	token, err := decoder.Token()
+	if err != nil {
+		return err
+	}
+	delimiter, isDelimiter := token.(json.Delim)
+	if !isDelimiter {
+		return nil
+	}
+	switch delimiter {
+	case '{':
+		members := map[string]struct{}{}
+		for decoder.More() {
+			memberToken, err := decoder.Token()
+			member, isMember := memberToken.(string)
+			if err != nil || !isMember {
+				return ErrInvalid
+			}
+			if _, duplicate := members[member]; duplicate {
+				return ErrInvalid
+			}
+			members[member] = struct{}{}
+			if err := validateJSONValue(decoder); err != nil {
+				return err
+			}
+		}
+		closing, err := decoder.Token()
+		if err != nil || closing != json.Delim('}') {
+			return ErrInvalid
+		}
+		return nil
+	case '[':
+		for decoder.More() {
+			if err := validateJSONValue(decoder); err != nil {
+				return err
+			}
+		}
+		closing, err := decoder.Token()
+		if err != nil || closing != json.Delim(']') {
+			return ErrInvalid
+		}
+		return nil
+	default:
+		return ErrInvalid
+	}
+}
+
+// canonicalJSONNumber always marshals a JSON number in one exact scientific
+// representation, so equivalent number spellings produce the same payload
+// digest without converting through an imprecise float64.
+type canonicalJSONNumber string
+
+func (number canonicalJSONNumber) MarshalJSON() ([]byte, error) {
+	return []byte(number), nil
+}
+
+func canonicalizeJSONValue(value any) (any, error) {
+	switch typed := value.(type) {
+	case nil, bool, string:
+		return typed, nil
+	case json.Number:
+		return canonicalizeJSONNumber(typed)
+	case []any:
+		result := make([]any, len(typed))
+		for index, item := range typed {
+			canonical, err := canonicalizeJSONValue(item)
+			if err != nil {
+				return nil, err
+			}
+			result[index] = canonical
+		}
+		return result, nil
+	case map[string]any:
+		result := make(map[string]any, len(typed))
+		for key, item := range typed {
+			canonical, err := canonicalizeJSONValue(item)
+			if err != nil {
+				return nil, err
+			}
+			result[key] = canonical
+		}
+		return result, nil
+	default:
+		return nil, ErrInvalid
+	}
+}
+
+func canonicalizeJSONNumber(number json.Number) (canonicalJSONNumber, error) {
+	literal := number.String()
+	negative := strings.HasPrefix(literal, "-")
+	if negative {
+		literal = literal[1:]
+	}
+	exponentLiteral := "0"
+	if index := strings.IndexAny(literal, "eE"); index >= 0 {
+		exponentLiteral = literal[index+1:]
+		literal = literal[:index]
+	}
+	integer, fraction, hasFraction := strings.Cut(literal, ".")
+	if integer == "" || (hasFraction && fraction == "") || !decimalDigits(integer) || (hasFraction && !decimalDigits(fraction)) {
+		return "", ErrInvalid
+	}
+	exponent, validExponent := new(big.Int).SetString(exponentLiteral, 10)
+	if !validExponent {
+		return "", ErrInvalid
+	}
+	significant := strings.TrimLeft(integer+fraction, "0")
+	if significant == "" {
+		return canonicalJSONNumber("0"), nil
+	}
+	trailingZeroes := len(significant) - len(strings.TrimRight(significant, "0"))
+	significant = strings.TrimRight(significant, "0")
+	scale := new(big.Int).Sub(exponent, big.NewInt(int64(len(fraction))))
+	scale.Add(scale, big.NewInt(int64(trailingZeroes)))
+	scientificExponent := scale.Add(scale, big.NewInt(int64(len(significant)-1)))
+	canonical := string(significant[0])
+	if len(significant) > 1 {
+		canonical += "." + significant[1:]
+	}
+	if negative {
+		canonical = "-" + canonical
+	}
+	return canonicalJSONNumber(canonical + "e" + scientificExponent.String()), nil
+}
+
+func decimalDigits(value string) bool {
+	for _, character := range value {
+		if character < '0' || character > '9' {
+			return false
+		}
+	}
+	return true
 }
 
 func encodeSafeResponse(response SafeResponse) (json.RawMessage, error) {

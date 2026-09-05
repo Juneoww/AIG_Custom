@@ -15,8 +15,9 @@ import (
 )
 
 var (
-	ErrNotFound = errors.New("MCP 幂等记录不存在")
-	ErrInvalid  = errors.New("MCP 幂等请求无效")
+	ErrNotFound            = errors.New("MCP 幂等记录不存在")
+	ErrInvalid             = errors.New("MCP 幂等请求无效")
+	ErrTransactionRequired = errors.New("MCP 幂等成功结果必须在业务事务中持久化")
 )
 
 // Repository keeps the physical advisory lock distinct from the business
@@ -115,6 +116,9 @@ func (repository *GormRepository) Get(ctx context.Context, identity recordIdenti
 func (repository *GormRepository) Create(ctx context.Context, record *Record) error {
 	if repository == nil || repository.db == nil || !validRecord(record) {
 		return ErrInvalid
+	}
+	if !hasGormTransaction(ctx) {
+		return ErrTransactionRequired
 	}
 	return txcontext.Gorm(ctx, repository.db).Create(cloneRecord(record)).Error
 }
@@ -322,4 +326,19 @@ func cloneRecord(record *Record) *Record {
 	copy.PayloadHash = append([]byte(nil), record.PayloadHash...)
 	copy.SafeResponse = append([]byte(nil), record.SafeResponse...)
 	return &copy
+}
+
+// hasGormTransaction rejects the advisory-lock connection itself: a session
+// connection serializes callers but auto-commits writes. The success record
+// must instead share audit.Mutation.Run's explicit business transaction.
+func hasGormTransaction(ctx context.Context) bool {
+	database, carried := txcontext.FromGorm(ctx)
+	if !carried || database == nil || database.Statement == nil || database.Statement.ConnPool == nil {
+		return false
+	}
+	_, transactional := database.Statement.ConnPool.(interface {
+		Commit() error
+		Rollback() error
+	})
+	return transactional
 }

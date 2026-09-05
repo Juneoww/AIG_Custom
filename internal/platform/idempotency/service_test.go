@@ -71,6 +71,64 @@ func TestServiceRejectsReusedKeyForDifferentCanonicalPayload(t *testing.T) {
 	require.ErrorIs(t, err, ErrKeyReused)
 }
 
+func TestServiceReplaysNumericallyEquivalentCanonicalPayload(t *testing.T) {
+	service := NewService(NewMemoryRepository())
+	subject := identity.Subject{UserID: "user-alice", Role: identity.RoleUser}
+	operation := Operation{Scope: ScopePrivate, Method: "POST", Path: "/api/v1/platform/mcp-scans", Key: "canonical-number", Payload: json.RawMessage(`{"concurrency":1}`)}
+	called := 0
+	_, err := service.Execute(context.Background(), subject, operation, func(ctx context.Context, claim *Claim) error {
+		called++
+		return claim.PersistSuccess(ctx, 200, SafeResponse{TaskID: "01e5f3a4-ec5b-4a15-9d07-0161d42f0c25", Status: "pending"})
+	})
+	require.NoError(t, err)
+
+	operation.Payload = json.RawMessage(`{"concurrency":1.0}`)
+	result, err := service.Execute(context.Background(), subject, operation, func(context.Context, *Claim) error {
+		called++
+		return nil
+	})
+	require.NoError(t, err)
+	assert.True(t, result.Replay)
+	assert.Equal(t, 1, called)
+}
+
+func TestServiceRejectsDuplicatePayloadFields(t *testing.T) {
+	service := NewService(NewMemoryRepository())
+	subject := identity.Subject{UserID: "user-alice", Role: identity.RoleUser}
+	operation := Operation{
+		Scope: ScopePrivate, Method: "POST", Path: "/api/v1/platform/mcp-scans", Key: "duplicate-payload-field",
+		Payload: json.RawMessage(`{"source_kind":"service","source_kind":"repository"}`),
+	}
+	called := false
+	_, err := service.Execute(context.Background(), subject, operation, func(context.Context, *Claim) error {
+		called = true
+		return errors.New("duplicate payload must not reach the business callback")
+	})
+	require.ErrorIs(t, err, ErrInvalid)
+	assert.False(t, called)
+}
+
+func TestServiceNormalizesEquivalentEscapedPaths(t *testing.T) {
+	service := NewService(NewMemoryRepository())
+	subject := identity.Subject{UserID: "user-alice", Role: identity.RoleUser}
+	operation := Operation{Scope: ScopePrivate, Method: "POST", Path: "/api/v1/%6dcp-scans", Key: "canonical-path", Payload: json.RawMessage(`{"source_kind":"service"}`)}
+	called := 0
+	_, err := service.Execute(context.Background(), subject, operation, func(ctx context.Context, claim *Claim) error {
+		called++
+		return claim.PersistSuccess(ctx, 200, SafeResponse{TaskID: "01e5f3a4-ec5b-4a15-9d07-0161d42f0c26", Status: "pending"})
+	})
+	require.NoError(t, err)
+
+	operation.Path = "/api/v1/mcp-scans"
+	result, err := service.Execute(context.Background(), subject, operation, func(context.Context, *Claim) error {
+		called++
+		return nil
+	})
+	require.NoError(t, err)
+	assert.True(t, result.Replay)
+	assert.Equal(t, 1, called)
+}
+
 func TestDeriveScopeKeyUsesTrustedSubjectOnly(t *testing.T) {
 	user := identity.Subject{UserID: "user-alice", Role: identity.RoleUser}
 	admin := identity.Subject{UserID: "admin-ivy", Role: identity.RoleAdmin}
@@ -235,6 +293,24 @@ func TestGormClaimSuccessRecordRollsBackWithItsBusinessTransaction(t *testing.T)
 	require.NoError(t, err)
 	assert.False(t, result.Replay)
 	assert.Equal(t, 1, called)
+}
+
+func TestGormServiceRejectsSuccessOutsideBusinessTransaction(t *testing.T) {
+	ctx := context.Background()
+	db := openIdempotencyPostgresDB(t)
+	repository := NewGormRepository(db)
+	require.NoError(t, database.Migrate(db))
+	service := NewService(repository)
+	subject := identity.Subject{UserID: "user-alice", Role: identity.RoleUser}
+	operation := Operation{Scope: ScopePrivate, Method: "POST", Path: "/api/v1/platform/mcp-scans", Key: "transaction-required", Payload: json.RawMessage(`{"source_kind":"service"}`)}
+
+	_, err := service.Execute(ctx, subject, operation, func(locked context.Context, claim *Claim) error {
+		return claim.PersistSuccess(locked, 200, SafeResponse{TaskID: "01e5f3a4-ec5b-4a15-9d07-0161d42f0c27", Status: "pending"})
+	})
+	require.ErrorIs(t, err, ErrTransactionRequired)
+	var count int64
+	require.NoError(t, db.Model(&Record{}).Count(&count).Error)
+	assert.Zero(t, count)
 }
 
 func TestRepositoryRejectsUnsafeRawSafeResponse(t *testing.T) {
