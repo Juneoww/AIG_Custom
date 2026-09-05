@@ -69,6 +69,22 @@ func TestServiceRejectsQueryFromMCPMutationIdentity(t *testing.T) {
 	assert.False(t, called)
 }
 
+func TestServiceRejectsEmptyQueryFromMCPMutationIdentity(t *testing.T) {
+	service := NewService(NewMemoryRepository())
+	subject := identity.Subject{UserID: "user-alice", Role: identity.RoleUser}
+	operation := Operation{
+		Scope: ScopePrivate, Method: "POST", Path: "/api/v1/platform/mcp-scans?", Key: "empty-query-is-not-identity",
+		Payload: json.RawMessage(`{"source_kind":"service"}`),
+	}
+	called := false
+	_, err := service.Execute(context.Background(), subject, operation, func(context.Context, *Claim) error {
+		called = true
+		return errors.New("empty-query mutation must be rejected before business execution")
+	})
+	require.ErrorIs(t, err, ErrInvalid)
+	assert.False(t, called)
+}
+
 func TestServiceRejectsReusedKeyForDifferentCanonicalPayload(t *testing.T) {
 	service := NewService(NewMemoryRepository())
 	subject := identity.Subject{UserID: "user-alice", Role: identity.RoleUser}
@@ -207,7 +223,19 @@ func TestGormServiceSerializesConcurrentMCPKeysAndPersistsOnlySafeFields(t *test
 	require.NoError(t, database.Migrate(db))
 	require.NoError(t, repository.Init())
 	first := NewService(repository)
-	second := NewService(NewGormRepository(db))
+	secondRepository := NewGormRepository(db)
+	type lockAttempt struct {
+		backendPID int
+		err        error
+	}
+	secondLockAttempt := make(chan lockAttempt, 1)
+	secondRepository.beforeKeyLock = func(locked context.Context) error {
+		var backendPID int
+		err := txcontext.Gorm(locked, db).Raw("SELECT pg_backend_pid()").Scan(&backendPID).Error
+		secondLockAttempt <- lockAttempt{backendPID: backendPID, err: err}
+		return err
+	}
+	second := NewService(secondRepository)
 	subject := identity.Subject{UserID: "user-alice", Role: identity.RoleUser}
 	operation := Operation{
 		Scope: ScopePrivate, Method: "POST", Path: "/api/v1/platform/mcp-scans",
@@ -263,7 +291,9 @@ func TestGormServiceSerializesConcurrentMCPKeysAndPersistsOnlySafeFields(t *test
 		})
 		secondDone <- execution{result: result, err: err}
 	}()
-	waitForAdvisoryLockWaiter(t, db)
+	secondAttempt := <-secondLockAttempt
+	require.NoError(t, secondAttempt.err)
+	waitForAdvisoryLockWaiter(t, db, lockBackendPID, secondAttempt.backendPID)
 	close(release)
 	firstResult := <-firstDone
 	secondResult := <-secondDone
@@ -284,18 +314,31 @@ func TestGormServiceSerializesConcurrentMCPKeysAndPersistsOnlySafeFields(t *test
 	}
 }
 
-func waitForAdvisoryLockWaiter(t *testing.T, db *gorm.DB) {
+func waitForAdvisoryLockWaiter(t *testing.T, db *gorm.DB, holderBackendPID, waitingBackendPID int) {
 	t.Helper()
 	deadline := time.Now().Add(2 * time.Second)
 	for {
 		var waiting int64
-		err := db.Raw("SELECT count(*) FROM pg_locks WHERE locktype = 'advisory' AND NOT granted").Scan(&waiting).Error
+		err := db.Raw(`
+SELECT count(*)
+FROM pg_locks AS waiter
+JOIN pg_locks AS holder
+  ON holder.locktype = waiter.locktype
+ AND holder.database IS NOT DISTINCT FROM waiter.database
+ AND holder.classid = waiter.classid
+ AND holder.objid = waiter.objid
+ AND holder.objsubid = waiter.objsubid
+WHERE waiter.locktype = 'advisory'
+  AND NOT waiter.granted
+  AND waiter.pid = ?
+  AND holder.granted
+  AND holder.pid = ?`, waitingBackendPID, holderBackendPID).Scan(&waiting).Error
 		if err == nil && waiting > 0 {
 			return
 		}
 		if time.Now().After(deadline) {
 			require.NoError(t, err)
-			t.Fatal("the second request never reached PostgreSQL advisory-lock waiting state")
+			t.Fatal("the second request never waited for the first request's PostgreSQL advisory lock")
 		}
 		time.Sleep(10 * time.Millisecond)
 	}

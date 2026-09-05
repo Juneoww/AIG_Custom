@@ -33,7 +33,10 @@ type Repository interface {
 
 // GormRepository operates only on the v10 MCP idempotency table and never
 // performs runtime DDL.
-type GormRepository struct{ db *gorm.DB }
+type GormRepository struct {
+	db            *gorm.DB
+	beforeKeyLock func(context.Context) error
+}
 
 func NewGormRepository(db *gorm.DB) *GormRepository { return &GormRepository{db: db} }
 
@@ -75,6 +78,14 @@ func (repository *GormRepository) WithinKeyLock(ctx context.Context, lockKey str
 		return err
 	}
 	defer connection.Close()
+	lockedDB := repository.db.Session(&gorm.Session{Context: ctx, NewDB: true})
+	lockedDB.Statement.ConnPool = connection
+	lockedContext := txcontext.WithGorm(ctx, lockedDB)
+	if repository.beforeKeyLock != nil {
+		if err := repository.beforeKeyLock(lockedContext); err != nil {
+			return err
+		}
+	}
 	if _, err = connection.ExecContext(ctx, "SELECT pg_advisory_lock(hashtextextended($1, 0))", lockKey); err != nil {
 		return err
 	}
@@ -91,9 +102,7 @@ func (repository *GormRepository) WithinKeyLock(ctx context.Context, lockKey str
 			resultErr = errors.New("释放 MCP 幂等锁失败")
 		}
 	}()
-	lockedDB := repository.db.Session(&gorm.Session{Context: ctx, NewDB: true})
-	lockedDB.Statement.ConnPool = connection
-	return apply(txcontext.WithGorm(ctx, lockedDB))
+	return apply(lockedContext)
 }
 
 func (repository *GormRepository) Get(ctx context.Context, identity recordIdentity) (*Record, error) {
