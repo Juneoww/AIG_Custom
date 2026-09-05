@@ -307,10 +307,12 @@ describe('任务页面', () => {
       'http://localhost:3000/api/v1/platform/tasks?page=3&page_size=20&status=running&task_type=ai_infra_scan',
     )
     expect(await screen.findByRole('heading', { name: 'AI 基础设施扫描' })).toBeInTheDocument()
-    expect(screen.getByText(/已授权目标范围/)).toBeInTheDocument()
+    expect(screen.getByText('集中跟踪已授权目标的扫描任务')).toBeInTheDocument()
     expect(screen.getByRole('link', { name: '新建 AI 基础设施扫描任务' })).toHaveAttribute('href', '/tasks/ai-infra/new')
-    expect(screen.getByRole('combobox', { name: '任务状态' })).toBeInTheDocument()
+    const statusFilter = screen.getByRole('group', { name: 'AI 基础设施扫描状态筛选' })
+    expect(within(statusFilter).getByRole('combobox', { name: '任务状态' })).toBeInTheDocument()
     expect(screen.queryByRole('combobox', { name: '任务类型' })).not.toBeInTheDocument()
+    expect(screen.getByRole('region', { name: 'AI 基础设施扫描运行态势' })).toHaveTextContent('匹配任务41当前查询')
 
     const table = screen.getByRole('table', { name: 'AI 基础设施扫描任务台账' })
     for (const header of ['任务 ID', '负责人', '状态', '创建时间', '更新时间', '操作']) {
@@ -323,6 +325,7 @@ describe('任务页面', () => {
       'href',
       '/tasks/ai-infra/ai%20infra%2Fopaque-1',
     )
+    expect(screen.getByRole('navigation', { name: 'AI 基础设施扫描任务分页' })).toHaveTextContent('共 41 条')
     expect(fetchMock).toHaveBeenCalledTimes(1)
   })
 
@@ -350,6 +353,25 @@ describe('任务页面', () => {
     expect(fetchMock.mock.calls[2]?.[0]).toBe(
       'http://localhost:3000/api/v1/platform/tasks?page=2&page_size=20&status=failed&task_type=ai_infra_scan',
     )
+  })
+
+  it('AI 基础设施列表在服务端返回空页但仍有总数时保留真实分页回退入口', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(jsonResponse({ items: [], total: 41, page: 3, page_size: 20 }))
+    vi.stubGlobal('fetch', fetchMock)
+    renderPage(
+      <TaskListPage fixedTaskType="ai_infra_scan" />,
+      { id: 'user-1', username: 'alice', role: 'user', must_change_password: false },
+      '/tasks/ai-infra?page=3',
+      '/tasks/ai-infra',
+    )
+
+    expect(await screen.findByText('暂无匹配任务')).toBeInTheDocument()
+    const pagination = screen.getByRole('navigation', { name: 'AI 基础设施扫描任务分页' })
+    expect(within(pagination).getByRole('button', { name: '上一页' })).toBeEnabled()
+    expect(within(pagination).getByRole('button', { name: '下一页' })).toBeDisabled()
+    fireEvent.click(within(pagination).getByRole('button', { name: '上一页' }))
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2))
+    expect(fetchMock.mock.calls[1]?.[0]).toBe('http://localhost:3000/api/v1/platform/tasks?page=2&page_size=20&task_type=ai_infra_scan')
   })
 
   it('AI 基础设施列表清除状态或筛选时保留固定 API 类型', async () => {

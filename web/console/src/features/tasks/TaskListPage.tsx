@@ -5,6 +5,7 @@
  * 输出：任务台账、筛选、分页及独立加载/空/失败/403状态。
  * 依赖：Fluent UI、React Query、React Router 与共享监管组件。
  */
+import { AddRegular } from '@fluentui/react-icons'
 import { Button, Field, Select, makeStyles, mergeClasses, tokens } from '@fluentui/react-components'
 import { useQuery } from '@tanstack/react-query'
 import { useEffect } from 'react'
@@ -17,6 +18,10 @@ import { DataTable, type DataTableColumn } from '../../shared/components/DataTab
 import { PageHeader } from '../../shared/components/PageHeader'
 import { StatePanel } from '../../shared/components/StatePanel'
 import { fetchTaskList } from './api'
+import { AIInfraTaskOperationsSummary } from './components/AIInfraTaskOperationsSummary'
+import { AIInfraTaskTable } from './components/AIInfraTaskTable'
+import { AIInfraWorkbenchHeader } from './components/AIInfraWorkbenchHeader'
+import { useAIInfraWorkbenchStyles } from './components/AIInfraWorkbench.styles'
 import { TaskOperationsSummary } from './components/TaskOperationsSummary'
 
 const useStyles = makeStyles({
@@ -153,6 +158,7 @@ interface TaskListPageProps {
 
 export function TaskListPage({ fixedTaskType }: TaskListPageProps) {
   const styles = useStyles()
+  const aiStyles = useAIInfraWorkbenchStyles()
   const { state } = useSession()
   const isAiInfraList = fixedTaskType === 'ai_infra_scan'
   const [searchParams, setSearchParams] = useSearchParams()
@@ -236,11 +242,67 @@ export function TaskListPage({ fixedTaskType }: TaskListPageProps) {
     },
   ]
 
-  const pageTitle = fixedTaskType === 'ai_infra_scan' ? 'AI 基础设施扫描' : '扫描任务'
-  const pageDescription = fixedTaskType === 'ai_infra_scan'
-    ? '查看已授权目标范围内的 AI 基础设施扫描任务状态，筛选由服务端在分页前执行。'
-    : '按权限范围查看任务状态，筛选由服务端在分页前执行。'
-  const tableCaption = fixedTaskType === 'ai_infra_scan' ? 'AI 基础设施扫描任务台账' : '扫描任务台账'
+  const pageTitle = '扫描任务'
+  const pageDescription = '按权限范围查看任务状态，筛选由服务端在分页前执行。'
+  const tableCaption = '扫描任务台账'
+
+  if (isAiInfraList) {
+    return (
+      <section className={aiStyles.page}>
+        <AIInfraWorkbenchHeader
+          action={canCreate ? (
+            <Link className={aiStyles.primaryAction} to="/tasks/ai-infra/new" aria-label="新建 AI 基础设施扫描任务">
+              <AddRegular aria-hidden="true" />
+              <span>新建 AI 基础设施扫描任务</span>
+            </Link>
+          ) : undefined}
+        />
+        <div className={aiStyles.surface} role="group" aria-label="AI 基础设施扫描状态筛选">
+          <div className={aiStyles.filterControls}>
+            <Field className={aiStyles.filterField} label="任务状态">
+              <Select
+                value={status ?? ''}
+                onChange={(_, data) => {
+                  updateSearch(1, (data.value || undefined) as TaskStatus | undefined, taskType)
+                }}
+              >
+                <option value="">全部状态</option>
+                {Object.entries(taskStatusLabels).map(([value, label]) => (
+                  <option key={value} value={value}>{label}</option>
+                ))}
+              </Select>
+            </Field>
+            {hasActiveFilters ? (
+              <Button appearance="subtle" onClick={() => updateSearch(1, undefined, undefined)}>清除筛选</Button>
+            ) : null}
+          </div>
+        </div>
+        {query.isSuccess ? <AIInfraTaskOperationsSummary tasks={query.data.items} total={query.data.total} /> : null}
+        {query.isPending ? <StatePanel state="loading" title="正在加载 AI 基础设施扫描任务" /> : null}
+        {query.isError && query.error instanceof ApiError && query.error.kind === 'forbidden' ? (
+          <StatePanel state="forbidden" title="无权查看 AI 基础设施扫描任务台账" />
+        ) : null}
+        {query.isError && !(query.error instanceof ApiError && query.error.kind === 'forbidden') ? (
+          <StatePanel state="error" title="暂时无法加载 AI 基础设施扫描任务" description="请稍后重试。" actionLabel="重试" onAction={() => void query.refetch()} />
+        ) : null}
+        {query.data?.items.length === 0 ? <StatePanel state="empty" title="暂无匹配任务" description="调整状态筛选或创建新的扫描任务。" /> : null}
+        {query.data && (query.data.items.length > 0 || query.data.total > 0) ? (
+          <AIInfraTaskTable
+            tasks={query.data.items}
+            pagination={{
+              total: query.data.total,
+              page: query.data.page,
+              pageSize: query.data.page_size,
+              onPreviousPage: query.data.page > 1 ? () => updateSearch(query.data.page - 1) : undefined,
+              onNextPage: query.data.page * query.data.page_size < query.data.total
+                ? () => updateSearch(query.data.page + 1)
+                : undefined,
+            }}
+          />
+        ) : null}
+      </section>
+    )
+  }
 
   return (
     <section className={styles.page}>
@@ -251,10 +313,10 @@ export function TaskListPage({ fixedTaskType }: TaskListPageProps) {
         {canCreate ? (
           <Link
             className={styles.headerAction}
-            to={fixedTaskType === 'ai_infra_scan' ? '/tasks/ai-infra/new' : '/tasks/new'}
-            aria-label={fixedTaskType === 'ai_infra_scan' ? '新建 AI 基础设施扫描任务' : '创建扫描任务'}
+            to="/tasks/new"
+            aria-label="创建扫描任务"
           >
-            {fixedTaskType === 'ai_infra_scan' ? '新建 AI 基础设施扫描任务' : '创建任务'}
+            创建任务
           </Link>
         ) : null}
       </PageHeader>
