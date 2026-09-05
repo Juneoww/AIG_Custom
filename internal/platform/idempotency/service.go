@@ -197,7 +197,7 @@ func validIdempotencyKey(value string) bool {
 
 func normalizePath(raw string) (string, error) {
 	parsed, err := url.ParseRequestURI(strings.TrimSpace(raw))
-	if err != nil || parsed.IsAbs() || parsed.Host != "" || parsed.Fragment != "" || !strings.HasPrefix(parsed.Path, "/") {
+	if err != nil || parsed.IsAbs() || parsed.Host != "" || parsed.Fragment != "" || parsed.RawQuery != "" || parsed.ForceQuery || !strings.HasPrefix(parsed.Path, "/") {
 		return "", ErrInvalid
 	}
 	cleaned := path.Clean(parsed.Path)

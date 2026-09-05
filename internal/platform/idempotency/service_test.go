@@ -28,7 +28,7 @@ func TestServiceReplaysCanonicalPrivateRequestOnlyOnce(t *testing.T) {
 	service.now = func() time.Time { return now }
 	subject := identity.Subject{UserID: "user-alice", Role: identity.RoleUser}
 	operation := Operation{
-		Scope: ScopePrivate, Method: "post", Path: "/api/v1/platform/mcp-scans?tenant=forged",
+		Scope: ScopePrivate, Method: "post", Path: "/api/v1/platform/mcp-scans",
 		Key: "mcp-create-replay", Payload: json.RawMessage(`{"connection_version":1,"source_kind":"service"}`),
 	}
 	called := 0
@@ -41,7 +41,6 @@ func TestServiceReplaysCanonicalPrivateRequestOnlyOnce(t *testing.T) {
 	assert.Equal(t, 200, first.StatusCode)
 	assert.Equal(t, "pending", first.Response.Status)
 
-	operation.Path = "/api/v1/platform/mcp-scans?tenant=another-forged-value"
 	operation.Payload = json.RawMessage(`{"source_kind":"service","connection_version":1}`)
 	second, err := service.Execute(context.Background(), subject, operation, func(context.Context, *Claim) error {
 		called++
@@ -52,6 +51,22 @@ func TestServiceReplaysCanonicalPrivateRequestOnlyOnce(t *testing.T) {
 	assert.Equal(t, first.StatusCode, second.StatusCode)
 	assert.Equal(t, first.Response, second.Response)
 	assert.Equal(t, 1, called)
+}
+
+func TestServiceRejectsQueryFromMCPMutationIdentity(t *testing.T) {
+	service := NewService(NewMemoryRepository())
+	subject := identity.Subject{UserID: "user-alice", Role: identity.RoleUser}
+	operation := Operation{
+		Scope: ScopePrivate, Method: "POST", Path: "/api/v1/platform/mcp-scans?tenant=forged", Key: "query-is-not-identity",
+		Payload: json.RawMessage(`{"source_kind":"service"}`),
+	}
+	called := false
+	_, err := service.Execute(context.Background(), subject, operation, func(context.Context, *Claim) error {
+		called = true
+		return errors.New("query-bearing mutation must be rejected before business execution")
+	})
+	require.ErrorIs(t, err, ErrInvalid)
+	assert.False(t, called)
 }
 
 func TestServiceRejectsReusedKeyForDifferentCanonicalPayload(t *testing.T) {
@@ -207,11 +222,16 @@ func TestGormServiceSerializesConcurrentMCPKeysAndPersistsOnlySafeFields(t *test
 		err    error
 	}
 	firstDone := make(chan execution, 1)
+	var lockBackendPID int
+	var transactionBackendPID int
 	go func() {
 		result, err := first.Execute(ctx, subject, operation, func(locked context.Context, claim *Claim) error {
 			callbacksMu.Lock()
 			callbacks++
 			callbacksMu.Unlock()
+			if err := txcontext.Gorm(locked, db).Raw("SELECT pg_backend_pid()").Scan(&lockBackendPID).Error; err != nil {
+				return err
+			}
 			close(started)
 			<-release
 			return txcontext.Gorm(locked, db).Transaction(func(transaction *gorm.DB) error {
@@ -219,6 +239,12 @@ func TestGormServiceSerializesConcurrentMCPKeysAndPersistsOnlySafeFields(t *test
 				_, carried := txcontext.FromGorm(transactionContext)
 				if !carried {
 					return fmt.Errorf("the business transaction lost the idempotency lock connection")
+				}
+				if err := txcontext.Gorm(transactionContext, db).Raw("SELECT pg_backend_pid()").Scan(&transactionBackendPID).Error; err != nil {
+					return err
+				}
+				if transactionBackendPID != lockBackendPID {
+					return fmt.Errorf("the business transaction did not use the idempotency lock connection")
 				}
 				return claim.PersistSuccess(transactionContext, 200, SafeResponse{TaskID: "01e5f3a4-ec5b-4a15-9d07-0161d42f0c21", Status: "pending"})
 			})
@@ -237,11 +263,7 @@ func TestGormServiceSerializesConcurrentMCPKeysAndPersistsOnlySafeFields(t *test
 		})
 		secondDone <- execution{result: result, err: err}
 	}()
-	select {
-	case result := <-secondDone:
-		t.Fatalf("the second caller bypassed the physical advisory lock: %+v", result)
-	case <-time.After(100 * time.Millisecond):
-	}
+	waitForAdvisoryLockWaiter(t, db)
 	close(release)
 	firstResult := <-firstDone
 	secondResult := <-secondDone
@@ -249,6 +271,7 @@ func TestGormServiceSerializesConcurrentMCPKeysAndPersistsOnlySafeFields(t *test
 	require.NoError(t, secondResult.err)
 	assert.False(t, firstResult.result.Replay)
 	assert.True(t, secondResult.result.Replay)
+	assert.Equal(t, lockBackendPID, transactionBackendPID)
 	callbacksMu.Lock()
 	assert.Equal(t, 1, callbacks)
 	assert.Zero(t, secondCallbacks)
@@ -258,6 +281,23 @@ func TestGormServiceSerializesConcurrentMCPKeysAndPersistsOnlySafeFields(t *test
 	require.NoError(t, db.Table((Record{}).TableName()).Select("safe_response::text").Scan(&safeResponse).Error)
 	for _, forbidden := range []string{"internal.example.test", "do-not-store", "endpoint", "token"} {
 		assert.NotContains(t, safeResponse, forbidden)
+	}
+}
+
+func waitForAdvisoryLockWaiter(t *testing.T, db *gorm.DB) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		var waiting int64
+		err := db.Raw("SELECT count(*) FROM pg_locks WHERE locktype = 'advisory' AND NOT granted").Scan(&waiting).Error
+		if err == nil && waiting > 0 {
+			return
+		}
+		if time.Now().After(deadline) {
+			require.NoError(t, err)
+			t.Fatal("the second request never reached PostgreSQL advisory-lock waiting state")
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
 }
 
