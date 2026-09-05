@@ -500,6 +500,23 @@ func TestSwaggerDocumentsEnterpriseConsoleContracts(t *testing.T) {
 			assertExactProperties(t, document, "dashboard.AttentionItem", "report_id", "task_id", "task_type", "completed_at", "score", "high", "medium", "low")
 			assertExactProperties(t, document, "tasks.TaskSummary", "id", "owner", "task_type", "status", "created_at", "updated_at")
 			assertExactProperties(t, document, "tasks.TaskDetail", "id", "owner", "task_type", "status", "created_at", "updated_at", "input_summary")
+			assertExactProperties(t, document, "tasks.TaskInputSummary", "language", "model_id", "num_prompts", "port_scan_mode", "target_count", "thread", "timeout")
+			modelID := swaggerValue(t, document, "definitions", "tasks.TaskInputSummary", "properties", "model_id")
+			if got := swaggerValue(t, modelID, "type"); got != "string" {
+				t.Errorf("tasks.TaskInputSummary.model_id type = %v, want string", got)
+			}
+			if got := swaggerValue(t, modelID, "maxLength"); got != float64(128) && got != 128 {
+				t.Errorf("tasks.TaskInputSummary.model_id maxLength = %v, want 128", got)
+			}
+			if got := swaggerValue(t, modelID, "pattern"); got != "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$" {
+				t.Errorf("tasks.TaskInputSummary.model_id pattern = %v", got)
+			}
+			modelIDDescription := strings.ToLower(swaggerValue(t, modelID, "description").(string))
+			for _, term := range []string{"opaque", "persisted", "validated", "not a token", "base url", "credential", "current-availability"} {
+				if !strings.Contains(modelIDDescription, term) {
+					t.Errorf("tasks.TaskInputSummary.model_id description does not contain %q", term)
+				}
+			}
 
 			if got := swaggerValue(t, document, "definitions", "dashboard.View", "properties", "security_score", "x-nullable"); got != true {
 				t.Errorf("dashboard security_score x-nullable = %v, want true", got)

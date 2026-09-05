@@ -5,6 +5,7 @@
  * 输出：任务台账、筛选、分页及独立加载/空/失败/403状态。
  * 依赖：Fluent UI、React Query、React Router 与共享监管组件。
  */
+import { AddRegular } from '@fluentui/react-icons'
 import { Button, Field, Select, makeStyles, mergeClasses, tokens } from '@fluentui/react-components'
 import { useQuery } from '@tanstack/react-query'
 import { useEffect } from 'react'
@@ -17,6 +18,10 @@ import { DataTable, type DataTableColumn } from '../../shared/components/DataTab
 import { PageHeader } from '../../shared/components/PageHeader'
 import { StatePanel } from '../../shared/components/StatePanel'
 import { fetchTaskList } from './api'
+import { AIInfraTaskOperationsSummary } from './components/AIInfraTaskOperationsSummary'
+import { AIInfraTaskTable } from './components/AIInfraTaskTable'
+import { AIInfraWorkbenchHeader } from './components/AIInfraWorkbenchHeader'
+import { useAIInfraWorkbenchStyles } from './components/AIInfraWorkbench.styles'
 import { TaskOperationsSummary } from './components/TaskOperationsSummary'
 
 const useStyles = makeStyles({
@@ -147,16 +152,22 @@ export function formatTaskTime(value: string): string {
   return formatter.format(new Date(value))
 }
 
-export function TaskListPage() {
+interface TaskListPageProps {
+  fixedTaskType?: Exclude<TaskType, 'unknown'>
+}
+
+export function TaskListPage({ fixedTaskType }: TaskListPageProps) {
   const styles = useStyles()
+  const aiStyles = useAIInfraWorkbenchStyles()
   const { state } = useSession()
+  const isAiInfraList = fixedTaskType === 'ai_infra_scan'
   const [searchParams, setSearchParams] = useSearchParams()
   const page = positivePage(searchParams.get('page'))
   const statusValue = searchParams.get('status') as TaskStatus | null
   const taskTypeValue = searchParams.get('task_type') as Exclude<TaskType, 'unknown'> | null
   const status = statusValue && selectableStatuses.has(statusValue) ? statusValue : undefined
-  const taskType = taskTypeValue && selectableTaskTypes.has(taskTypeValue) ? taskTypeValue : undefined
-  const normalizedSearch = normalizedTaskSearch(page, status, taskType)
+  const taskType = fixedTaskType ?? (taskTypeValue && selectableTaskTypes.has(taskTypeValue) ? taskTypeValue : undefined)
+  const normalizedSearch = normalizedTaskSearch(page, status, fixedTaskType ? undefined : taskType)
   useEffect(() => {
     if (searchParams.toString() !== normalizedSearch) setSearchParams(normalizedSearch, { replace: true })
   }, [normalizedSearch, searchParams, setSearchParams])
@@ -164,12 +175,12 @@ export function TaskListPage() {
     nextPage: number,
     ...nextFilters: [] | [TaskStatus | undefined, Exclude<TaskType, 'unknown'> | undefined]
   ) => {
-    if (nextFilters.length === 0) {
-      setSearchParams(normalizedTaskSearch(nextPage, status, taskType))
-      return
-    }
     const [nextStatus, nextTaskType] = nextFilters
-    setSearchParams(normalizedTaskSearch(nextPage, nextStatus, nextTaskType))
+    setSearchParams(normalizedTaskSearch(
+      nextPage,
+      nextFilters.length === 0 ? status : nextStatus,
+      fixedTaskType ? undefined : nextFilters.length === 0 ? taskType : nextTaskType,
+    ))
   }
   const query = useQuery({
     queryKey: ['tasks', { page, pageSize: 20, status, taskType }],
@@ -181,7 +192,7 @@ export function TaskListPage() {
     status ? `状态：${taskStatusLabels[status]}` : '全部状态',
     taskType ? `类型：${taskTypeLabels[taskType]}` : '全部类型',
   ]
-  const hasActiveFilters = Boolean(status || taskType)
+  const hasActiveFilters = Boolean(status || (!fixedTaskType && taskType))
   const statusMarkStyles: Record<TaskStatus, string> = {
     pending: styles.statusPending,
     dispatching: styles.statusActive,
@@ -192,7 +203,26 @@ export function TaskListPage() {
     dispatch_unknown: styles.statusAttention,
     cancelled: styles.statusTerminal,
   }
-  const columns: readonly DataTableColumn<TaskSummary>[] = [
+  const columns: readonly DataTableColumn<TaskSummary>[] = isAiInfraList ? [
+    { id: 'id', header: '任务 ID', render: (task) => task.id },
+    { id: 'owner', header: '负责人', render: (task) => task.owner },
+    {
+      id: 'status',
+      header: '状态',
+      render: (task) => <span className={mergeClasses(styles.statusMark, statusMarkStyles[task.status])}>{taskStatusLabels[task.status]}</span>,
+    },
+    { id: 'created', header: '创建时间', render: (task) => formatTaskTime(task.created_at) },
+    { id: 'updated', header: '更新时间', render: (task) => formatTaskTime(task.updated_at) },
+    {
+      id: 'action',
+      header: '操作',
+      render: (task) => (
+        <Link className={styles.taskLink} to={`/tasks/ai-infra/${encodeURIComponent(task.id)}`} aria-label={`查看任务 ${task.id}`}>
+          查看
+        </Link>
+      ),
+    },
+  ] : [
     { id: 'type', header: '任务类型', render: (task) => taskTypeLabels[task.task_type] },
     { id: 'owner', header: '负责人', render: (task) => task.owner },
     {
@@ -212,14 +242,80 @@ export function TaskListPage() {
     },
   ]
 
+  const pageTitle = '扫描任务'
+  const pageDescription = '按权限范围查看任务状态，筛选由服务端在分页前执行。'
+  const tableCaption = '扫描任务台账'
+
+  if (isAiInfraList) {
+    return (
+      <section className={aiStyles.page}>
+        <AIInfraWorkbenchHeader
+          action={canCreate ? (
+            <Link className={aiStyles.primaryAction} to="/tasks/ai-infra/new" aria-label="新建 AI 基础设施扫描任务">
+              <AddRegular aria-hidden="true" />
+              <span>新建 AI 基础设施扫描任务</span>
+            </Link>
+          ) : undefined}
+        />
+        <div className={aiStyles.surface} role="group" aria-label="AI 基础设施扫描状态筛选">
+          <div className={aiStyles.filterControls}>
+            <Field className={aiStyles.filterField} label="任务状态">
+              <Select
+                value={status ?? ''}
+                onChange={(_, data) => {
+                  updateSearch(1, (data.value || undefined) as TaskStatus | undefined, taskType)
+                }}
+              >
+                <option value="">全部状态</option>
+                {Object.entries(taskStatusLabels).map(([value, label]) => (
+                  <option key={value} value={value}>{label}</option>
+                ))}
+              </Select>
+            </Field>
+            {hasActiveFilters ? (
+              <Button appearance="subtle" onClick={() => updateSearch(1, undefined, undefined)}>清除筛选</Button>
+            ) : null}
+          </div>
+        </div>
+        {query.isSuccess ? <AIInfraTaskOperationsSummary tasks={query.data.items} total={query.data.total} /> : null}
+        {query.isPending ? <StatePanel state="loading" title="正在加载 AI 基础设施扫描任务" /> : null}
+        {query.isError && query.error instanceof ApiError && query.error.kind === 'forbidden' ? (
+          <StatePanel state="forbidden" title="无权查看 AI 基础设施扫描任务台账" />
+        ) : null}
+        {query.isError && !(query.error instanceof ApiError && query.error.kind === 'forbidden') ? (
+          <StatePanel state="error" title="暂时无法加载 AI 基础设施扫描任务" description="请稍后重试。" actionLabel="重试" onAction={() => void query.refetch()} />
+        ) : null}
+        {query.data?.items.length === 0 ? <StatePanel state="empty" title="暂无匹配任务" description="调整状态筛选或创建新的扫描任务。" /> : null}
+        {query.data && (query.data.items.length > 0 || query.data.total > 0) ? (
+          <AIInfraTaskTable
+            tasks={query.data.items}
+            pagination={{
+              total: query.data.total,
+              page: query.data.page,
+              pageSize: query.data.page_size,
+              onPreviousPage: query.data.page > 1 ? () => updateSearch(query.data.page - 1) : undefined,
+              onNextPage: query.data.page * query.data.page_size < query.data.total
+                ? () => updateSearch(query.data.page + 1)
+                : undefined,
+            }}
+          />
+        ) : null}
+      </section>
+    )
+  }
+
   return (
     <section className={styles.page}>
       <PageHeader
-        title="扫描任务"
-        description="按权限范围查看任务状态，筛选由服务端在分页前执行。"
+        title={pageTitle}
+        description={pageDescription}
       >
         {canCreate ? (
-          <Link className={styles.headerAction} to="/tasks/new" aria-label="创建扫描任务">
+          <Link
+            className={styles.headerAction}
+            to="/tasks/new"
+            aria-label="创建扫描任务"
+          >
             创建任务
           </Link>
         ) : null}
@@ -240,20 +336,22 @@ export function TaskListPage() {
               ))}
             </Select>
           </Field>
-          <Field className={styles.filter} label="任务类型">
-            <Select
-              className={styles.select}
-              value={taskType ?? ''}
-              onChange={(_, data) => {
-                updateSearch(1, status, (data.value || undefined) as Exclude<TaskType, 'unknown'> | undefined)
-              }}
-            >
-              <option value="">全部类型</option>
-              {Object.entries(taskTypeLabels).filter(([value]) => value !== 'unknown').map(([value, label]) => (
-                <option key={value} value={value}>{label}</option>
-              ))}
-            </Select>
-          </Field>
+          {!fixedTaskType ? (
+            <Field className={styles.filter} label="任务类型">
+              <Select
+                className={styles.select}
+                value={taskType ?? ''}
+                onChange={(_, data) => {
+                  updateSearch(1, status, (data.value || undefined) as Exclude<TaskType, 'unknown'> | undefined)
+                }}
+              >
+                <option value="">全部类型</option>
+                {Object.entries(taskTypeLabels).filter(([value]) => value !== 'unknown').map(([value, label]) => (
+                  <option key={value} value={value}>{label}</option>
+                ))}
+              </Select>
+            </Field>
+          ) : null}
         </div>
       </div>
       {query.isSuccess ? (
@@ -274,7 +372,7 @@ export function TaskListPage() {
       {query.data?.items.length === 0 ? <StatePanel state="empty" title="暂无匹配任务" description="调整筛选条件或创建新的扫描任务。" /> : null}
       {query.data?.items.length ? (
         <div className={styles.tableViewport}>
-          <DataTable caption="扫描任务台账" columns={columns} rows={query.data.items} getRowKey={(task) => task.id} />
+          <DataTable caption={tableCaption} columns={columns} rows={query.data.items} getRowKey={(task) => task.id} />
         </div>
       ) : null}
       {query.data ? (

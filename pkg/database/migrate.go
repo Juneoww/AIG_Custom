@@ -47,6 +47,7 @@ var migrations = []migration{
 	{version: 7, apply: migrateReportSchema},
 	{version: 8, apply: migratePlatformTaskDashboardIndexes},
 	{version: 9, apply: migratePlatformAttachmentLifecycle},
+	{version: 10, apply: migratePlatformTaskRemarkAndTargetCount},
 }
 
 const migrationAdvisoryLockKey int64 = 301237729
@@ -391,4 +392,16 @@ WHERE attachment.state = 'ready'
     ) AS reference(value)
     WHERE reference.value = attachment.id
   )`).Error
+}
+
+func migratePlatformTaskRemarkAndTargetCount(db *gorm.DB) error {
+	for _, statement := range []string{
+		`ALTER TABLE platform_tasks ADD COLUMN IF NOT EXISTS remark text NOT NULL DEFAULT ''`,
+		`ALTER TABLE platform_tasks ADD COLUMN IF NOT EXISTS target_count integer NOT NULL DEFAULT 0`,
+	} {
+		if err := db.Exec(statement).Error; err != nil {
+			return err
+		}
+	}
+	return nil
 }

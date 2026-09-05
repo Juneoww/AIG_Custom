@@ -231,6 +231,30 @@ export const appRoutes: RouteObject[] = [
             ),
           },
           {
+            path: 'tasks/ai-infra',
+            element: (
+              <RequireRole allowedRoles={['user', 'auditor', 'admin']}>
+                <TaskListPage fixedTaskType="ai_infra_scan" />
+              </RequireRole>
+            ),
+          },
+          {
+            path: 'tasks/ai-infra/new',
+            element: (
+              <RequireRole allowedRoles={['user', 'admin']}>
+                <TaskCreatePage fixedTaskType="ai_infra_scan" returnTo="/tasks/ai-infra" />
+              </RequireRole>
+            ),
+          },
+          {
+            path: 'tasks/ai-infra/:taskId',
+            element: (
+              <RequireRole allowedRoles={['user', 'auditor', 'admin']}>
+                <TaskDetailPage expectedTaskType="ai_infra_scan" returnTo="/tasks/ai-infra" />
+              </RequireRole>
+            ),
+          },
+          {
             path: 'tasks/:taskId',
             element: (
               <RequireRole allowedRoles={['user', 'auditor', 'admin']}>

@@ -2,9 +2,15 @@ package tasks
 
 import (
 	"encoding/json"
+	"regexp"
 	"strings"
 	"time"
+	"unicode/utf8"
+
+	"github.com/Juneoww/AIG_Custom/common/runner"
 )
+
+var safeModelIDPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$`)
 
 // TaskSummary is the intentionally small browser list wire model.
 type TaskSummary struct {
@@ -28,6 +34,7 @@ type TaskListResponse struct {
 // are intentionally not representable by this type.
 type TaskInputSummary struct {
 	Language     string `json:"language,omitempty"`
+	ModelID      string `json:"model_id,omitempty"`
 	Thread       int    `json:"thread,omitempty"`
 	Timeout      int    `json:"timeout,omitempty"`
 	TargetCount  int    `json:"target_count,omitempty"`
@@ -40,6 +47,7 @@ type TaskDetail struct {
 	Owner        string           `json:"owner"`
 	TaskType     string           `json:"task_type"`
 	Status       Status           `json:"status"`
+	Remark       string           `json:"remark,omitempty"`
 	CreatedAt    time.Time        `json:"created_at"`
 	UpdatedAt    time.Time        `json:"updated_at"`
 	InputSummary TaskInputSummary `json:"input_summary"`
@@ -58,10 +66,11 @@ type TaskCreateBadRequestResponse struct {
 }
 
 type taskDetailFields struct {
-	ID, Owner, TaskType, Content, CountryIsoCode string
-	Status                                       Status
-	Params                                       json.RawMessage
-	CreatedAt, UpdatedAt                         time.Time
+	ID, Owner, TaskType, Content, Remark, CountryIsoCode string
+	Status                                               Status
+	TargetCount                                          int
+	Params                                               json.RawMessage
+	CreatedAt, UpdatedAt                                 time.Time
 }
 
 func taskSummaryOf(task *Task) TaskSummary {
@@ -74,7 +83,8 @@ func taskSummaryOf(task *Task) TaskSummary {
 func taskDetailOf(task *Task) TaskDetail {
 	return taskDetailFromFields(taskDetailFields{
 		ID: task.ID, Owner: task.OwnerUsername, TaskType: task.TaskType, Status: task.Status,
-		Content: task.Content, Params: task.Params, CountryIsoCode: task.CountryIsoCode,
+		Content: task.Content, Remark: task.Remark, TargetCount: task.TargetCount,
+		Params: task.Params, CountryIsoCode: task.CountryIsoCode,
 		CreatedAt: task.CreatedAt, UpdatedAt: task.UpdatedAt,
 	})
 }
@@ -82,19 +92,25 @@ func taskDetailOf(task *Task) TaskDetail {
 func taskDetailOfView(view View) TaskDetail {
 	return taskDetailFromFields(taskDetailFields{
 		ID: view.ID, Owner: view.OwnerUsername, TaskType: view.TaskType, Status: view.Status,
-		Content: view.Content, Params: view.Params, CountryIsoCode: view.CountryIsoCode,
+		Content: view.Content, Remark: view.Remark, TargetCount: view.TargetCount,
+		Params: view.Params, CountryIsoCode: view.CountryIsoCode,
 		CreatedAt: view.CreatedAt, UpdatedAt: view.UpdatedAt,
 	})
 }
 
 func taskDetailFromFields(fields taskDetailFields) TaskDetail {
-	return TaskDetail{
+	detail := TaskDetail{
 		ID: fields.ID, Owner: fields.Owner, TaskType: canonicalTaskType(fields.TaskType), Status: fields.Status,
 		CreatedAt: fields.CreatedAt, UpdatedAt: fields.UpdatedAt,
 		InputSummary: safeInputSummary(&Task{
-			TaskType: fields.TaskType, Content: fields.Content, Params: fields.Params, CountryIsoCode: fields.CountryIsoCode,
+			TaskType: fields.TaskType, Content: fields.Content, TargetCount: fields.TargetCount,
+			Params: fields.Params, CountryIsoCode: fields.CountryIsoCode,
 		}),
 	}
+	if remark := safeTaskRemark(fields.Remark); remark != "" {
+		detail.Remark = remark
+	}
+	return detail
 }
 
 func safeInputSummary(task *Task) TaskInputSummary {
@@ -102,8 +118,9 @@ func safeInputSummary(task *Task) TaskInputSummary {
 		return TaskInputSummary{}
 	}
 	type displayParams struct {
-		Thread  int `json:"thread"`
-		Timeout int `json:"timeout"`
+		ModelID string `json:"model_id"`
+		Thread  int    `json:"thread"`
+		Timeout int    `json:"timeout"`
 		Dataset struct {
 			NumPrompts int `json:"numPrompts"`
 		} `json:"dataset"`
@@ -117,10 +134,20 @@ func safeInputSummary(task *Task) TaskInputSummary {
 			Thread:   safePositiveInt(params.Thread, 1024),
 		}
 	case "ai_infra_scan":
+		targetCount := task.TargetCount
+		if targetCount == 0 {
+			targetCount = nonEmptyLineCount(task.Content)
+			if targetCount > runner.MaxTargetExpressions {
+				targetCount = 0
+			}
+		} else if targetCount < 1 || targetCount > runner.MaxTargetExpressions {
+			targetCount = 0
+		}
 		summary := TaskInputSummary{
 			Language:    safeLanguage(task.CountryIsoCode),
+			ModelID:     safeModelID(params.ModelID),
 			Timeout:     safePositiveInt(params.Timeout, 86400),
-			TargetCount: nonEmptyLineCount(task.Content),
+			TargetCount: targetCount,
 		}
 		if mode, valid := normalizedInfrastructurePortScanMode(task.Params); valid {
 			summary.PortScanMode = string(mode)
@@ -136,6 +163,21 @@ func safeInputSummary(task *Task) TaskInputSummary {
 	default:
 		return TaskInputSummary{}
 	}
+}
+
+func safeTaskRemark(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" || !utf8.ValidString(value) || utf8.RuneCountInString(value) > MaxTaskRemarkRuneCount {
+		return ""
+	}
+	return value
+}
+
+func safeModelID(value string) string {
+	if len(value) == 0 || len(value) > 128 || !safeModelIDPattern.MatchString(value) {
+		return ""
+	}
+	return value
 }
 
 func canonicalTaskType(value string) string {

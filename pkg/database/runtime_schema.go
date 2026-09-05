@@ -23,7 +23,7 @@ import (
 
 // LatestSchemaVersion is the schema version required by the running server.
 // Schema changes are applied only by the explicit `aig migrate` command.
-const LatestSchemaVersion int64 = 9
+const LatestSchemaVersion int64 = 10
 
 var requiredRuntimeTables = []string{
 	"users",
@@ -44,6 +44,9 @@ var requiredRuntimeTables = []string{
 }
 
 var requiredRuntimeColumns = map[string][]string{
+	"platform_tasks": {
+		"remark", "target_count",
+	},
 	"report_snapshots": {
 		"task_id", "owner_user_id", "task_type", "completed_at", "created_at",
 		"raw_result", "risk_summary", "render_data", "brand_snapshot",

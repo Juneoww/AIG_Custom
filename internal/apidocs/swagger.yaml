@@ -940,6 +940,11 @@ definitions:
         - zh
         - en
         type: string
+      model_id:
+        description: Opaque persisted and validated AI infrastructure model reference for current catalog-label recovery; not a Token, Base URL, credential, or current-availability claim.
+        maxLength: 128
+        pattern: ^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$
+        type: string
       num_prompts:
         maximum: 1000000
         minimum: 1

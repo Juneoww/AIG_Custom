@@ -6,10 +6,12 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/Juneoww/AIG_Custom/common/runner"
 	"github.com/Juneoww/AIG_Custom/internal/platform/audit"
 	"github.com/Juneoww/AIG_Custom/internal/platform/identity"
 	"github.com/Juneoww/AIG_Custom/pkg/database"
@@ -44,6 +46,7 @@ func TestTaskBrowserListReturnsSafePagedOwnerScopedContract(t *testing.T) {
 			ID: fmt.Sprintf("task-%02d", index), OwnerUserID: ownerID, OwnerUsername: ownerName,
 			IdempotencyKey: fmt.Sprintf("key-%02d", index), EngineSessionID: "engine-secret",
 			TaskType: "mcp_scan", Content: "private-content", Params: json.RawMessage(`{"token":"params-secret"}`),
+			Remark: "list-remark-secret", TargetCount: 4123,
 			AttachmentRefs: json.RawMessage(`["attachment-secret"]`), Status: StatusRunning,
 			DispatchError: "dispatch-secret", DispatchClaimToken: "claim-secret",
 			CreatedAt: base.Add(time.Duration(index/2) * time.Minute), UpdatedAt: base.Add(time.Duration(index) * time.Minute),
@@ -65,7 +68,7 @@ func TestTaskBrowserListReturnsSafePagedOwnerScopedContract(t *testing.T) {
 	items := wire["items"].([]any)
 	require.NotEmpty(t, items)
 	assert.ElementsMatch(t, []string{"id", "owner", "task_type", "status", "created_at", "updated_at"}, mapKeys(items[0].(map[string]any)))
-	for _, secret := range []string{"user-alice", "engine-secret", "private-content", "params-secret", "attachment-secret", "dispatch-secret", "claim-secret"} {
+	for _, secret := range []string{"user-alice", "engine-secret", "private-content", "params-secret", "attachment-secret", "dispatch-secret", "claim-secret", "list-remark-secret", "4123"} {
 		assert.NotContains(t, response.Body.String(), secret)
 	}
 
@@ -300,12 +303,114 @@ func TestTaskBrowserDetailUsesTaskTypeWhitelistAndDropsUnsafeFields(t *testing.T
 	}
 }
 
+func TestTaskBrowserDetailAIInfraModelIDProjectionIsSafe(t *testing.T) {
+	router, tokens, repository, _ := newTaskBrowserFixture(t)
+	now := time.Now().UTC()
+	putBrowserTask(t, repository, Task{
+		ID: "infra-model-safe", OwnerUserID: "user-alice", OwnerUsername: "alice", IdempotencyKey: "infra-model-safe",
+		TaskType: "ai_infra_scan", Content: "first-target\nsecond-target", Remark: "本次扫描用于上线前复核", TargetCount: 9,
+		CountryIsoCode: "zh", Status: StatusPending,
+		Params: json.RawMessage(`{"model_id":"model-opaque-1","timeout":300,"port_scan_mode":"fixed_ai"}`),
+		AttachmentRefs: json.RawMessage(`[]`), CreatedAt: now, UpdatedAt: now,
+	})
+	putBrowserTask(t, repository, Task{
+		ID: "infra-model-unsafe", OwnerUserID: "user-alice", OwnerUsername: "alice", IdempotencyKey: "infra-model-unsafe",
+		TaskType: "ai_infra_scan", Content: "one-target", CountryIsoCode: "en", Status: StatusPending,
+		Params: json.RawMessage(`{"model_id":"model-opaque-2","timeout":60,"port_scan_mode":"fixed_ai","token":"token-sentinel","base_url":"https://credential.invalid","credentials":{"token":"nested-credential-sentinel"}}`),
+		AttachmentRefs: json.RawMessage(`[]`), CreatedAt: now, UpdatedAt: now,
+	})
+
+	response := performTaskJSON(t, router, tokens["alice"], http.MethodGet, "/tasks/infra-model-safe", "", nil)
+	require.Equal(t, http.StatusOK, response.Code, response.Body.String())
+	var safeWire map[string]any
+	require.NoError(t, json.Unmarshal(response.Body.Bytes(), &safeWire))
+	assert.Equal(t, "本次扫描用于上线前复核", safeWire["remark"])
+	assert.Equal(t, map[string]any{
+		"language": "zh", "model_id": "model-opaque-1", "timeout": float64(300), "target_count": float64(9), "port_scan_mode": "fixed_ai",
+	}, safeWire["input_summary"])
+
+	response = performTaskJSON(t, router, tokens["alice"], http.MethodGet, "/tasks/infra-model-unsafe", "", nil)
+	require.Equal(t, http.StatusOK, response.Code, response.Body.String())
+	var unsafeWire map[string]any
+	require.NoError(t, json.Unmarshal(response.Body.Bytes(), &unsafeWire))
+	assert.NotContains(t, unsafeWire, "remark", "empty remarks must preserve the existing wire shape")
+	assert.Equal(t, map[string]any{
+		"language": "en", "model_id": "model-opaque-2", "timeout": float64(60), "target_count": float64(1),
+	}, unsafeWire["input_summary"])
+	for _, forbidden := range []string{"token-sentinel", "https://credential.invalid", "nested-credential-sentinel", "credentials", "params"} {
+		assert.NotContains(t, response.Body.String(), forbidden)
+	}
+}
+
+func TestSafeInputSummaryUsesPersistedAIInfraTargetCountWithBoundedLegacyFallback(t *testing.T) {
+	tests := []struct {
+		name        string
+		targetCount int
+		content     string
+		expected    int
+	}{
+		{name: "attachment or expanded range count wins", targetCount: 9, content: "one-manual-line", expected: 9},
+		{name: "legacy zero falls back to nonempty lines", targetCount: 0, content: "first\n\n second ", expected: 2},
+		{name: "negative corrupt count is omitted", targetCount: -1, content: "first\nsecond", expected: 0},
+		{name: "oversized corrupt count is omitted", targetCount: runner.MaxTargetExpressions + 1, content: "one-safe-line", expected: 0},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			summary := safeInputSummary(&Task{
+				TaskType: "ai_infra_scan", Content: test.content, TargetCount: test.targetCount,
+			})
+			assert.Equal(t, test.expected, summary.TargetCount)
+			if test.expected == 0 {
+				encoded, err := json.Marshal(summary)
+				require.NoError(t, err)
+				assert.NotContains(t, string(encoded), "target_count")
+			}
+		})
+	}
+}
+
+func TestSafeInputSummaryBoundsLegacyAIInfraTargetCountFallback(t *testing.T) {
+	content := strings.Repeat("target\n", runner.MaxTargetExpressions+1)
+	summary := safeInputSummary(&Task{TaskType: "ai_infra_scan", Content: content, TargetCount: 0})
+	assert.Zero(t, summary.TargetCount)
+	encoded, err := json.Marshal(summary)
+	require.NoError(t, err)
+	assert.NotContains(t, string(encoded), "target_count")
+}
+
+func TestSafeInputSummaryOmitsInvalidAIInfraModelID(t *testing.T) {
+	for _, modelID := range []string{
+		"model with space",
+		"model/forbidden",
+		"m" + strings.Repeat("a", 128),
+	} {
+		t.Run(modelID, func(t *testing.T) {
+			summary := safeInputSummary(&Task{TaskType: "ai_infra_scan", Params: json.RawMessage(`{"model_id":` + strconv.Quote(modelID) + `}`)})
+			assert.Empty(t, summary.ModelID)
+			encoded, err := json.Marshal(summary)
+			require.NoError(t, err)
+			assert.NotContains(t, string(encoded), "model_id")
+		})
+	}
+}
+
+func TestSafeInputSummaryOnlyAIInfraProjectsModelID(t *testing.T) {
+	for _, taskType := range []string{"mcp_scan", "model_redteam_report", "agent_scan", "future_task"} {
+		t.Run(taskType, func(t *testing.T) {
+			summary := safeInputSummary(&Task{TaskType: taskType, Params: json.RawMessage(`{"model_id":"model-opaque-1"}`)})
+			assert.Empty(t, summary.ModelID)
+		})
+	}
+}
+
 func TestTaskAndViewDetailProjectionStayEquivalentAndSafe(t *testing.T) {
 	now := time.Date(2026, 8, 17, 10, 0, 0, 0, time.UTC)
 	task := &Task{
 		ID: "projection-task", OwnerUserID: "owner-id-sentinel", OwnerUsername: "alice",
 		EngineSessionID: "engine-session-sentinel", TaskType: "AI-Infra-Scan",
-		Content: "https://target.invalid\n\nhttps://second.invalid", Params: json.RawMessage(`{"timeout":45,"secret_label":"params-sentinel"}`),
+		Content: "https://target.invalid\n\nhttps://second.invalid", Remark: " \n发布窗口扫描\t ", TargetCount: 9,
+		Params: json.RawMessage(`{"timeout":45,"secret_label":"params-sentinel"}`),
 		AttachmentRefs: json.RawMessage(`["attachment-sentinel"]`), CountryIsoCode: "en", Status: StatusRunning,
 		DispatchError: "dispatch-error-sentinel", CreatedAt: now, UpdatedAt: now.Add(time.Minute),
 	}
@@ -317,9 +422,49 @@ func TestTaskAndViewDetailProjectionStayEquivalentAndSafe(t *testing.T) {
 	require.NoError(t, err)
 	var wire map[string]any
 	require.NoError(t, json.Unmarshal(encoded, &wire))
-	assert.ElementsMatch(t, []string{"id", "owner", "task_type", "status", "created_at", "updated_at", "input_summary"}, mapKeys(wire))
+	assert.ElementsMatch(t, []string{"id", "owner", "task_type", "status", "created_at", "updated_at", "input_summary", "remark"}, mapKeys(wire))
+	assert.Equal(t, "发布窗口扫描", wire["remark"])
+	assert.Equal(t, float64(9), wire["input_summary"].(map[string]any)["target_count"])
 	for _, forbidden := range []string{"owner-id-sentinel", "engine-session-sentinel", "target.invalid", "params-sentinel", "attachment-sentinel", "dispatch-error-sentinel"} {
 		assert.NotContains(t, string(encoded), forbidden)
+	}
+}
+
+func TestTaskDetailOmitsEmptyRemarkFromJSON(t *testing.T) {
+	detail := taskDetailOf(&Task{TaskType: "ai_infra_scan", Content: "legacy-target"})
+	encoded, err := json.Marshal(detail)
+	require.NoError(t, err)
+	var wire map[string]any
+	require.NoError(t, json.Unmarshal(encoded, &wire))
+	assert.NotContains(t, wire, "remark")
+}
+
+func TestTaskDetailRemarkProjectionNormalizesAndRejectsUnsafeStoredValues(t *testing.T) {
+	tests := []struct {
+		name     string
+		stored   string
+		expected string
+	}{
+		{name: "normalizes valid remark", stored: " \n发布窗口扫描\t ", expected: "发布窗口扫描"},
+		{name: "omits whitespace only remark", stored: " \n\t ", expected: ""},
+		{name: "omits invalid utf8 remark", stored: string([]byte{'o', 'k', 0xff}), expected: ""},
+		{name: "omits oversized remark", stored: strings.Repeat("备", MaxTaskRemarkRuneCount+1), expected: ""},
+		{name: "keeps maximum length remark", stored: strings.Repeat("注", MaxTaskRemarkRuneCount), expected: strings.Repeat("注", MaxTaskRemarkRuneCount)},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			detail := taskDetailOf(&Task{TaskType: "ai_infra_scan", Content: "legacy-target", Remark: test.stored})
+			encoded, err := json.Marshal(detail)
+			require.NoError(t, err)
+			var wire map[string]any
+			require.NoError(t, json.Unmarshal(encoded, &wire))
+			if test.expected == "" {
+				assert.NotContains(t, wire, "remark")
+				return
+			}
+			assert.Equal(t, test.expected, wire["remark"])
+		})
 	}
 }
 
@@ -374,7 +519,7 @@ func TestTaskBrowserGormRepositoryFiltersOwnerBeforePagingAndCountsFilteredTotal
 	for _, column := range []string{"id", "owner_username", "task_type", "status", "created_at", "updated_at"} {
 		assert.Contains(t, projection, column)
 	}
-	for _, forbidden := range []string{"*", "owner_user_id", "content", "params", "attachment_refs", "engine_session_id", "dispatch_error", "dispatch_claim_token", "dispatch_lease_until"} {
+	for _, forbidden := range []string{"*", "owner_user_id", "content", "remark", "target_count", "params", "attachment_refs", "engine_session_id", "dispatch_error", "dispatch_claim_token", "dispatch_lease_until"} {
 		assert.NotContains(t, projection, forbidden)
 	}
 
