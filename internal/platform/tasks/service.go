@@ -60,6 +60,7 @@ const (
 
 type Repository interface {
 	WithinCreateKeyLock(context.Context, string, string, func(context.Context) error) error
+	RequireSpecializedMCPUnitOfWork(context.Context) error
 	CreateOrGet(context.Context, *Task) (*Task, bool, error)
 	ClaimDispatch(context.Context, string, time.Time, time.Time) (string, bool, error)
 	ReserveDispatchAttempt(context.Context, string, string, time.Time) (int, bool, error)
@@ -254,8 +255,11 @@ func (service *Service) CreateSpecializedInUnitOfWork(ctx context.Context, subje
 		!validTaskAttachmentIDs(input.AttachmentIDs) {
 		return nil, ErrInvalid
 	}
-	if _, usesGormRepository := service.repository.(*GormRepository); usesGormRepository && !hasExplicitGormTransaction(ctx) {
+	if !audit.InGovernedMutation(ctx) {
 		return nil, ErrInvalid
+	}
+	if err := service.repository.RequireSpecializedMCPUnitOfWork(ctx); err != nil {
+		return nil, err
 	}
 	attachmentIDs := append([]string{}, input.AttachmentIDs...)
 	params, valid := normalizeMCPTaskParams(input.Params)
@@ -266,6 +270,26 @@ func (service *Service) CreateSpecializedInUnitOfWork(ctx context.Context, subje
 	if err != nil {
 		return nil, ErrInvalid
 	}
+	now := service.now()
+	candidate := &Task{
+		ID: input.TaskID, OwnerUserID: subject.UserID, OwnerUsername: subject.Username,
+		IdempotencyKey: input.TaskID, EngineSessionID: input.TaskID, TaskType: "mcp_scan",
+		Content: "", Params: append(json.RawMessage(nil), params...), AttachmentRefs: attachmentRefs,
+		CountryIsoCode: "zh_CN", Status: StatusPending, CreatedAt: now, UpdatedAt: now,
+	}
+	// Resolve an existing matching task before requiring attached files to still
+	// be ready. The first successful attempt turns its input attachments into
+	// attached; a legitimate retry must return that exact task rather than fail.
+	existing, getErr := service.repository.Get(ctx, input.TaskID)
+	if getErr == nil {
+		if !sameCreateRequest(existing, candidate) {
+			return nil, ErrInvalid
+		}
+		return existing, nil
+	}
+	if !errors.Is(getErr, ErrNotFound) {
+		return nil, getErr
+	}
 	if len(attachmentIDs) > 0 {
 		if service.attachments == nil {
 			return nil, ErrInvalid
@@ -273,13 +297,6 @@ func (service *Service) CreateSpecializedInUnitOfWork(ctx context.Context, subje
 		if _, err := service.attachments.ResolveReady(ctx, subject.UserID, attachmentIDs); err != nil {
 			return nil, err
 		}
-	}
-	now := service.now()
-	candidate := &Task{
-		ID: input.TaskID, OwnerUserID: subject.UserID, OwnerUsername: subject.Username,
-		IdempotencyKey: input.TaskID, EngineSessionID: input.TaskID, TaskType: "mcp_scan",
-		Content: "", Params: append(json.RawMessage(nil), params...), AttachmentRefs: attachmentRefs,
-		CountryIsoCode: "zh_CN", Status: StatusPending, CreatedAt: now, UpdatedAt: now,
 	}
 	persisted, created, err := service.repository.CreateOrGet(ctx, candidate)
 	if err != nil {
@@ -326,6 +343,17 @@ func hasExplicitGormTransaction(ctx context.Context) bool {
 		Rollback() error
 	})
 	return transactional
+}
+
+// RequireSpecializedMCPUnitOfWork ensures that GORM-backed MCP task writes
+// receive the explicit transaction created by the audited UoW. It lives on
+// Repository so decorators must preserve the guard instead of silently
+// bypassing it through a concrete-type assertion.
+func (repository *GormRepository) RequireSpecializedMCPUnitOfWork(ctx context.Context) error {
+	if repository == nil || repository.db == nil || !hasExplicitGormTransaction(ctx) {
+		return ErrInvalid
+	}
+	return nil
 }
 
 func (service *Service) createLocked(
@@ -2778,6 +2806,16 @@ func (repository *MemoryRepository) WithinCreateKeyLock(
 	}
 	defer repository.releaseCreateKeyLock(key, lock, true)
 	return apply(ctx)
+}
+
+// RequireSpecializedMCPUnitOfWork keeps the in-memory repository usable in
+// service tests. The caller still has to carry the non-forgeable audit marker;
+// only the GORM implementation additionally requires a physical transaction.
+func (repository *MemoryRepository) RequireSpecializedMCPUnitOfWork(context.Context) error {
+	if repository == nil {
+		return ErrInvalid
+	}
+	return nil
 }
 
 func (repository *MemoryRepository) releaseCreateKeyLock(key string, lock *memoryCreateLock, acquired bool) {

@@ -2755,12 +2755,18 @@ func TestMCPCreateUnitOfWorkPortCreatesSafeTaskWithoutNestedAuditOrDispatch(t *t
 	repository := NewMemoryRepository()
 	auditRepository := audit.NewMemoryRepository()
 	engine := &recordingEngine{}
-	service := NewService(repository, engine, audit.NewService(auditRepository))
+	auditService := audit.NewService(auditRepository)
+	service := NewService(repository, engine, auditService)
 	subject := identity.Subject{UserID: "mcp-owner", Username: "mcp-owner-name", Role: identity.RoleUser}
 
-	task, err := service.CreateSpecializedInUnitOfWork(ctx, subject, SpecializedCreateInput{
-		TaskID: "01e5f3a4-ec5b-4a15-9d07-0161d42f0d01",
-		Params: json.RawMessage(`{"source_kind":"service","authorization_confirmed":true,"model_id":"governed-model"}`),
+	var task *Task
+	err := runMCPTaskAuditMutation(ctx, auditService, subject, "01e5f3a4-ec5b-4a15-9d07-0161d42f0d01", func(transactionContext context.Context) error {
+		var createErr error
+		task, createErr = service.CreateSpecializedInUnitOfWork(transactionContext, subject, SpecializedCreateInput{
+			TaskID: "01e5f3a4-ec5b-4a15-9d07-0161d42f0d01",
+			Params: json.RawMessage(`{"source_kind":"service","authorization_confirmed":true,"model_id":"governed-model"}`),
+		})
+		return createErr
 	})
 	require.NoError(t, err)
 	require.NotNil(t, task)
@@ -2775,7 +2781,7 @@ func TestMCPCreateUnitOfWorkPortCreatesSafeTaskWithoutNestedAuditOrDispatch(t *t
 	assert.Zero(t, engine.submits.Load(), "the specialized port must not dispatch before its outer UoW commits")
 	events, listErr := auditRepository.List(ctx, audit.Filter{})
 	require.NoError(t, listErr)
-	assert.Empty(t, events, "the specialized port must not begin a nested audit mutation")
+	assert.Len(t, events, 2, "the specialized port must not begin an audit mutation beyond its outer UoW")
 }
 
 func TestMCPCreateUnitOfWorkPortBindsReadyAttachments(t *testing.T) {
@@ -2795,12 +2801,57 @@ func TestMCPCreateUnitOfWorkPortBindsReadyAttachments(t *testing.T) {
 	}
 	require.NoError(t, repository.CreateAttachment(ctx, attachment))
 
-	task, err := service.CreateSpecializedInUnitOfWork(ctx, subject, SpecializedCreateInput{
-		TaskID: "01e5f3a4-ec5b-4a15-9d07-0161d42f0d02", Params: json.RawMessage(`{"source_kind":"repository"}`), AttachmentIDs: []string{attachment.ID},
+	var task *Task
+	err = runMCPTaskAuditMutation(ctx, auditService, subject, "01e5f3a4-ec5b-4a15-9d07-0161d42f0d02", func(transactionContext context.Context) error {
+		var createErr error
+		task, createErr = service.CreateSpecializedInUnitOfWork(transactionContext, subject, SpecializedCreateInput{
+			TaskID: "01e5f3a4-ec5b-4a15-9d07-0161d42f0d02", Params: json.RawMessage(`{"source_kind":"repository"}`), AttachmentIDs: []string{attachment.ID},
+		})
+		return createErr
 	})
 	require.NoError(t, err)
 	assert.Empty(t, task.Content)
 	assert.JSONEq(t, fmt.Sprintf(`["%s"]`, attachment.ID), string(task.AttachmentRefs))
+	storedAttachment, err := repository.GetAttachment(ctx, attachment.ID)
+	require.NoError(t, err)
+	assert.Equal(t, AttachmentStateAttached, storedAttachment.State)
+}
+
+func TestMCPCreateUnitOfWorkPortRetriesAttachedInputIdempotently(t *testing.T) {
+	ctx := context.Background()
+	repository := NewMemoryRepository()
+	auditService := audit.NewService(audit.NewMemoryRepository())
+	attachments, err := NewAttachmentService(repository, AttachmentConfig{
+		UploadDir: t.TempDir(), MaxFileBytes: 16, MaxChunkBytes: 8,
+	}, auditService)
+	require.NoError(t, err)
+	service := NewService(repository, &recordingEngine{}, auditService)
+	service.SetAttachmentService(attachments)
+	subject := identity.Subject{UserID: "mcp-retry-owner", Username: "mcp-retry-owner-name", Role: identity.RoleUser}
+	attachment := &Attachment{
+		ID: "mcp-retry-attachment", OwnerUserID: subject.UserID, OriginalName: "private-source.zip", StorageName: "opaque-retry-storage",
+		Size: 8, State: AttachmentStateReady, CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC(),
+	}
+	require.NoError(t, repository.CreateAttachment(ctx, attachment))
+	input := SpecializedCreateInput{
+		TaskID: "01e5f3a4-ec5b-4a15-9d07-0161d42f0d06", Params: json.RawMessage(`{"source_kind":"repository"}`), AttachmentIDs: []string{attachment.ID},
+	}
+
+	create := func() (*Task, error) {
+		var created *Task
+		err := runMCPTaskAuditMutation(ctx, auditService, subject, input.TaskID, func(transactionContext context.Context) error {
+			var createErr error
+			created, createErr = service.CreateSpecializedInUnitOfWork(transactionContext, subject, input)
+			return createErr
+		})
+		return created, err
+	}
+
+	first, err := create()
+	require.NoError(t, err)
+	second, err := create()
+	require.NoError(t, err, "a retry must accept the attachment already bound by its matching first attempt")
+	assert.Equal(t, first.ID, second.ID)
 	storedAttachment, err := repository.GetAttachment(ctx, attachment.ID)
 	require.NoError(t, err)
 	assert.Equal(t, AttachmentStateAttached, storedAttachment.State)
@@ -2837,7 +2888,8 @@ func TestMCPCreateUnitOfWorkPortRequiresExplicitGormTransaction(t *testing.T) {
 	ctx := context.Background()
 	db := openTaskSnapshotPostgresDB(t)
 	repository := NewGormRepository(db)
-	service := NewService(repository, &recordingEngine{}, audit.NewService(audit.NewMemoryRepository()))
+	auditService := audit.NewService(audit.NewGormRepository(db))
+	service := NewService(repository, &recordingEngine{}, auditService)
 	subject := identity.Subject{UserID: "mcp-gorm-owner", Role: identity.RoleUser}
 	input := SpecializedCreateInput{
 		TaskID: "01e5f3a4-ec5b-4a15-9d07-0161d42f0d05", Params: json.RawMessage(`{"source_kind":"repository"}`),
@@ -2851,9 +2903,45 @@ func TestMCPCreateUnitOfWorkPortRequiresExplicitGormTransaction(t *testing.T) {
 
 	require.NoError(t, db.Transaction(func(transaction *gorm.DB) error {
 		_, createErr := service.CreateSpecializedInUnitOfWork(txcontext.WithGorm(ctx, transaction), subject, input)
+		require.ErrorIs(t, createErr, ErrInvalid, "a bare database transaction is not an audited MCP UoW")
+		return nil
+	}))
+	require.NoError(t, db.Model(&Task{}).Count(&count).Error)
+	assert.Zero(t, count)
+
+	var stored *Task
+	require.NoError(t, auditService.WithinTransaction(ctx, func(transactionContext context.Context) error {
+		_, createErr := service.CreateSpecializedInUnitOfWork(transactionContext, subject, input)
+		require.ErrorIs(t, createErr, ErrInvalid, "an audit transaction without a prepared mutation cannot create an MCP task")
+		return nil
+	}))
+	require.NoError(t, db.Model(&Task{}).Count(&count).Error)
+	assert.Zero(t, count)
+
+	require.NoError(t, runMCPTaskAuditMutation(ctx, auditService, subject, input.TaskID, func(transactionContext context.Context) error {
+		var createErr error
+		stored, createErr = service.CreateSpecializedInUnitOfWork(transactionContext, subject, input)
 		return createErr
 	}))
-	stored, err := repository.Get(ctx, input.TaskID)
+	require.NotNil(t, stored)
+	stored, err = repository.Get(ctx, input.TaskID)
 	require.NoError(t, err)
 	assert.Equal(t, "mcp_scan", stored.TaskType)
+}
+
+func runMCPTaskAuditMutation(
+	ctx context.Context,
+	auditService *audit.Service,
+	subject identity.Subject,
+	taskID string,
+	apply func(context.Context) error,
+) error {
+	mutation, err := audit.BeginMutation(ctx, auditService, subject, audit.EventInput{
+		Action: audit.Action("mcp_scan.created"), ResourceType: "mcp_scan", ResourceID: taskID,
+		Metadata: map[string]any{"task_type": "mcp_scan"},
+	})
+	if err != nil {
+		return err
+	}
+	return mutation.Run(ctx, taskID, map[string]any{"task_type": "mcp_scan"}, apply)
 }

@@ -29,6 +29,23 @@ type ambiguousTransactionRecorder struct {
 	transactions int
 }
 
+func TestMutationRunMarksGovernedContext(t *testing.T) {
+	ctx := context.Background()
+	service := NewService(NewMemoryRepository())
+	actor := identity.Subject{UserID: "governed-mutation-owner", Role: identity.RoleUser}
+	assert.False(t, InGovernedMutation(ctx))
+	mutation, err := BeginMutation(ctx, service, actor, EventInput{
+		Action: ActionKnowledgeChanged, ResourceType: "governed-mutation", ResourceID: "governed-mutation-resource",
+	})
+	require.NoError(t, err)
+
+	require.NoError(t, mutation.Run(ctx, "governed-mutation-resource", nil, func(transactionContext context.Context) error {
+		assert.True(t, InGovernedMutation(transactionContext))
+		return nil
+	}))
+	assert.False(t, InGovernedMutation(ctx), "the governance marker must stay scoped to the mutation callback context")
+}
+
 func (recorder *ambiguousTransactionRecorder) WithinTransaction(ctx context.Context, apply func(context.Context) error) error {
 	recorder.transactions++
 	if err := apply(ctx); err != nil {
