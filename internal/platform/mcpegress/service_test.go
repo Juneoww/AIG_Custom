@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net"
 	"testing"
+	"time"
 
 	"github.com/Juneoww/AIG_Custom/internal/platform/mcpconnections"
 	"github.com/Juneoww/AIG_Custom/internal/platform/tasks"
@@ -223,6 +224,39 @@ func TestIssueRuntimeForRepositoryReturnsOnlyOpaqueArchiveReference(t *testing.T
 	assert.NotContains(t, string(encoded), url)
 }
 
+func TestIssueRuntimeRejectsRepositoryFetcherFilePaths(t *testing.T) {
+	ctx := context.Background()
+	const taskID = "runtime-repository-path-task"
+	keyring := testEgressKeyring(t)
+	binding := &mcpconnections.TaskBinding{ID: "runtime-repository-path-binding", TaskID: taskID, SourceKind: "repository"}
+	require.NoError(t, keyring.SealRepositorySource(binding, mcpconnections.BindingEncryptionContext{
+		OwnerUserID: "repository-path-owner", Scope: mcpconnections.ScopePrivate, Version: 1,
+	}, mcpconnections.RepositorySourceSnapshot{RepositoryURL: "https://git.allowed.example.test/team/private-repository.git"}))
+	fetcher := &recordingRepositoryFetcher{}
+	service := NewService(ServiceDependencies{
+		Tasks: &memoryTaskReader{records: map[string]*tasks.Task{
+			taskID: {ID: taskID, OwnerUserID: "repository-path-owner", TaskType: "mcp_scan", Status: tasks.StatusPending},
+		}},
+		Bindings:     &memoryBindingReader{bindings: map[string]*mcpconnections.TaskBinding{taskID: binding}},
+		Keyring:      keyring,
+		Capabilities: NewMemoryCapabilityRepository(),
+		Policy:       testEgressPolicy(t),
+		Fetcher:      fetcher,
+	})
+
+	for _, candidate := range []string{"/var/lib/aig/private/archive.tar", `C:\\aig\\private\\archive.tar`, "../private", "archive:folder/private", "token=secret"} {
+		fetcher.archive = candidate
+		_, err := service.IssueRuntime(ctx, taskID)
+		assert.ErrorIs(t, err, ErrRuntimeUnavailable, "archive reference %q must not reach the Agent", candidate)
+	}
+}
+
+func TestNewServiceCapsCapabilityTTL(t *testing.T) {
+	assert.Equal(t, maxCapabilityTTL, NewService(ServiceDependencies{CapabilityTTL: 24 * time.Hour}).capabilityTTL)
+	assert.Equal(t, 30*time.Second, NewService(ServiceDependencies{CapabilityTTL: 30 * time.Second}).capabilityTTL)
+	assert.Equal(t, defaultCapabilityTTL, NewService(ServiceDependencies{}).capabilityTTL)
+}
+
 func TestRuntimeAndRepositoryFetchRequestRedactFormattedOutput(t *testing.T) {
 	runtime := Runtime{
 		MCPProxyURL:    "https://platform.internal.example.test/api/internal/mcp-egress/task-sentinel",
@@ -232,8 +266,10 @@ func TestRuntimeAndRepositoryFetchRequestRedactFormattedOutput(t *testing.T) {
 		TaskID: "task-sentinel", OwnerUserID: "owner-sentinel", RepositoryURL: "https://git.allowed.example.test/private.git",
 	}
 	for _, sentinel := range []string{"runtime-capability-secret", "private.git", "owner-sentinel"} {
-		assert.NotContains(t, fmt.Sprintf("%+v", runtime), sentinel)
-		assert.NotContains(t, fmt.Sprintf("%+v", request), sentinel)
+		for _, format := range []string{"%+v", "%#v"} {
+			assert.NotContains(t, fmt.Sprintf(format, runtime), sentinel)
+			assert.NotContains(t, fmt.Sprintf(format, request), sentinel)
+		}
 	}
 }
 

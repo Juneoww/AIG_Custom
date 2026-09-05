@@ -33,6 +33,9 @@ type Runtime struct {
 // expanding the proxy capability or archive reference by accident.
 func (Runtime) String() string { return "MCP 运行时 [REDACTED]" }
 
+// GoString covers the %#v format, which deliberately bypasses Stringer.
+func (Runtime) GoString() string { return "mcpegress.Runtime{[REDACTED]}" }
+
 // TaskRuntimeParams creates the ephemeral assignment-only map consumed by the
 // existing websocket adapter. Callers must not marshal or persist this map.
 func (runtime Runtime) TaskRuntimeParams() map[string]any {
@@ -64,3 +67,8 @@ type RepositoryFetchRequest struct {
 // String keeps the decrypted repository URL and owner identity out of
 // accidental printf-style logs in a Fetcher implementation.
 func (RepositoryFetchRequest) String() string { return "MCP 仓库获取请求 [REDACTED]" }
+
+// GoString covers the %#v format, which deliberately bypasses Stringer.
+func (RepositoryFetchRequest) GoString() string {
+	return "mcpegress.RepositoryFetchRequest{[REDACTED]}"
+}

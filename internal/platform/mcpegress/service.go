@@ -15,7 +15,12 @@ import (
 	"github.com/Juneoww/AIG_Custom/internal/platform/tasks"
 )
 
-const defaultCapabilityTTL = 5 * time.Minute
+const (
+	defaultCapabilityTTL = 5 * time.Minute
+	maxCapabilityTTL     = 15 * time.Minute
+)
+
+const archiveReferencePrefix = "archive:"
 
 var (
 	// ErrRuntimeUnavailable is intentionally nonspecific. It is safe for an
@@ -75,6 +80,9 @@ func NewService(dependencies ServiceDependencies) *Service {
 	ttl := dependencies.CapabilityTTL
 	if ttl <= 0 {
 		ttl = defaultCapabilityTTL
+	}
+	if ttl > maxCapabilityTTL {
+		ttl = maxCapabilityTTL
 	}
 	now := dependencies.Now
 	if now == nil {
@@ -236,7 +244,20 @@ func validRawCapability(raw string) bool {
 }
 
 func validArchiveReference(value string) bool {
-	return value != "" && value == strings.TrimSpace(value) && len(value) <= 512 && !strings.Contains(value, "://") && !strings.ContainsAny(value, "\r\n\t ")
+	if value == "" || value != strings.TrimSpace(value) || !strings.HasPrefix(value, archiveReferencePrefix) {
+		return false
+	}
+	identifier := strings.TrimPrefix(value, archiveReferencePrefix)
+	if identifier == "" || len(identifier) > 128 {
+		return false
+	}
+	for _, character := range identifier {
+		if character >= 'a' && character <= 'z' || character >= 'A' && character <= 'Z' || character >= '0' && character <= '9' || character == '-' || character == '_' {
+			continue
+		}
+		return false
+	}
+	return true
 }
 
 func isMCPTask(task *tasks.Task) bool {
