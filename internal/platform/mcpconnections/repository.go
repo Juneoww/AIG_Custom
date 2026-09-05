@@ -47,7 +47,7 @@ func (repository *GormRepository) Init() error {
 // Create 在同一事务中写入初始配置及其不可变版本。调用方不能借由输入字段伪造
 // 已信任的测试结论：无论输入为何，v1 都必须是 disabled 和 not_tested。
 func (repository *GormRepository) Create(ctx context.Context, config *ConnectionConfig, version *ConnectionVersion) error {
-	if repository == nil || repository.db == nil || !validConfig(config) || !validVersionMaterial(version) || version.ConnectionConfigID != config.ID {
+	if repository == nil || repository.db == nil || !validConfig(config) || !validVersionMaterial(version) || version.ConnectionConfigID != config.ID || version.Version != 1 {
 		return ErrInvalid
 	}
 	storedConfig := cloneConnectionConfig(config)
@@ -67,7 +67,6 @@ func (repository *GormRepository) Create(ctx context.Context, config *Connection
 	storedConfig.CurrentVersion = 1
 	storedConfig.ResourceRevision = "1"
 	storedConfig.Enabled = false
-	storedVersion.Version = 1
 	storedVersion.DetectedTransport = ""
 	storedVersion.ProbeStatus = ProbeStatusNotTested
 

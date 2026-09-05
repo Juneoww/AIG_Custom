@@ -64,7 +64,7 @@ func TestRepositoryCreatesDisabledUntestedVersionOne(t *testing.T) {
 		LastProbeStartedAt: &ignoredLastProbeAt, CreatedAt: createdAt, UpdatedAt: createdAt,
 	}
 	version := &ConnectionVersion{
-		ID: "version-one-sentinel", ConnectionConfigID: config.ID, Version: 99, Transport: TransportHTTP,
+		ID: "version-one-sentinel", ConnectionConfigID: config.ID, Version: 1, Transport: TransportHTTP,
 		EncryptedPayload: []byte("ciphertext-version-one-sentinel"), PayloadNonce: []byte("nonce-version-one-sentinel"), KeyID: "key-version-one-sentinel",
 		DetectedTransport: TransportSSE, ProbeStatus: ProbeStatusPassed, CreatedAt: createdAt,
 	}
@@ -87,6 +87,54 @@ func TestRepositoryCreatesDisabledUntestedVersionOne(t *testing.T) {
 	assert.Equal(t, TransportHTTP, storedVersion.Transport)
 	assert.Empty(t, storedVersion.DetectedTransport)
 	assert.Equal(t, ProbeStatusNotTested, storedVersion.ProbeStatus)
+}
+
+func TestRepositoryCreatePreservesSealedVersionOnePayload(t *testing.T) {
+	ctx := context.Background()
+	db := openMCPConnectionPostgresDB(t)
+	require.NoError(t, database.Migrate(db))
+	repository := NewGormRepository(db)
+	keyring, err := NewKeyring("create-version-one-aes-gcm", bytes.Repeat([]byte{0x51}, 32), nil)
+	require.NoError(t, err)
+
+	config := testConnectionConfig("config-create-sealed-version-one")
+	version := testConnectionVersion(config.ID, "version-create-sealed-version-one", "placeholder-create-sealed-version-one")
+	version.Version = 1
+	payload := ConnectionPayload{
+		Endpoint:       "https://service.example.test/initial",
+		Authentication: Authentication{Kind: AuthenticationBearer, Secret: "initial-secret"},
+		Headers:        []Header{{Name: "X-Initial-Tenant", Value: "tenant-a"}},
+	}
+	require.NoError(t, keyring.SealConnectionPayload(config, version, payload))
+	require.NoError(t, repository.Create(ctx, config, version))
+
+	storedConfig, err := repository.GetConfig(ctx, config.ID)
+	require.NoError(t, err)
+	storedVersion, err := repository.GetVersion(ctx, config.ID, 1)
+	require.NoError(t, err)
+	opened, err := keyring.OpenConnectionPayload(storedConfig, storedVersion)
+	require.NoError(t, err, "the persisted initial version must retain the version used in AES-GCM AAD")
+	assert.Equal(t, payload, opened)
+}
+
+func TestRepositoryCreateRejectsSealedNonVersionOnePayloadWithoutWritingConfig(t *testing.T) {
+	ctx := context.Background()
+	db := openMCPConnectionPostgresDB(t)
+	require.NoError(t, database.Migrate(db))
+	repository := NewGormRepository(db)
+	keyring, err := NewKeyring("create-version-contract-aes-gcm", bytes.Repeat([]byte{0x52}, 32), nil)
+	require.NoError(t, err)
+
+	config := testConnectionConfig("config-create-sealed-version-two")
+	version := testConnectionVersion(config.ID, "version-create-sealed-version-two", "placeholder-create-sealed-version-two")
+	version.Version = 2
+	require.NoError(t, keyring.SealConnectionPayload(config, version, ConnectionPayload{
+		Endpoint: "https://service.example.test/non-initial", Authentication: Authentication{Kind: AuthenticationNone},
+	}))
+
+	require.ErrorIs(t, repository.Create(ctx, config, version), ErrInvalid)
+	_, err = repository.GetConfig(ctx, config.ID)
+	require.ErrorIs(t, err, ErrNotFound)
 }
 
 func TestRepositoryStartProbeRateLimitPersistsAcrossRepositories(t *testing.T) {
