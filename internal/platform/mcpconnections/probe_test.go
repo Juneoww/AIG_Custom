@@ -87,6 +87,18 @@ func TestProbeEngineAppliesSafeDefaultMinimumInterval(t *testing.T) {
 	require.ErrorIs(t, err, ErrProbeRateLimited, "the default must not permit unlimited probing")
 }
 
+func TestProbeEngineClampsSubMinuteMinimumInterval(t *testing.T) {
+	clock := &fixedProbeClock{now: time.Date(2026, 9, 5, 3, 4, 5, 0, time.UTC)}
+	port := &scriptedProbePort{errors: map[Transport]error{TransportHTTP: nil}}
+	engine := NewProbeEngine(port, ProbeOptions{MinimumInterval: time.Nanosecond, Clock: clock})
+
+	assert.Equal(t, time.Minute, engine.minimumInterval, "callers cannot lower the durable probe interval below one minute")
+	_, err := engine.Probe(context.Background(), "config-sub-minute-rate", unauthenticatedProbePayload("https://safe.example.test/mcp"), TransportHTTP)
+	require.NoError(t, err)
+	_, err = engine.Probe(context.Background(), "config-sub-minute-rate", unauthenticatedProbePayload("https://safe.example.test/mcp"), TransportHTTP)
+	require.ErrorIs(t, err, ErrProbeRateLimited)
+}
+
 func TestProbeEngineRateLimitsByOpaqueConnectionConfigID(t *testing.T) {
 	clock := &fixedProbeClock{now: time.Date(2026, 9, 4, 4, 5, 6, 0, time.UTC)}
 	port := &scriptedProbePort{errors: map[Transport]error{TransportHTTP: nil}}

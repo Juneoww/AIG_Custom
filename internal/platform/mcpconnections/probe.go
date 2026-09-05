@@ -24,6 +24,9 @@ const (
 	minimumInitializeRequestID       = "mcp-probe"
 	minimumInitializeProtocolVersion = "2025-03-26"
 	maxProbeSessionIDBytes           = 4 * 1024
+	// minimumDurableProbeInterval 由持久化 StartProbe 边界同样执行，避免不同
+	// 进程以较小的本地参数绕过跨进程限流。
+	minimumDurableProbeInterval = time.Minute
 )
 
 // ProbeRequest 是探测端口的内部输入，不可直接映射 API DTO。它可携带解密后的
@@ -72,9 +75,7 @@ func NewProbeEngine(port ProbePort, options ProbeOptions) *ProbeEngine {
 	if options.Timeout <= 0 {
 		options.Timeout = 10 * time.Second
 	}
-	if options.MinimumInterval <= 0 {
-		options.MinimumInterval = time.Minute
-	}
+	options.MinimumInterval = durableProbeInterval(options.MinimumInterval)
 	if options.Clock == nil {
 		options.Clock = systemProbeClock{}
 	}
@@ -85,6 +86,13 @@ func NewProbeEngine(port ProbePort, options ProbeOptions) *ProbeEngine {
 		clock:           options.Clock,
 		lastAttempts:    make(map[string]time.Time),
 	}
+}
+
+func durableProbeInterval(requested time.Duration) time.Duration {
+	if requested < minimumDurableProbeInterval {
+		return minimumDurableProbeInterval
+	}
+	return requested
 }
 
 func (engine *ProbeEngine) Probe(ctx context.Context, connectionConfigID string, payload ConnectionPayload, selected Transport) (ProbeResult, error) {

@@ -78,16 +78,18 @@ initialize，并在原 SSE 流中等待匹配的 `message` response，随后发�
 派生 endpoint 可携带服务端创建的会话 query，但不能跳转到其他 origin；所有步骤受同一
 request context 和响应字节上限约束。
 
-选择 `auto` 时先测试 Streamable HTTP，再测试 legacy SSE；指定 transport 不能回退。探测默认
-最短间隔为 1 分钟，按不透明连接配置 ID 独立限流，不能以 endpoint 作为限流键。该时间戳持久化
-在 MCP 连接配置中，因此多个服务进程、重启后的进程和不同 `ProbeEngine` 都共享限流；
+选择 `auto` 时先测试 Streamable HTTP，再测试 legacy SSE；指定 transport 不能回退。探测服务端
+强制的最短间隔为 1 分钟：调用者即使传入零、负值或更小的间隔也不能降低该下限。它按不透明连接
+配置 ID 独立限流，不能以 endpoint 作为限流键。该时间戳持久化在 MCP 连接配置中，因此多个服务
+进程、重启后的进程和不同 `ProbeEngine` 都共享限流；
 `ProbeEngine` 的本地记录仅用于提前拒绝同进程的重复请求，不能替代数据库事务。只有当前版本
 探测成功、连接已启用且受控 dialer 可用时，连接才可被任务选择。真实探测失败也会保留本次启动
 时间并占用间隔；限流请求本身不得清空既有结果、改变 revision 或发起网络请求。
 
 通过本地预检后，探测启动事务会先按 config → current version 加锁并核验版本/revision 快照，再在
-任何状态重置前检查持久化的启动时间。通过检查时，事务原子地写入启动时间、禁用连接、清空旧结果
-并递增 `resource_revision`，把新 revision 作为不透明 attempt token；结果写回仅在 config、version
+任何状态重置前使用 PostgreSQL `clock_timestamp()` 检查持久化的启动时间，并使用同一个数据库时间
+写入启动时间与 `updated_at`，避免不同服务主机时钟改变限流决定。通过检查时，事务原子地写入启动
+时间、禁用连接、清空旧结果并递增 `resource_revision`，把新 revision 作为不透明 attempt token；结果写回仅在 config、version
 与该 token 仍精确匹配时允许，并在结算时再次推进 revision，使同一结果不能重放。新探测、新版本、
 展示元数据或启用状态变更都会让旧 token 失效；任何跨 Engine/进程的迟到结果必须返回安全冲突
 （或被安全忽略），不得改写任意版本的结果投影。

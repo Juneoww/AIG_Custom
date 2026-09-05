@@ -225,9 +225,10 @@ func (repository *GormRepository) UpdateDisplayMetadata(ctx context.Context, con
 // current version 加锁，在锁内先核对快照和跨进程的 config-ID 限流，再将连接置为
 // 不可用并清空旧结果；随后只有携带相同 token 的结果能够写回。
 func (repository *GormRepository) StartProbe(ctx context.Context, configID string, expectedCurrentVersion int, expectedResourceRevision string, minimumInterval time.Duration) (*ProbeAttempt, error) {
-	if repository == nil || repository.db == nil || strings.TrimSpace(configID) == "" || expectedCurrentVersion < 1 || strings.TrimSpace(expectedResourceRevision) == "" || minimumInterval <= 0 {
+	if repository == nil || repository.db == nil || strings.TrimSpace(configID) == "" || expectedCurrentVersion < 1 || strings.TrimSpace(expectedResourceRevision) == "" {
 		return nil, ErrInvalid
 	}
+	minimumInterval = durableProbeInterval(minimumInterval)
 	var attempt ProbeAttempt
 	err := txcontext.Gorm(ctx, repository.db).Transaction(func(transaction *gorm.DB) error {
 		var config ConnectionConfig
@@ -244,7 +245,11 @@ func (repository *GormRepository) StartProbe(ctx context.Context, configID strin
 		if !configurableTransport(version.Transport) {
 			return ErrInvalid
 		}
-		now := time.Now().UTC()
+		var now time.Time
+		if err := transaction.Raw("SELECT clock_timestamp()").Scan(&now).Error; err != nil {
+			return err
+		}
+		now = now.UTC()
 		if config.LastProbeStartedAt != nil && now.Sub(*config.LastProbeStartedAt) < minimumInterval {
 			return ErrProbeRateLimited
 		}

@@ -137,7 +137,7 @@ func TestRepositoryCreateRejectsSealedNonVersionOnePayloadWithoutWritingConfig(t
 	require.ErrorIs(t, err, ErrNotFound)
 }
 
-func TestRepositoryStartProbeRateLimitPersistsAcrossRepositories(t *testing.T) {
+func TestRepositoryStartProbeClampsSubMinuteRateLimitAcrossRepositories(t *testing.T) {
 	ctx := context.Background()
 	db := openMCPConnectionPostgresDB(t)
 	require.NoError(t, database.Migrate(db))
@@ -159,7 +159,7 @@ func TestRepositoryStartProbeRateLimitPersistsAcrossRepositories(t *testing.T) {
 	require.NoError(t, err)
 	assert.NotContains(t, string(encodedConfig), "last_probe_started_at")
 
-	_, err = secondProcess.StartProbe(ctx, config.ID, beforeConfig.CurrentVersion, beforeConfig.ResourceRevision, time.Minute)
+	_, err = secondProcess.StartProbe(ctx, config.ID, beforeConfig.CurrentVersion, beforeConfig.ResourceRevision, time.Nanosecond)
 	require.ErrorIs(t, err, ErrProbeRateLimited)
 	afterConfig, err := firstProcess.GetConfig(ctx, config.ID)
 	require.NoError(t, err)
@@ -178,10 +178,10 @@ func TestServiceProbeRateLimitPersistsAcrossIndependentEnginesBeforeNetwork(t *t
 	firstPort := &endpointCountingProbePort{result: errors.New("first upstream failure")}
 	secondPort := &endpointCountingProbePort{}
 	firstService := NewService(firstRepository, testKeyring(t), NewProbeEngine(firstPort, ProbeOptions{
-		Timeout: time.Second, MinimumInterval: time.Minute,
+		Timeout: time.Second, MinimumInterval: time.Hour,
 	}), testPolicy(t, true))
 	secondService := NewService(secondRepository, testKeyring(t), NewProbeEngine(secondPort, ProbeOptions{
-		Timeout: time.Second, MinimumInterval: time.Minute,
+		Timeout: time.Second, MinimumInterval: time.Nanosecond,
 	}), testPolicy(t, true))
 	alice := identity.Subject{UserID: "persistent-rate-limit-owner", Role: identity.RoleUser}
 

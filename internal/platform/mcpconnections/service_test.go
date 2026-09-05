@@ -82,9 +82,7 @@ func (repository *memoryConnectionRepository) ListConfigs(_ context.Context) ([]
 }
 
 func (repository *memoryConnectionRepository) StartProbe(_ context.Context, configID string, expectedCurrentVersion int, expectedResourceRevision string, minimumInterval time.Duration) (*ProbeAttempt, error) {
-	if minimumInterval <= 0 {
-		return nil, ErrInvalid
-	}
+	minimumInterval = durableProbeInterval(minimumInterval)
 	config, ok := repository.configs[configID]
 	if !ok {
 		return nil, ErrNotFound
@@ -248,7 +246,20 @@ func testPolicy(t *testing.T, controlled bool) *OutboundPolicy {
 
 func testService(t *testing.T, repository *memoryConnectionRepository, controlled bool, port *scriptedProbePort) *Service {
 	t.Helper()
-	return NewService(repository, testKeyring(t), NewProbeEngine(port, ProbeOptions{Timeout: time.Second, MinimumInterval: time.Nanosecond}), testPolicy(t, controlled))
+	return NewService(repository, testKeyring(t), NewProbeEngine(port, ProbeOptions{Timeout: time.Second, MinimumInterval: time.Minute}), testPolicy(t, controlled))
+}
+
+// ageProbeAttempt 将测试用的本地快速拒绝缓存和持久化时间同时推至最小间隔之外，
+// 用于模拟真实等待而不允许测试降低生产的探测间隔。
+func ageProbeAttempt(t *testing.T, service *Service, repository *memoryConnectionRepository, configID string) {
+	t.Helper()
+	startedAt := time.Now().UTC().Add(-minimumDurableProbeInterval - time.Second)
+	config, exists := repository.configs[configID]
+	require.True(t, exists)
+	config.LastProbeStartedAt = &startedAt
+	service.prober.mu.Lock()
+	service.prober.lastAttempts[configID] = startedAt
+	service.prober.mu.Unlock()
 }
 
 func serviceInput(name string, scope Scope, transport Transport) CreateConnectionInput {
@@ -467,6 +478,7 @@ func TestServiceRecordsFailedProbeWithoutReturningFailureDetail(t *testing.T) {
 
 	port.errors = map[Transport]error{TransportHTTP: nil}
 	port.attempts = nil
+	ageProbeAttempt(t, service, repository, created.ID)
 	probed, err := service.Probe(ctx, alice, created.ID)
 	require.NoError(t, err)
 	assert.Equal(t, ProbeStatusPassed, probed.ProbeStatus)
@@ -527,6 +539,7 @@ func TestServiceFailedProbeRevokesEnabledTaskEligibility(t *testing.T) {
 	require.NoError(t, err)
 
 	port.errors = map[Transport]error{TransportHTTP: errors.New("upstream response containing secret material")}
+	ageProbeAttempt(t, service, repository, created.ID)
 	_, err = service.Probe(ctx, alice, created.ID)
 	require.ErrorIs(t, err, ErrProbeFailed)
 	stored, err := repository.GetConfig(ctx, created.ID)
