@@ -76,6 +76,8 @@ type Service struct {
 	newCapability func() (string, error)
 }
 
+var _ tasks.MCPRuntimeIssuer = (*Service)(nil)
+
 func NewService(dependencies ServiceDependencies) *Service {
 	ttl := dependencies.CapabilityTTL
 	if ttl <= 0 {
@@ -141,36 +143,57 @@ func (service *Service) IssueRuntime(ctx context.Context, taskID string) (Runtim
 	}
 }
 
+// IssueRuntimeParams adapts the opaque runtime result to the task-domain
+// assignment interface. It deliberately returns a fresh map on every call so
+// a retry cannot recover a token from a Session or mutable shared map.
+func (service *Service) IssueRuntimeParams(ctx context.Context, taskID string) (map[string]any, error) {
+	runtime, err := service.IssueRuntime(ctx, taskID)
+	if err != nil {
+		return nil, ErrRuntimeUnavailable
+	}
+	return runtime.TaskRuntimeParams(), nil
+}
+
 // VerifyCapability is used by the Agent-only gateway before every upstream
 // request. Only the latest unexpired record for the exact task can authorize
 // a proxy operation; an older assignment token is revoked by rotation.
 func (service *Service) VerifyCapability(ctx context.Context, taskID, rawCapability string) error {
+	_, err := service.verifiedCapability(ctx, taskID, rawCapability)
+	return err
+}
+
+func (service *Service) verifiedCapability(ctx context.Context, taskID, rawCapability string) (*RuntimeCapability, error) {
 	if service == nil || service.tasks == nil || service.capabilities == nil || strings.TrimSpace(taskID) == "" || !validRawCapability(rawCapability) {
-		return ErrCapabilityDenied
+		return nil, ErrCapabilityDenied
 	}
 	// A task can become cancelled or terminal after its Agent received a short-
 	// lived token. Recheck its state for every upstream request so terminal work
 	// loses egress immediately instead of waiting for the token TTL to expire.
 	task, err := service.tasks.Get(ctx, taskID)
 	if err != nil || !isMCPTask(task) {
-		return ErrCapabilityDenied
+		return nil, ErrCapabilityDenied
 	}
 	latest, err := service.capabilities.Latest(ctx, taskID)
-	if err != nil || latest == nil || !latest.ExpiresAt.After(service.now().UTC()) {
-		return ErrCapabilityDenied
+	if err != nil || latest == nil || latest.TaskID != taskID || !latest.ExpiresAt.After(service.now().UTC()) {
+		return nil, ErrCapabilityDenied
 	}
 	digest := capabilityDigest(rawCapability)
 	if subtle.ConstantTimeCompare(latest.CapabilityHash, digest) != 1 {
-		return ErrCapabilityDenied
+		return nil, ErrCapabilityDenied
 	}
-	return nil
+	return latest, nil
 }
 
 type boundSource struct {
-	task          *tasks.Task
-	kind          string
-	transport     mcpconnections.Transport
-	repositoryURL string
+	expiresAt          time.Time
+	capabilityRotation int
+	configID           string
+	configVersion      int
+	task               *tasks.Task
+	kind               string
+	transport          mcpconnections.Transport
+	repositoryURL      string
+	payload            mcpconnections.ConnectionPayload
 }
 
 func (service *Service) resolveBoundSource(ctx context.Context, taskID string) (boundSource, error) {
@@ -195,7 +218,8 @@ func (service *Service) resolveBoundSource(ctx context.Context, taskID string) (
 			return boundSource{}, ErrRuntimeUnavailable
 		}
 		version, err := service.bindings.GetVersion(ctx, *binding.ConnectionConfigID, *binding.ConnectionConfigVersion)
-		if err != nil || version == nil || version.ConnectionConfigID != config.ID || version.Version != *binding.ConnectionConfigVersion || !concreteTransport(version.DetectedTransport) {
+		if err != nil || version == nil || version.ConnectionConfigID != config.ID || version.Version != *binding.ConnectionConfigVersion ||
+			version.ProbeStatus != mcpconnections.ProbeStatusPassed || !concreteTransport(version.DetectedTransport) {
 			return boundSource{}, ErrRuntimeUnavailable
 		}
 		if service.policy.RequireControlledDialer() != nil {
@@ -205,7 +229,8 @@ func (service *Service) resolveBoundSource(ctx context.Context, taskID string) (
 		if err != nil || service.policy.ValidateServerURL(ctx, payload.Endpoint) != nil {
 			return boundSource{}, ErrRuntimeUnavailable
 		}
-		return boundSource{task: task, kind: "service", transport: version.DetectedTransport}, nil
+		return boundSource{task: task, kind: "service", transport: version.DetectedTransport, payload: payload,
+			configID: config.ID, configVersion: version.Version}, nil
 	case "repository":
 		if binding.ConnectionConfigID != nil || binding.ConnectionConfigVersion != nil || service.policy.RequireControlledDialer() != nil {
 			return boundSource{}, ErrRuntimeUnavailable
@@ -222,6 +247,24 @@ func (service *Service) resolveBoundSource(ctx context.Context, taskID string) (
 	}
 }
 
+// resolveServiceProxyTarget performs a fresh capability, task, binding,
+// configuration, decrypt, and egress-policy check for every gateway request.
+// Its decrypted payload is package-private and must never cross into an Agent
+// frame, task parameter, browser response, log, or error message.
+func (service *Service) resolveServiceProxyTarget(ctx context.Context, taskID, rawCapability string) (boundSource, error) {
+	capability, err := service.verifiedCapability(ctx, taskID, rawCapability)
+	if err != nil {
+		return boundSource{}, ErrCapabilityDenied
+	}
+	bound, err := service.resolveBoundSource(ctx, taskID)
+	if err != nil || bound.kind != "service" {
+		return boundSource{}, ErrCapabilityDenied
+	}
+	bound.expiresAt = capability.ExpiresAt
+	bound.capabilityRotation = capability.Rotation
+	return bound, nil
+}
+
 func (service *Service) proxyURLForTask(taskID string) (string, error) {
 	if service == nil || strings.TrimSpace(taskID) == "" || service.gatewayURL == "" {
 		return "", ErrRuntimeUnavailable
@@ -230,7 +273,7 @@ func (service *Service) proxyURLForTask(taskID string) (string, error) {
 	if err != nil || parsed == nil || (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.Host == "" || parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" {
 		return "", ErrRuntimeUnavailable
 	}
-	return service.gatewayURL + "/api/internal/mcp-egress/" + taskID, nil
+	return service.gatewayURL + internalGatewayPathPrefix + taskID, nil
 }
 
 func randomCapability() (string, error) {

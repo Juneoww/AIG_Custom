@@ -3,6 +3,7 @@ package websocket
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -23,6 +24,15 @@ func TestTaskManagerImplementsNarrowPlatformEngineAdapter(t *testing.T) {
 	var _ platformtasks.EngineAdapter = (*TaskManager)(nil)
 }
 
+type staticMCPEventRedactor struct {
+	calls int
+}
+
+func (redactor *staticMCPEventRedactor) RedactMCPEvent(_ context.Context, _ string, _ any) (any, error) {
+	redactor.calls++
+	return map[string]any{"message": "[MCP 事件已脱敏]", "timestamp": int64(123)}, nil
+}
+
 func TestPlatformTaskTypesMapToExactLegacyEngineAliases(t *testing.T) {
 	expected := map[string]string{
 		"mcp_scan":             "Mcp-Scan",
@@ -39,7 +49,7 @@ func TestPlatformTaskTypesMapToExactLegacyEngineAliases(t *testing.T) {
 	assert.False(t, ok)
 }
 
-func TestPlatformTaskAdapterForwardsMcpSourceKindAndPreservesLegacyEnginePayload(t *testing.T) {
+func TestPlatformTaskAdapterForwardsMCPRepositoryOnlyAsOpaqueArchive(t *testing.T) {
 	taskManager, cleanup := newTestTaskManager(t)
 	defer cleanup()
 	serverConnection := websocketConnectionPair(t)
@@ -50,8 +60,8 @@ func TestPlatformTaskAdapterForwardsMcpSourceKindAndPreservesLegacyEnginePayload
 
 	request := platformtasks.EngineTask{
 		PlatformTaskID: "platform-task-submit", OwnerUsername: "alice", TaskType: "mcp_scan",
-		Params:      json.RawMessage(`{"source_kind":"repository","thread":4}`),
-		Attachments: []string{"internal-ref-1"}, CountryIsoCode: "en",
+		Params:        json.RawMessage(`{"source_kind":"repository","thread":4}`),
+		RuntimeParams: map[string]any{"archive_ref": "archive:source-archive"}, CountryIsoCode: "zh_CN",
 	}
 	sessionID, err := taskManager.SubmitTask(context.Background(), request)
 	require.NoError(t, err)
@@ -69,6 +79,7 @@ func TestPlatformTaskAdapterForwardsMcpSourceKindAndPreservesLegacyEnginePayload
 	assert.Equal(t, "Mcp-Scan", content.TaskType)
 	assert.Equal(t, request.Content, content.Content)
 	assert.Equal(t, request.Attachments, content.Attachments)
+	assert.Equal(t, "archive:source-archive", content.Params["archive_ref"])
 	assert.Equal(t, "repository", content.Params["source_kind"])
 	assert.Equal(t, float64(4), content.Params["thread"])
 	assert.Equal(t, request.CountryIsoCode, content.CountryIsoCode)
@@ -78,6 +89,273 @@ func TestPlatformTaskAdapterForwardsMcpSourceKindAndPreservesLegacyEnginePayload
 	assert.Equal(t, "alice", session.Username)
 	assert.Equal(t, "Mcp-Scan", session.TaskType)
 	assert.False(t, session.Share)
+	assert.NotContains(t, string(session.Params), "source-archive")
+}
+
+func TestPlatformMCPRuntimeParamsReachOnlyTheAssignedAgent(t *testing.T) {
+	taskManager, cleanup := newTestTaskManager(t)
+	defer cleanup()
+	serverConnection := websocketConnectionPair(t)
+	taskManager.agentManager.mu.Lock()
+	taskManager.agentManager.connections["agent-runtime"] = NewAgentConnection(serverConnection.server)
+	taskManager.agentManager.connections["agent-runtime"].agentID = "agent-runtime"
+	taskManager.agentManager.mu.Unlock()
+
+	const (
+		taskID     = "platform-runtime-task"
+		proxyURL   = "https://platform.internal.example.test/api/internal/mcp-egress/platform-runtime-task"
+		capability = "platform-runtime-capability-sentinel"
+	)
+	request := platformtasks.EngineTask{
+		PlatformTaskID: taskID, OwnerUsername: "alice", TaskType: "mcp_scan",
+		Params: json.RawMessage(`{"source_kind":"service","authorization_confirmed":true}`),
+		RuntimeParams: map[string]any{
+			"mcp_proxy_url":       proxyURL,
+			"task_capability":     capability,
+			"effective_transport": "http",
+		},
+		CountryIsoCode: "zh_CN",
+	}
+	_, err := taskManager.SubmitTask(context.Background(), request)
+	require.NoError(t, err)
+
+	require.NoError(t, serverConnection.client.SetReadDeadline(time.Now().Add(2*time.Second)))
+	var assigned WSMessage
+	require.NoError(t, serverConnection.client.ReadJSON(&assigned))
+	payload, marshalErr := json.Marshal(assigned.Content)
+	require.NoError(t, marshalErr)
+	var content TaskContent
+	require.NoError(t, json.Unmarshal(payload, &content))
+	assert.Equal(t, proxyURL, content.Params["mcp_proxy_url"])
+	assert.Equal(t, capability, content.Params["task_capability"])
+	assert.Equal(t, "http", content.Params["effective_transport"])
+
+	session, sessionErr := taskManager.taskStore.GetSession(taskID)
+	require.NoError(t, sessionErr)
+	assert.JSONEq(t, `{"source_kind":"service","authorization_confirmed":true}`, string(session.Params))
+	assert.NotContains(t, string(session.Params), proxyURL)
+	assert.NotContains(t, string(session.Params), capability)
+	stored, exists := taskManager.GetTask(taskID)
+	require.True(t, exists)
+	assert.Nil(t, stored.RuntimeParams, "runtime material must leave TaskManager memory once the assignment frame is built")
+	encoded, encodeErr := json.Marshal(stored)
+	require.NoError(t, encodeErr)
+	assert.NotContains(t, string(encoded), proxyURL)
+	assert.NotContains(t, string(encoded), capability)
+}
+
+func TestPlatformTaskAdapterDoesNotIssueRuntimeForAnAlreadyAcceptedSession(t *testing.T) {
+	taskManager, cleanup := newTestTaskManager(t)
+	defer cleanup()
+	const taskID = "platform-runtime-existing-session"
+	require.NoError(t, taskManager.taskStore.CreateSession(&database.Session{
+		ID: taskID, Username: "alice", TaskType: "Mcp-Scan", Status: TaskStatusDoing,
+		AssignedAgent: "already-assigned-agent", Share: false,
+	}))
+	var runtimeCalls int
+	_, err := taskManager.SubmitTask(context.Background(), platformtasks.EngineTask{
+		PlatformTaskID: taskID, OwnerUsername: "alice", TaskType: "mcp_scan",
+		Params: json.RawMessage(`{"source_kind":"service","authorization_confirmed":true}`),
+		RuntimeIssuer: func(context.Context) (map[string]any, error) {
+			runtimeCalls++
+			return map[string]any{
+				"mcp_proxy_url":       "https://platform.internal.example.test/api/internal/mcp-egress/" + taskID,
+				"task_capability":     "must-not-be-issued",
+				"effective_transport": "http",
+			}, nil
+		},
+	})
+	require.NoError(t, err)
+	assert.Zero(t, runtimeCalls, "an already accepted assignment must retain its existing capability")
+}
+
+func TestMCPAgentEventsAreRedactedBeforePersistenceAndSSE(t *testing.T) {
+	taskManager, cleanup := newTestTaskManager(t)
+	defer cleanup()
+	const (
+		sessionID  = "mcp-event-redaction-session"
+		endpoint   = "https://mcp.private.example.test/internal"
+		capability = "mcp-event-capability-sentinel"
+	)
+	redactor := &staticMCPEventRedactor{}
+	taskManager.SetMCPEventRedactor(redactor)
+	require.NoError(t, taskManager.taskStore.CreateSession(&database.Session{
+		ID: sessionID, Username: "alice", TaskType: "Mcp-Scan", Status: TaskStatusDoing,
+		AssignedAgent: "assigned-agent", Share: false,
+	}))
+	sse := httptest.NewRecorder()
+	require.NoError(t, taskManager.sseManager.AddConnection(sessionID, "alice", sse))
+	defer taskManager.sseManager.RemoveConnection(sessionID)
+	event := map[string]any{
+		"message":         endpoint,
+		"task_capability": capability,
+		"nested":          map[string]any{"endpoint": endpoint},
+	}
+
+	accepted := taskManager.HandleAgentEvent("assigned-agent", sessionID, WSMsgTypeLiveStatus, event)
+
+	require.True(t, accepted)
+	assert.Equal(t, 1, redactor.calls)
+	events, err := taskManager.taskStore.GetSessionEventsByType(sessionID, WSMsgTypeLiveStatus)
+	require.NoError(t, err)
+	require.Len(t, events, 1)
+	assert.NotContains(t, string(events[0].EventData), endpoint)
+	assert.NotContains(t, string(events[0].EventData), capability)
+	assert.Contains(t, string(events[0].EventData), "MCP 事件已脱敏")
+	assert.NotContains(t, sse.Body.String(), endpoint)
+	assert.NotContains(t, sse.Body.String(), capability)
+	assert.Contains(t, sse.Body.String(), "MCP 事件已脱敏")
+}
+
+func TestPlatformTaskAdapterRejectsUnknownMCPRuntimeFieldsBeforeSessionPersistence(t *testing.T) {
+	taskManager, cleanup := newTestTaskManager(t)
+	defer cleanup()
+	const (
+		taskID         = "platform-runtime-reject-task"
+		forbiddenValue = "https://attacker.example.test/private-mcp-endpoint"
+	)
+	_, err := taskManager.SubmitTask(context.Background(), platformtasks.EngineTask{
+		PlatformTaskID: taskID, OwnerUsername: "alice", TaskType: "mcp_scan",
+		Params:        json.RawMessage(`{"source_kind":"service","authorization_confirmed":true}`),
+		RuntimeParams: map[string]any{"server_url": forbiddenValue},
+	})
+	require.Error(t, err)
+	assert.NotContains(t, err.Error(), forbiddenValue)
+	_, sessionErr := taskManager.taskStore.GetSession(taskID)
+	assert.Error(t, sessionErr, "invalid runtime input must not create an engine session")
+}
+
+func TestMCPDeferredRuntimeRejectsUnsafeInputsBeforeSessionPersistence(t *testing.T) {
+	for _, field := range []string{"params", "content", "attachments", "language", "unbound"} {
+		t.Run(field, func(t *testing.T) {
+			manager, cleanup := newTestTaskManager(t)
+			defer cleanup()
+			request := platformtasks.EngineTask{
+				PlatformTaskID: "unsafe-deferred-" + field, OwnerUsername: "alice", TaskType: "mcp_scan",
+				Params: json.RawMessage(`{"source_kind":"service","authorization_confirmed":true}`), CountryIsoCode: "zh_CN",
+				RuntimeIssuer: func(context.Context) (map[string]any, error) {
+					t.Fatal("invalid input must not issue runtime")
+					return nil, nil
+				},
+			}
+			switch field {
+			case "params":
+				request.Params = json.RawMessage(`{"source_kind":"service","authorization_confirmed":true,"task_capability":"sentinel"}`)
+			case "content":
+				request.Content = "https://private.example.test/mcp"
+			case "attachments":
+				request.Attachments = []string{"/private/source.zip"}
+			case "language":
+				request.CountryIsoCode = "en"
+			case "unbound":
+				request.RuntimeIssuer = nil
+			}
+			_, err := manager.SubmitTask(context.Background(), request)
+			require.ErrorIs(t, err, platformtasks.ErrInvalid)
+			_, err = manager.taskStore.GetSession(request.PlatformTaskID)
+			assert.Error(t, err, "unsafe inputs cannot be persisted even with a deferred runtime issuer")
+		})
+	}
+}
+
+func TestMCPDirectRuntimeIsDiscardedWhenNoAgentIsAvailable(t *testing.T) {
+	manager, cleanup := newTestTaskManager(t)
+	defer cleanup()
+	const taskID = "runtime-no-agent"
+	_, err := manager.SubmitTask(context.Background(), platformtasks.EngineTask{
+		PlatformTaskID: taskID, OwnerUsername: "alice", TaskType: "mcp_scan",
+		Params: json.RawMessage(`{"source_kind":"repository"}`), CountryIsoCode: "zh_CN",
+		RuntimeParams: map[string]any{"archive_ref": "archive:private-archive-reference"},
+	})
+	require.Error(t, err)
+	stored, ok := manager.GetTask(taskID)
+	require.True(t, ok)
+	assert.Nil(t, stored.RuntimeParams, "failed dispatch must not cache runtime material for reuse")
+}
+
+func TestMCPRuntimeIssuanceUsesCallerContextAndReleasesUnsentAssignment(t *testing.T) {
+	manager, cleanup := newTestTaskManager(t)
+	defer cleanup()
+	pair := websocketConnectionPair(t)
+	connection := NewAgentConnection(pair.server)
+	connection.agentID = "runtime-cancel-agent"
+	manager.agentManager.connections[connection.agentID] = connection
+	type contextKey struct{}
+	ctx, cancel := context.WithCancel(context.WithValue(context.Background(), contextKey{}, "runtime-context"))
+	defer cancel()
+	const taskID = "runtime-cancel-task"
+	_, err := manager.SubmitTask(ctx, platformtasks.EngineTask{
+		PlatformTaskID: taskID, OwnerUsername: "alice", TaskType: "mcp_scan", CountryIsoCode: "zh_CN",
+		Params: json.RawMessage(`{"source_kind":"repository"}`),
+		RuntimeIssuer: func(runtimeContext context.Context) (map[string]any, error) {
+			assert.Equal(t, "runtime-context", runtimeContext.Value(contextKey{}))
+			_, hasDeadline := runtimeContext.Deadline()
+			assert.True(t, hasDeadline, "runtime preparation must have a bounded deadline")
+			cancel()
+			select {
+			case <-runtimeContext.Done():
+			case <-time.After(100 * time.Millisecond):
+				t.Error("caller cancellation was not propagated")
+			}
+			return nil, errors.New("private-runtime-error-sentinel")
+		},
+	})
+	require.Error(t, err)
+	assert.NotContains(t, err.Error(), "private-runtime-error-sentinel")
+	session, err := manager.taskStore.GetSession(taskID)
+	require.NoError(t, err)
+	assert.Equal(t, TaskStatusTodo, session.Status)
+	assert.Empty(t, session.AssignedAgent)
+}
+
+func TestMCPMissingRedactorCannotMarkUnusableResultAsSucceeded(t *testing.T) {
+	manager, cleanup := newTestTaskManager(t)
+	defer cleanup()
+	const taskID = "redaction-unavailable-task"
+	require.NoError(t, manager.taskStore.CreateSession(&database.Session{
+		ID: taskID, Username: "alice", TaskType: "Mcp-Scan", Status: TaskStatusDoing, AssignedAgent: "assigned-agent",
+	}))
+	require.True(t, manager.HandleAgentEvent("assigned-agent", taskID, WSMsgTypeResultUpdate, map[string]any{
+		"result": map[string]any{"secret": "raw-result-secret-sentinel"},
+	}))
+	session, err := manager.taskStore.GetSession(taskID)
+	require.NoError(t, err)
+	assert.Equal(t, TaskStatusError, session.Status, "a redaction failure must not leave an unrecoverable success result")
+	events, err := manager.taskStore.GetSessionEventsByType(taskID, WSMsgTypeResultUpdate)
+	require.NoError(t, err)
+	assert.Empty(t, events)
+	events, err = manager.taskStore.GetSessionEventsByType(taskID, WSMsgTypeError)
+	require.NoError(t, err)
+	require.Len(t, events, 1)
+	assert.NotContains(t, string(events[0].EventData), "raw-result-secret-sentinel")
+}
+
+func TestMCPPreparedAssignmentReleaseCannotReopenStartedOrForeignAssignment(t *testing.T) {
+	manager, cleanup := newTestTaskManager(t)
+	defer cleanup()
+	for _, status := range []string{TaskStatusTodo, TaskStatusDoing, TaskStatusDone, TaskStatusError, TaskStatusTerminated, TaskStatusDispatchUnknown} {
+		t.Run(status, func(t *testing.T) {
+			id := "release-assignment-" + status
+			require.NoError(t, manager.taskStore.CreateSession(&database.Session{
+				ID: id, Username: "alice", TaskType: "Mcp-Scan", Status: status, AssignedAgent: "assigned-agent",
+			}))
+			require.Error(t, manager.taskStore.ReleaseSessionAssignment(id, "different-agent"))
+			err := manager.taskStore.ReleaseSessionAssignment(id, "assigned-agent")
+			if status == TaskStatusTodo {
+				require.NoError(t, err)
+			} else {
+				require.Error(t, err)
+			}
+			session, err := manager.taskStore.GetSession(id)
+			require.NoError(t, err)
+			assert.Equal(t, status, session.Status)
+			if status == TaskStatusTodo {
+				assert.Empty(t, session.AssignedAgent)
+			} else {
+				assert.Equal(t, "assigned-agent", session.AssignedAgent)
+			}
+		})
+	}
 }
 
 func TestTaskManagerPlatformStatusAndResultUseEngineSessionMapping(t *testing.T) {
@@ -158,9 +436,7 @@ func TestPlatformDispatchWithoutAgentRetriesExistingUnassignedTodoBeforeFailing(
 	subject := identity.Subject{UserID: "retry-owner-id", Username: "retry-owner", Role: identity.RoleUser}
 
 	view, err := service.Create(context.Background(), subject, platformtasks.CreateInput{
-		IdempotencyKey: "retry-without-agent", TaskType: "mcp_scan",
-		Content: "https://git.example.test/platform/mcp-server.git",
-		Params:  json.RawMessage(`{"source_kind":"repository"}`),
+		IdempotencyKey: "retry-without-agent", TaskType: "ai_infra_scan", Content: "127.0.0.1",
 	})
 	require.ErrorIs(t, err, platformtasks.ErrDispatchFailed)
 	assert.Equal(t, platformtasks.StatusDispatchFailed, view.Status)
@@ -197,7 +473,9 @@ func TestTaskManagerFailedAgentWriteLeavesObservableUnknownAssignment(t *testing
 	taskManager.agentManager.mu.Unlock()
 	require.NoError(t, pair.server.Close())
 
-	request := platformtasks.EngineTask{PlatformTaskID: "failed-agent-write", OwnerUsername: "alice", TaskType: "mcp_scan", Content: "scan"}
+	request := platformtasks.EngineTask{PlatformTaskID: "failed-agent-write", OwnerUsername: "alice", TaskType: "mcp_scan",
+		Params: json.RawMessage(`{"source_kind":"repository"}`), CountryIsoCode: "zh_CN",
+		RuntimeParams: map[string]any{"archive_ref": "archive:source-archive"}}
 	_, err := taskManager.SubmitTask(context.Background(), request)
 	require.ErrorIs(t, err, platformtasks.ErrSubmitAcknowledgementUnknown)
 	session, err := taskManager.taskStore.GetSession(request.PlatformTaskID)
@@ -217,8 +495,9 @@ func TestTaskManagerPayloadBuildFailureNeverClaimsAgentOrMarksRunning(t *testing
 	taskManager.agentManager.mu.Unlock()
 
 	request := platformtasks.EngineTask{
-		PlatformTaskID: "payload-build-failure", OwnerUsername: "alice", TaskType: "mcp_scan", Content: "scan",
-		Params: json.RawMessage(`{"model_id":"missing-model"}`),
+		PlatformTaskID: "payload-build-failure", OwnerUsername: "alice", TaskType: "mcp_scan", CountryIsoCode: "zh_CN",
+		Params:        json.RawMessage(`{"source_kind":"repository","model_id":"missing-model"}`),
+		RuntimeParams: map[string]any{"archive_ref": "archive:source-archive"},
 	}
 	_, err := taskManager.SubmitTask(context.Background(), request)
 	require.Error(t, err)
@@ -282,6 +561,7 @@ func TestAgentEventsAreBoundToAuthenticatedAssignedConnection(t *testing.T) {
 func TestAssignedAgentEventCanResolveUnknownDispatch(t *testing.T) {
 	taskManager, cleanup := newTestTaskManager(t)
 	defer cleanup()
+	taskManager.SetMCPEventRedactor(&staticMCPEventRedactor{})
 	require.NoError(t, taskManager.taskStore.CreateUser(&database.User{
 		UserID: "unknown-owner-id", Username: "unknown-owner", Email: "unknown-owner@example.test", IsActive: true,
 	}))

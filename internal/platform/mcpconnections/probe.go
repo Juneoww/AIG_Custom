@@ -429,36 +429,12 @@ func applyProbeAuthentication(request *http.Request, payload validatedProbePaylo
 	if request == nil {
 		return ErrProbeFailed
 	}
-	// validatedProbePayload 是私有类型，但同包未来代码仍可手工构造。再次要求
-	// canonical payload，避免绕过 Initialize 的入口校验而把不合法 Header 写入请求。
-	canonical, valid := canonicalConnectionPayload(payload.ConnectionPayload)
-	if !valid || !sameConnectionPayload(canonical, payload.ConnectionPayload) {
+	// validatedProbePayload 是私有类型，但同包未来代码仍可手工构造。共享的
+	// runtime 边界会再次要求 canonical payload，避免绕过 Initialize 的入口。
+	if ApplyRuntimeAuthentication(request.Header, payload.ConnectionPayload) != nil {
 		return ErrProbeFailed
 	}
-	for _, header := range payload.Headers {
-		request.Header.Set(header.Name, header.Value)
-	}
-	switch payload.Authentication.Kind {
-	case AuthenticationBearer:
-		request.Header.Set("Authorization", "Bearer "+payload.Authentication.Secret)
-	case AuthenticationAPIKeyHeader:
-		if payload.Authentication.HeaderName != "" {
-			request.Header.Set(payload.Authentication.HeaderName, payload.Authentication.Secret)
-		}
-	}
 	return nil
-}
-
-func sameConnectionPayload(left, right ConnectionPayload) bool {
-	if left.Endpoint != right.Endpoint || left.Authentication != right.Authentication || len(left.Headers) != len(right.Headers) {
-		return false
-	}
-	for index := range left.Headers {
-		if left.Headers[index] != right.Headers[index] {
-			return false
-		}
-	}
-	return true
 }
 
 // applyStreamableHTTPHeaders 必须在全部用户材料之后调用。保存时的 header 策略

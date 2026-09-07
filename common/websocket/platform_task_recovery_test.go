@@ -1,6 +1,7 @@
 package websocket
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -15,6 +16,8 @@ import (
 	platformaudit "github.com/Juneoww/AIG_Custom/internal/platform/audit"
 	platformbrand "github.com/Juneoww/AIG_Custom/internal/platform/brand"
 	"github.com/Juneoww/AIG_Custom/internal/platform/identity"
+	"github.com/Juneoww/AIG_Custom/internal/platform/mcpconnections"
+	"github.com/Juneoww/AIG_Custom/internal/platform/mcpegress"
 	platformreports "github.com/Juneoww/AIG_Custom/internal/platform/reports"
 	platformtasks "github.com/Juneoww/AIG_Custom/internal/platform/tasks"
 	"github.com/Juneoww/AIG_Custom/pkg/database"
@@ -63,6 +66,20 @@ func TestTaskManagerReconcilesDurableResultAfterInitialPlatformSnapshotFailure(t
 	_, created, err := taskRepository.CreateOrGet(ctx, &nowTask)
 	require.NoError(t, err)
 	require.True(t, created)
+
+	// Recovery exercises the real binding-based redactor. A missing redactor
+	// must now fail closed instead of persisting an unfiltered success result.
+	keyring, err := mcpconnections.NewKeyring("recovery-test-key", bytes.Repeat([]byte{7}, 32), nil)
+	require.NoError(t, err)
+	bindings := mcpconnections.NewGormRepository(db)
+	bound := &mcpconnections.TaskBinding{ID: "recovery-binding", TaskID: sessionID, SourceKind: "repository"}
+	require.NoError(t, keyring.SealRepositorySource(bound, mcpconnections.BindingEncryptionContext{
+		OwnerUserID: "alice-id", Scope: mcpconnections.ScopePrivate, Version: 1,
+	}, mcpconnections.RepositorySourceSnapshot{RepositoryURL: "https://git.example.test/recovery/source.git"}))
+	require.NoError(t, bindings.CreateTaskBinding(ctx, bound))
+	manager.SetMCPEventRedactor(mcpegress.NewService(mcpegress.ServiceDependencies{
+		Tasks: taskRepository, Bindings: bindings, Keyring: keyring,
+	}))
 
 	assert.True(t, manager.HandleAgentEvent("agent-recovery", sessionID, WSMsgTypeResultUpdate, raw))
 	legacy, err := taskStore.GetSession(sessionID)

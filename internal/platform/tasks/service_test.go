@@ -37,6 +37,26 @@ type recordingEngine struct {
 	last        EngineTask
 }
 
+type recordingMCPRuntimeIssuer struct {
+	calls  atomic.Int64
+	taskID string
+	params map[string]any
+	err    error
+}
+
+func (issuer *recordingMCPRuntimeIssuer) IssueRuntimeParams(_ context.Context, taskID string) (map[string]any, error) {
+	issuer.calls.Add(1)
+	issuer.taskID = taskID
+	if issuer.err != nil {
+		return nil, issuer.err
+	}
+	params := make(map[string]any, len(issuer.params))
+	for key, value := range issuer.params {
+		params[key] = value
+	}
+	return params, nil
+}
+
 type readerCallback func([]byte) (int, error)
 
 func (callback readerCallback) Read(buffer []byte) (int, error) { return callback(buffer) }
@@ -148,6 +168,47 @@ func (engine *recordingEngine) SubmitTask(_ context.Context, task EngineTask) (s
 	}
 	engine.status[task.PlatformTaskID] = EngineStatus{State: EngineStateRunning}
 	return task.PlatformTaskID, nil
+}
+
+func TestMCPPostCommitDispatchDefersEphemeralRuntimeUntilEngineAssignment(t *testing.T) {
+	repository := NewMemoryRepository()
+	engine := &recordingEngine{}
+	service := NewService(repository, engine, audit.NewService(audit.NewMemoryRepository()))
+	issuer := &recordingMCPRuntimeIssuer{params: map[string]any{
+		"mcp_proxy_url":       "https://platform.internal.example.test/api/internal/mcp-egress/mcp-runtime-dispatch-task",
+		"task_capability":     "mcp-runtime-dispatch-capability",
+		"effective_transport": "http",
+	}}
+	service.SetMCPRuntimeIssuer(issuer)
+	const taskID = "mcp-runtime-dispatch-task"
+	now := time.Now().UTC()
+	_, created, err := repository.CreateOrGet(context.Background(), &Task{
+		ID: taskID, OwnerUserID: "mcp-runtime-owner", OwnerUsername: "alice", IdempotencyKey: taskID,
+		EngineSessionID: taskID, TaskType: "mcp_scan", Content: "", CountryIsoCode: "zh_CN", Status: StatusPending,
+		Params: json.RawMessage(`{"source_kind":"service","authorization_confirmed":true}`), AttachmentRefs: json.RawMessage(`[]`),
+		CreatedAt: now, UpdatedAt: now,
+	})
+	require.NoError(t, err)
+	require.True(t, created)
+
+	err = service.DispatchMCPAfterCommit(context.Background(), identity.Subject{UserID: "mcp-runtime-owner", Username: "alice", Role: identity.RoleUser}, taskID)
+	require.NoError(t, err)
+	assert.Zero(t, issuer.calls.Load(), "the task service must not rotate a capability before the engine is ready to send a frame")
+	assert.Equal(t, int64(1), engine.submits.Load())
+	engine.mu.Lock()
+	dispatched := engine.last
+	engine.mu.Unlock()
+	assert.Nil(t, dispatched.RuntimeParams)
+	require.NotNil(t, dispatched.RuntimeIssuer)
+	runtime, runtimeErr := dispatched.RuntimeIssuer(context.Background())
+	require.NoError(t, runtimeErr)
+	assert.Equal(t, issuer.params, runtime)
+	assert.Equal(t, int64(1), issuer.calls.Load())
+	assert.Equal(t, taskID, issuer.taskID)
+	stored, err := repository.Get(context.Background(), taskID)
+	require.NoError(t, err)
+	assert.JSONEq(t, `{"source_kind":"service","authorization_confirmed":true}`, string(stored.Params))
+	assert.NotContains(t, string(stored.Params), "mcp-runtime-dispatch-capability")
 }
 
 func (engine *recordingEngine) GetTaskStatus(_ context.Context, sessionID string) (EngineStatus, error) {

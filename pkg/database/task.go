@@ -256,6 +256,23 @@ func (s *TaskStore) PrepareSessionAssignment(sessionID, agentID string) error {
 	return nil
 }
 
+// ReleaseSessionAssignment reverses a prepared assignment when no WebSocket
+// frame was written. It is intentionally narrower than cancellation: only the
+// same Agent may release a still-todo row, so a concurrent successful write
+// can never be reopened for a second dispatch.
+func (s *TaskStore) ReleaseSessionAssignment(sessionID, agentID string) error {
+	result := s.db.Model(&Session{}).
+		Where("id = ? AND status = ? AND assigned_agent = ?", sessionID, "todo", agentID).
+		Updates(map[string]interface{}{"assigned_agent": "", "updated_at": time.Now().UnixMilli()})
+	if result.Error != nil {
+		return result.Error
+	}
+	if result.RowsAffected != 1 {
+		return fmt.Errorf("任务分配状态已变更")
+	}
+	return nil
+}
+
 // ConfirmSessionAssignment marks a successfully written assignment as running.
 // A fast authenticated terminal event may already have advanced the task, which
 // is also a successful confirmation.

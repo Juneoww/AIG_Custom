@@ -147,6 +147,7 @@ type Service struct {
 	audits              audit.Recorder
 	attachments         *AttachmentService
 	reportSnapshots     reportSnapshotter
+	mcpRuntimeIssuer    MCPRuntimeIssuer
 	now                 func() time.Time
 	recoveryItemTimeout time.Duration
 	recoveryMu          sync.Mutex
@@ -156,6 +157,15 @@ type Service struct {
 type reportSnapshotter interface {
 	Prepare(context.Context, reports.CompletedTask) (*reports.Snapshot, error)
 	Persist(context.Context, *reports.Snapshot) error
+}
+
+// MCPRuntimeIssuer supplies the one-time, assignment-only material for a
+// dedicated MCP task. The map is never a task parameter or persistent value;
+// it is passed directly to the engine adapter and checked again at that edge.
+// Keeping this small interface here avoids coupling the task domain to the
+// mcpegress implementation package.
+type MCPRuntimeIssuer interface {
+	IssueRuntimeParams(context.Context, string) (map[string]any, error)
 }
 
 type engineEventCoordinator interface {
@@ -172,6 +182,12 @@ func (service *Service) SetAttachmentService(attachments *AttachmentService) {
 
 func (service *Service) SetReportSnapshotService(snapshotter reportSnapshotter) {
 	service.reportSnapshots = snapshotter
+}
+
+func (service *Service) SetMCPRuntimeIssuer(issuer MCPRuntimeIssuer) {
+	if service != nil {
+		service.mcpRuntimeIssuer = issuer
+	}
 }
 
 func (service *Service) Create(ctx context.Context, subject identity.Subject, input CreateInput) (View, error) {
@@ -943,6 +959,17 @@ func (service *Service) dispatch(ctx context.Context, subject identity.Subject, 
 		PlatformTaskID: task.ID, OwnerUsername: task.OwnerUsername, TaskType: task.TaskType,
 		Content: task.Content, Params: params, CountryIsoCode: task.CountryIsoCode,
 	}
+	// The dedicated MCP workflow supplies a factory, not an already-issued
+	// capability. The engine invokes it only after it has selected an Agent and
+	// committed to a new assignment frame, preventing a no-op/idempotent submit
+	// from rotating an existing Agent's capability.
+	if task.TaskType == "mcp_scan" && task.Content == "" && service.mcpRuntimeIssuer != nil {
+		issuer := service.mcpRuntimeIssuer
+		taskID := task.ID
+		engineTask.RuntimeIssuer = func(runtimeContext context.Context) (map[string]any, error) {
+			return issuer.IssueRuntimeParams(runtimeContext, taskID)
+		}
+	}
 	var attachmentIDs []string
 	_ = json.Unmarshal(task.AttachmentRefs, &attachmentIDs)
 	if len(attachmentIDs) > 0 {
@@ -1029,6 +1056,98 @@ func (service *Service) dispatch(ctx context.Context, subject identity.Subject, 
 		return task, getErr
 	}
 	return current, fmt.Errorf("%w: %s", ErrDispatchFailed, safeError)
+}
+
+// DispatchMCPAfterCommit is the only post-commit entry point used by the
+// dedicated MCP create workflow. It reacquires the task and dispatch lease
+// after the binding transaction commits, so a runtime capability is never
+// issued from uncommitted task data.
+func (service *Service) DispatchMCPAfterCommit(ctx context.Context, subject identity.Subject, taskID string) error {
+	if service == nil || service.repository == nil || strings.TrimSpace(taskID) == "" {
+		return ErrInvalid
+	}
+	task, err := service.repository.Get(ctx, taskID)
+	if err != nil {
+		return err
+	}
+	if task.TaskType != "mcp_scan" || task.OwnerUserID != subject.UserID ||
+		(subject.Role != identity.RoleUser && subject.Role != identity.RoleAdmin) {
+		return ErrForbidden
+	}
+	now := service.now()
+	claim, claimed, err := service.repository.ClaimDispatch(ctx, task.ID, now, now.Add(dispatchLeaseDuration))
+	if err != nil {
+		return err
+	}
+	if !claimed {
+		return nil
+	}
+	_, err = service.dispatch(ctx, subject, task, claim)
+	return err
+}
+
+// ValidMCPSafeTaskParams validates the persistent channel before the engine
+// writes a Session, including when runtime material has not yet been issued.
+func ValidMCPSafeTaskParams(params json.RawMessage) bool {
+	_, valid := decodeMCPTaskParams(params)
+	return valid
+}
+
+// ValidMCPRuntimeAssignment admits only a fixed task gateway URL, capability
+// and concrete transport, or one opaque repository archive reference.
+func ValidMCPRuntimeAssignment(taskID string, params json.RawMessage, runtime map[string]any) bool {
+	safe, valid := decodeMCPTaskParams(params)
+	if !valid || strings.TrimSpace(taskID) == "" {
+		return false
+	}
+	switch safe.SourceKind {
+	case "service":
+		if len(runtime) != 3 {
+			return false
+		}
+		proxyURL, proxyOK := runtime["mcp_proxy_url"].(string)
+		capability, capabilityOK := runtime["task_capability"].(string)
+		transport, transportOK := runtime["effective_transport"].(string)
+		return proxyOK && validMCPRuntimeProxyURL(proxyURL, taskID) && capabilityOK && validMCPRuntimeCapability(capability) &&
+			transportOK && (transport == "http" || transport == "sse")
+	case "repository":
+		if len(runtime) != 1 {
+			return false
+		}
+		archiveRef, ok := runtime["archive_ref"].(string)
+		return ok && validMCPRuntimeArchiveReference(archiveRef)
+	default:
+		return false
+	}
+}
+
+func validMCPRuntimeProxyURL(raw, taskID string) bool {
+	parsed, err := url.Parse(raw)
+	return err == nil && parsed != nil && (parsed.Scheme == "http" || parsed.Scheme == "https") && parsed.Host != "" && parsed.User == nil &&
+		parsed.RawQuery == "" && !parsed.ForceQuery && parsed.Fragment == "" && parsed.Opaque == "" && parsed.RawPath == "" &&
+		parsed.Path == "/api/internal/mcp-egress/"+taskID
+}
+
+func validMCPRuntimeCapability(value string) bool {
+	return value != "" && value == strings.TrimSpace(value) && len(value) <= 512
+}
+
+func validMCPRuntimeArchiveReference(value string) bool {
+	const prefix = "archive:"
+	if value == "" || value != strings.TrimSpace(value) || !strings.HasPrefix(value, prefix) {
+		return false
+	}
+	identifier := strings.TrimPrefix(value, prefix)
+	if identifier == "" || len(identifier) > 128 {
+		return false
+	}
+	for _, character := range identifier {
+		if character >= 'a' && character <= 'z' || character >= 'A' && character <= 'Z' || character >= '0' && character <= '9' || character == '-' || character == '_' {
+			continue
+		}
+		return false
+	}
+	return true
 }
 
 func (service *Service) currentAfterLeaseLoss(ctx context.Context, fallback *Task, err error) (*Task, error) {

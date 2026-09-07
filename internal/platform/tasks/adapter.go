@@ -17,12 +17,24 @@ const (
 	EngineStateCancelled EngineState = "cancelled"
 )
 
+// RuntimeParamsIssuer creates one assignment's private runtime material only
+// after the engine has committed to sending an Agent frame. It is intentionally
+// a function rather than persisted task data: retries call it again and never
+// reuse a capability from task or engine-session storage.
+type RuntimeParamsIssuer func(context.Context) (map[string]any, error)
+
 type EngineTask struct {
 	PlatformTaskID string
 	OwnerUsername  string
 	TaskType       string
 	Content        string
 	Params         json.RawMessage
+	// RuntimeParams is assignment-only material. It must never be serialized
+	// into platform task state, engine sessions, browser DTOs, audits, or logs.
+	RuntimeParams map[string]any `json:"-"`
+	// RuntimeIssuer is an in-memory factory for a fresh RuntimeParams map. The
+	// engine invokes it only immediately before a confirmed Agent assignment.
+	RuntimeIssuer  RuntimeParamsIssuer `json:"-"`
 	Attachments    []string
 	CountryIsoCode string
 }

@@ -180,6 +180,21 @@ func TestIssueRuntimeRotatesThePriorCapability(t *testing.T) {
 	require.NoError(t, service.VerifyCapability(ctx, taskID, second.TaskCapability))
 }
 
+func TestIssueRuntimeParamsReturnsOnlyAssignmentMaterial(t *testing.T) {
+	ctx := context.Background()
+	service, taskID := newServiceRuntimeFixture(t)
+	service.newCapability = func() (string, error) { return "runtime-params-capability", nil }
+
+	params, err := service.IssueRuntimeParams(ctx, taskID)
+	require.NoError(t, err)
+	assert.Equal(t, "https://platform.internal.example.test/api/internal/mcp-egress/"+taskID, params["mcp_proxy_url"])
+	assert.Equal(t, "runtime-params-capability", params["task_capability"])
+	assert.Equal(t, "http", params["effective_transport"])
+	assert.NotContains(t, params, "endpoint")
+	assert.NotContains(t, params, "authorization")
+	assert.NotContains(t, params, "headers")
+}
+
 func TestIssueRuntimeRefusesTerminalTask(t *testing.T) {
 	ctx := context.Background()
 	service, taskID := newServiceRuntimeFixture(t)
