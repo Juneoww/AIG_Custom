@@ -16,17 +16,17 @@
 # Tencent Zhuque Lab (https://github.com/Tencent/AI-Infra-Guard) in its
 # documentation or user interface, as detailed in the NOTICE file.
 
-"""
-Report generation for agent security scanning.
-
-This module converts LLM-generated vulnerability XML into the standardized 
-frontend report format (schema: agent-security-report@1).
+"""功能：把漏洞 XML 转为 agent-security-report@1 报告。
+实现：提取漏洞及对话、计算风险等级和 OWASP 汇总，保留兼容解析入口。
+输入：漏洞文本及扫描元数据；输出：前端兼容报告模型。
 """
 
 import re
 import time
+import xml.etree.ElementTree as ET
 from typing import Any, Dict, List, Optional
 from collections import defaultdict
+from .review import validate_review_output
 
 from .models import (
     Severity,
@@ -64,6 +64,16 @@ def _severity_to_level(severity: Severity) -> str:
 
 def _extract_tag_content(text: str, tag: str) -> Optional[str]:
     """Extract content from XML-like tag."""
+    try:
+        element = ET.fromstring(f"<root>{text}</root>").find(tag)
+        if element is not None:
+            # 严格复核采用合法 XML；叶节点自动解码实体/CDATA，证据保持原文。
+            if not list(element):
+                return (element.text or "").strip()
+            return ((element.text or "") + "".join(ET.tostring(child, encoding="unicode") for child in element)).strip()
+    except ET.ParseError:
+        pass
+    # 旧的直接调用仍可处理非严格 XML 文本，扫描入口另行执行完整复核校验。
     pattern = re.compile(rf'<{tag}>\s*(.*?)\s*</{tag}>', re.DOTALL)
     match = pattern.search(text)
     return match.group(1).strip() if match else None
@@ -183,6 +193,24 @@ def _level_to_severity(level: str) -> Severity:
     return Severity.LOW
 
 
+def _extract_review_findings(text: str) -> List[Dict[str, Any]]:
+    """已验证复核结果直接从 XML 节点转换，完整保留 CDATA 和转义证据。"""
+    validate_review_output(text)
+    root = ET.fromstring(f"<review>{text}</review>")
+    for item in root.findall("vuln"):
+        if _is_example_placeholder(" ".join(item.itertext())):
+            raise RuntimeError("Invalid final review: placeholder evidence")
+    return [{
+        "title": item.findtext("title").strip(),
+        "description": item.findtext("desc").strip(),
+        "risk_type": item.findtext("risk_type").strip(),
+        "level": item.findtext("level").strip(),
+        "suggestion": item.findtext("suggestion").strip(),
+        "conversation": [{"prompt": turn.findtext("prompt"), "response": turn.findtext("response")}
+                         for turn in item.find("conversation")],
+    } for item in root.findall("vuln")]
+
+
 def _extract_asi_from_risk_type(risk_type: str) -> str:
     """Extract ASI category from risk_type. Expects format 'ASI0X: Category Name' (per agent_security_reviewer)."""
     asi_match = re.search(r'asi0?(\d+)', risk_type, re.IGNORECASE)
@@ -226,6 +254,7 @@ def generate_report_from_xml(
     end_time: Optional[int] = None,
     total_tests: int = 0,
     report_description: str = "",
+    strict_review: bool = False,
 ) -> AgentSecurityReport:
     """
     Generate security report from XML-formatted vulnerability text.
@@ -247,7 +276,7 @@ def generate_report_from_xml(
     Returns:
         AgentSecurityReport ready for frontend consumption
     """
-    vuln_list = _extract_vuln_blocks(vuln_text)
+    vuln_list = _extract_review_findings(vuln_text) if strict_review else _extract_vuln_blocks(vuln_text)
 
     # Use passed total_tests, default to vuln_list length if 0
     if total_tests == 0 and len(vuln_list) > 0:

@@ -16,6 +16,11 @@
 # Tencent Zhuque Lab (https://github.com/Tencent/AI-Infra-Guard) in its
 # documentation or user interface, as detailed in the NOTICE file.
 
+"""功能：执行单阶段 Agent 工具循环，明确区分完成与执行失败。
+实现：限制模型连续错误和迭代次数，只有 finish 后格式化成功才完成。
+输入：模型、阶段指令、任务上下文和工具；输出：阶段结果或执行异常。
+"""
+
 import json
 import uuid
 from typing import Optional
@@ -28,6 +33,10 @@ from utils.logging import logger
 from utils.parse import parse_tool_invocations, clean_content
 from utils.prompt_manager import prompt_manager
 from utils.tool_context import ToolContext
+
+
+class AgentExecutionError(RuntimeError):
+    """阶段无法可靠完成时中止扫描，禁止降级为空结果。"""
 
 
 class BaseAgent:
@@ -107,15 +116,6 @@ class BaseAgent:
     def next_prompt(self):
         return prompt_manager.format_prompt("next_prompt", round=self.iter)
 
-    def _latest_assistant_fallback(self) -> str:
-        for message in reversed(self.history):
-            if message.get("role") != "assistant":
-                continue
-            content = clean_content(message.get("content", ""))
-            if content and not is_llm_error_response(content):
-                return content
-        return ""
-
     def _append_model_error_recovery_message(self, response: str):
         self.history.append({"role": "assistant", "content": response})
         self.history.append({
@@ -170,8 +170,7 @@ class BaseAgent:
                             f"Max consecutive LLM failures ({max_consecutive_failures}) reached. "
                             f"Terminating agent."
                         )
-                        self.is_finished = True
-                        break
+                        raise AgentExecutionError("LLM failed after 3 consecutive model errors")
 
                     # Write error message as assistant + user pair to history,
                     # ensuring history always ends with a user message,
@@ -189,6 +188,8 @@ class BaseAgent:
                     result = res
                 self.iter += 1
 
+            except AgentExecutionError:
+                raise
             except Exception as e:
                 # Catch unexpected exceptions (llm.chat should degrade to string, this is a fallback)
                 consecutive_failures += 1
@@ -202,8 +203,7 @@ class BaseAgent:
                         f"Max consecutive exceptions ({max_consecutive_failures}) reached. "
                         f"Terminating agent."
                     )
-                    self.is_finished = True
-                    break
+                    raise AgentExecutionError("LLM execution failed after 3 consecutive exceptions") from e
 
                 # Write as valid assistant + user pair to avoid invalid role sequence
                 self.history.append({
@@ -217,8 +217,8 @@ class BaseAgent:
                 self.iter += 1
                 continue
 
-        if self.iter >= self.max_iter:
-            logger.warning(f"Max iterations ({self.max_iter}) reached without finish signal")
+        if not self.is_finished:
+            raise AgentExecutionError(f"Maximum iterations ({self.max_iter}) reached without successful finish")
 
         return result
 
@@ -253,7 +253,6 @@ class BaseAgent:
         self.tool_usage_stats[tool_name] += 1
 
         if tool_name == "finish":
-            self.is_finished = True
             if self.format_on_finish:
                 # Full stages (recon, review): reformat the entire history via LLM
                 # to produce a clean, structured final report.
@@ -265,6 +264,7 @@ class BaseAgent:
                 # use the full assistant message so _extract_vuln_blocks() can
                 # find the <vuln> tags.
                 result = self.history[-1].get("content", "")
+            self.is_finished = True
             logger.info("Finish tool called, final result formatted.")
             scanLogger.status_update(self.step_id, description, "", "completed")
             scanLogger.action_log(tool_id, tool_name, self.step_id, result)
@@ -283,7 +283,12 @@ class BaseAgent:
         )
 
         # Call tool via Dispatcher
-        tool_result = await self.dispatcher.call_tool(tool_name, tool_args, context)
+        try:
+            tool_result = await self.dispatcher.call_tool(tool_name, tool_args, context)
+        except Exception:
+            if tool_name == "dialogue":
+                raise AgentExecutionError("Target agent dialogue failed; scan cannot be completed") from None
+            raise
 
         # Format tool result and add to history
         result_message = f"{tool_result}"
@@ -321,12 +326,12 @@ class BaseAgent:
             output_format=self.instruction
         )
         recent_history.append({"role": "user", "content": formatting_prompt})
-        final_output = await self.llm.chat_async(recent_history, language=self.language)
-        if is_llm_error_response(final_output):
-            logger.warning(f"Final output formatting skipped due to LLM error response: {final_output}")
-            fallback = self._latest_assistant_fallback()
-            if fallback:
-                return fallback
+        try:
+            final_output = await self.llm.chat_async(recent_history, language=self.language)
+        except Exception as exc:
+            raise AgentExecutionError("Final output formatting failed") from exc
+        if not isinstance(final_output, str) or not final_output.strip() or is_llm_error_response(final_output):
+            raise AgentExecutionError("Final output formatting failed: empty output or model error")
         logger.info(f"Final Output: {final_output}")
         return final_output
 

@@ -54,6 +54,8 @@ class LLM:
                 time.sleep(1.3)
                 if retry > 5:
                     logger.error("LLM chat error, retry 5 times, exit")
+                    if getattr(self, "strict_empty_output", False):
+                        raise ValueError("Skills model returned no output after retries")
                     ret = "连接LLM失败，已重试5次，模型输出为空,请等待1分钟后再试"
                     break
         if p:

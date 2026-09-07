@@ -16,6 +16,11 @@
 # Tencent Zhuque Lab (https://github.com/Tencent/AI-Infra-Guard) in its
 # documentation or user interface, as detailed in the NOTICE file.
 
+"""功能：向目标 Agent 发起单轮对话并报告连接失败。
+实现：瞬时故障重试一次，空响应和最终失败返回明确错误标记。
+输入：prompt 和工具上下文；输出：实际目标回复，连接失败则抛出脱敏异常。
+"""
+
 import time
 
 from core.agent_adapter.adapter import AIProviderClient, ProviderTestResult
@@ -39,18 +44,24 @@ def dialogue(prompt: str = None, context: ToolContext = None) -> str:
     (e.g. invalid prompt encoding) that a retry will not fix.
 
     Returns:
-        The agent's response text, or an error description string (prefixed
-        with ``[Error: …]``) so the calling skill agent can reason about the
-        failure rather than receiving a bare ``None``.
+        The agent's response text. Connection failures raise RuntimeError;
+        target text is never interpreted as an execution status.
     """
     last_result: ProviderTestResult | None = None
 
     for attempt in range(_MAX_RETRIES + 1):
-        last_result = context.call_provider(prompt)
-        logger.info(f"Dialogue result: {last_result}")
+        try:
+            last_result = context.call_provider(prompt)
+        except Exception:
+            # 异常可能含连接 URL、请求头和凭据，不传播到扫描日志。
+            raise RuntimeError("Target agent connection failed") from None
+        logger.info(f"Dialogue attempt {attempt + 1}: success={last_result.success}")
 
         if last_result.success:
-            return last_result.provider_response.output
+            output = last_result.provider_response.output if last_result.provider_response else None
+            if not isinstance(output, str) or not output.strip():
+                raise RuntimeError("Target agent returned an empty response")
+            return output
 
         error_msg = last_result.message or ""
 
@@ -63,11 +74,8 @@ def dialogue(prompt: str = None, context: ToolContext = None) -> str:
 
         logger.warning(
             f"Dialogue attempt {attempt + 1} failed (transient), "
-            f"retrying in {_RETRY_DELAY_SECONDS}s: {error_msg}"
+            f"retrying in {_RETRY_DELAY_SECONDS}s"
         )
         time.sleep(_RETRY_DELAY_SECONDS)
 
-    # Return a descriptive error string so the skill agent can log and continue
-    # rather than silently treating None as an empty response.
-    error_desc = last_result.message if last_result else "Unknown error"
-    return f"[Error: {error_desc}]"
+    raise RuntimeError("Target agent dialogue failed")

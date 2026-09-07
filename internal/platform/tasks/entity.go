@@ -26,6 +26,8 @@ type Task struct {
 	EngineSessionID    string          `gorm:"not null;column:engine_session_id" json:"engine_session_id,omitempty"`
 	TaskType           string          `gorm:"not null;column:task_type" json:"task_type"`
 	Content            string          `gorm:"not null;column:content" json:"content"`
+	Remark             string          `gorm:"not null;column:remark" json:"remark,omitempty"`
+	TargetCount        int             `gorm:"not null;column:target_count" json:"target_count"`
 	Params             json.RawMessage `gorm:"type:jsonb;not null;column:params" json:"params,omitempty"`
 	AttachmentRefs     json.RawMessage `gorm:"type:jsonb;not null;column:attachment_refs" json:"attachment_ids,omitempty"`
 	CountryIsoCode     string          `gorm:"column:country_iso_code" json:"country_iso_code,omitempty"`
@@ -67,6 +69,7 @@ type CreateInput struct {
 	IdempotencyKey string          `json:"-"`
 	TaskType       string          `json:"task_type"`
 	Content        string          `json:"content"`
+	Remark         string          `json:"remark,omitempty"`
 	Params         json.RawMessage `json:"params,omitempty"`
 	AttachmentIDs  []string        `json:"attachment_ids,omitempty"`
 	CountryIsoCode string          `json:"country_iso_code,omitempty"`
@@ -89,6 +92,8 @@ type View struct {
 	EngineSessionID  string          `json:"engine_session_id,omitempty"`
 	TaskType         string          `json:"task_type"`
 	Content          string          `json:"content"`
+	Remark           string          `json:"remark,omitempty"`
+	TargetCount      int             `json:"target_count"`
 	Params           json.RawMessage `json:"params,omitempty"`
 	AttachmentIDs    []string        `json:"attachment_ids,omitempty"`
 	CountryIsoCode   string          `json:"country_iso_code,omitempty"`
@@ -105,6 +110,7 @@ func viewOf(task *Task) View {
 	return View{
 		ID: task.ID, OwnerUserID: task.OwnerUserID, OwnerUsername: task.OwnerUsername,
 		EngineSessionID: task.EngineSessionID, TaskType: task.TaskType, Content: task.Content,
+		Remark: task.Remark, TargetCount: task.TargetCount,
 		Params: append(json.RawMessage(nil), task.Params...), AttachmentIDs: attachments,
 		CountryIsoCode: task.CountryIsoCode, Status: task.Status, DispatchError: task.DispatchError,
 		DispatchAttempts: task.DispatchAttempts, CreatedAt: task.CreatedAt, UpdatedAt: task.UpdatedAt,

@@ -16,19 +16,10 @@
 # Tencent Zhuque Lab (https://github.com/Tencent/AI-Infra-Guard) in its
 # documentation or user interface, as detailed in the NOTICE file.
 
-"""Agent scan pipeline: orchestrates recon, parallel detection, and review stages.
-
-The top-level entry point is :class:`Agent`.  Internally it delegates to
-:class:`ScanPipeline`, which runs three stages:
-
-1. **Information Collection** – a single recon agent gathers the target's
-   configuration, capabilities, and exposed endpoints.
-2. **Parallel Vulnerability Detection** – one lightweight :class:`SkillWorker`
-   is spawned per detection skill and all workers run concurrently.  A shared
-   :class:`asyncio.Semaphore` caps simultaneous ``dialogue()`` calls to the
-   target agent so rate limits are not exhausted.
-3. **Vulnerability Review** – a single reviewer agent consolidates the merged
-   ``<vuln>`` blocks, maps findings to OWASP ASI, and assigns final severity.
+"""功能：编排信息收集、漏洞检测及漏洞复核三阶段扫描。
+实现：向各阶段传递任务说明，校验最终复核合同后生成报告。
+输入：选定模型、Agent provider、仓库路径及任务说明。
+输出：agent-security-report@1 结果；任何阶段或复核失败时抛出异常。
 """
 
 import asyncio
@@ -40,6 +31,7 @@ import utils.llm
 from core.agent_adapter.adapter import AIProviderClient, ProviderOptions
 from core.base_agent import run_agent
 from core.report import generate_report_from_xml
+from core.report.review import validate_review_output
 from utils.aig_logger import scanLogger
 from utils.logging import logger
 from utils.project_analyzer import analyze_language, get_top_language
@@ -403,13 +395,18 @@ class Agent:
         # ------------------------------------------------------------------
         # Stage 3 — Vulnerability Review
         # ------------------------------------------------------------------
-        vuln_review, _review_stats = await self.pipeline.execute_stage(
+        vuln_review, review_stats = await self.pipeline.execute_stage(
             stage=ScanStage("3", "Vulnerability Review", "agent_security_reviewer", language=self.language),
             repo_dir=repo_dir,
             prompt=prompt,
             agent_provider=self.agent_provider,
             context_data={"Vulnerability Detection Report": vuln_detection},
         )
+
+        total_dialogue_count += review_stats.get("dialogue", 0)
+        reviewed_count = validate_review_output(vuln_review)
+        if self.agent_provider is not None and total_dialogue_count == 0:
+            raise RuntimeError("Dynamic scan completed no target tests; a security result cannot be produced")
 
         # ------------------------------------------------------------------
         # Report generation
@@ -439,9 +436,14 @@ class Agent:
             end_time=int(end_time),
             report_description=info_collection,
             total_tests=total_dialogue_count,
+            strict_review=True,
         )
 
-        result = report.dict()
+        # 复核和报告转换必须一一对应，不能过滤后静默变成 safe。
+        if len(report.results) != reviewed_count:
+            raise RuntimeError("Invalid final review: report parser rejected one or more vulnerability blocks")
+
+        result = report.model_dump()
         result["language"] = top_language
 
         scanLogger.result_update(result)

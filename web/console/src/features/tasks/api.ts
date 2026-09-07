@@ -7,6 +7,7 @@
  */
 import { apiRequest } from '../../shared/api/client'
 import { ApiError, NetworkError } from '../../shared/api/errors'
+import { safeAgentReference, safeEvaluationModelReference, safeReportReference } from './agentWorkflow'
 import type {
   TaskCreateRequest,
   TaskDetail,
@@ -27,7 +28,7 @@ export interface TaskListFilters {
   taskType?: Exclude<TaskType, 'unknown'>
 }
 
-const TASK_TYPES = new Set<TaskType>(['mcp_scan', 'ai_infra_scan', 'model_redteam_report', 'agent_scan', 'unknown'])
+const TASK_TYPES = new Set<TaskType>(['mcp_scan', 'ai_infra_scan', 'skills_scan', 'model_redteam_report', 'agent_scan', 'unknown'])
 const TASK_STATUSES = new Set<TaskStatus>([
   'pending',
   'dispatching',
@@ -41,6 +42,7 @@ const TASK_STATUSES = new Set<TaskStatus>([
 const TERMINAL_STATUSES = new Set<TaskStatus>(['succeeded', 'failed', 'cancelled'])
 const MAX_POLL_COUNT = 8
 const MCP_SOURCE_KINDS = new Set<MCPSourceKind>(['repository', 'service', 'legacy_unknown'])
+const MAX_TASK_REMARK_CODE_POINTS = 2_000
 
 function recordOf(value: unknown): Record<string, unknown> | undefined {
   return typeof value === 'object' && value !== null ? (value as Record<string, unknown>) : undefined
@@ -48,6 +50,15 @@ function recordOf(value: unknown): Record<string, unknown> | undefined {
 
 function boundedString(value: unknown, maximum = 256): string | undefined {
   return typeof value === 'string' && value.length > 0 && value.length <= maximum ? value : undefined
+}
+
+function safeModelID(value: unknown): string | undefined {
+  return typeof value === 'string'
+    && /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(value)
+    && value !== '.'
+    && value !== '..'
+    ? value
+    : undefined
 }
 
 function safeDate(value: unknown): string | undefined {
@@ -59,6 +70,28 @@ function safeInteger(value: unknown, maximum = Number.MAX_SAFE_INTEGER): number 
   return Number.isSafeInteger(value) && (value as number) >= 0 && (value as number) <= maximum
     ? (value as number)
     : undefined
+}
+
+function isWellFormedUnicode(value: string): boolean {
+  for (let index = 0; index < value.length; index += 1) {
+    const unit = value.charCodeAt(index)
+    if (unit >= 0xD800 && unit <= 0xDBFF) {
+      if (index + 1 >= value.length) return false
+      const next = value.charCodeAt(index + 1)
+      if (!(next >= 0xDC00 && next <= 0xDFFF)) return false
+      index += 1
+      continue
+    }
+    if (unit >= 0xDC00 && unit <= 0xDFFF) return false
+  }
+  return true
+}
+
+function safeTaskRemark(value: unknown): string | undefined {
+  if (typeof value !== 'string' || !isWellFormedUnicode(value)) return undefined
+  const normalized = value.trim()
+  if (!normalized || !isWellFormedUnicode(normalized) || [...normalized].length > MAX_TASK_REMARK_CODE_POINTS) return undefined
+  return normalized
 }
 
 function parseTaskSummary(value: unknown): TaskSummary | undefined {
@@ -75,13 +108,37 @@ function parseTaskSummary(value: unknown): TaskSummary | undefined {
   return { id, owner, task_type: taskType, status, created_at: createdAt, updated_at: updatedAt }
 }
 
-function parseInputSummary(value: unknown): TaskInputSummary | undefined {
+function parseInputSummary(value: unknown, taskType?: TaskType): TaskInputSummary | undefined {
   const source = recordOf(value)
   if (!source) return undefined
   const result: TaskInputSummary = {}
+  if (taskType === 'agent_scan') {
+    if (source.agent_id !== undefined) {
+      const id = safeAgentReference(source.agent_id)
+      if (!id) return undefined
+      result.agent_id = id
+    }
+    if (source.eval_model_id !== undefined) {
+      const id = safeEvaluationModelReference(source.eval_model_id)
+      if (!id) return undefined
+      result.eval_model_id = id
+    }
+  }
+  if (source.model_id !== undefined) {
+    const modelID = safeModelID(source.model_id)
+    if (!modelID) return undefined
+    result.model_id = modelID
+  }
   if (source.language !== undefined) {
     if (source.language !== 'zh' && source.language !== 'en') return undefined
     result.language = source.language
+  }
+  if (taskType === 'skills_scan') {
+    if (source.scan_mode !== undefined) {
+      if (source.scan_mode !== 'static') return undefined
+      result.scan_mode = source.scan_mode
+    }
+    return result
   }
   if (source.port_scan_mode !== undefined) {
     if (source.port_scan_mode !== 'fixed_ai' && source.port_scan_mode !== 'full_tcp') return undefined
@@ -107,10 +164,22 @@ function parseInputSummary(value: unknown): TaskInputSummary | undefined {
 }
 
 export function parseTaskDetail(value: unknown): TaskDetail {
+  const source = recordOf(value)
   const summary = parseTaskSummary(value)
-  const inputSummary = parseInputSummary(recordOf(value)?.input_summary)
+  const inputSummary = parseInputSummary(source?.input_summary, summary?.task_type)
   if (!summary || !inputSummary) throw new ApiError('unexpected-response', 200)
-  return { ...summary, input_summary: inputSummary }
+  const detail: TaskDetail = { ...summary, input_summary: inputSummary }
+  if (source?.report_id !== undefined) {
+    const reportID = safeReportReference(source.report_id)
+    if (!reportID || summary.status !== 'succeeded') throw new ApiError('unexpected-response', 200)
+    detail.report_id = reportID
+  }
+  if (source?.remark !== undefined) {
+    const remark = safeTaskRemark(source.remark)
+    if (!remark) throw new ApiError('unexpected-response', 200)
+    detail.remark = remark
+  }
+  return detail
 }
 
 function parseTaskList(value: unknown): TaskListResponse {

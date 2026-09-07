@@ -16,11 +16,9 @@
 # Tencent Zhuque Lab (https://github.com/Tencent/AI-Infra-Guard) in its
 # documentation or user interface, as detailed in the NOTICE file.
 
-"""
-API client module - Re-exports from SDK for backward compatibility.
-
-For new code, prefer using agent_ui.sdk directly:
-    from agent_ui.sdk import AIProviderClient, ProviderTestResult
+"""功能：通过统一接口调用 HTTP、WebSocket 和已配置的平台 Agent。
+实现：读取 provider 配置，按协议区分文本与控制帧，流中错误优先于已有答案。
+输入：provider YAML/配置和每轮 prompt；输出：连接结果、响应及元数据。
 """
 
 import json
@@ -34,13 +32,13 @@ import yaml
 from pydantic import BaseModel, Field, Json
 
 try:
-    from websockets.exceptions import ConnectionClosed, WebSocketException
+    from websockets.exceptions import ConnectionClosed, ConnectionClosedOK, WebSocketException
     from websockets.sync.client import connect as websocket_connect
 except ImportError:  # pragma: no cover - exercised only when optional dependency is absent
     class _MissingWebSocketDependencyError(Exception):
         pass
 
-    ConnectionClosed = WebSocketException = _MissingWebSocketDependencyError
+    ConnectionClosed = ConnectionClosedOK = WebSocketException = _MissingWebSocketDependencyError
     websocket_connect = None
 
 
@@ -227,6 +225,10 @@ class AIProviderClient:
     DEFAULT_WS_MAX_MESSAGES = 20
     DEFAULT_WS_MAX_RESPONSE_BYTES = 1024 * 1024
     WS_SCHEMES = ("ws://", "wss://")
+    STREAM_FAILURE_SIGNALS = {
+        "error", "failed", "stopped", "cancelled", "canceled", "partial-succeeded", "partial_succeeded",
+        "workflow_failed", "workflow_stopped", "conversation.chat.failed",
+    }
     WS_TERMINAL_SIGNALS = {
         "event": {
             "conversation.chat.completed",
@@ -589,6 +591,13 @@ class AIProviderClient:
     def _append_ws_message_output(self, parsed_message: Any, transform_response: Optional[str]) -> Optional[str]:
         """Extract text output from a parsed WebSocket message."""
         if isinstance(parsed_message, dict):
+            if self._is_ws_control_message(parsed_message):
+                # 控制帧只接受明确文本，不能把状态、元数据或整个 data 字典序列化成答案。
+                if transform_response:
+                    output = self._apply_transform(parsed_message, transform_response, text_only=True)
+                    if output and output.strip():
+                        return output
+                return self._extract_ws_response_evidence(parsed_message)
             output = self._extract_output(parsed_message, transform_response)
             if output:
                 return output
@@ -596,6 +605,44 @@ class AIProviderClient:
         if isinstance(parsed_message, str):
             return parsed_message
         return None
+
+    def _is_ws_control_message(self, message: Dict[str, Any]) -> bool:
+        """功能：识别终态和已知控制通知，保留普通 message/ok JSON 的原提取行为。"""
+        if self._is_ws_done_message(message):
+            return True
+        signals = [str(message.get(field) or "").lower() for field in ("event", "type")]
+        return (any(signal.startswith(("workflow_", "node_", "response."))
+                    or signal in {"ping", "pong", "heartbeat", "keepalive"} for signal in signals)
+                or str(message.get("status") or "").lower() in {"pending", "queued", "running", "in_progress", "processing"})
+
+    def _extract_ws_response_evidence(self, value: Any) -> Optional[str]:
+        """功能：仅提取协议帧的显式回答；输入嵌套载荷，输出文本或无证据。"""
+        if isinstance(value, str):
+            return value if value.strip() else None
+        if isinstance(value, list):
+            parts = [self._extract_ws_response_evidence(item) for item in value]
+            return "".join(part for part in parts if part) or None
+        if not isinstance(value, dict):
+            return None
+        for field in ("answer", "text", "content", "generated_text", "delta", "message", "choices", "candidates",
+                      "parts", "outputs", "output", "response", "result", "data", "serverContent", "server_content",
+                      "modelTurn", "model_turn"):
+            child = value.get(field)
+            if field == "message" and isinstance(child, str):
+                continue  # 完成通知的 message 是控制说明；普通 JSON 文本仍走原提取接口。
+            output = self._extract_ws_response_evidence(child)
+            if output:
+                return output
+        return None
+
+    def _is_stream_failure(self, message: Any) -> bool:
+        """功能：识别流中失败及部分成功终态；输入事件对象，输出失败标记。"""
+        if not isinstance(message, dict):
+            return False
+        return (bool(message.get("error"))
+                or any(str(message.get(field) or "").lower() in self.STREAM_FAILURE_SIGNALS
+                       for field in ("event", "type", "status"))
+                or self._is_stream_failure(message.get("data")))
 
     def _is_ws_done_message(self, parsed_message: Any) -> bool:
         """Best-effort detection for common WebSocket stream terminators."""
@@ -627,13 +674,19 @@ class AIProviderClient:
         output_parts: List[str] = []
         total_response_bytes = 0
 
+        def failure(reason):
+            return raw_messages, output_parts, ProviderTestResult(success=False, message=reason,
+                provider_response=ProviderResponseInfo(error=reason))
+
         for _ in range(max_messages):
             try:
                 response_message = websocket.recv(timeout=timeout)
             except TimeoutError:
-                break
+                return failure("WebSocket response timed out before completion")
+            except ConnectionClosedOK:
+                return raw_messages, output_parts, None
             except ConnectionClosed:
-                break
+                return failure("WebSocket connection closed before completion")
 
             if isinstance(response_message, bytes):
                 total_response_bytes += len(response_message)
@@ -651,15 +704,17 @@ class AIProviderClient:
 
             parsed_message = self._parse_ws_message(response_message)
             raw_messages.append(parsed_message)
+            if self._is_stream_failure(parsed_message):
+                return failure("WebSocket target returned a failure event")
 
-            output = self._append_ws_message_output(parsed_message, config.transform_response)
+            output = None if parsed_message == "[DONE]" else self._append_ws_message_output(parsed_message, config.transform_response)
             if output:
                 output_parts.append(output)
 
             if self._is_ws_done_message(parsed_message):
-                break
+                return raw_messages, output_parts, None
 
-        return raw_messages, output_parts, None
+        return failure("WebSocket message limit reached before completion")
 
     def _call_websocket_provider(self, provider: ProviderOptions, prompt: str) -> ProviderTestResult:
         """Call a request-response style WebSocket endpoint."""
@@ -704,7 +759,7 @@ class AIProviderClient:
 
             elapsed = time.time() - start_time
             raw_response: Any = raw_messages[-1] if len(raw_messages) == 1 else raw_messages
-            output = "".join(output_parts) if output_parts else self._extract_output(raw_response, config.transform_response)
+            output = "".join(output_parts)
 
             provider_response = ProviderResponseInfo(
                 raw=raw_response,
@@ -717,7 +772,7 @@ class AIProviderClient:
                 }
             )
 
-            if output:
+            if output.strip():
                 return ProviderTestResult(
                     success=True,
                     message=f"✅ WebSocket connection successful! Messages: {len(raw_messages)}, Time: {elapsed:.2f}s",
@@ -726,7 +781,7 @@ class AIProviderClient:
             return ProviderTestResult(
                 success=False,
                 message="❌ WebSocket response did not contain extractable output",
-                provider_response=provider_response
+                provider_response=ProviderResponseInfo(error="WebSocket response did not contain extractable output")
             )
 
         except TimeoutError:
@@ -783,28 +838,29 @@ class AIProviderClient:
         base_url = base_url.rstrip("/")
 
         # Determine endpoint
-        dify_type = getattr(config, 'extra', {}).get('dify_type', 'chat') if config else 'chat'
+        extra = (config.extra or {}) if config else {}
+        dify_type = extra.get('dify_type', 'workflow' if 'workflow' in provider_id else 'chat')
+        inputs = self._render_prompt_body(extra['inputs'], prompt) if extra.get('inputs') else {}
         if "workflow" in dify_type:
             endpoint = "/workflows/run"
             # Workflow uses 'inputs' for the prompt
             body = {
-                "inputs": getattr(config, 'extra', {}).get('inputs', {}) if config else {},
+                "inputs": inputs,
                 "response_mode": "streaming",
-                "user": getattr(config, 'extra', {}).get('user', 'agent-user') if config else 'agent-user'
+                "user": extra.get('user', 'agent-user')
             }
-            # Add prompt to inputs if not already specified
-            if "query" not in body["inputs"]:
-                body["inputs"]["query"] = prompt
+            # 每轮使用当前 prompt，且不污染被后续扫描复用的 provider inputs。
+            body["inputs"]["query"] = prompt
         else:
             endpoint = "/chat-messages"
             body = {
-                "inputs": getattr(config, 'extra', {}).get('inputs', {}) if config else {},
+                "inputs": inputs,
                 "query": prompt,
                 "response_mode": "streaming",
-                "user": getattr(config, 'extra', {}).get('user', 'agent-user') if config else 'agent-user'
+                "user": extra.get('user', 'agent-user')
             }
             # Add conversation_id if provided
-            conversation_id = getattr(config, 'extra', {}).get('conversation_id') if config else None
+            conversation_id = extra.get('conversation_id')
             if conversation_id:
                 body["conversation_id"] = conversation_id
 
@@ -817,6 +873,22 @@ class AIProviderClient:
         result = self._make_http_request(url, "POST", headers, body, "answer")
 
         if result.success and result.provider_response:
+            raw = result.provider_response.raw
+            raw = raw if isinstance(raw, dict) else {}
+            if raw.get("sse_error") or not (result.provider_response.output or "").strip():
+                result.success = False
+                result.message = "Dify returned an error or no output"
+                return result
+            if endpoint == "/workflows/run":
+                workflow = raw.get("workflow_data") or raw.get("data") or {}
+                if workflow.get("status") != "succeeded" or not result.provider_response.output:
+                    result.success = False
+                    result.message = "Dify workflow did not complete successfully or returned no output"
+                    return result
+            elif not raw.get("dify_message_end"):
+                result.success = False
+                result.message = "Dify chat did not complete successfully"
+                return result
             result.provider_response.metadata = result.provider_response.metadata or {}
             result.provider_response.metadata["provider"] = "dify"
             result.provider_response.metadata["endpoint"] = endpoint
@@ -979,6 +1051,12 @@ class AIProviderClient:
                         raw_response = response.text
                     token_usage = raw_response.get("usage") if isinstance(raw_response, dict) else None
 
+                if is_sse and raw_response.get("sse_error"):
+                    reason = "HTTP stream returned an error"
+                    return ProviderTestResult(success=False, message=reason,
+                        provider_response=ProviderResponseInfo(error=reason,
+                            metadata={"status_code": status_code, "is_sse": True}))
+
                 output = self._extract_output(raw_response, transform_response)
 
                 provider_response = ProviderResponseInfo(
@@ -1033,6 +1111,27 @@ class AIProviderClient:
                 provider_response=ProviderResponseInfo(error=str(e), metadata={"url": url})
             )
 
+    @staticmethod
+    def _iter_sse_events(sse_text: str):
+        """功能：按空行分组 SSE 字段，兼容换序和多行 data；输出事件类型与完整载荷。"""
+        event_type = ""
+        data_parts = []
+        for line in sse_text.splitlines() + [""]:
+            if not line:
+                if event_type or data_parts:
+                    yield event_type, "\n".join(data_parts)
+                event_type, data_parts = "", []
+                continue
+            if line.startswith(":"):
+                continue
+            field, _, value = line.partition(":")
+            if value.startswith(" "):
+                value = value[1:]
+            if field == "event":
+                event_type = value.strip()
+            elif field == "data":
+                data_parts.append(value)
+
     def _parse_sse_response(self, sse_text: str) -> tuple:
         """
         Parse SSE (Server-Sent Events) format response.
@@ -1054,25 +1153,33 @@ class AIProviderClient:
         token_usage = None
         last_data = None
         role = None
+        workflow_data = None
+        sse_error = False
+        dify_message_end = False
 
-        for line in sse_text.split("\n"):
-            line = line.strip()
-
-            # Skip empty lines and comments
-            if not line or line.startswith(":"):
+        for event_type, data_str in self._iter_sse_events(sse_text):
+            if event_type.lower() in self.STREAM_FAILURE_SIGNALS:
+                sse_error = True
                 continue
 
-            # Parse data lines
-            if line.startswith("data:"):
-                data_str = line[5:].strip()
-
+            if data_str:
                 # Skip [DONE] marker
                 if data_str == "[DONE]":
                     continue
 
                 try:
                     data = json.loads(data_str)
+                    if not isinstance(data, dict):
+                        if isinstance(data, str):
+                            content_parts.append(data)
+                        continue
+                    if self._is_stream_failure(data):
+                        sse_error = True
+                        continue
                     last_data = data
+                    data_event = data.get("event") or event_type
+                    if data_event == "message_end":
+                        dify_message_end = True
 
                     # Extract content from OpenAI-style streaming response
                     if "choices" in data:
@@ -1111,6 +1218,15 @@ class AIProviderClient:
                                 content_parts.append(text)
 
                     # Extract content from dify streaming response
+                    elif data_event == "workflow_finished":
+                        workflow_data = data.get("data") or {}
+                        outputs = workflow_data.get("outputs") or {}
+                        if isinstance(outputs, dict):
+                            answer = outputs.get("answer") or outputs.get("text")
+                            if answer is None and outputs:
+                                answer = json.dumps(outputs, ensure_ascii=False)
+                            if answer is not None:
+                                content_parts.append(str(answer))
                     elif "answer" in data:
                         content_parts.append(data.get("answer", ""))
 
@@ -1160,6 +1276,11 @@ class AIProviderClient:
             }
             if token_usage:
                 response["usage"] = token_usage
+
+        if workflow_data is not None:
+            response["workflow_data"] = workflow_data
+        response["sse_error"] = sse_error
+        response["dify_message_end"] = dify_message_end
 
         return response, token_usage
 
@@ -1237,7 +1358,7 @@ class AIProviderClient:
 
         return None
 
-    def _apply_transform(self, raw_response: Any, expression: str) -> Optional[str]:
+    def _apply_transform(self, raw_response: Any, expression: str, text_only: bool = False) -> Optional[str]:
         """Apply transform expression to extract data from response."""
         import re
 
@@ -1252,11 +1373,15 @@ class AIProviderClient:
         if expression.lower() in ["", "response", "json", "data"]:
             if isinstance(raw_response, str):
                 return raw_response
+            if text_only:
+                return None
             return json.dumps(raw_response, ensure_ascii=False) if raw_response else None
 
         try:
             current = raw_response
             tokens = re.findall(r'\[\d+\]|[^.\[\]]+', expression)
+            if text_only and tokens and tokens[-1].lower() in {"event", "type", "status"}:
+                return None
 
             for token in tokens:
                 if current is None:
@@ -1277,6 +1402,8 @@ class AIProviderClient:
                 return None
             elif isinstance(current, str):
                 return current
+            elif text_only:
+                return None
             elif isinstance(current, (dict, list)):
                 return json.dumps(current, ensure_ascii=False)
             else:

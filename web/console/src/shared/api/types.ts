@@ -46,6 +46,7 @@ export interface PublicBrandConfig {
 export type TaskType =
   | 'mcp_scan'
   | 'ai_infra_scan'
+  | 'skills_scan'
   | 'model_redteam_report'
   | 'agent_scan'
   | 'unknown'
@@ -85,6 +86,9 @@ export interface TaskSummary {
 }
 
 export interface TaskInputSummary {
+  agent_id?: string
+  eval_model_id?: string
+  model_id?: string
   language?: 'zh' | 'en'
   thread?: number
   timeout?: number
@@ -92,10 +96,13 @@ export interface TaskInputSummary {
   num_prompts?: number
   port_scan_mode?: InfrastructurePortScanMode
   source_kind?: MCPSourceKind
+  scan_mode?: 'static'
 }
 
 export interface TaskDetail extends TaskSummary {
   input_summary: TaskInputSummary
+  remark?: string
+  report_id?: string
 }
 
 export interface TaskListResponse {
@@ -108,6 +115,7 @@ export interface TaskListResponse {
 export interface TaskCreateRequest {
   task_type: Exclude<TaskType, 'unknown'>
   content: string
+  remark?: string
   params: {
     model_id?: string | string[]
     eval_model_id?: string

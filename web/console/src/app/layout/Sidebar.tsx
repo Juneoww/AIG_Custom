@@ -41,6 +41,9 @@ function matchingGroupFor(pathname: string): NavigationGroupID | undefined {
 
 function isSecondaryActive(item: SecondaryNavigationItem, pathname: string, search: string) {
   const [targetPathname, targetQuery] = item.path.split('?')
+  if (item.id === 'ai-infra-scan' || item.id === 'agent-workflow-scan' || item.id === 'skills-scan') {
+    return isPathWithin(pathname, targetPathname)
+  }
   if (pathname !== targetPathname) {
     return false
   }
@@ -75,6 +78,7 @@ const useStyles = makeStyles({
     transitionProperty: 'width, min-width',
     transitionDuration: tokens.durationNormal,
     '@media (max-width: 760px)': {
+      boxSizing: 'border-box',
       width: '100%',
       minWidth: 0,
       minHeight: 'auto',
@@ -284,6 +288,9 @@ export function Sidebar({ role }: SidebarProps) {
   const location = useLocation()
   const [collapsed, setCollapsed] = useState(false)
   const initialGroup = matchingGroupFor(location.pathname)
+  const navigationGroupRouteKey = location.pathname === '/tasks/new'
+    ? `${location.pathname}?scan=${new URLSearchParams(location.search).get('scan') ?? ''}`
+    : location.pathname
   const [expandedGroups, setExpandedGroups] = useState<Record<NavigationGroupID, boolean>>({
     tasks: initialGroup === 'tasks',
     credentials: initialGroup === 'credentials',
@@ -297,7 +304,7 @@ export function Sidebar({ role }: SidebarProps) {
     setExpandedGroups((current) =>
       current[matchingGroup] ? current : { ...current, [matchingGroup]: true },
     )
-  }, [location.pathname, location.search])
+  }, [location.pathname, navigationGroupRouteKey])
 
   const isPrimaryActive = (item: NavigationItem) => {
     if (item.id === 'models') {

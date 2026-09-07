@@ -22,7 +22,10 @@ function RouteDriver() {
       <button onClick={() => navigate('/tasks')}>前往任务列表</button>
       <button onClick={() => navigate('/tasks/new')}>前往新建任务</button>
       <button onClick={() => navigate('/tasks/mcp')}>前往 MCP 扫描</button>
-      <button onClick={() => navigate('/tasks?task_type=agent_scan')}>前往 Agent 扫描</button>
+      <button onClick={() => navigate('/tasks/agent-workflow')}>前往 Agent 扫描</button>
+      <button onClick={() => navigate('/tasks/ai-infra?status=running')}>前往 AI 基础设施运行中</button>
+      <button onClick={() => navigate('/tasks/ai-infra?status=failed&page=2')}>前往 AI 基础设施失败</button>
+      <button onClick={() => navigate('/tasks/ai-infra/new')}>前往新建 AI 基础设施任务</button>
       <button onClick={() => navigate('/models')}>前往模型配置</button>
     </div>
   )
@@ -46,6 +49,12 @@ function renderSidebar(initialEntry = '/reports', withRouteDriver = false) {
 }
 
 describe('Sidebar', () => {
+  it.each(['/tasks/skills', '/tasks/skills/new', '/tasks/skills/task-opaque-1'])('在%s保持 Skills 子导航活动状态', (path) => {
+    renderSidebar(path)
+    expect(screen.getByRole('link', { name: 'Skills 扫描' })).toHaveAttribute('aria-current', 'page')
+    expect(screen.getByRole('link', { name: 'AI 基础设施扫描' })).not.toHaveAttribute('aria-current')
+  })
+
   it('renders the user navigation in order and marks the active link', () => {
     renderSidebar()
 
@@ -78,17 +87,14 @@ describe('Sidebar', () => {
     fireEvent.click(screen.getByRole('button', { name: '展开扫描任务子菜单' }))
 
     expect(screen.getByRole('link', { name: 'MCP 安全扫描' })).toHaveAttribute('href', '/tasks/mcp')
+    expect(screen.getByRole('link', { name: 'Skills 扫描' })).toHaveAttribute('href', '/tasks/skills')
     expect(screen.getByRole('link', { name: 'AI 基础设施扫描' })).toHaveAttribute(
       'href',
-      '/tasks?task_type=ai_infra_scan',
-    )
-    expect(screen.getByRole('link', { name: '模型红队评测' })).toHaveAttribute(
-      'href',
-      '/tasks?task_type=model_redteam_report',
+      '/tasks/ai-infra',
     )
     expect(screen.getByRole('link', { name: 'Agent 工作流扫描' })).toHaveAttribute(
       'href',
-      '/tasks?task_type=agent_scan',
+      '/tasks/agent-workflow',
     )
 
     fireEvent.click(screen.getByRole('button', { name: '展开凭证配置子菜单' }))
@@ -120,21 +126,21 @@ describe('Sidebar', () => {
     expect(screen.getByRole('button', { name: '展开凭证配置子菜单' })).toHaveAttribute('aria-expanded', 'false')
   })
 
-  it('expands from the initial route and activates only the matching scan child', () => {
-    renderSidebar('/tasks?task_type=agent_scan')
+  it('expands from the initial route and activates only the exact scan child', () => {
+    renderSidebar('/tasks/agent-workflow')
 
     const scanToggle = screen.getByRole('button', { name: '收起扫描任务子菜单' })
     const scanSubmenu = document.getElementById(scanToggle.getAttribute('aria-controls')!)
     expect(within(scanSubmenu!).getAllByRole('link').map((link) => link.textContent?.trim())).toEqual([
       'MCP 安全扫描',
+      'Skills 扫描',
       'AI 基础设施扫描',
-      '模型红队评测',
       'Agent 工作流扫描',
     ])
     expect(within(scanSubmenu!).getByRole('link', { name: 'Agent 工作流扫描' })).toHaveAttribute('aria-current', 'page')
     expect(within(scanSubmenu!).getByRole('link', { name: 'MCP 安全扫描' })).not.toHaveAttribute('aria-current')
     expect(within(scanSubmenu!).getByRole('link', { name: 'AI 基础设施扫描' })).not.toHaveAttribute('aria-current')
-    expect(within(scanSubmenu!).getByRole('link', { name: '模型红队评测' })).not.toHaveAttribute('aria-current')
+    expect(within(scanSubmenu!).getByRole('link', { name: 'Skills 扫描' })).not.toHaveAttribute('aria-current')
   })
 
   it('updates group expansion after mounted route changes', () => {
@@ -157,6 +163,41 @@ describe('Sidebar', () => {
     fireEvent.click(screen.getByRole('button', { name: '前往模型配置' }))
     expect(screen.getByRole('button', { name: '收起凭证配置子菜单' })).toHaveAttribute('aria-expanded', 'true')
     expect(screen.getByRole('link', { name: '模型配置' })).toHaveAttribute('aria-current', 'page')
+  })
+
+  it.each(['/tasks/ai-infra', '/tasks/ai-infra/new', '/tasks/ai-infra/scan-42'])('activates AI infrastructure scans across its task routes', (path) => {
+    renderSidebar(path)
+
+    expect(screen.getByRole('link', { name: '扫描任务' })).toHaveAttribute('href', '/tasks')
+    expect(screen.getByRole('link', { name: '扫描任务' })).toHaveAttribute('aria-current', 'page')
+    expect(screen.getByRole('button', { name: '收起扫描任务子菜单' })).toHaveAttribute('aria-expanded', 'true')
+    expect(screen.getByRole('link', { name: 'AI 基础设施扫描' })).toHaveAttribute('aria-current', 'page')
+  })
+
+  it.each(['/tasks/agent-workflow', '/tasks/agent-workflow/new', '/tasks/agent-workflow/scan-42'])('activates Agent scans across its task routes', (path) => {
+    renderSidebar(path)
+    expect(screen.getByRole('link', { name: 'Agent 工作流扫描' })).toHaveAttribute('aria-current', 'page')
+    expect(screen.getByRole('link', { name: 'AI 基础设施扫描' })).not.toHaveAttribute('aria-current', 'page')
+  })
+  it('preserves a manual task collapse across query-only navigation', () => {
+    renderSidebar('/tasks/ai-infra?status=running', true)
+
+    fireEvent.click(screen.getByRole('button', { name: '收起扫描任务子菜单' }))
+    expect(screen.getByRole('button', { name: '展开扫描任务子菜单' })).toHaveAttribute('aria-expanded', 'false')
+
+    fireEvent.click(screen.getByRole('button', { name: '前往 AI 基础设施失败' }))
+    expect(screen.getByRole('button', { name: '展开扫描任务子菜单' })).toHaveAttribute('aria-expanded', 'false')
+    expect(screen.queryByRole('link', { name: 'AI 基础设施扫描' })).not.toBeInTheDocument()
+  })
+
+  it('auto-expands task navigation after moving to a new task pathname', () => {
+    renderSidebar('/tasks/ai-infra?status=running', true)
+
+    fireEvent.click(screen.getByRole('button', { name: '收起扫描任务子菜单' }))
+    fireEvent.click(screen.getByRole('button', { name: '前往新建 AI 基础设施任务' }))
+
+    expect(screen.getByRole('button', { name: '收起扫描任务子菜单' })).toHaveAttribute('aria-expanded', 'true')
+    expect(screen.getByRole('link', { name: 'AI 基础设施扫描' })).toHaveAttribute('aria-current', 'page')
   })
 
   it('activates credentials without activating the rules group', () => {
@@ -182,7 +223,7 @@ describe('Sidebar', () => {
 
     fireEvent.click(screen.getByRole('button', { name: '收起导航' }))
 
-    for (const label of ['MCP 安全扫描', 'AI 基础设施扫描', '模型红队评测', 'Agent 工作流扫描', '模型配置', '智能体配置']) {
+    for (const label of ['MCP 安全扫描', 'Skills 扫描', 'AI 基础设施扫描', 'Agent 工作流扫描', '模型配置', '智能体配置']) {
       expect(screen.queryByRole('link', { name: label })).not.toBeInTheDocument()
     }
     expect(screen.getByRole('link', { name: '扫描任务' })).toBeInTheDocument()
@@ -196,11 +237,11 @@ describe('Sidebar', () => {
     expect(screen.getByRole('link', { name: 'AI 基础设施扫描' })).not.toHaveAttribute('aria-current')
   })
 
-  it('keeps a task classification active when its query is a subset of the current task URL', () => {
-    renderSidebar('/tasks?task_type=ai_infra_scan&status=running&page=2')
+  it('keeps the dedicated task classification active with additional query parameters', () => {
+    renderSidebar('/tasks/ai-infra?status=running&page=2')
 
     expect(screen.getByRole('link', { name: 'AI 基础设施扫描' })).toHaveAttribute('aria-current', 'page')
-    expect(screen.getByRole('link', { name: '模型红队评测' })).not.toHaveAttribute('aria-current')
+    expect(screen.getByRole('link', { name: 'Skills 扫描' })).not.toHaveAttribute('aria-current')
     expect(screen.getByRole('link', { name: 'Agent 工作流扫描' })).not.toHaveAttribute('aria-current')
   })
 

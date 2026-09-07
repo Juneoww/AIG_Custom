@@ -66,6 +66,32 @@ func TestTrustedSuccessPersistsOneBrandVersionedSnapshot(t *testing.T) {
 	assert.Equal(t, "v2", secondSnapshot.Brand.ProductName)
 }
 
+func TestTrustedSuccessSnapshotNeverContainsTaskRemark(t *testing.T) {
+	ctx := context.Background()
+	engine := &recordingEngine{results: map[string]json.RawMessage{}}
+	repository := NewMemoryRepository()
+	tasks := NewService(repository, engine, audit.NewService(audit.NewMemoryRepository()))
+	snapshots := reports.NewMemoryRepository()
+	tasks.SetReportSnapshotService(reports.NewService(snapshots, brand.NewService(brand.NewMemoryRepository())))
+	owner := identity.Subject{UserID: "remark-snapshot-owner", Username: "alice", Role: identity.RoleUser}
+	remark := "remark-must-not-enter-report-snapshot"
+	created, err := tasks.Create(ctx, owner, CreateInput{
+		IdempotencyKey: "remark-snapshot", TaskType: "mcp_scan", Content: "https://example.com/repository.git", Remark: remark,
+		Params: json.RawMessage(`{"source_kind":"repository"}`),
+	})
+	require.NoError(t, err)
+	setEngineResult(engine, created.EngineSessionID, json.RawMessage(`{"id":"remark-event","type":"resultUpdate","timestamp":1,"result":{"score":100,"results":[]}}`))
+
+	require.NoError(t, tasks.RecordEngineEvent(ctx, created.EngineSessionID, EngineStateSucceeded, ""))
+	snapshot, err := snapshots.GetByTaskID(ctx, created.ID)
+	require.NoError(t, err)
+	encoded, err := json.Marshal(snapshot)
+	require.NoError(t, err)
+	assert.NotContains(t, string(encoded), remark)
+	assert.NotContains(t, string(snapshot.RawResult), remark)
+	assert.NotContains(t, string(snapshot.RenderData), remark)
+}
+
 func TestRecoveredSuccessPreservesTrustedEngineCompletionTime(t *testing.T) {
 	ctx := context.Background()
 	engine := &recordingEngine{results: map[string]json.RawMessage{}}

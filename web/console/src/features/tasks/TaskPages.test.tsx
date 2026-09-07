@@ -6,9 +6,9 @@
  * 依赖：Testing Library、TanStack Query、React Router 与 SessionProvider。
  */
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
-import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { StrictMode } from 'react'
-import { MemoryRouter, Route, Routes } from 'react-router-dom'
+import { MemoryRouter, Route, Routes, useLocation } from 'react-router-dom'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { SessionProvider } from '../auth/session'
@@ -49,12 +49,46 @@ const agentScanRunningTask = {
   status: 'running',
 } as const satisfies TaskSummary
 
+const aiInfraRunningTask = {
+  ...taskSummary,
+  id: 'ai infra/opaque-1',
+  task_type: 'ai_infra_scan',
+  status: 'running',
+} as const satisfies TaskSummary
+
+const aiInfraDetail = {
+  ...aiInfraRunningTask,
+  id: 'task-ai-infra-1',
+  input_summary: { language: 'zh', target_count: 2, timeout: 300, port_scan_mode: 'fixed_ai', model_id: 'model-opaque-1' },
+} as const
+
 function jsonResponse(body: unknown) {
   return new Response(JSON.stringify(body), { status: 200, headers: { 'Content-Type': 'application/json' } })
 }
 
-function renderPage(page: React.ReactNode, subject: CurrentSubject, path = '/', routePath = '*') {
-  const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } })
+type FetchCall = [request: RequestInfo | URL, init?: RequestInit]
+
+function taskPostCalls(calls: readonly FetchCall[]): FetchCall[] {
+  return calls.filter(([request, init]) => String(request).endsWith('/tasks') && init?.method === 'POST')
+}
+
+function taskPostInit(calls: readonly FetchCall[]): RequestInit {
+  const call = taskPostCalls(calls)[0]
+  if (!call?.[1]) throw new Error('预期存在创建任务请求。')
+  return call[1]
+}
+
+function TaskLocationProbe() {
+  return <output aria-label="当前任务路由">{useLocation().pathname}</output>
+}
+
+function renderPage(
+  page: React.ReactNode,
+  subject: CurrentSubject,
+  path = '/',
+  routePath = '*',
+  queryClient = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } }),
+) {
   return render(
     <QueryClientProvider client={queryClient}>
       <SessionProvider initialState={{ status: 'authenticated', subject }}>
@@ -62,10 +96,19 @@ function renderPage(page: React.ReactNode, subject: CurrentSubject, path = '/', 
           <Routes>
             <Route path={routePath} element={page} />
           </Routes>
+          <TaskLocationProbe />
         </MemoryRouter>
       </SessionProvider>
     </QueryClientProvider>,
   )
+}
+
+function catalogModel(overrides: Record<string, unknown> = {}) {
+  return {
+    id: 'model-opaque-1', owner_user_id: 'user-1', scope: 'private', name: '受治理扫描模型', provider_model: 'gpt-secure',
+    base_url: 'https://models.example.test/v1', note: '不应展示', limit: 4, disabled: false, token: '********', source: 'platform', read_only: false,
+    ...overrides,
+  }
 }
 
 beforeEach(() => {
@@ -80,6 +123,8 @@ beforeEach(() => {
 })
 
 afterEach(() => {
+  // StrictMode 卸载会重放布局引用；先卸载页面，再恢复 ResizeObserver 等浏览器替身。
+  cleanup()
   vi.useRealTimers()
   vi.unstubAllGlobals()
   vi.restoreAllMocks()
@@ -261,6 +306,129 @@ describe('任务页面', () => {
     expect(fetchMock.mock.calls[0]?.[0]).toBe('http://localhost:3000/api/v1/platform/tasks?page=1&page_size=20')
   })
 
+  it('AI 基础设施列表固定任务类型，使用安全列和专用操作路径', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(jsonResponse({ items: [aiInfraRunningTask], total: 41, page: 3, page_size: 20 }))
+    vi.stubGlobal('fetch', fetchMock)
+    renderPage(
+      <TaskListPage fixedTaskType="ai_infra_scan" />,
+      { id: 'user-1', username: 'alice', role: 'user', must_change_password: false },
+      '/tasks/ai-infra?page=3&status=running&task_type=agent_scan',
+      '/tasks/ai-infra',
+    )
+
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1))
+    expect(fetchMock.mock.calls[0]?.[0]).toBe(
+      'http://localhost:3000/api/v1/platform/tasks?page=3&page_size=20&status=running&task_type=ai_infra_scan',
+    )
+    expect(await screen.findByRole('heading', { name: 'AI 基础设施扫描' })).toBeInTheDocument()
+    expect(screen.getByText('集中跟踪已授权目标的扫描任务')).toBeInTheDocument()
+    expect(screen.getByRole('link', { name: '新建 AI 基础设施扫描任务' })).toHaveAttribute('href', '/tasks/ai-infra/new')
+    const statusFilter = screen.getByRole('group', { name: 'AI 基础设施扫描状态筛选' })
+    expect(within(statusFilter).getByRole('combobox', { name: '任务状态' })).toBeInTheDocument()
+    expect(screen.queryByRole('combobox', { name: '任务类型' })).not.toBeInTheDocument()
+    expect(screen.getByRole('region', { name: 'AI 基础设施扫描运行态势' })).toHaveTextContent('匹配任务41当前查询')
+
+    const table = screen.getByRole('table', { name: 'AI 基础设施扫描任务台账' })
+    for (const header of ['任务 ID', '负责人', '状态', '创建时间', '更新时间', '操作']) {
+      expect(within(table).getByRole('columnheader', { name: header })).toBeInTheDocument()
+    }
+    for (const forbiddenHeader of ['任务类型', '目标', '模型', '端口', '附件', '原始结果']) {
+      expect(within(table).queryByRole('columnheader', { name: forbiddenHeader })).not.toBeInTheDocument()
+    }
+    expect(within(table).getByRole('link', { name: '查看任务 ai infra/opaque-1' })).toHaveAttribute(
+      'href',
+      '/tasks/ai-infra/ai%20infra%2Fopaque-1',
+    )
+    expect(screen.getByRole('navigation', { name: 'AI 基础设施扫描任务分页' })).toHaveTextContent('共 41 条')
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+  })
+
+  it('AI 基础设施列表在状态和分页变更中保留固定 API 类型', async () => {
+    const fetchMock = vi.fn().mockImplementation(() => Promise.resolve(
+      jsonResponse({ items: [aiInfraRunningTask], total: 41, page: 1, page_size: 20 }),
+    ))
+    vi.stubGlobal('fetch', fetchMock)
+    renderPage(
+      <TaskListPage fixedTaskType="ai_infra_scan" />,
+      { id: 'user-1', username: 'alice', role: 'user', must_change_password: false },
+      '/tasks/ai-infra',
+      '/tasks/ai-infra',
+    )
+
+    await screen.findByRole('table', { name: 'AI 基础设施扫描任务台账' })
+    fireEvent.change(screen.getByRole('combobox', { name: '任务状态' }), { target: { value: 'failed' } })
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2))
+    expect(fetchMock.mock.calls[1]?.[0]).toBe(
+      'http://localhost:3000/api/v1/platform/tasks?page=1&page_size=20&status=failed&task_type=ai_infra_scan',
+    )
+
+    fireEvent.click(await screen.findByRole('button', { name: '下一页' }))
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(3))
+    expect(fetchMock.mock.calls[2]?.[0]).toBe(
+      'http://localhost:3000/api/v1/platform/tasks?page=2&page_size=20&status=failed&task_type=ai_infra_scan',
+    )
+  })
+
+  it('AI 基础设施列表在服务端返回空页但仍有总数时保留真实分页回退入口', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(jsonResponse({ items: [], total: 41, page: 3, page_size: 20 }))
+    vi.stubGlobal('fetch', fetchMock)
+    renderPage(
+      <TaskListPage fixedTaskType="ai_infra_scan" />,
+      { id: 'user-1', username: 'alice', role: 'user', must_change_password: false },
+      '/tasks/ai-infra?page=3',
+      '/tasks/ai-infra',
+    )
+
+    expect(await screen.findByText('暂无匹配任务')).toBeInTheDocument()
+    const pagination = screen.getByRole('navigation', { name: 'AI 基础设施扫描任务分页' })
+    expect(within(pagination).getByRole('button', { name: '上一页' })).toBeEnabled()
+    expect(within(pagination).getByRole('button', { name: '下一页' })).toBeDisabled()
+    fireEvent.click(within(pagination).getByRole('button', { name: '上一页' }))
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2))
+    expect(fetchMock.mock.calls[1]?.[0]).toBe('http://localhost:3000/api/v1/platform/tasks?page=2&page_size=20&task_type=ai_infra_scan')
+  })
+
+  it('AI 基础设施列表清除状态或筛选时保留固定 API 类型', async () => {
+    const fetchMock = vi.fn().mockImplementation(() => Promise.resolve(
+      jsonResponse({ items: [aiInfraRunningTask], total: 41, page: 1, page_size: 20 }),
+    ))
+    vi.stubGlobal('fetch', fetchMock)
+    renderPage(
+      <TaskListPage fixedTaskType="ai_infra_scan" />,
+      { id: 'user-1', username: 'alice', role: 'user', must_change_password: false },
+      '/tasks/ai-infra?status=running',
+      '/tasks/ai-infra',
+    )
+
+    await screen.findByRole('table', { name: 'AI 基础设施扫描任务台账' })
+    fireEvent.change(screen.getByRole('combobox', { name: '任务状态' }), { target: { value: '' } })
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2))
+    expect(fetchMock.mock.calls[1]?.[0]).toBe(
+      'http://localhost:3000/api/v1/platform/tasks?page=1&page_size=20&task_type=ai_infra_scan',
+    )
+
+    fireEvent.change(screen.getByRole('combobox', { name: '任务状态' }), { target: { value: 'failed' } })
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(3))
+    fireEvent.click(screen.getByRole('button', { name: '清除筛选' }))
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(4))
+    expect(fetchMock.mock.calls[3]?.[0]).toBe(
+      'http://localhost:3000/api/v1/platform/tasks?page=1&page_size=20&task_type=ai_infra_scan',
+    )
+  })
+
+  it('AI 基础设施列表不向审计员显示创建入口', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(jsonResponse({ items: [], total: 0, page: 1, page_size: 20 })))
+    renderPage(
+      <TaskListPage fixedTaskType="ai_infra_scan" />,
+      { id: 'auditor-1', username: 'auditor', role: 'auditor', must_change_password: false },
+      '/tasks/ai-infra',
+      '/tasks/ai-infra',
+    )
+
+    expect(await screen.findByRole('heading', { name: 'AI 基础设施扫描' })).toBeInTheDocument()
+    expect(screen.queryByRole('link', { name: '新建 AI 基础设施扫描任务' })).not.toBeInTheDocument()
+  })
+
   it('详情按角色与真实状态显示取消能力，审计员无写按钮', async () => {
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue(jsonResponse(task)))
     renderPage(
@@ -308,6 +476,196 @@ describe('任务页面', () => {
     expect(screen.getByText('受控运行服务')).toBeInTheDocument()
     expect(screen.queryByText('https://private.example/mcp')).not.toBeInTheDocument()
     expect(screen.queryByText('authorization_confirmed')).not.toBeInTheDocument()
+  })
+
+  it('专属 AI 基础设施详情显示安全摘要并恢复受治理模型名称', async () => {
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(jsonResponse(aiInfraDetail))
+      .mockResolvedValueOnce(jsonResponse({ items: [catalogModel()], total: 1, page: 1, page_size: 100 }))
+    vi.stubGlobal('fetch', fetchMock)
+    renderPage(
+      <TaskDetailPage expectedTaskType="ai_infra_scan" returnTo="/tasks/ai-infra" />,
+      { id: 'user-1', username: 'alice', role: 'user', must_change_password: false },
+      '/tasks/ai-infra/task-ai-infra-1',
+      '/tasks/ai-infra/:taskId',
+    )
+
+    expect(await screen.findByRole('heading', { name: 'AI 基础设施扫描任务详情' })).toBeInTheDocument()
+    expect(screen.getByRole('link', { name: '返回任务台账' })).toHaveAttribute('href', '/tasks/ai-infra')
+    expect(await screen.findByText('受治理扫描模型（gpt-secure，私有）')).toBeInTheDocument()
+    expect(screen.getByText('2')).toBeInTheDocument()
+    expect(screen.getByText('中文')).toBeInTheDocument()
+    expect(screen.getByText('300')).toBeInTheDocument()
+    expect(screen.getByText('固定 AI 端口（11434、1337、7000–9000、18789）')).toBeInTheDocument()
+    expect(screen.queryByText('https://models.example.test/v1')).not.toBeInTheDocument()
+    expect(screen.queryByText('不应展示')).not.toBeInTheDocument()
+    expect(screen.queryByText('********')).not.toBeInTheDocument()
+    expect(screen.queryByText('user-1')).not.toBeInTheDocument()
+  })
+
+  it('专属 AI 基础设施详情显示任务备注', async () => {
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(jsonResponse({ ...aiInfraDetail, remark: '变更窗口前的授权扫描' }))
+      .mockResolvedValueOnce(jsonResponse({ items: [catalogModel()], total: 1, page: 1, page_size: 100 }))
+    vi.stubGlobal('fetch', fetchMock)
+    renderPage(
+      <TaskDetailPage expectedTaskType="ai_infra_scan" />,
+      { id: 'user-1', username: 'alice', role: 'user', must_change_password: false },
+      '/tasks/ai-infra/task-ai-infra-1',
+      '/tasks/ai-infra/:taskId',
+    )
+
+    expect(await screen.findByText('变更窗口前的授权扫描')).toBeInTheDocument()
+    expect(screen.getByText('任务说明')).toBeInTheDocument()
+  })
+
+  it('通用任务详情不显示备注', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(jsonResponse({ ...aiInfraDetail, remark: '只允许专属详情显示' })))
+    renderPage(
+      <TaskDetailPage />,
+      { id: 'user-1', username: 'alice', role: 'user', must_change_password: false },
+      '/tasks/task-ai-infra-1',
+      '/tasks/:taskId',
+    )
+
+    expect(await screen.findByRole('region', { name: '任务安全摘要' })).toBeInTheDocument()
+    expect(screen.queryByText('任务说明')).not.toBeInTheDocument()
+    expect(screen.queryByText('只允许专属详情显示')).not.toBeInTheDocument()
+  })
+
+  it('非 AI 任务即使携带备注也不会在专属详情显示', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(jsonResponse({ ...task, remark: '不应显示' })))
+    renderPage(
+      <TaskDetailPage expectedTaskType="ai_infra_scan" />,
+      { id: 'user-1', username: 'alice', role: 'user', must_change_password: false },
+      '/tasks/ai-infra/task-opaque-1',
+      '/tasks/ai-infra/:taskId',
+    )
+
+    expect(await screen.findByText('该任务不属于 AI 基础设施扫描')).toBeInTheDocument()
+    expect(screen.queryByText('任务说明')).not.toBeInTheDocument()
+    expect(screen.queryByText('不应显示')).not.toBeInTheDocument()
+  })
+
+  it('专属 AI 基础设施详情在备注缺省时不显示任务说明', async () => {
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(jsonResponse(aiInfraDetail))
+      .mockResolvedValueOnce(jsonResponse({ items: [catalogModel()], total: 1, page: 1, page_size: 100 }))
+    vi.stubGlobal('fetch', fetchMock)
+    renderPage(
+      <TaskDetailPage expectedTaskType="ai_infra_scan" />,
+      { id: 'user-1', username: 'alice', role: 'user', must_change_password: false },
+      '/tasks/ai-infra/task-ai-infra-1',
+      '/tasks/ai-infra/:taskId',
+    )
+
+    expect(await screen.findByRole('region', { name: '任务安全摘要' })).toBeInTheDocument()
+    expect(screen.queryByText('任务说明')).not.toBeInTheDocument()
+  })
+
+  it('专属 AI 基础设施详情为第二页模型自动继续请求目录', async () => {
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(jsonResponse(aiInfraDetail))
+      .mockResolvedValueOnce(jsonResponse({ items: [catalogModel({ id: 'other-model', name: '其他模型' })], total: 101, page: 1, page_size: 100 }))
+      .mockResolvedValueOnce(jsonResponse({ items: [catalogModel()], total: 101, page: 2, page_size: 100 }))
+    vi.stubGlobal('fetch', fetchMock)
+    renderPage(<TaskDetailPage expectedTaskType="ai_infra_scan" />, { id: 'user-1', username: 'alice', role: 'user', must_change_password: false }, '/tasks/ai-infra/task-ai-infra-1', '/tasks/ai-infra/:taskId')
+
+    expect(await screen.findByText('受治理扫描模型（gpt-secure，私有）')).toBeInTheDocument()
+    expect(fetchMock.mock.calls[2]?.[0]).toBe('http://localhost:3000/api/v1/platform/models?page=2&page_size=100')
+  })
+
+  it('专属 AI 基础设施详情遇到重复模型目录页时停止并保留暂不可用状态', async () => {
+    const repeatedPage = [catalogModel({ id: 'other-model', name: '其他模型' })]
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(jsonResponse(aiInfraDetail))
+      .mockResolvedValueOnce(jsonResponse({ items: repeatedPage, total: 201, page: 1, page_size: 100 }))
+      .mockResolvedValueOnce(jsonResponse({ items: repeatedPage, total: 201, page: 2, page_size: 100 }))
+    vi.stubGlobal('fetch', fetchMock)
+    renderPage(<TaskDetailPage expectedTaskType="ai_infra_scan" />, { id: 'user-1', username: 'alice', role: 'user', must_change_password: false }, '/tasks/ai-infra/task-ai-infra-1', '/tasks/ai-infra/:taskId')
+
+    expect(await screen.findByText('已选择的模型（ID: model-opaque-1，目录暂不可用）')).toBeInTheDocument()
+    expect(fetchMock).toHaveBeenCalledTimes(3)
+  })
+
+  it.each([
+    ['目录耗尽后缺失', jsonResponse({ items: [catalogModel({ id: 'other-model' })], total: 1, page: 1, page_size: 100 }), 'model-opaque-1'],
+    ['canonical 首项已停用', jsonResponse({ items: [catalogModel({ disabled: true })], total: 1, page: 1, page_size: 100 }), 'model-opaque-1'],
+  ])('专属 AI 基础设施详情在%s时显示安全模型回退', async (_caseName, catalogResponse, modelID) => {
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(jsonResponse({ ...aiInfraDetail, input_summary: { ...aiInfraDetail.input_summary, model_id: modelID } }))
+      .mockResolvedValueOnce(catalogResponse)
+    vi.stubGlobal('fetch', fetchMock)
+    renderPage(<TaskDetailPage expectedTaskType="ai_infra_scan" />, { id: 'user-1', username: 'alice', role: 'user', must_change_password: false }, '/tasks/ai-infra/task-ai-infra-1', '/tasks/ai-infra/:taskId')
+
+    expect(await screen.findByText('已选择的模型（ID: model-opaque-1）')).toBeInTheDocument()
+  })
+
+  it('专属 AI 基础设施详情在模型目录失败时保留暂不可用状态并允许重试', async () => {
+    let resolveRetry: ((response: Response) => void) | undefined
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(jsonResponse(aiInfraDetail))
+      .mockResolvedValueOnce(new Response(null, { status: 500 }))
+      .mockImplementationOnce(() => new Promise<Response>((resolve) => { resolveRetry = resolve }))
+    vi.stubGlobal('fetch', fetchMock)
+    renderPage(<TaskDetailPage expectedTaskType="ai_infra_scan" />, { id: 'user-1', username: 'alice', role: 'user', must_change_password: false }, '/tasks/ai-infra/task-ai-infra-1', '/tasks/ai-infra/:taskId')
+
+    expect(await screen.findByText('已选择的模型（ID: model-opaque-1，目录暂不可用）')).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: '重试恢复模型名称' }))
+    expect(screen.getByRole('button', { name: '正在重试恢复模型名称…' })).toBeDisabled()
+    resolveRetry?.(jsonResponse({ items: [catalogModel()], total: 1, page: 1, page_size: 100 }))
+    expect(await screen.findByText('受治理扫描模型（gpt-secure，私有）')).toBeInTheDocument()
+  })
+
+  it.each([
+    ['enabled', catalogModel(), '受治理扫描模型（gpt-secure，私有）'],
+    ['disabled', catalogModel({ disabled: true }), '已选择的模型（ID: model-opaque-1）'],
+  ])('专属 AI 基础设施详情不会在缓存 %s 模型刷新失败时采信旧目录', async (_state, cachedModel, oldLabel) => {
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } })
+    queryClient.setQueryData(['task-detail-model-catalog', 'model-opaque-1'], {
+      pages: [{ items: [cachedModel], total: 1, page: 1, page_size: 100 }],
+      pageParams: [1],
+    })
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(jsonResponse(aiInfraDetail))
+      .mockResolvedValueOnce(new Response(null, { status: 500 }))
+    vi.stubGlobal('fetch', fetchMock)
+    renderPage(
+      <TaskDetailPage expectedTaskType="ai_infra_scan" />,
+      { id: 'user-1', username: 'alice', role: 'user', must_change_password: false },
+      '/tasks/ai-infra/task-ai-infra-1',
+      '/tasks/ai-infra/:taskId',
+      queryClient,
+    )
+
+    expect(await screen.findByText('已选择的模型（ID: model-opaque-1，目录暂不可用）')).toBeInTheDocument()
+    expect(screen.queryByText(oldLabel)).not.toBeInTheDocument()
+    expect(screen.getByRole('button', { name: '重试恢复模型名称' })).toBeInTheDocument()
+  })
+
+  it('专属 AI 基础设施详情类型不匹配时不展示任何任务事实或请求模型目录', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(jsonResponse(task))
+    vi.stubGlobal('fetch', fetchMock)
+    renderPage(<TaskDetailPage expectedTaskType="ai_infra_scan" />, { id: 'user-1', username: 'alice', role: 'user', must_change_password: false }, '/tasks/ai-infra/task-opaque-1', '/tasks/ai-infra/:taskId')
+
+    expect(await screen.findByText('该任务不属于 AI 基础设施扫描')).toBeInTheDocument()
+    expect(screen.queryByRole('region', { name: '任务安全摘要' })).not.toBeInTheDocument()
+    expect(screen.queryByText('alice')).not.toBeInTheDocument()
+    expect(screen.queryByText('执行中')).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: '取消任务' })).not.toBeInTheDocument()
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+  })
+
+  it('专属 AI 基础设施详情类型不匹配后停止后续轮询', async () => {
+    vi.useFakeTimers()
+    const fetchMock = vi.fn().mockResolvedValue(jsonResponse(task))
+    vi.stubGlobal('fetch', fetchMock)
+    renderPage(<TaskDetailPage expectedTaskType="ai_infra_scan" />, { id: 'user-1', username: 'alice', role: 'user', must_change_password: false }, '/tasks/ai-infra/task-opaque-1', '/tasks/ai-infra/:taskId')
+
+    await act(async () => { await vi.advanceTimersByTimeAsync(1) })
+    expect(screen.getByText('该任务不属于 AI 基础设施扫描')).toBeInTheDocument()
+    await act(async () => { await vi.advanceTimersByTimeAsync(120_000) })
+    expect(fetchMock).toHaveBeenCalledTimes(1)
   })
 
   it('取消写入不确定时复用确认详情且不触发第三次读取', async () => {
@@ -720,6 +1078,294 @@ describe('任务页面', () => {
     const body = JSON.parse(String((fetchMock.mock.calls[0]?.[1] as RequestInit).body))
     expect(body.params).toEqual({ source_kind: 'repository', thread: 4 })
     expect(body.params).not.toHaveProperty('authorization_confirmed')
+  })
+
+  it('专属 AI 基础设施创建页以三段式信息引导组织扫描对象、配置和提交', () => {
+    vi.stubGlobal('fetch', vi.fn(() => new Promise<Response>(() => undefined)))
+    renderPage(
+      <TaskCreatePage fixedTaskType="ai_infra_scan" returnTo="/tasks/ai-infra" />,
+      { id: 'user-1', username: 'alice', role: 'user', must_change_password: false },
+      '/tasks/ai-infra/new',
+    )
+
+    expect(screen.getByRole('heading', { name: '新建 AI 基础设施扫描任务' })).toBeInTheDocument()
+    expect(screen.queryByRole('group', { name: '第一步：任务类型' })).not.toBeInTheDocument()
+    expect(screen.getByRole('heading', { name: '1 扫描对象' })).toBeInTheDocument()
+    expect(screen.getByRole('heading', { name: '2 扫描配置' })).toBeInTheDocument()
+    expect(screen.getByRole('heading', { name: '3 确认并提交' })).toBeInTheDocument()
+    expect(screen.queryByRole('group', { name: '第三步：附件' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('group', { name: '第四步：确认' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('group', { name: '第二步：参数' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('combobox', { name: '扫描类型' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('combobox', { name: '语言' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('textbox', { name: '模型 ID' })).not.toBeInTheDocument()
+    expect(screen.getByRole('textbox', { name: '手工填写扫描目标（可选）' })).toBeInTheDocument()
+    expect(screen.getByLabelText('导入目标清单（可选）')).toBeInTheDocument()
+    expect(screen.getByRole('textbox', { name: '任务说明 / 备注（可选）' })).toBeInTheDocument()
+    expect(screen.getByText('任务说明会作为本次扫描任务的保留说明，不会写入扫描配置。')).toBeInTheDocument()
+    expect(screen.getByRole('combobox', { name: '扫描模型' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: '创建 AI 基础设施扫描任务' })).toBeInTheDocument()
+  })
+
+  it('专属 AI 基础设施创建页提交受治理模型并导航到专属任务列表详情', async () => {
+    const created = { ...task, id: 'created/ai-1', task_type: 'ai_infra_scan', input_summary: { language: 'zh', timeout: 300, port_scan_mode: 'fixed_ai', model_id: 'model-opaque-1' } }
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(jsonResponse({ items: [catalogModel()], total: 1, page: 1, page_size: 100 }))
+      .mockResolvedValueOnce(jsonResponse(created))
+    vi.stubGlobal('fetch', fetchMock)
+    renderPage(
+      <TaskCreatePage fixedTaskType="ai_infra_scan" returnTo="/tasks/ai-infra" />,
+      { id: 'user-1', username: 'alice', role: 'user', must_change_password: false },
+      '/tasks/ai-infra/new',
+    )
+
+    fireEvent.change(screen.getByRole('textbox', { name: '手工填写扫描目标（可选）' }), { target: { value: '192.0.2.10' } })
+    await screen.findByRole('option', { name: '受治理扫描模型（gpt-secure，私有）' })
+    fireEvent.change(await screen.findByRole('combobox', { name: '扫描模型' }), { target: { value: 'model-opaque-1' } })
+    await waitFor(() => expect(screen.getByRole('combobox', { name: '扫描模型' })).toHaveValue('model-opaque-1'))
+    fireEvent.click(screen.getByRole('button', { name: '创建 AI 基础设施扫描任务' }))
+
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2))
+    expect(JSON.parse(String((fetchMock.mock.calls[1]?.[1] as RequestInit).body))).toEqual(expect.objectContaining({
+      task_type: 'ai_infra_scan', country_iso_code: 'zh_CN', params: { model_id: 'model-opaque-1', timeout: 300, port_scan_mode: 'fixed_ai' },
+    }))
+    await waitFor(() => expect(screen.getByLabelText('当前任务路由')).toHaveTextContent('/tasks/ai-infra/created%2Fai-1'))
+  })
+
+  it('专属 AI 页面允许仅导入目标清单创建任务', async () => {
+    const created = { ...aiInfraDetail, id: 'created-ai-from-file' }
+    const fetchMock = vi.fn((request: RequestInfo | URL, _init?: RequestInit) => {
+      void _init
+      const url = String(request)
+      if (url.includes('/models?')) return Promise.resolve(jsonResponse({ items: [], total: 0, page: 1, page_size: 100 }))
+      if (url.endsWith('/attachments')) {
+        return Promise.resolve(jsonResponse({
+          id: 'attachment-target-list', filename: 'targets.txt', size: 10, state: 'ready', created_at: '2026-08-18T01:00:00Z',
+        }))
+      }
+      if (url.endsWith('/tasks')) return Promise.resolve(jsonResponse(created))
+      return Promise.resolve(new Response(null, { status: 404 }))
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    renderPage(
+      <TaskCreatePage fixedTaskType="ai_infra_scan" returnTo="/tasks/ai-infra" />,
+      { id: 'user-1', username: 'alice', role: 'user', must_change_password: false },
+      '/tasks/ai-infra/new',
+    )
+
+    await screen.findByRole('link', { name: '前往凭证配置 → 模型配置' })
+    fireEvent.change(screen.getByLabelText('导入目标清单（可选）'), {
+      target: { files: [new File(['192.0.2.10'], 'targets.txt', { type: 'text/plain' })] },
+    })
+    fireEvent.click(screen.getByRole('button', { name: '上传目标清单' }))
+    await screen.findByRole('button', { name: '下载附件 targets.txt' })
+    fireEvent.click(screen.getByRole('button', { name: '创建 AI 基础设施扫描任务' }))
+
+    await waitFor(() => expect(taskPostCalls(fetchMock.mock.calls)).toHaveLength(1))
+    const init = taskPostInit(fetchMock.mock.calls)
+    expect(JSON.parse(String(init.body))).toEqual(expect.objectContaining({
+      task_type: 'ai_infra_scan', content: '', attachment_ids: ['attachment-target-list'],
+    }))
+  })
+
+  it('专属 AI 页面将手工目标和目标清单分开提交，由服务端合并', async () => {
+    const created = { ...aiInfraDetail, id: 'created-ai-mixed-source' }
+    const fetchMock = vi.fn((request: RequestInfo | URL, _init?: RequestInit) => {
+      void _init
+      const url = String(request)
+      if (url.includes('/models?')) return Promise.resolve(jsonResponse({ items: [], total: 0, page: 1, page_size: 100 }))
+      if (url.endsWith('/attachments')) {
+        return Promise.resolve(jsonResponse({
+          id: 'attachment-target-list', filename: 'targets.txt', size: 10, state: 'ready', created_at: '2026-08-18T01:00:00Z',
+        }))
+      }
+      if (url.endsWith('/tasks')) return Promise.resolve(jsonResponse(created))
+      return Promise.resolve(new Response(null, { status: 404 }))
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    renderPage(
+      <TaskCreatePage fixedTaskType="ai_infra_scan" returnTo="/tasks/ai-infra" />,
+      { id: 'user-1', username: 'alice', role: 'user', must_change_password: false },
+      '/tasks/ai-infra/new',
+    )
+
+    await screen.findByRole('link', { name: '前往凭证配置 → 模型配置' })
+    fireEvent.change(screen.getByRole('textbox', { name: '手工填写扫描目标（可选）' }), { target: { value: '192.0.2.11' } })
+    fireEvent.change(screen.getByLabelText('导入目标清单（可选）'), {
+      target: { files: [new File(['192.0.2.12'], 'targets.txt', { type: 'text/plain' })] },
+    })
+    fireEvent.click(screen.getByRole('button', { name: '上传目标清单' }))
+    await screen.findByRole('button', { name: '下载附件 targets.txt' })
+    fireEvent.click(screen.getByRole('button', { name: '创建 AI 基础设施扫描任务' }))
+
+    await waitFor(() => expect(taskPostCalls(fetchMock.mock.calls)).toHaveLength(1))
+    const init = taskPostInit(fetchMock.mock.calls)
+    expect(JSON.parse(String(init.body))).toEqual(expect.objectContaining({
+      content: '192.0.2.11', attachment_ids: ['attachment-target-list'],
+    }))
+  })
+
+  it('专属 AI 页面在没有任一目标来源时阻止提交', async () => {
+    const fetchMock = vi.fn((_request: RequestInfo | URL, _init?: RequestInit) => {
+      void _request
+      void _init
+      return new Promise<Response>(() => undefined)
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    renderPage(
+      <TaskCreatePage fixedTaskType="ai_infra_scan" returnTo="/tasks/ai-infra" />,
+      { id: 'user-1', username: 'alice', role: 'user', must_change_password: false },
+      '/tasks/ai-infra/new',
+    )
+
+    fireEvent.click(screen.getByRole('button', { name: '创建 AI 基础设施扫描任务' }))
+
+    expect(await screen.findByText('请填写扫描目标或导入目标清单。')).toBeInTheDocument()
+    expect(taskPostCalls(fetchMock.mock.calls)).toHaveLength(0)
+  })
+
+  it('专属 AI 页面将修剪后的任务备注单独发送且不影响目标预览', async () => {
+    const created = { ...aiInfraDetail, id: 'created-ai-with-remark' }
+    const fetchMock = vi.fn((request: RequestInfo | URL, _init?: RequestInit) => {
+      void _init
+      const url = String(request)
+      if (url.includes('/models?')) return Promise.resolve(jsonResponse({ items: [], total: 0, page: 1, page_size: 100 }))
+      if (url.endsWith('/tasks')) return Promise.resolve(jsonResponse(created))
+      return Promise.resolve(new Response(null, { status: 404 }))
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    renderPage(
+      <TaskCreatePage fixedTaskType="ai_infra_scan" returnTo="/tasks/ai-infra" />,
+      { id: 'user-1', username: 'alice', role: 'user', must_change_password: false },
+      '/tasks/ai-infra/new',
+    )
+
+    await screen.findByRole('link', { name: '前往凭证配置 → 模型配置' })
+    fireEvent.change(screen.getByRole('textbox', { name: '手工填写扫描目标（可选）' }), { target: { value: '192.0.2.10' } })
+    expect(screen.getByText('已识别 1 个目标')).toBeInTheDocument()
+    fireEvent.change(screen.getByRole('textbox', { name: '任务说明 / 备注（可选）' }), { target: { value: '  本次资产核查  ' } })
+    expect(screen.getByText('已识别 1 个目标')).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: '创建 AI 基础设施扫描任务' }))
+
+    await waitFor(() => expect(taskPostCalls(fetchMock.mock.calls)).toHaveLength(1))
+    const body = JSON.parse(String(taskPostInit(fetchMock.mock.calls).body))
+    expect(body).toEqual(expect.objectContaining({ content: '192.0.2.10', remark: '本次资产核查' }))
+    expect(body.params).not.toHaveProperty('remark')
+  })
+
+  it('专属 AI 页面省略空白备注，并在 2,000 个 Unicode 字符后阻止提交', async () => {
+    const created = { ...aiInfraDetail, id: 'created-ai-empty-remark' }
+    const fetchMock = vi.fn((request: RequestInfo | URL, _init?: RequestInit) => {
+      void _init
+      const url = String(request)
+      if (url.includes('/models?')) return Promise.resolve(jsonResponse({ items: [], total: 0, page: 1, page_size: 100 }))
+      if (url.endsWith('/tasks')) return Promise.resolve(jsonResponse(created))
+      return Promise.resolve(new Response(null, { status: 404 }))
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    renderPage(
+      <TaskCreatePage fixedTaskType="ai_infra_scan" returnTo="/tasks/ai-infra" />,
+      { id: 'user-1', username: 'alice', role: 'user', must_change_password: false },
+      '/tasks/ai-infra/new',
+    )
+
+    await screen.findByRole('link', { name: '前往凭证配置 → 模型配置' })
+    fireEvent.change(screen.getByRole('textbox', { name: '手工填写扫描目标（可选）' }), { target: { value: '192.0.2.10' } })
+    fireEvent.change(screen.getByRole('textbox', { name: '任务说明 / 备注（可选）' }), { target: { value: '   ' } })
+    fireEvent.click(screen.getByRole('button', { name: '创建 AI 基础设施扫描任务' }))
+
+    await waitFor(() => expect(taskPostCalls(fetchMock.mock.calls)).toHaveLength(1))
+    expect(JSON.parse(String(taskPostInit(fetchMock.mock.calls).body))).not.toHaveProperty('remark')
+
+    const withinLimit = `${'安'.repeat(1_999)}😀`
+    const remarkField = screen.getByRole('textbox', { name: '任务说明 / 备注（可选）' })
+    fireEvent.change(remarkField, { target: { value: withinLimit } })
+    expect(screen.getByText('2,000 / 2,000')).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: '创建 AI 基础设施扫描任务' }))
+
+    await waitFor(() => expect(taskPostCalls(fetchMock.mock.calls)).toHaveLength(2))
+    expect(JSON.parse(String(taskPostCalls(fetchMock.mock.calls)[1]?.[1]?.body))).toEqual(
+      expect.objectContaining({ remark: withinLimit }),
+    )
+
+    fireEvent.change(remarkField, { target: { value: `${'安'.repeat(2_000)}😀` } })
+    expect(screen.getByText('2,001 / 2,000')).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: '创建 AI 基础设施扫描任务' }))
+    expect(await screen.findByText('任务说明不能超过 2,000 个字符。')).toBeInTheDocument()
+    expect(taskPostCalls(fetchMock.mock.calls)).toHaveLength(2)
+  })
+
+  it('专属 AI 页面在上传前提示超过 1 MiB 的目标清单', async () => {
+    const fetchMock = vi.fn((_request: RequestInfo | URL, _init?: RequestInit) => {
+      void _request
+      void _init
+      return new Promise<Response>(() => undefined)
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    renderPage(
+      <TaskCreatePage fixedTaskType="ai_infra_scan" returnTo="/tasks/ai-infra" />,
+      { id: 'user-1', username: 'alice', role: 'user', must_change_password: false },
+      '/tasks/ai-infra/new',
+    )
+
+    fireEvent.change(screen.getByLabelText('导入目标清单（可选）'), {
+      target: { files: [new File([new Uint8Array(1_024 * 1_024 + 1)], 'oversized-targets.txt', { type: 'text/plain' })] },
+    })
+    fireEvent.click(screen.getByRole('button', { name: '上传目标清单' }))
+
+    expect(await screen.findByText('目标清单文件不能超过 1 MiB，请缩小后重试。')).toBeInTheDocument()
+    expect(taskPostCalls(fetchMock.mock.calls)).toHaveLength(0)
+  })
+
+  it('专属 AI 页面允许不使用模型且取消返回专属列表', async () => {
+    const created = { ...task, id: 'created-ai-2', task_type: 'ai_infra_scan', input_summary: { language: 'zh', timeout: 300, port_scan_mode: 'fixed_ai' } }
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(jsonResponse({ items: [], total: 0, page: 1, page_size: 100 }))
+      .mockResolvedValueOnce(jsonResponse(created))
+    vi.stubGlobal('fetch', fetchMock)
+    const page = renderPage(
+      <TaskCreatePage fixedTaskType="ai_infra_scan" returnTo="/tasks/ai-infra" />,
+      { id: 'user-1', username: 'alice', role: 'user', must_change_password: false },
+      '/tasks/ai-infra/new',
+    )
+    await screen.findByRole('link', { name: '前往凭证配置 → 模型配置' })
+    fireEvent.change(screen.getByRole('textbox', { name: '手工填写扫描目标（可选）' }), { target: { value: '192.0.2.10' } })
+    fireEvent.click(screen.getByRole('button', { name: '创建 AI 基础设施扫描任务' }))
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2))
+    expect(JSON.parse(String((fetchMock.mock.calls[1]?.[1] as RequestInit).body)).params).not.toHaveProperty('model_id')
+    page.unmount()
+
+    vi.stubGlobal('fetch', vi.fn(() => new Promise<Response>(() => undefined)))
+    renderPage(<TaskCreatePage fixedTaskType="ai_infra_scan" returnTo="/tasks/ai-infra" />, { id: 'user-1', username: 'alice', role: 'user', must_change_password: false }, '/tasks/ai-infra/new')
+    fireEvent.click(screen.getByRole('button', { name: '取消' }))
+    expect(screen.getByLabelText('当前任务路由')).toHaveTextContent('/tasks/ai-infra')
+  })
+
+  it('专属 AI 页面在已选模型目录后台刷新时阻止 pending 模型提交', async () => {
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } })
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(jsonResponse({ items: [catalogModel()], total: 1, page: 1, page_size: 100 }))
+      .mockImplementationOnce(() => new Promise<Response>(() => undefined))
+    vi.stubGlobal('fetch', fetchMock)
+    renderPage(
+      <TaskCreatePage fixedTaskType="ai_infra_scan" returnTo="/tasks/ai-infra" />,
+      { id: 'user-1', username: 'alice', role: 'user', must_change_password: false },
+      '/tasks/ai-infra/new',
+      '*',
+      queryClient,
+    )
+
+    fireEvent.change(screen.getByRole('textbox', { name: '手工填写扫描目标（可选）' }), { target: { value: '192.0.2.10' } })
+    await screen.findByRole('option', { name: '受治理扫描模型（gpt-secure，私有）' })
+    fireEvent.change(screen.getByRole('combobox', { name: '扫描模型' }), { target: { value: 'model-opaque-1' } })
+    await waitFor(() => expect(screen.getByRole('combobox', { name: '扫描模型' })).toHaveValue('model-opaque-1'))
+
+    void queryClient.invalidateQueries({ queryKey: ['governed-model-catalog'] })
+    expect(await screen.findByText('正在验证已选模型')).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: '创建 AI 基础设施扫描任务' }))
+
+    expect(await screen.findByText('扫描模型尚未确认可用，请等待目录验证完成或选择不使用模型。')).toBeInTheDocument()
+    expect(fetchMock.mock.calls.filter(([, init]) => (init as RequestInit | undefined)?.method === 'POST')).toHaveLength(0)
   })
 
   it.each(['fixed_ai', 'full_tcp'] as const)('AI 基础设施扫描提交显式发送端口扫描模式 %s', async (portScanMode) => {

@@ -44,9 +44,9 @@ export const navigationItems: readonly NavigationItem[] = [
     allowedRoles: ALL_ROLES,
     children: [
       { id: 'mcp', path: '/tasks/mcp', label: 'MCP 安全扫描', description: '查看 MCP 扫描入口、状态和安全风险摘要。' },
-      { id: 'ai-infra', path: '/tasks?task_type=ai_infra_scan', label: 'AI 基础设施扫描', description: '查看 AI 基础设施扫描任务。' },
-      { id: 'model-redteam', path: '/tasks?task_type=model_redteam_report', label: '模型红队评测', description: '查看模型红队评测任务。' },
-      { id: 'agent-workflow', path: '/tasks?task_type=agent_scan', label: 'Agent 工作流扫描', description: '查看 Agent 工作流扫描任务。' },
+      { id: 'skills', path: '/tasks/skills', label: 'Skills 扫描', description: '查看技能包的静态安全扫描任务。' },
+      { id: 'ai-infra', path: '/tasks/ai-infra', label: 'AI 基础设施扫描', description: '查看 AI 基础设施扫描任务。' },
+      { id: 'agent-workflow', path: '/tasks/agent-workflow', label: 'Agent 工作流扫描', description: '查看 Agent 工作流扫描任务。' },
     ],
   },
   { id: 'reports', path: '/reports', label: '安全报告', description: '查看不可变报告快照并执行受审计 PDF 导出。', allowedRoles: ALL_ROLES },
@@ -61,9 +61,9 @@ export const navigationItems: readonly NavigationItem[] = [
 const secondaryNavigation: Readonly<Record<string, readonly SecondaryNavigationItem[]>> = {
   tasks: [
     { id: 'mcp-scan', path: '/tasks/mcp', label: 'MCP 安全扫描', allowedRoles: ALL_ROLES },
-    { id: 'ai-infra-scan', path: '/tasks?task_type=ai_infra_scan', label: 'AI 基础设施扫描', allowedRoles: ALL_ROLES },
-    { id: 'model-redteam', path: '/tasks?task_type=model_redteam_report', label: '模型红队评测', allowedRoles: ALL_ROLES },
-    { id: 'agent-workflow-scan', path: '/tasks?task_type=agent_scan', label: 'Agent 工作流扫描', allowedRoles: ALL_ROLES },
+    { id: 'skills-scan', path: '/tasks/skills', label: 'Skills 扫描', allowedRoles: ALL_ROLES },
+    { id: 'ai-infra-scan', path: '/tasks/ai-infra', label: 'AI 基础设施扫描', allowedRoles: ALL_ROLES },
+    { id: 'agent-workflow-scan', path: '/tasks/agent-workflow', label: 'Agent 工作流扫描', allowedRoles: ALL_ROLES },
   ],
   credentials: [
     { id: 'model-config', path: '/models', label: '模型配置', allowedRoles: ALL_ROLES },

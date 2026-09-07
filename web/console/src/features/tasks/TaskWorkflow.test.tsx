@@ -43,7 +43,7 @@ describe('任务服务端列表合同', () => {
   it('只发送服务端支持的分页和精确筛选，并校验安全摘要', async () => {
     const fetchMock = vi.fn().mockResolvedValue(
       jsonResponse({
-        items: [runningTask],
+        items: [{ ...runningTask, remark: '列表不得透出备注' }],
         total: 1,
         page: 2,
         page_size: 20,
@@ -60,6 +60,7 @@ describe('任务服务端列表合同', () => {
     )
     expect(result).toEqual({ items: [expect.objectContaining({ id: 'task-opaque-1' })], total: 1, page: 2, page_size: 20 })
     expect(JSON.stringify(result)).not.toContain('raw_result')
+    expect(JSON.stringify(result)).not.toContain('列表不得透出备注')
   })
 
   it('详情拒绝未知的端口扫描模式，不将其传给页面', () => {
@@ -85,7 +86,143 @@ describe('任务服务端列表合同', () => {
   })
 })
 
+describe('任务详情模型摘要白名单', () => {
+  it('AI 基础设施任务只投影安全 model_id，不向页面传递敏感未知字段', () => {
+    const result = parseTaskDetail({
+      ...runningTask,
+      task_type: 'ai_infra_scan',
+      input_summary: {
+        model_id: 'model-opaque-1',
+        token: 'must-not-reach-page',
+        base_url: 'https://internal.invalid',
+      },
+    })
+
+    expect(result.input_summary).toEqual({ model_id: 'model-opaque-1' })
+    expect(JSON.stringify(result)).not.toContain('token')
+    expect(JSON.stringify(result)).not.toContain('base_url')
+  })
+
+  it.each([
+    ['a', 'one character'],
+    ['a'.repeat(128), '128 characters'],
+    ['model.name', 'dot separator'],
+    ['model_name', 'underscore separator'],
+    ['model:name', 'colon separator'],
+    ['model-name', 'hyphen separator'],
+  ])('accepts a valid %s model ID', (modelID) => {
+    const result = parseTaskDetail({
+      ...runningTask,
+      task_type: 'ai_infra_scan',
+      input_summary: { model_id: modelID },
+    })
+
+    expect(result.input_summary).toEqual({ model_id: modelID })
+  })
+
+  it('projects model_id together with other approved AI infrastructure summary fields', () => {
+    const result = parseTaskDetail({
+      ...runningTask,
+      task_type: 'ai_infra_scan',
+      input_summary: {
+        model_id: 'model-opaque-1',
+        language: 'zh',
+        timeout: 60,
+        port_scan_mode: 'fixed_ai',
+      },
+    })
+
+    expect(result.input_summary).toEqual({
+      model_id: 'model-opaque-1',
+      language: 'zh',
+      timeout: 60,
+      port_scan_mode: 'fixed_ai',
+    })
+  })
+
+  it.each([
+    ['', 'empty'],
+    [' ', 'space'],
+    ['a'.repeat(129), 'too long'],
+    ['model/unsafe', 'forbidden character'],
+    ['.', 'single dot'],
+    ['..', 'double dot'],
+  ])('rejects a %s model ID in task detail', (modelID) => {
+    expect(() => parseTaskDetail({
+      ...runningTask,
+      task_type: 'ai_infra_scan',
+      input_summary: { model_id: modelID },
+    })).toThrow(ApiError)
+  })
+
+  it('rejects a non-string model ID in task detail', () => {
+    expect(() => parseTaskDetail({
+      ...runningTask,
+      task_type: 'ai_infra_scan',
+      input_summary: { model_id: 123 },
+    })).toThrow(ApiError)
+  })
+})
+
+describe('任务详情备注白名单', () => {
+  it('保留去除外围空白后的中文与 emoji，并按 Unicode 码点接受 2000 个字符', () => {
+    const boundaryRemark = `${'安'.repeat(1_999)}😀`
+
+    const result = parseTaskDetail({
+      ...runningTask,
+      task_type: 'ai_infra_scan',
+      remark: ` \n${boundaryRemark}\t `,
+      input_summary: {},
+      internal_note: '不得传给页面',
+    })
+
+    expect(result.remark).toBe(boundaryRemark)
+    expect(Object.keys(result)).toEqual([
+      'id', 'owner', 'task_type', 'status', 'created_at', 'updated_at', 'input_summary', 'remark',
+    ])
+    expect(JSON.stringify(result)).not.toContain('internal_note')
+  })
+
+  it.each([
+    ['数字', 123],
+    ['全空白文本', ' \n\t '],
+    ['超过 2000 个 Unicode 码点', `注${'😀'.repeat(2_000)}`],
+    ['未配对代理项', '\uD800'],
+  ])('拒绝%s备注', (_caseName, remark) => {
+    expect(() => parseTaskDetail({
+      ...runningTask,
+      task_type: 'ai_infra_scan',
+      remark,
+      input_summary: {},
+    })).toThrow(ApiError)
+  })
+
+  it('备注缺省时不增加详情字段', () => {
+    const result = parseTaskDetail({ ...runningTask, input_summary: {} })
+
+    expect(result).not.toHaveProperty('remark')
+  })
+})
+
 describe('任务写入和短轮询边界', () => {
+  it('创建请求原样发送可选备注，且不混入扫描内容或参数', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(jsonResponse(runningTask, 202))
+    vi.stubGlobal('fetch', fetchMock)
+    const input: TaskCreateRequest = {
+      task_type: 'ai_infra_scan',
+      content: '192.0.2.10',
+      params: { model_id: 'model-opaque-1' },
+      remark: '  本次为变更窗口前扫描  ',
+    }
+
+    await createTaskSubmission(input, 'task-with-remark').submit()
+
+    const sent = JSON.parse(String((fetchMock.mock.calls[0]?.[1] as RequestInit).body)) as Record<string, unknown>
+    expect(sent.remark).toBe('  本次为变更窗口前扫描  ')
+    expect(sent.content).toBe('192.0.2.10')
+    expect(sent.params).toEqual({ model_id: 'model-opaque-1' })
+  })
+
   it('同一次逻辑提交显式重试复用幂等键且不会自动重放', async () => {
     const fetchMock = vi
       .fn()

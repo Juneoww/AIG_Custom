@@ -8,7 +8,7 @@
 import { apiBinaryRequest, apiRequest } from '../../shared/api/client'
 import { ApiError } from '../../shared/api/errors'
 
-export type ReportTaskType = 'mcp_scan' | 'ai_infra_scan' | 'model_redteam_report' | 'agent_scan'
+export type ReportTaskType = 'mcp_scan' | 'ai_infra_scan' | 'skills_scan' | 'model_redteam_report' | 'agent_scan'
 export type RiskSeverity = 'high' | 'medium' | 'low'
 export type InfrastructurePortScanMode = 'fixed_ai' | 'full_tcp'
 
@@ -92,7 +92,7 @@ export interface ReportDetailView {
   render: RenderModelView
 }
 
-const TASK_TYPES = new Set<ReportTaskType>(['mcp_scan', 'ai_infra_scan', 'model_redteam_report', 'agent_scan'])
+const TASK_TYPES = new Set<ReportTaskType>(['mcp_scan', 'ai_infra_scan', 'skills_scan', 'model_redteam_report', 'agent_scan'])
 const SEVERITIES = new Set<RiskSeverity>(['high', 'medium', 'low'])
 const MAX_PDF_BYTES = 50 * 1024 * 1024
 const FIXED_AI_PORT_SPEC = '11434,1337,7000-9000,18789'

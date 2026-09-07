@@ -32,9 +32,9 @@ describe('role navigation', () => {
 
     expect(scanTasks?.children?.map(({ label, path }) => ({ label, path }))).toEqual([
       { label: 'MCP 安全扫描', path: '/tasks/mcp' },
-      { label: 'AI 基础设施扫描', path: '/tasks?task_type=ai_infra_scan' },
-      { label: '模型红队评测', path: '/tasks?task_type=model_redteam_report' },
-      { label: 'Agent 工作流扫描', path: '/tasks?task_type=agent_scan' },
+      { label: 'Skills 扫描', path: '/tasks/skills' },
+      { label: 'AI 基础设施扫描', path: '/tasks/ai-infra' },
+      { label: 'Agent 工作流扫描', path: '/tasks/agent-workflow' },
     ])
   })
 
@@ -57,9 +57,9 @@ describe('role navigation', () => {
   it('exposes grouped scan navigation for regular users', () => {
     const scanChildren = [
       expect.objectContaining({ label: 'MCP 安全扫描', path: '/tasks/mcp' }),
-      expect.objectContaining({ label: 'AI 基础设施扫描', path: '/tasks?task_type=ai_infra_scan' }),
-      expect.objectContaining({ label: '模型红队评测', path: '/tasks?task_type=model_redteam_report' }),
-      expect.objectContaining({ label: 'Agent 工作流扫描', path: '/tasks?task_type=agent_scan' }),
+      expect.objectContaining({ label: 'Skills 扫描', path: '/tasks/skills' }),
+      expect.objectContaining({ label: 'AI 基础设施扫描', path: '/tasks/ai-infra' }),
+      expect.objectContaining({ label: 'Agent 工作流扫描', path: '/tasks/agent-workflow' }),
     ]
     const credentialChildren = [
       expect.objectContaining({ label: '模型配置', path: '/models' }),

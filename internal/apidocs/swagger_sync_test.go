@@ -499,7 +499,24 @@ func TestSwaggerDocumentsEnterpriseConsoleContracts(t *testing.T) {
 			assertExactProperties(t, document, "dashboard.View", "has_data", "security_score", "mapping_versions", "risk", "trend", "recent_tasks", "attention")
 			assertExactProperties(t, document, "dashboard.AttentionItem", "report_id", "task_id", "task_type", "completed_at", "score", "high", "medium", "low")
 			assertExactProperties(t, document, "tasks.TaskSummary", "id", "owner", "task_type", "status", "created_at", "updated_at")
-			assertExactProperties(t, document, "tasks.TaskDetail", "id", "owner", "task_type", "status", "created_at", "updated_at", "input_summary")
+			assertExactProperties(t, document, "tasks.TaskDetail", "id", "owner", "task_type", "status", "remark", "report_id", "created_at", "updated_at", "input_summary")
+			assertExactProperties(t, document, "tasks.TaskInputSummary", "language", "source_kind", "agent_id", "eval_model_id", "model_id", "num_prompts", "port_scan_mode", "scan_mode", "target_count", "thread", "timeout")
+			modelID := swaggerValue(t, document, "definitions", "tasks.TaskInputSummary", "properties", "model_id")
+			if got := swaggerValue(t, modelID, "type"); got != "string" {
+				t.Errorf("tasks.TaskInputSummary.model_id type = %v, want string", got)
+			}
+			if got := swaggerValue(t, modelID, "maxLength"); got != float64(128) && got != 128 {
+				t.Errorf("tasks.TaskInputSummary.model_id maxLength = %v, want 128", got)
+			}
+			if got := swaggerValue(t, modelID, "pattern"); got != "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$" {
+				t.Errorf("tasks.TaskInputSummary.model_id pattern = %v", got)
+			}
+			modelIDDescription := strings.ToLower(swaggerValue(t, modelID, "description").(string))
+			for _, term := range []string{"opaque", "persisted", "validated", "not a token", "base url", "credential", "current-availability"} {
+				if !strings.Contains(modelIDDescription, term) {
+					t.Errorf("tasks.TaskInputSummary.model_id description does not contain %q", term)
+				}
+			}
 
 			if got := swaggerValue(t, document, "definitions", "dashboard.View", "properties", "security_score", "x-nullable"); got != true {
 				t.Errorf("dashboard security_score x-nullable = %v, want true", got)
@@ -635,7 +652,7 @@ func TestSwaggerDocumentsTaskCreateAndLegacySecurityCorrections(t *testing.T) {
 				t.Errorf("attachment id maxLength = %v", got)
 			}
 			taskTypes := swaggerValue(t, body, "properties", "task_type", "enum").([]interface{})
-			if !reflect.DeepEqual(taskTypes, []interface{}{"mcp_scan", "ai_infra_scan", "model_redteam_report", "agent_scan"}) {
+			if !reflect.DeepEqual(taskTypes, []interface{}{"mcp_scan", "ai_infra_scan", "model_redteam_report", "agent_scan", "skills_scan"}) {
 				t.Errorf("task create type enum = %v", taskTypes)
 			}
 			badRequestDescription := strings.ToLower(swaggerValue(t, document, "paths", createPath, "post", "responses", "400", "description").(string))
@@ -819,7 +836,7 @@ func TestSwaggerDocumentsTaskListExactFilters(t *testing.T) {
 				t.Errorf("task status filter enum = %v", status)
 			}
 			taskType := swaggerParameterValue(t, document, path, "get", "task_type", "enum").([]interface{})
-			if !reflect.DeepEqual(taskType, []interface{}{"mcp_scan", "ai_infra_scan", "model_redteam_report", "agent_scan"}) {
+			if !reflect.DeepEqual(taskType, []interface{}{"mcp_scan", "ai_infra_scan", "model_redteam_report", "agent_scan", "skills_scan"}) {
 				t.Errorf("task_type filter enum = %v", taskType)
 			}
 			description := swaggerValue(t, document, "paths", path, "get", "responses", "400", "description").(string)
@@ -881,7 +898,7 @@ func TestAPIGuidesDocumentEnterpriseConsoleContracts(t *testing.T) {
 			"## Browser identity, CSRF, and public bootstrap", "/api/v1/auth/csrf", "/api/v1/auth/me", "/api/v1/public/brand", "/api/v1/version",
 			"## Enterprise console collections", "/api/v1/platform/dashboard", "exactly 30 UTC", "security_score=null",
 			"TaskListResponse", "ReportListResponse", "UserListResponse", "AuditListResponse", "CatalogPage", "page=1..1000", "page_size=1..100",
-			"attachment.download_authorized", "other users receive `404`", "auditors receive `403`", "schema reaches v9", "deleting tombstone",
+			"attachment.download_authorized", "other users receive `404`", "auditors receive `403`", "schema reaches v10", "deleting tombstone",
 			"GET `/api/v1/auth/csrf` before login", "persistent cookie jar", "session.cookies.get(\"aig_csrf\")", "X-CSRF-Token", `-b "$COOKIE_JAR"`,
 			"idx_platform_tasks_updated_at", "idx_platform_tasks_owner_updated_at",
 		}},
@@ -889,7 +906,7 @@ func TestAPIGuidesDocumentEnterpriseConsoleContracts(t *testing.T) {
 			"## 浏览器身份、CSRF 与公开初始化", "/api/v1/auth/csrf", "/api/v1/auth/me", "/api/v1/public/brand", "/api/v1/version",
 			"## 企业控制台集合契约", "/api/v1/platform/dashboard", "恰好 30 个 UTC", "security_score=null",
 			"TaskListResponse", "ReportListResponse", "UserListResponse", "AuditListResponse", "CatalogPage", "page=1..1000", "page_size=1..100",
-			"attachment.download_authorized", "其他普通用户得到 `404`", "审计员得到 `403`", "schema 到达 v9", "deleting 墓碑",
+			"attachment.download_authorized", "其他普通用户得到 `404`", "审计员得到 `403`", "schema 到达 v10", "deleting 墓碑",
 			"登录前先 GET `/api/v1/auth/csrf`", "持久 Cookie jar", "session.cookies.get(\"aig_csrf\")", "X-CSRF-Token", `-b "$COOKIE_JAR"`,
 			"idx_platform_tasks_updated_at", "idx_platform_tasks_owner_updated_at",
 		}},
@@ -903,8 +920,9 @@ func TestAPIGuidesDocumentEnterpriseConsoleContracts(t *testing.T) {
 				t.Errorf("%s does not document %q", guide.path, required)
 			}
 		}
-		if strings.Contains(string(contents), "schema reaches v8") || strings.Contains(string(contents), "schema 到达 v8") {
-			t.Errorf("%s retains the obsolete schema v8 statement", guide.path)
+		if strings.Contains(string(contents), "schema reaches v8") || strings.Contains(string(contents), "schema 到达 v8") ||
+			strings.Contains(string(contents), "schema reaches v9") || strings.Contains(string(contents), "schema 到达 v9") {
+			t.Errorf("%s retains an obsolete schema version statement", guide.path)
 		}
 	}
 }
@@ -920,7 +938,7 @@ func TestAPIGuidesDocumentLegacyModelAndMigrationBoundaries(t *testing.T) {
 				"/api/v1/app/models/{modelId}", "collection DELETE", "{status,message,data}",
 				"HTTP `200`", "`401`", "`403`", "masked", "/api/v1/platform/models",
 				"cannot shadow", "fails closed",
-				"Only `aig migrate` may apply database DDL", "schema reaches v9", "empty legacy table",
+				"Only `aig migrate` may apply database DDL", "schema reaches v10", "empty legacy table",
 				"/api/v1/platform/tasks", "Idempotency-Key", "same persisted request payload", "opaque attachment IDs", "410 Gone", "password-change and CSRF checks",
 				"/api/v1/platform/reports", "page_size", "safe summary", "immutable RenderModel", "30 fixed UTC day buckets",
 				"/api/v1/platform/reports/{reportID}/exports/pdf", "durable pending/completion audit outbox",
@@ -934,7 +952,7 @@ func TestAPIGuidesDocumentLegacyModelAndMigrationBoundaries(t *testing.T) {
 				"/api/v1/app/models/{modelId}", "集合 DELETE", "{status,message,data}",
 				"HTTP `200`", "`401`", "`403`", "始终脱敏", "/api/v1/platform/models",
 				"不能遮蔽", "失败关闭",
-				"只有 `aig migrate` 可以执行数据库 DDL", "schema 到达 v9", "旧表为空",
+				"只有 `aig migrate` 可以执行数据库 DDL", "schema 到达 v10", "旧表为空",
 				"/api/v1/platform/tasks", "Idempotency-Key", "相同持久化请求载荷", "opaque 附件 ID", "410 Gone", "首次改密与 CSRF 校验",
 				"/api/v1/platform/reports", "page_size", "安全摘要", "不可变 RenderModel", "30 个固定 UTC 日桶",
 				"/api/v1/platform/reports/{reportID}/exports/pdf", "持久化 pending/completion 审计 outbox",
@@ -1217,4 +1235,85 @@ func decodeSwaggerJSON(t *testing.T, data []byte) interface{} {
 		}
 	}
 	return document
+}
+
+func TestSwaggerDocumentsAgentWorkflowCreateAndSafeDetailContract(t *testing.T) {
+	for name, document := range loadSwaggerDocuments(t) {
+		t.Run(name, func(t *testing.T) {
+			createPath := "/api/v1/platform/tasks"
+			body := swaggerBodyParameterSchema(t, document, createPath, "post")
+			checks := []struct {
+				value interface{}
+				terms []string
+			}{
+				{swaggerValue(t, body, "properties", "content", "description"), []string{"agent_scan", "non-whitespace", "valid UTF-8", "32 KiB", "bytes", "execution instructions"}},
+				{swaggerValue(t, body, "properties", "attachment_ids", "description"), []string{"agent_scan", "unsupported", "omitted", "empty array"}},
+				{swaggerValue(t, body, "properties", "params", "description"), []string{"agent_scan", "only agent_id and eval_model_id"}},
+				{swaggerValue(t, document, "paths", createPath, "post", "description"), []string{"before the new Agent input constraints", "single provider", "HTTP", "WebSocket", "Dify", "Coze", "apiKey", "apiBaseUrl", "extra.dify_type", "chat", "workflow", "three stages", "primary and auxiliary", "no successful report"}},
+				{swaggerValue(t, document, "definitions", "tasks.TaskDetail", "properties", "report_id", "description"), []string{"GET", "succeeded", "authorized", "existing immutable snapshot", "omitted", "create"}},
+				{swaggerValue(t, document, "paths", "/api/v1/platform/tasks/{taskID}", "get", "description"), []string{"agent_id", "eval_model_id", "agent_scan", "report_id", "succeeded", "authorized", "snapshot"}},
+			}
+			for _, check := range checks {
+				for _, term := range check.terms {
+					if !strings.Contains(check.value.(string), term) {
+						t.Errorf("Agent workflow contract description lacks %q", term)
+					}
+				}
+			}
+			for _, reference := range []struct{ name, pattern string }{
+				{"agent_id", "^[A-Za-z0-9][A-Za-z0-9._ -]{0,127}$"},
+				{"eval_model_id", "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"},
+			} {
+				field := swaggerValue(t, document, "definitions", "tasks.TaskInputSummary", "properties", reference.name)
+				if got := swaggerValue(t, field, "type"); got != "string" {
+					t.Errorf("Agent reference %s type = %v", reference.name, got)
+				}
+				if got := swaggerValue(t, field, "maxLength"); got != float64(128) && got != 128 {
+					t.Errorf("Agent reference %s maxLength = %v", reference.name, got)
+				}
+				if got := swaggerValue(t, field, "pattern"); got != reference.pattern {
+					t.Errorf("Agent reference %s pattern = %v", reference.name, got)
+				}
+				description := swaggerValue(t, field, "description").(string)
+				for _, term := range []string{"agent_scan only", "persisted", "not a credential", "omitted", "current availability"} {
+					if !strings.Contains(description, term) {
+						t.Errorf("Agent reference %s description lacks %q", reference.name, term)
+					}
+				}
+			}
+			for _, schema := range []interface{}{body, swaggerValue(t, document, "definitions", "tasks.TaskDetail")} {
+				remark := swaggerValue(t, schema, "properties", "remark")
+				if got := swaggerValue(t, remark, "maxLength"); got != float64(2000) && got != 2000 {
+					t.Errorf("task remark maxLength = %v, want 2000 Unicode code points", got)
+				}
+				for _, required := range swaggerValue(t, schema, "required").([]interface{}) {
+					if required == "remark" || required == "report_id" {
+						t.Errorf("optional task field %s is required", required)
+					}
+				}
+			}
+			for _, status := range []string{"202", "503"} {
+				description := swaggerValue(t, document, "paths", createPath, "post", "responses", status, "description").(string)
+				if !strings.Contains(description, "report_id is omitted") {
+					t.Errorf("task create %s must explicitly omit report_id", status)
+				}
+			}
+		})
+	}
+}
+
+func TestAPIGuidesDocumentAgentWorkflowContract(t *testing.T) {
+	for _, path := range []string{"../../docs/api/reference.md", "../../docs/api/reference.en.md"} {
+		t.Run(path, func(t *testing.T) {
+			contents, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, term := range []string{"agent_scan", "agent_id", "eval_model_id", "32 KiB", "UTF-8", "2,000", "remark", "HTTP", "WebSocket", "Dify", "Coze", "extra.dify_type", "review_complete", "no_findings", "report_id", "succeeded", "agent-security-report@1"} {
+				if !strings.Contains(string(contents), term) {
+					t.Errorf("Agent workflow API guide lacks %q", term)
+				}
+			}
+		})
+	}
 }

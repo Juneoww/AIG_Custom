@@ -1,0 +1,189 @@
+/**
+ * 功能：为扫描任务从受治理模型目录选择一个模型 ID。
+ * 实现：分页读取安全目录，仅展示白名单标签，并验证待解析的受治理模型 ID。
+ * 输入：当前 opaque 模型 ID、变更回调和可选禁用状态。
+ * 输出：模型 ID 或 undefined；不输出模型凭据、地址或备注。
+ * 依赖：Fluent UI、TanStack Query、React Router 与模型目录 API。
+ */
+import { Button, Field, MessageBar, MessageBarBody, Select, makeStyles, tokens } from '@fluentui/react-components'
+import { useInfiniteQuery } from '@tanstack/react-query'
+import { useEffect, useRef } from 'react'
+import { Link } from 'react-router-dom'
+
+import { fetchModelCatalog } from '../../models/api'
+import { ApiError } from '../../../shared/api/errors'
+import { MODEL_CATALOG_PAGE_SIZE, canonicalModels, hasRepeatedCatalogPage, modelOptionLabel, nextCatalogPage, selectableModels } from '../governedModels'
+
+const useStyles = makeStyles({
+  field: { minWidth: 0 },
+  container: { display: 'flex', flexDirection: 'column', gap: tokens.spacingVerticalS, minWidth: 0 },
+  select: { minWidth: 0, width: '100%', maxWidth: '100%', boxSizing: 'border-box', '& select': { minWidth: 0, maxWidth: '100%' } },
+  actions: { display: 'flex', alignItems: 'center', gap: tokens.spacingHorizontalS, flexWrap: 'wrap' },
+})
+
+export interface GovernedModelSelectorProps {
+  value?: string
+  onChange: (modelID: string | undefined) => void
+  onAvailabilityChange?: (availability: GovernedModelAvailability) => void
+  disabled?: boolean
+  label?: string
+  required?: boolean
+}
+
+export type GovernedModelAvailability = 'available' | 'pending' | 'unavailable'
+
+export function GovernedModelSelector({ value, onChange, onAvailabilityChange, disabled = false, label = '扫描模型', required = false }: GovernedModelSelectorProps) {
+  const styles = useStyles()
+  const clearedModelIDRef = useRef<string | undefined>(undefined)
+  const verifiedPageParamsRef = useRef<string | undefined>(undefined)
+  const catalog = useInfiniteQuery({
+    queryKey: ['governed-model-catalog'],
+    initialPageParam: 1,
+    queryFn: async ({ pageParam, signal }) => {
+      const page = await fetchModelCatalog({ page: pageParam, pageSize: MODEL_CATALOG_PAGE_SIZE }, signal)
+      if (page.page !== pageParam || page.page_size !== MODEL_CATALOG_PAGE_SIZE) throw new ApiError('unexpected-response', 200)
+      return page
+    },
+    getNextPageParam: (lastPage, allPages, lastPageParam, allPageParams) => {
+      if (lastPage.page !== lastPageParam || hasRepeatedCatalogPage(lastPage.items, allPages.slice(0, -1).map((page) => page.items))) return undefined
+      return nextCatalogPage(lastPage, allPageParams)
+    },
+    retry: false,
+  })
+  const catalogItems = catalog.data?.pages.flatMap((page) => page.items) ?? []
+  const canonicalCatalogItems = canonicalModels(catalogItems)
+  const catalogRefreshInProgress = catalog.isRefetching && !catalog.isFetchingNextPage
+  const catalogRefreshFailed = Boolean(catalog.data) && catalog.isRefetchError && !catalog.isFetchNextPageError
+  const catalogTrusted = !catalogRefreshInProgress && !catalogRefreshFailed
+  const models = catalogTrusted ? selectableModels(catalogItems) : []
+  const selectedModelID = typeof value === 'string' && value !== '' ? value : undefined
+  const lastCatalogPage = catalog.data?.pages.at(-1)
+  const repeatedCatalogPage = catalogTrusted && lastCatalogPage !== undefined && hasRepeatedCatalogPage(
+    lastCatalogPage.items,
+    (catalog.data?.pages.slice(0, -1) ?? []).map((page) => page.items),
+  )
+  const selectedIsAvailable = selectedModelID !== undefined && models.some((model) => model.id === selectedModelID)
+  const selectedCanonicalModel = !catalogTrusted || selectedModelID === undefined ? undefined : canonicalCatalogItems.find((model) => model.id === selectedModelID)
+  const selectedCanonicalDisabled = selectedCanonicalModel?.disabled === true
+  const selectionNeedsVerification = selectedModelID !== undefined && !selectedIsAvailable && !selectedCanonicalDisabled
+  const catalogExhausted = catalogTrusted && Boolean(catalog.data) && !repeatedCatalogPage && !catalog.hasNextPage && !catalog.isFetching && !catalog.isFetchNextPageError
+  const unavailableSelectedModel = selectedModelID !== undefined && !selectedIsAvailable && (selectedCanonicalDisabled || catalogExhausted)
+  const canAutomaticallyVerifySelection = selectionNeedsVerification && Boolean(catalog.data) && Boolean(catalog.hasNextPage) &&
+    catalogTrusted && !repeatedCatalogPage && !catalog.isFetching && !catalog.isFetchingNextPage && !catalog.isFetchNextPageError
+  const verificationPageParamsKey = `${selectedModelID ?? ''}:${catalog.data?.pageParams.join(',') ?? ''}`
+  const firstPageFailed = catalog.isError && !catalog.data
+  const pendingSelectedModelID = selectedModelID !== undefined && !selectedIsAvailable && !unavailableSelectedModel ? selectedModelID : undefined
+  const pendingModelLabel = repeatedCatalogPage
+    ? `已选模型（ID: ${pendingSelectedModelID}）：模型目录分页响应重复，尚未确认`
+    : catalogRefreshFailed
+      ? `已选模型（ID: ${pendingSelectedModelID}）：目录刷新失败，保留待重试`
+      : firstPageFailed || catalog.isFetchNextPageError
+      ? `已选模型（ID: ${pendingSelectedModelID}）：目录加载失败，保留待重试`
+      : `已选模型（ID: ${pendingSelectedModelID}）：正在验证`
+  const availability: GovernedModelAvailability = selectedModelID === undefined
+    ? required ? catalog.isPending || catalogRefreshInProgress ? 'pending' : 'unavailable' : 'available'
+    : selectedIsAvailable ? 'available' : unavailableSelectedModel ? 'unavailable' : 'pending'
+  const catalogRefreshFailureMessage = selectedModelID === undefined ? '模型目录刷新失败' : '模型目录刷新失败，当前选择待确认'
+  const emptyCatalog = catalogTrusted && Boolean(catalog.data) && models.length === 0
+  const nextPageButtonLabel = catalog.isFetchingNextPage
+    ? '正在加载更多模型…'
+    : catalog.isFetching ? '正在刷新模型目录…' : '加载更多模型'
+
+  const requestNextPage = () => {
+    if (!catalog.isFetching && !catalogRefreshFailed) void catalog.fetchNextPage({ cancelRefetch: false })
+  }
+
+  useEffect(() => {
+    if (unavailableSelectedModel && clearedModelIDRef.current !== selectedModelID) {
+      clearedModelIDRef.current = selectedModelID
+      onChange(undefined)
+      return
+    }
+    if (!unavailableSelectedModel) clearedModelIDRef.current = undefined
+  }, [onChange, selectedModelID, unavailableSelectedModel])
+
+  const availabilityCallbackRef = useRef(onAvailabilityChange)
+  const reportedAvailabilityRef = useRef<GovernedModelAvailability | undefined>(undefined)
+
+  useEffect(() => {
+    availabilityCallbackRef.current = onAvailabilityChange
+  }, [onAvailabilityChange])
+
+  useEffect(() => {
+    if (reportedAvailabilityRef.current === availability) return
+    reportedAvailabilityRef.current = availability
+    availabilityCallbackRef.current?.(availability)
+  }, [availability])
+
+  useEffect(() => {
+    if (!canAutomaticallyVerifySelection) {
+      verifiedPageParamsRef.current = undefined
+      return
+    }
+    if (verifiedPageParamsRef.current === verificationPageParamsKey) return
+    verifiedPageParamsRef.current = verificationPageParamsKey
+    void catalog.fetchNextPage({ cancelRefetch: false })
+  }, [canAutomaticallyVerifySelection, catalog.fetchNextPage, verificationPageParamsKey])
+
+  return (
+    <Field className={styles.field} label={label} required={required}>
+      <div className={styles.container}>
+        {catalog.isPending ? <span role="status">正在加载模型…</span> : null}
+        {firstPageFailed ? (
+          <MessageBar intent="error">
+            <MessageBarBody>模型目录加载失败</MessageBarBody>
+            <Button appearance="transparent" disabled={catalog.isFetching} onClick={() => void catalog.refetch()}>
+              {catalog.isFetching ? '正在重试模型…' : '重试加载模型'}
+            </Button>
+          </MessageBar>
+        ) : null}
+        {catalogRefreshFailed ? (
+          <MessageBar intent="error">
+            <MessageBarBody>{catalogRefreshFailureMessage}</MessageBarBody>
+            <Button appearance="transparent" disabled={catalog.isFetching} onClick={() => void catalog.refetch()}>
+              {catalog.isFetching ? '正在重试刷新模型目录…' : '重试刷新模型目录'}
+            </Button>
+          </MessageBar>
+        ) : null}
+        <Select
+          className={styles.select}
+          aria-label={label}
+          required={required}
+          value={value ?? ''}
+          disabled={disabled || catalog.isPending}
+          onChange={(_, data) => onChange(data.value || undefined)}
+        >
+          <option value="" disabled={required}>{required ? '请选择可用模型' : '不使用模型'}</option>
+          {pendingSelectedModelID === undefined ? null : <option value={pendingSelectedModelID} disabled>{pendingModelLabel}</option>}
+          {models.map((model) => <option key={model.id} value={model.id}>{modelOptionLabel(model)}</option>)}
+        </Select>
+        {pendingSelectedModelID !== undefined && !repeatedCatalogPage && !catalog.isFetchNextPageError && !firstPageFailed ? <span role="status">正在验证已选模型</span> : null}
+        {repeatedCatalogPage ? (
+          <MessageBar intent="warning">
+            <MessageBarBody>{pendingSelectedModelID === undefined ? '模型目录分页响应重复，无法继续加载' : '模型目录分页响应重复，无法继续加载；已选模型尚未确认'}</MessageBarBody>
+            <Button appearance="transparent" disabled={catalog.isFetching} onClick={() => void catalog.refetch()}>
+              {catalog.isFetching ? '正在重新加载模型目录…' : '重新加载模型目录'}
+            </Button>
+          </MessageBar>
+        ) : null}
+        {unavailableSelectedModel ? <MessageBar intent="warning"><MessageBarBody>已选模型不可用，已清除选择。</MessageBarBody></MessageBar> : null}
+        {emptyCatalog ? <Link to="/models">前往凭证配置 → 模型配置</Link> : null}
+        {catalog.isFetchNextPageError ? (
+          <MessageBar intent="error">
+            <MessageBarBody>加载更多模型失败</MessageBarBody>
+            <Button appearance="transparent" disabled={catalog.isFetching} onClick={requestNextPage}>
+              {catalog.isFetchingNextPage ? '正在重试更多模型…' : catalog.isFetching ? '正在刷新模型目录…' : '重试加载更多模型'}
+            </Button>
+          </MessageBar>
+        ) : null}
+        {catalog.hasNextPage && !catalog.isFetchNextPageError ? (
+          <div className={styles.actions}>
+            <Button disabled={disabled || catalog.isFetching || catalogRefreshFailed || pendingSelectedModelID !== undefined} onClick={requestNextPage}>
+              {nextPageButtonLabel}
+            </Button>
+          </div>
+        ) : null}
+      </div>
+    </Field>
+  )
+}

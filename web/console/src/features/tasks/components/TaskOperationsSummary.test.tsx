@@ -60,7 +60,7 @@ describe('TaskOperationsSummary', () => {
 
     expect(query).toHaveTextContent('全部状态')
     expect(query).toHaveTextContent('全部类型')
-    expect(query).toHaveTextContent('匹配任务 47')
+    expect(query).toHaveTextContent('当前查询匹配任务 47')
     expect(signals).toHaveTextContent('本页正在执行 2')
     expect(signals).toHaveTextContent('本页等待调度 1')
     expect(signals).toHaveTextContent('本页需关注 3')
@@ -81,7 +81,7 @@ describe('TaskOperationsSummary', () => {
     const query = within(summary).getByRole('group', { name: '当前查询' })
     expect(query).toHaveTextContent('状态：执行中')
     expect(query).toHaveTextContent('类型：Agent 扫描')
-    expect(query).toHaveTextContent('匹配任务 0')
+    expect(query).toHaveTextContent('当前查询匹配任务 0')
     expect(summary).not.toHaveTextContent('本页正在执行 0')
     expect(summary).not.toHaveTextContent('本页等待调度 0')
     expect(summary).not.toHaveTextContent('本页需关注 0')

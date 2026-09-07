@@ -77,6 +77,13 @@ afterEach(() => {
 })
 
 describe('报告安全 DTO', () => {
+  it('识别 Skills 报告列表和不可变详情类型', () => {
+    const value = reportDetail({ task_type: 'skills_scan' })
+    value.render.task_type = 'skills_scan'
+    expect(parseReportDetail(value).render.task_type).toBe('skills_scan')
+    expect(parseReportList({ items: [{ ...value, brand_product_name: '快照品牌' }], total: 1, page: 1, page_size: 20 }).items[0]?.task_type).toBe('skills_scan')
+  })
+
   it('仅投影安全列表字段且不保留响应中的敏感哨兵', () => {
     const parsed = parseReportList({
       items: [{ ...reportDetail(), brand_product_name: '快照品牌' }],

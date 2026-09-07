@@ -24,8 +24,7 @@ import "github.com/swaggo/swag"
 const docTemplate = `{
     "swagger": "2.0",
     "info": {
-        "contact": {
-        },
+        "contact": {},
         "description": "API for managing AIG Custom Platform AI security scanning tasks. Based on Tencent Zhuque Lab AI-Infra-Guard (https://github.com/Tencent/AI-Infra-Guard).",
         "title": "AIG Custom Platform 任务API",
         "version": "1.0"
@@ -1199,7 +1198,8 @@ const docTemplate = `{
                             "mcp_scan",
                             "ai_infra_scan",
                             "model_redteam_report",
-                            "agent_scan"
+                            "agent_scan",
+                            "skills_scan"
                         ],
                         "in": "query",
                         "name": "task_type",
@@ -1235,7 +1235,7 @@ const docTemplate = `{
                 "consumes": [
                     "application/json"
                 ],
-                "description": "Breaking security hardening: create responses now use the browser-safe TaskDetail with bounded input_summary instead of the former internal task View; clients must migrate field access. The JSON body is limited to 256 KiB. Creates an owner-scoped platform task from the authenticated Cookie Subject. Idempotency-Key is required and unique per owner. A retry with the same persisted request payload returns the existing task without revalidating live governed references; reusing that key with a different payload returns 400 invalid task request. Only exact canonical task types are accepted and the platform maps them to private Agent aliases: mcp_scan params allow model_id and thread; ai_infra_scan params allow model_id, timeout, and port_scan_mode (fixed_ai or full_tcp; omission defaults to fixed_ai); model_redteam_report params require model_id as a bounded string array plus eval_model_id and may include dataset numPrompts/randomSeed/promptColumn and techniques; agent_scan params require agent_id and eval_model_id. For mcp_scan, params.source_kind is required and is exactly repository or service. repository accepts exactly a Git repository reference or opaque code attachments and must not include authorization_confirmed. service accepts a controlled HTTP(S) endpoint with no attachments and requires params.authorization_confirmed=true; source-related audit metadata contains source_kind and the Boolean authorization confirmation, and the general task audit flow may retain safe phase metadata, while endpoint and authorization data never cross the browser boundary. Every model_id/eval_model_id must resolve through the governed model boundary, and agent_id through the user or public Agent registry, before persistence; unknown or invisible references write no task. Unknown fields, nested credential objects, raw model credentials, and legacy aliases are rejected. Attachments are supplied only as at most ten opaque attachment IDs. Dispatch uses persisted claims and a global attempt budget. An uncertain network acknowledgement becomes dispatch_unknown and is never submitted automatically again; this is at-most-once dispatch, not exactly-once execution. Requires CSRF protection.",
+                "description": "Breaking security hardening: create responses now use the browser-safe TaskDetail with bounded input_summary and optional remark instead of the former internal task View; clients must migrate field access. The JSON body is limited to 256 KiB. Creates an owner-scoped platform task from the authenticated Cookie Subject. Idempotency-Key is required and unique per owner. A retry with the same persisted request payload returns the existing task without revalidating live governed references; reusing that key with a different payload returns 400 invalid task request. Historical same-key requests are compared before the new Agent input constraints, so matching historical tasks are not rejected for empty content or attachments. Only exact canonical task types are accepted and the platform maps them to private Agent aliases: mcp_scan params allow model_id and thread; ai_infra_scan params allow model_id, timeout, and port_scan_mode (fixed_ai or full_tcp; omission defaults to fixed_ai); model_redteam_report params require model_id as a bounded string array plus eval_model_id and may include dataset numPrompts/randomSeed/promptColumn and techniques; agent_scan params require only agent_id and eval_model_id. skills_scan params allow only model_id, a required available governed model ID; exactly one owner-scoped ready ZIP attachment is required and content must be empty. Skills perform static audit only, with no dynamic, URL, repository, concurrency, port, or custom prompt options. The ZIP limit is 20 MiB compressed, 100 MiB actual expanded bytes, 5 MiB per file, and at most 2,000 original ZIP entries and normalized files/directories (including implicit directories); it must contain exactly one valid UTF-8 SKILL.md with non-empty name and description frontmatter strings, at the archive root or inside one top-level wrapper directory. Unsafe paths, links, duplicate entries, case conflicts, invalid YAML, CRC damage, encrypted entries, and unsupported compression are rejected. For mcp_scan, params.source_kind is required and is exactly repository or service. repository accepts exactly a Git repository reference or opaque code attachments and must not include authorization_confirmed. service accepts a controlled HTTP(S) endpoint with no attachments and requires params.authorization_confirmed=true; source-related audit metadata contains source_kind and the Boolean authorization confirmation, and the general task audit flow may retain safe phase metadata, while endpoint and authorization data never cross the browser boundary. Every model_id/eval_model_id must resolve through the governed model boundary, and agent_id through the user or public Agent registry, before persistence; unknown or invisible references write no task. New agent_scan tasks require non-whitespace valid UTF-8 content of at most 32 KiB (32768 bytes) and do not support attachments. The Agent configuration must contain a single provider validated before persistence and again at dispatch: HTTP/HTTPS, WebSocket, or Dify; Coze and unknown providers are rejected. Dify requires explicit apiKey, apiBaseUrl, and extra.dify_type equal to chat or workflow; conflicting routing fields, ambiguous YAML scalars, aliases, and malformed configuration are rejected. The three stages of information collection, vulnerability detection, and review use the selected eval_model_id for primary and auxiliary models in platform mode. Failed or incomplete execution, invalid final review, and missing results produce no successful report. Unknown fields, nested credential objects, raw model credentials, and legacy aliases are rejected. Task types supporting attachments accept at most ten opaque attachment IDs. Optional remark is trimmed and limited to 2,000 Unicode code points, participates in idempotency, and is returned only in authorized TaskDetail; it never enters the engine, audit metadata, or reports. Dispatch uses persisted claims and a global attempt budget. An uncertain network acknowledgement becomes dispatch_unknown and is never submitted automatically again; this is at-most-once dispatch, not exactly-once execution. Requires CSRF protection.",
                 "parameters": [
                     {
                         "in": "header",
@@ -1251,29 +1251,32 @@ const docTemplate = `{
                         "schema": {
                             "properties": {
                                 "attachment_ids": {
+                                    "description": "Opaque owner-scoped ready attachment references for supported task types; the general maximum is ten. Attachments are unsupported for new agent_scan tasks; the field must be omitted or an empty array. skills_scan requires exactly one ZIP and validates the archive before binding.",
                                     "items": {
-                                        "type": "string",
-                                        "maxLength": 128
+                                        "maxLength": 128,
+                                        "type": "string"
                                     },
-                                    "type": "array",
-                                    "maxItems": 10
+                                    "maxItems": 10,
+                                    "type": "array"
                                 },
                                 "content": {
-                                    "type": "string",
-                                    "maxLength": 32768
+                                    "description": "Task execution input, limited to 32 KiB (32768 bytes); the character maxLength does not replace this byte limit. New agent_scan tasks require non-whitespace valid UTF-8 execution instructions that are passed to all three scan stages. skills_scan content must be empty or omitted; Skill source is supplied only by the ZIP attachment.",
+                                    "maxLength": 32768,
+                                    "type": "string"
                                 },
                                 "country_iso_code": {
-                                    "type": "string",
                                     "enum": [
                                         "",
                                         "zh",
                                         "zh_CN",
                                         "en"
-                                    ]
+                                    ],
+                                    "type": "string",
+                                    "description": "Output language. The Chinese Skills UI explicitly sends zh_CN; the API retains all documented language values."
                                 },
                                 "params": {
                                     "type": "object",
-                                    "description": "Exact per-task schema described by this operation; arbitrary and credential-bearing fields are rejected. For mcp_scan, source_kind is required; its conditional fields are documented below.",
+                                    "description": "Exact per-task schema described by this operation; agent_scan accepts only agent_id and eval_model_id, both required governed string references. skills_scan accepts only the required model_id string. Unknown, arbitrary, and credential-bearing fields are rejected.",
                                     "properties": {
                                         "authorization_confirmed": {
                                             "description": "Allowed and required only for mcp_scan service, where it must be true. repository rejects this field. Source-related audit metadata contains source_kind and the Boolean confirmation; general task audit flow may retain safe phase metadata, while endpoint and authorization material are never exposed.",
@@ -1289,14 +1292,20 @@ const docTemplate = `{
                                         }
                                     }
                                 },
+                                "remark": {
+                                    "description": "Optional task note, trimmed and limited to 2000 Unicode code points of valid UTF-8. Stored separately from content and included in idempotency comparison; never passed to the scan engine, audit metadata, or report snapshot.",
+                                    "maxLength": 2000,
+                                    "type": "string"
+                                },
                                 "task_type": {
-                                    "type": "string",
                                     "enum": [
                                         "mcp_scan",
                                         "ai_infra_scan",
                                         "model_redteam_report",
-                                        "agent_scan"
-                                    ]
+                                        "agent_scan",
+                                        "skills_scan"
+                                    ],
+                                    "type": "string"
                                 }
                             },
                             "required": [
@@ -1308,7 +1317,7 @@ const docTemplate = `{
                 ],
                 "responses": {
                     "202": {
-                        "description": "Browser-safe persisted task detail; raw request, attachment, identity, and engine fields are absent.",
+                        "description": "Browser-safe persisted task detail with optional remark; report_id is omitted even when acknowledging a previously completed task. Raw request, attachment, identity, and engine fields are absent.",
                         "schema": {
                             "$ref": "#/definitions/tasks.TaskDetail"
                         }
@@ -1329,7 +1338,7 @@ const docTemplate = `{
                         "description": "Persistence or durable audit failed; internal details are not exposed."
                     },
                     "503": {
-                        "description": "Fixed safe error plus persisted browser-safe task detail; dispatch diagnostics are not exposed.",
+                        "description": "Fixed safe error plus persisted browser-safe task detail; report_id is omitted and dispatch diagnostics are not exposed.",
                         "schema": {
                             "$ref": "#/definitions/tasks.TaskCreateErrorResponse"
                         }
@@ -1343,7 +1352,7 @@ const docTemplate = `{
         },
         "/api/v1/platform/tasks/{taskID}": {
             "get": {
-                "description": "Short-poll browser-safe TaskDetail using the authenticated Cookie Subject. Users read only their own task; auditors and administrators have global read access. The input_summary is a narrow display projection; browser-supplied identity headers are ignored.",
+                "description": "Short-poll browser-safe TaskDetail using the authenticated Cookie Subject. Users read only their own task; auditors and administrators have global read access. The input_summary is a narrow display projection; agent_id and eval_model_id are optional safe references for agent_scan only. Optional remark is display metadata and is never sent to the engine. Optional report_id is available only for a succeeded task when its existing immutable report snapshot is authorized for this Subject; absent snapshots produce no report link. Browser-supplied identity headers are ignored.",
                 "parameters": [
                     {
                         "in": "path",
@@ -2318,7 +2327,7 @@ const docTemplate = `{
         },
         "/api/v1/auth/password-resets/{userID}": {
             "post": {
-                "description": "Requires HTTPS, an administrator session, and a matching X-CSRF-Token header. This HTTP endpoint never returns a reset token. A trusted local administrator must run ai-infra-guard create-password-reset --username \u003cusername\u003e to obtain the sensitive one-time token for secure delivery; it must never be logged or persisted.",
+                "description": "Requires HTTPS, an administrator session, and a matching X-CSRF-Token header. This HTTP endpoint never returns a reset token. A trusted local administrator must run ai-infra-guard create-password-reset --username <username> to obtain the sensitive one-time token for secure delivery; it must never be logged or persisted.",
                 "parameters": [
                     {
                         "description": "Identity user ID",
@@ -3164,7 +3173,8 @@ const docTemplate = `{
                         "mcp_scan",
                         "ai_infra_scan",
                         "model_redteam_report",
-                        "agent_scan"
+                        "agent_scan",
+                        "skills_scan"
                     ],
                     "type": "string"
                 }
@@ -3792,7 +3802,8 @@ const docTemplate = `{
                     "type": "string"
                 },
                 "task_type": {
-                    "type": "string"
+                    "type": "string",
+                    "description": "Frozen task identity. New platform reports use mcp_scan, ai_infra_scan, model_redteam_report, agent_scan, or skills_scan; historical MCP and other engine aliases retain their original values. Skills reuse MCP result conversion without changing task_type."
                 }
             },
             "required": [
@@ -3830,7 +3841,8 @@ const docTemplate = `{
                     "type": "string"
                 },
                 "task_type": {
-                    "type": "string"
+                    "type": "string",
+                    "description": "Frozen task identity. New platform reports use mcp_scan, ai_infra_scan, model_redteam_report, agent_scan, or skills_scan; historical MCP and other engine aliases retain their original values. Skills reuse MCP result conversion without changing task_type."
                 }
             },
             "required": [
@@ -3949,7 +3961,8 @@ const docTemplate = `{
                     "type": "string"
                 },
                 "task_type": {
-                    "type": "string"
+                    "type": "string",
+                    "description": "Frozen task identity. New platform reports use mcp_scan, ai_infra_scan, model_redteam_report, agent_scan, or skills_scan; historical MCP and other engine aliases retain their original values. Skills reuse MCP result conversion without changing task_type."
                 },
                 "technical_findings": {
                     "items": {
@@ -4166,7 +4179,7 @@ const docTemplate = `{
             "type": "object"
         },
         "tasks.TaskDetail": {
-            "description": "Browser-safe task detail with only display-safe input metadata.",
+            "description": "Browser-safe task detail with display-safe input metadata and optional remark. Only a detail GET may additionally provide an authorized report_id for a succeeded task with an existing immutable snapshot; create responses omit report_id.",
             "properties": {
                 "created_at": {
                     "format": "date-time",
@@ -4179,6 +4192,15 @@ const docTemplate = `{
                     "$ref": "#/definitions/tasks.TaskInputSummary"
                 },
                 "owner": {
+                    "type": "string"
+                },
+                "remark": {
+                    "description": "Optional task remark, trimmed and limited to 2,000 Unicode code points of valid UTF-8; blank or invalid historical values are omitted. Included in idempotency and authorized detail only; never forwarded to the engine, audit metadata, or reports.",
+                    "maxLength": 2000,
+                    "type": "string"
+                },
+                "report_id": {
+                    "description": "Opaque report reference available only on a detail GET for a succeeded task with an authorized existing immutable snapshot. It is omitted from every create response and when no snapshot exists; clients must not guess it from the task ID or search other reports.",
                     "type": "string"
                 },
                 "status": {
@@ -4200,6 +4222,7 @@ const docTemplate = `{
                         "ai_infra_scan",
                         "model_redteam_report",
                         "agent_scan",
+                        "skills_scan",
                         "unknown"
                     ],
                     "type": "string"
@@ -4256,13 +4279,31 @@ const docTemplate = `{
             "type": "object"
         },
         "tasks.TaskInputSummary": {
-            "description": "Task-type-specific display metadata; source content, arbitrary parameters, credentials, URLs, attachment references, and engine data are absent.",
+            "description": "Task-type-specific display metadata; source content, arbitrary parameters, credentials, URLs, attachment references, and engine data are absent. Agent references appear only for agent_scan after validating the complete persisted reference contract; malformed historical inline parameters are omitted.",
             "properties": {
+                "agent_id": {
+                    "description": "agent_scan only. Safe persisted Agent configuration reference, not a credential or current availability claim. Invalid, overlong, path-like, or credential-like historical values are omitted; the name resolves in the task owner's registry context.",
+                    "maxLength": 128,
+                    "pattern": "^[A-Za-z0-9][A-Za-z0-9._ -]{0,127}$",
+                    "type": "string"
+                },
+                "eval_model_id": {
+                    "description": "agent_scan only. Safe persisted governed scan and review model reference, not a credential or current availability claim. Invalid, overlong, or credential-like historical values are omitted; unavailable catalog entries use the safe ID fallback.",
+                    "maxLength": 128,
+                    "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$",
+                    "type": "string"
+                },
                 "language": {
                     "enum": [
                         "zh",
                         "en"
                     ],
+                    "type": "string"
+                },
+                "model_id": {
+                    "description": "Opaque persisted and validated AI infrastructure or Skills model reference for current catalog-label recovery; not a Token, Base URL, credential, or current-availability claim.",
+                    "maxLength": 128,
+                    "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$",
                     "type": "string"
                 },
                 "num_prompts": {
@@ -4300,6 +4341,13 @@ const docTemplate = `{
                     "maximum": 86400,
                     "minimum": 1,
                     "type": "integer"
+                },
+                "scan_mode": {
+                    "description": "Only for skills_scan; fixed static audit mode. Other task types omit this field.",
+                    "enum": [
+                        "static"
+                    ],
+                    "type": "string"
                 }
             },
             "type": "object"
@@ -4367,6 +4415,7 @@ const docTemplate = `{
                         "ai_infra_scan",
                         "model_redteam_report",
                         "agent_scan",
+                        "skills_scan",
                         "unknown"
                     ],
                     "type": "string"

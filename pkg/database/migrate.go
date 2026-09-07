@@ -47,8 +47,9 @@ var migrations = []migration{
 	{version: 7, apply: migrateReportSchema},
 	{version: 8, apply: migratePlatformTaskDashboardIndexes},
 	{version: 9, apply: migratePlatformAttachmentLifecycle},
-	{version: 10, apply: migratePlatformMCPConnectionSchema},
-	{version: 11, apply: migratePlatformMCPProbeRateLimitSchema},
+	{version: 10, apply: migratePlatformTaskRemarkAndTargetCount},
+	{version: 11, apply: migratePlatformMCPConnectionSchema},
+	{version: 12, apply: migratePlatformMCPCompatibilitySchema},
 }
 
 const migrationAdvisoryLockKey int64 = 301237729
@@ -395,7 +396,7 @@ WHERE attachment.state = 'ready'
   )`).Error
 }
 
-// 以下结构只描述 v10 迁移所需的物理表，避免 pkg/database 依赖平台业务包。
+// 以下结构只描述 MCP 迁移所需的物理表，避免 pkg/database 依赖平台业务包。
 // 敏感连接信息只允许以密文、nonce 和密钥标识落库，禁止在此处新增明文字段。
 type platformMCPConnectionConfigMigration struct {
 	ID               string    `gorm:"primaryKey;column:id"`
@@ -610,6 +611,30 @@ func migratePlatformMCPProbeRateLimitSchema(db *gorm.DB) error {
 	}
 	if !db.Migrator().HasColumn(table, "last_probe_started_at") {
 		return fmt.Errorf("%s 缺少列 last_probe_started_at", table)
+	}
+	return nil
+}
+
+// 开发分支曾以 v10/v11 保存 MCP 结构；v12 同时补齐已发布 develop 的字段。
+// 迁移函数本身幂等，因此两种历史都保留原数据并收敛到相同结构。
+func migratePlatformMCPCompatibilitySchema(db *gorm.DB) error {
+	if err := migratePlatformTaskRemarkAndTargetCount(db); err != nil {
+		return err
+	}
+	if err := migratePlatformMCPConnectionSchema(db); err != nil {
+		return err
+	}
+	return migratePlatformMCPProbeRateLimitSchema(db)
+}
+
+func migratePlatformTaskRemarkAndTargetCount(db *gorm.DB) error {
+	for _, statement := range []string{
+		`ALTER TABLE platform_tasks ADD COLUMN IF NOT EXISTS remark text NOT NULL DEFAULT ''`,
+		`ALTER TABLE platform_tasks ADD COLUMN IF NOT EXISTS target_count integer NOT NULL DEFAULT 0`,
+	} {
+		if err := db.Exec(statement).Error; err != nil {
+			return err
+		}
 	}
 	return nil
 }

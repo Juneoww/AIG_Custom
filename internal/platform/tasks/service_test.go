@@ -364,6 +364,105 @@ func TestCompletedResultRecoveryProcessesAtMostOneKeysetBatchPerPass(t *testing.
 
 func (engine *recordingEngine) CancelTask(context.Context, string) error { return nil }
 
+func TestCreateNormalizesAndPersistsBoundedRemark(t *testing.T) {
+	repository := NewMemoryRepository()
+	engine := &recordingEngine{}
+	auditRepository := audit.NewMemoryRepository()
+	service := NewService(repository, engine, audit.NewService(auditRepository))
+	owner := identity.Subject{UserID: "remark-owner", Username: "alice", Role: identity.RoleUser}
+	remark := strings.Repeat("备", MaxTaskRemarkRuneCount)
+
+	created, err := service.Create(context.Background(), owner, CreateInput{
+		IdempotencyKey: "bounded-remark", TaskType: "mcp_scan", Content: "https://example.com/repository.git", Remark: " \n" + remark + "\t ",
+		Params: json.RawMessage(`{"source_kind":"repository"}`),
+	})
+	require.NoError(t, err)
+	assert.Equal(t, remark, created.Remark)
+	stored, err := repository.Get(context.Background(), created.ID)
+	require.NoError(t, err)
+	assert.Equal(t, remark, stored.Remark)
+
+	engine.mu.Lock()
+	encodedEngineTask, err := json.Marshal(engine.last)
+	engine.mu.Unlock()
+	require.NoError(t, err)
+	assert.NotContains(t, string(encodedEngineTask), remark)
+	assert.NotContains(t, engine.last.Content, remark)
+	assert.NotContains(t, string(engine.last.Params), remark)
+	assert.NotContains(t, strings.Join(engine.last.Attachments, "\n"), remark)
+
+	events, err := auditRepository.List(context.Background(), audit.Filter{ResourceID: created.ID, Action: audit.Action("task.created")})
+	require.NoError(t, err)
+	for _, event := range events {
+		assert.NotContains(t, string(event.Metadata), remark)
+	}
+}
+
+func TestCreateRejectsInvalidOrOversizedRemark(t *testing.T) {
+	for name, remark := range map[string]string{
+		"invalid utf8": string([]byte{0xff}),
+		"over limit":   strings.Repeat("备", MaxTaskRemarkRuneCount+1),
+	} {
+		t.Run(name, func(t *testing.T) {
+			repository := NewMemoryRepository()
+			engine := &recordingEngine{}
+			service := NewService(repository, engine, audit.NewService(audit.NewMemoryRepository()))
+			_, err := service.Create(context.Background(), identity.Subject{
+				UserID: "invalid-remark-owner", Username: "alice", Role: identity.RoleUser,
+			}, CreateInput{IdempotencyKey: "invalid-remark-" + strings.ReplaceAll(name, " ", "-"), TaskType: "mcp_scan", Content: "https://example.com/repository.git", Remark: remark, Params: json.RawMessage(`{"source_kind":"repository"}`)})
+			require.ErrorIs(t, err, ErrInvalid)
+			stored, listErr := repository.List(context.Background())
+			require.NoError(t, listErr)
+			assert.Empty(t, stored)
+			assert.Zero(t, engine.submits.Load())
+		})
+	}
+}
+
+func TestIdempotentCreateComparesNormalizedRemarkBeforeSideEffects(t *testing.T) {
+	repository := &countingAttachmentRepository{MemoryRepository: NewMemoryRepository()}
+	engine := &controlledReferenceEngine{}
+	auditRepository := audit.NewMemoryRepository()
+	audits := audit.NewService(auditRepository)
+	attachments, err := NewAttachmentService(repository, AttachmentConfig{
+		UploadDir: t.TempDir(), MaxFileBytes: 2 << 20, MaxChunkBytes: 1 << 20,
+	}, audits)
+	require.NoError(t, err)
+	service := NewService(repository, engine, audits)
+	service.SetAttachmentService(attachments)
+	owner := identity.Subject{UserID: "remark-idempotency-owner", Username: "alice", Role: identity.RoleUser}
+	attachment, err := attachments.Upload(context.Background(), owner, "targets.txt", strings.NewReader("127.0.0.2\n"))
+	require.NoError(t, err)
+	input := CreateInput{
+		IdempotencyKey: "remark-idempotency", TaskType: "ai_infra_scan", Content: "127.0.0.1",
+		Remark: "  same remark \n", AttachmentIDs: []string{attachment.ID},
+	}
+
+	created, err := service.Create(context.Background(), owner, input)
+	require.NoError(t, err)
+	readsAfterCreate := repository.reads.Load()
+	retried := input
+	retried.Remark = "\tsame remark  "
+	duplicate, err := service.Create(context.Background(), owner, retried)
+	require.NoError(t, err)
+	assert.Equal(t, created.ID, duplicate.ID)
+	assert.Equal(t, "same remark", duplicate.Remark)
+	assert.Equal(t, readsAfterCreate, repository.reads.Load(), "已持久化的同备注重试不得重新读取附件")
+	eventsBefore, err := auditRepository.List(context.Background(), audit.Filter{ResourceID: created.ID})
+	require.NoError(t, err)
+
+	conflict := input
+	conflict.Remark = "different remark"
+	_, err = service.Create(context.Background(), owner, conflict)
+	require.ErrorIs(t, err, ErrInvalid)
+	assert.Equal(t, int64(1), engine.referenceCalls.Load(), "备注冲突不得读取实时引用")
+	assert.Equal(t, readsAfterCreate, repository.reads.Load(), "备注冲突不得读取附件")
+	assert.Equal(t, int64(1), engine.submits.Load(), "备注冲突不得重复分发")
+	eventsAfter, err := auditRepository.List(context.Background(), audit.Filter{ResourceID: created.ID})
+	require.NoError(t, err)
+	assert.Len(t, eventsAfter, len(eventsBefore), "备注冲突不得追加审计")
+}
+
 func TestCreateAIInfraTargetRangeSucceeds(t *testing.T) {
 	repository := NewMemoryRepository()
 	engine := &recordingEngine{}
@@ -375,6 +474,10 @@ func TestCreateAIInfraTargetRangeSucceeds(t *testing.T) {
 	})
 	require.NoError(t, err)
 	assert.Equal(t, "192.168.10.2-192.168.10.10", created.Content)
+	assert.Equal(t, 9, created.TargetCount)
+	stored, err := repository.Get(context.Background(), created.ID)
+	require.NoError(t, err)
+	assert.Equal(t, 9, stored.TargetCount)
 	assert.Equal(t, int64(1), engine.submits.Load())
 }
 
@@ -449,7 +552,83 @@ func TestCreateAIInfraTargetAttachmentExpressionsCombineWithBody(t *testing.T) {
 	})
 	require.NoError(t, err)
 	assert.Equal(t, "192.168.10.2-192.168.10.3", created.Content, "audit and persisted content retain the raw user expression")
+	assert.Equal(t, 4, created.TargetCount)
 	assert.Equal(t, int64(1), engine.submits.Load())
+}
+
+func TestCreateAIInfraTargetCountUsesAttachmentOnlyAndDeduplicatesCombinedSources(t *testing.T) {
+	for _, test := range []struct {
+		name       string
+		content    string
+		attachment string
+		want       int
+	}{
+		{name: "attachment only", attachment: "192.168.20.2-192.168.20.4\n", want: 3},
+		{name: "combined overlap", content: "192.168.20.2-192.168.20.5", attachment: "192.168.20.4-192.168.20.7\n", want: 6},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			repository := NewMemoryRepository()
+			audits := audit.NewService(audit.NewMemoryRepository())
+			attachments, err := NewAttachmentService(repository, AttachmentConfig{
+				UploadDir: t.TempDir(), MaxFileBytes: 2 << 20, MaxChunkBytes: 1 << 20,
+			}, audits)
+			require.NoError(t, err)
+			owner := identity.Subject{UserID: "count-owner", Username: "alice", Role: identity.RoleUser}
+			attachment, err := attachments.Upload(context.Background(), owner, "targets.txt", strings.NewReader(test.attachment))
+			require.NoError(t, err)
+			service := NewService(repository, &recordingEngine{}, audits)
+			service.SetAttachmentService(attachments)
+
+			created, err := service.Create(context.Background(), owner, CreateInput{
+				IdempotencyKey: "target-count-" + strings.ReplaceAll(test.name, " ", "-"), TaskType: "ai_infra_scan",
+				Content: test.content, AttachmentIDs: []string{attachment.ID},
+			})
+			require.NoError(t, err)
+			assert.Equal(t, test.want, created.TargetCount)
+			stored, err := repository.Get(context.Background(), created.ID)
+			require.NoError(t, err)
+			assert.Equal(t, test.want, stored.TargetCount)
+		})
+	}
+}
+
+func TestCreateAIInfraRejectsZeroTargetsWithoutPersistenceOrSubmission(t *testing.T) {
+	for _, test := range []struct {
+		name       string
+		attachment string
+	}{
+		{name: "empty body"},
+		{name: "blank attachment", attachment: " \n\t\r\n"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			repository := NewMemoryRepository()
+			audits := audit.NewService(audit.NewMemoryRepository())
+			engine := &recordingEngine{}
+			service := NewService(repository, engine, audits)
+			owner := identity.Subject{UserID: "zero-target-owner", Username: "alice", Role: identity.RoleUser}
+			var attachmentIDs []string
+			if test.attachment != "" {
+				attachments, err := NewAttachmentService(repository, AttachmentConfig{
+					UploadDir: t.TempDir(), MaxFileBytes: 2 << 20, MaxChunkBytes: 1 << 20,
+				}, audits)
+				require.NoError(t, err)
+				attachment, err := attachments.Upload(context.Background(), owner, "targets.txt", strings.NewReader(test.attachment))
+				require.NoError(t, err)
+				attachmentIDs = []string{attachment.ID}
+				service.SetAttachmentService(attachments)
+			}
+
+			_, err := service.Create(context.Background(), owner, CreateInput{
+				IdempotencyKey: "zero-target-" + strings.ReplaceAll(test.name, " ", "-"), TaskType: "ai_infra_scan",
+				AttachmentIDs: attachmentIDs,
+			})
+			require.ErrorIs(t, err, ErrInvalid)
+			stored, listErr := repository.List(context.Background())
+			require.NoError(t, listErr)
+			assert.Empty(t, stored)
+			assert.Zero(t, engine.submits.Load())
+		})
+	}
 }
 
 func TestCreateAIInfraTargetValidationRejectsTooManyAttachmentExpressions(t *testing.T) {

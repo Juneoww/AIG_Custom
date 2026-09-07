@@ -189,6 +189,27 @@ func TestRuntimeSchemaRejectsMissingDispatchClaimColumnWithoutDDL(t *testing.T) 
 	assert.False(t, db.Migrator().HasColumn("platform_tasks", "dispatch_claim_token"), "runtime validation must not repair schema")
 }
 
+func TestRuntimeSchemaRejectsMissingRemarkAndTargetCountWithoutDDL(t *testing.T) {
+	db := openPostgresTestDB(t)
+	for _, column := range []string{"remark", "target_count"} {
+		t.Run(column, func(t *testing.T) {
+			resetPostgresTestDB(t, db)
+			require.NoError(t, Migrate(db))
+			require.NoError(t, db.Exec("ALTER TABLE platform_tasks DROP COLUMN " + column).Error)
+			beforeVersions := migrationVersions(t, db)
+			beforeCatalog := platformTaskRuntimeCatalogState(t, db)
+
+			err := ValidateRuntimeSchema(db)
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), "platform_tasks."+column)
+			assert.Contains(t, err.Error(), "aig migrate")
+			assert.Equal(t, beforeVersions, migrationVersions(t, db), "runtime validation must not update migration history")
+			assert.Equal(t, beforeCatalog, platformTaskRuntimeCatalogState(t, db), "runtime validation must not repair task catalog objects")
+			assert.False(t, db.Migrator().HasColumn("platform_tasks", column))
+		})
+	}
+}
+
 func TestRuntimeSchemaRejectsMissingReportTablesWithoutDDL(t *testing.T) {
 	db := openPostgresTestDB(t)
 	for _, table := range []string{"report_snapshots", "report_brand_settings"} {

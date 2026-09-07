@@ -30,6 +30,7 @@ import { ProfilePage } from '../features/profile/ProfilePage'
 import { ReportDetailPage } from '../features/reports/ReportDetailPage'
 import { ReportListPage } from '../features/reports/ReportListPage'
 import { TaskCreatePage } from '../features/tasks/TaskCreatePage'
+import { AgentWorkflowTaskCreatePage } from '../features/tasks/AgentWorkflowTaskCreatePage'
 import { TaskDetailPage } from '../features/tasks/TaskDetailPage'
 import { TaskListPage } from '../features/tasks/TaskListPage'
 import { MCPWorkbenchPage } from '../features/tasks/MCPWorkbenchPage'
@@ -236,6 +237,66 @@ export const appRoutes: RouteObject[] = [
             element: (
               <RequireRole allowedRoles={['user', 'auditor', 'admin']}>
                 <MCPWorkbenchPage />
+              </RequireRole>
+            ),
+          },
+          {
+            path: 'tasks/ai-infra',
+            element: (
+              <RequireRole allowedRoles={['user', 'auditor', 'admin']}>
+                <TaskListPage fixedTaskType="ai_infra_scan" />
+              </RequireRole>
+            ),
+          },
+          {
+            path: 'tasks/ai-infra/new',
+            element: (
+              <RequireRole allowedRoles={['user', 'admin']}>
+                <TaskCreatePage fixedTaskType="ai_infra_scan" returnTo="/tasks/ai-infra" />
+              </RequireRole>
+            ),
+          },
+          {
+            path: 'tasks/ai-infra/:taskId',
+            element: (
+              <RequireRole allowedRoles={['user', 'auditor', 'admin']}>
+                <TaskDetailPage expectedTaskType="ai_infra_scan" returnTo="/tasks/ai-infra" />
+              </RequireRole>
+            ),
+          },
+          {
+            path: 'tasks/agent-workflow',
+            element: <RequireRole allowedRoles={['user', 'auditor', 'admin']}><TaskListPage fixedTaskType="agent_scan" /></RequireRole>,
+          },
+          {
+            path: 'tasks/agent-workflow/new',
+            element: <RequireRole allowedRoles={['user', 'admin']}><AgentWorkflowTaskCreatePage /></RequireRole>,
+          },
+          {
+            path: 'tasks/agent-workflow/:taskId',
+            element: <RequireRole allowedRoles={['user', 'auditor', 'admin']}><TaskDetailPage expectedTaskType="agent_scan" returnTo="/tasks/agent-workflow" /></RequireRole>,
+          },
+          {
+            path: 'tasks/skills',
+            element: (
+              <RequireRole allowedRoles={['user', 'auditor', 'admin']}>
+                <TaskListPage fixedTaskType="skills_scan" />
+              </RequireRole>
+            ),
+          },
+          {
+            path: 'tasks/skills/new',
+            element: (
+              <RequireRole allowedRoles={['user', 'admin']}>
+                <TaskCreatePage fixedTaskType="skills_scan" returnTo="/tasks/skills" />
+              </RequireRole>
+            ),
+          },
+          {
+            path: 'tasks/skills/:taskId',
+            element: (
+              <RequireRole allowedRoles={['user', 'auditor', 'admin']}>
+                <TaskDetailPage expectedTaskType="skills_scan" returnTo="/tasks/skills" />
               </RequireRole>
             ),
           },

@@ -16,6 +16,11 @@
 # Tencent Zhuque Lab (https://github.com/Tencent/AI-Infra-Guard) in its
 # documentation or user interface, as detailed in the NOTICE file.
 
+"""功能：验证模型重试和最终输出失败时的安全行为。
+实现：使用受控模型响应检查恢复流程，禁止格式化失败回退成功。
+输入：固定模型响应；输出：pytest 断言，无真实模型调用。
+"""
+
 import sys
 from pathlib import Path
 
@@ -103,7 +108,7 @@ async def test_compact_history_skips_on_llm_error(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_format_final_output_falls_back_to_last_assistant(monkeypatch):
+async def test_format_final_output_rejects_error_without_fallback(monkeypatch):
     class DummyLLM:
         async def chat_async(self, _history, language="zh"):
             return f"{LLM_ERROR_PREFIX} format failed]"
@@ -120,4 +125,20 @@ async def test_format_final_output_falls_back_to_last_assistant(monkeypatch):
 
     monkeypatch.setattr(base_agent_module.prompt_manager, "format_prompt", lambda *_args, **_kwargs: "format prompt")
 
-    assert await BaseAgent._format_final_output(agent) == "final report content"
+    with pytest.raises(RuntimeError, match="(?i)format"):
+        await BaseAgent._format_final_output(agent)
+
+@pytest.mark.parametrize('error_type', [DummyBadRequestError, DummyAPIError, DummyConnectionError, DummyTimeoutError, RuntimeError])
+def test_model_errors_do_not_expose_response_secrets(monkeypatch, llm, error_type):
+    secret = 'controlled-model-response-secret'
+    logs = []
+    from types import SimpleNamespace
+    monkeypatch.setattr(llm_module, 'logger', SimpleNamespace(warning=lambda message, **_: logs.append(message), error=lambda message, **_: logs.append(message)))
+    monkeypatch.setattr(llm_module.time, 'sleep', lambda _: None)
+    def fail(_):
+        raise error_type(secret)
+    monkeypatch.setattr(llm, 'chat_stream', fail)
+    response = llm.chat([], language='en')
+    assert response.startswith(LLM_ERROR_PREFIX)
+    assert secret not in response
+    assert secret not in '\n'.join(logs)
