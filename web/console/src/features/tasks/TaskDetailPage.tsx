@@ -1,5 +1,5 @@
 /**
- * 功能：展示任务安全详情、受控短轮询、角色化取消和专属 AI 模型名称恢复。
+ * 功能：展示任务安全详情、受控短轮询、角色化取消和各扫描类型的模型名称恢复。
  * 实现：查询和写请求随路由/卸载取消，刷新失败隐藏旧摘要；非终态有界退避，模型目录仅以安全白名单分页读取。
  * 输入：opaque 任务 ID、可选预期类型、当前 Subject 与安全任务/模型 DTO。
  * 输出：安全输入摘要、状态、更新时间、允许的取消按钮和模型安全标签。
@@ -12,13 +12,14 @@ import { Link, useParams } from 'react-router-dom'
 
 import { useSession } from '../auth/session'
 import { ApiError } from '../../shared/api/errors'
+import type { TaskType } from '../../shared/api/types'
 import { PageHeader } from '../../shared/components/PageHeader'
 import { StatePanel } from '../../shared/components/StatePanel'
 import { fetchModelCatalog } from '../models/api'
 import { cancelTaskGoverned, fetchTaskDetail, taskPollDelay } from './api'
 import { MODEL_CATALOG_PAGE_SIZE, canonicalModels, fallbackModelLabel, hasRepeatedCatalogPage, modelOptionLabel, nextCatalogPage, selectableModels } from './governedModels'
 import { formatTaskTime, taskStatusLabels, taskTypeLabels } from './TaskListPage'
-import { taskWorkbench, type DedicatedTaskType } from './taskWorkbenches'
+import { taskWorkbenchFor } from './taskWorkbenches'
 
 const useStyles = makeStyles({
   page: { display: 'flex', flexDirection: 'column', gap: tokens.spacingVerticalL, minWidth: 0 },
@@ -110,7 +111,7 @@ function RestoredModelName({ modelID }: { modelID: string }) {
 }
 
 export interface TaskDetailPageProps {
-  expectedTaskType?: DedicatedTaskType
+  expectedTaskType?: Exclude<TaskType, 'unknown'>
   returnTo?: string
 }
 
@@ -120,10 +121,14 @@ interface TaskCancellation {
 }
 
 export function TaskDetailPage({ expectedTaskType, returnTo }: TaskDetailPageProps) {
+  const { taskId = '' } = useParams<{ taskId: string }>()
+  return <TaskDetailContent key={`${taskId}:${expectedTaskType ?? 'all'}`} taskId={taskId} expectedTaskType={expectedTaskType} returnTo={returnTo} />
+}
+
+function TaskDetailContent({ taskId, expectedTaskType, returnTo }: TaskDetailPageProps & { taskId: string }) {
   const styles = useStyles()
   const queryClient = useQueryClient()
-  const workbench = taskWorkbench(expectedTaskType)
-  const { taskId = '' } = useParams<{ taskId: string }>()
+  const workbench = taskWorkbenchFor(expectedTaskType)
   const { state } = useSession()
   const activeCancellation = useRef<AbortController | null>(null)
   const query = useQuery({
@@ -170,6 +175,7 @@ export function TaskDetailPage({ expectedTaskType, returnTo }: TaskDetailPagePro
   const currentCancellation = cancel.variables?.taskId === taskId && !cancel.variables.controller.signal.aborted
   const subject = state.status === 'authenticated' ? state.subject : undefined
   const typeMismatch = query.isSuccess && expectedTaskType !== undefined && query.data.task_type !== expectedTaskType
+  const showModelAndRemark = expectedTaskType === 'ai_infra_scan' || query.data?.task_type === 'skills_scan'
   const canCancel = Boolean(
     query.isSuccess &&
     !typeMismatch &&
@@ -211,12 +217,13 @@ export function TaskDetailPage({ expectedTaskType, returnTo }: TaskDetailPagePro
             {query.data.input_summary.port_scan_mode ? <div className={styles.fact}><Text className={styles.label}>端口扫描模式</Text><Text>{portScanModeLabels[query.data.input_summary.port_scan_mode]}</Text></div> : null}
             {query.data.input_summary.target_count ? <div className={styles.fact}><Text className={styles.label}>目标数量</Text><Text>{query.data.input_summary.target_count}</Text></div> : null}
             {query.data.input_summary.num_prompts ? <div className={styles.fact}><Text className={styles.label}>提示词数量</Text><Text>{query.data.input_summary.num_prompts}</Text></div> : null}
-            {expectedTaskType === 'ai_infra_scan' && query.data.task_type === 'ai_infra_scan' && query.data.input_summary.model_id ? <div className={styles.fact}><Text className={styles.label}>扫描模型</Text><RestoredModelName modelID={query.data.input_summary.model_id} /></div> : null}
+            {query.data.input_summary.scan_mode === 'static' ? <div className={styles.fact}><Text className={styles.label}>扫描模式</Text><Text>静态扫描</Text></div> : null}
+            {showModelAndRemark && query.data.input_summary.model_id ? <div className={styles.fact}><Text className={styles.label}>扫描模型</Text><RestoredModelName modelID={query.data.input_summary.model_id} /></div> : null}
             {query.data.task_type === 'agent_scan' && query.data.input_summary.agent_id ? <div className={styles.fact}><Text className={styles.label}>Agent 配置</Text><Text>{query.data.input_summary.agent_id}</Text></div> : null}
             {query.data.task_type === 'agent_scan' && query.data.input_summary.eval_model_id ? <div className={styles.fact}><Text className={styles.label}>扫描 / 裁判模型</Text><RestoredModelName key={query.data.input_summary.eval_model_id} modelID={query.data.input_summary.eval_model_id} /></div> : null}
             {query.data.task_type === 'agent_scan' && query.data.remark ? <div className={styles.fact}><Text className={styles.label}>任务备注</Text><Text>{query.data.remark}</Text></div> : null}
             {query.data.report_id ? <div className={styles.fact}><Text className={styles.label}>扫描报告</Text><Link to={`/reports/${encodeURIComponent(query.data.report_id)}`}>查看扫描报告</Link></div> : null}
-            {expectedTaskType === 'ai_infra_scan' && query.data.task_type === 'ai_infra_scan' && query.data.remark ? (
+            {showModelAndRemark && query.data.remark ? (
               <div className={styles.fact}><Text className={styles.label}>任务说明</Text><Text>{query.data.remark}</Text></div>
             ) : null}
           </div>

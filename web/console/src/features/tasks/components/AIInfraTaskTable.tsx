@@ -1,7 +1,7 @@
 /**
- * 功能：呈现 AI 基础设施扫描专属的安全任务台账表格。
+ * 功能：为专属扫描工作台呈现共用的安全任务台账表格。
  * 实现：使用语义 Fluent 表格、精确状态标签和受控详情路径，不修改通用 DataTable。
- * 输入：安全任务摘要及可选的详情路径生成函数。
+ * 输入：安全任务摘要、业务名称及可选的详情路径生成函数。
  * 输出：六列、可横向滚动的专属任务表格。
  * 依赖：React Router、Fluent UI、任务 DTO 与共享工作台样式。
  */
@@ -55,7 +55,7 @@ function statusTone(styles: ReturnType<typeof useAIInfraWorkbenchStyles>, status
 
 interface AIInfraTaskTableProps {
   tasks: readonly TaskSummary[]
-  label?: string
+  taskLabel?: string
   detailPath?: (task: TaskSummary) => string
   pagination?: {
     total: number
@@ -66,20 +66,20 @@ interface AIInfraTaskTableProps {
   }
 }
 
-export function AIInfraTaskTable({ tasks, detailPath, pagination, label = 'AI 基础设施扫描' }: AIInfraTaskTableProps) {
+export function AIInfraTaskTable({ tasks, detailPath, pagination, taskLabel = 'AI 基础设施扫描' }: AIInfraTaskTableProps) {
   const styles = useAIInfraWorkbenchStyles()
   const pathOf = detailPath ?? ((task: TaskSummary) => `/tasks/ai-infra/${encodeURIComponent(task.id)}`)
 
   return (
-    <section className={styles.tableShell} aria-label={`${label}任务列表`}>
+    <section className={styles.tableShell} aria-label={`${taskLabel}任务列表`}>
       <div
         className={styles.tableViewport}
         role="region"
-        aria-label={`可横向滚动的 ${label}任务表格`}
+        aria-label={`可横向滚动的 ${taskLabel}任务表格`}
         tabIndex={0}
       >
         <Table className={styles.table}>
-          <caption className={styles.tableCaption}>{label}任务台账</caption>
+          <caption className={styles.tableCaption}>{taskLabel}任务台账</caption>
           <TableHeader>
             <TableRow>
               {['任务 ID', '负责人', '状态', '创建时间', '更新时间', '操作'].map((header) => (
@@ -106,7 +106,7 @@ export function AIInfraTaskTable({ tasks, detailPath, pagination, label = 'AI �
         </Table>
       </div>
       {pagination ? (
-        <nav className={styles.tablePagination} aria-label={`${label}任务分页`}>
+        <nav className={styles.tablePagination} aria-label={`${taskLabel}任务分页`}>
           <div className={styles.tablePaginationMeta}>
             <span>共 {pagination.total} 条</span>
             <span>第 {pagination.page} 页</span>

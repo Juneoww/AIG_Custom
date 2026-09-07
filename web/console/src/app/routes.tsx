@@ -268,6 +268,30 @@ export const appRoutes: RouteObject[] = [
             element: <RequireRole allowedRoles={['user', 'auditor', 'admin']}><TaskDetailPage expectedTaskType="agent_scan" returnTo="/tasks/agent-workflow" /></RequireRole>,
           },
           {
+            path: 'tasks/skills',
+            element: (
+              <RequireRole allowedRoles={['user', 'auditor', 'admin']}>
+                <TaskListPage fixedTaskType="skills_scan" />
+              </RequireRole>
+            ),
+          },
+          {
+            path: 'tasks/skills/new',
+            element: (
+              <RequireRole allowedRoles={['user', 'admin']}>
+                <TaskCreatePage fixedTaskType="skills_scan" returnTo="/tasks/skills" />
+              </RequireRole>
+            ),
+          },
+          {
+            path: 'tasks/skills/:taskId',
+            element: (
+              <RequireRole allowedRoles={['user', 'auditor', 'admin']}>
+                <TaskDetailPage expectedTaskType="skills_scan" returnTo="/tasks/skills" />
+              </RequireRole>
+            ),
+          },
+          {
             path: 'tasks/:taskId',
             element: (
               <RequireRole allowedRoles={['user', 'auditor', 'admin']}>

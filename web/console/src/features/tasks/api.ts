@@ -27,7 +27,7 @@ export interface TaskListFilters {
   taskType?: Exclude<TaskType, 'unknown'>
 }
 
-const TASK_TYPES = new Set<TaskType>(['mcp_scan', 'ai_infra_scan', 'model_redteam_report', 'agent_scan', 'unknown'])
+const TASK_TYPES = new Set<TaskType>(['mcp_scan', 'ai_infra_scan', 'skills_scan', 'model_redteam_report', 'agent_scan', 'unknown'])
 const TASK_STATUSES = new Set<TaskStatus>([
   'pending',
   'dispatching',
@@ -130,6 +130,13 @@ function parseInputSummary(value: unknown, taskType?: TaskType): TaskInputSummar
   if (source.language !== undefined) {
     if (source.language !== 'zh' && source.language !== 'en') return undefined
     result.language = source.language
+  }
+  if (taskType === 'skills_scan') {
+    if (source.scan_mode !== undefined) {
+      if (source.scan_mode !== 'static') return undefined
+      result.scan_mode = source.scan_mode
+    }
+    return result
   }
   if (source.port_scan_mode !== undefined) {
     if (source.port_scan_mode !== 'fixed_ai' && source.port_scan_mode !== 'full_tcp') return undefined

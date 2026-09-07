@@ -42,6 +42,7 @@ type TaskInputSummary struct {
 	TargetCount  int    `json:"target_count,omitempty"`
 	NumPrompts   int    `json:"num_prompts,omitempty"`
 	PortScanMode string `json:"port_scan_mode,omitempty"`
+	ScanMode     string `json:"scan_mode,omitempty"`
 }
 
 type TaskDetail struct {
@@ -131,6 +132,10 @@ func safeInputSummary(task *Task) TaskInputSummary {
 	var params displayParams
 	_ = json.Unmarshal(task.Params, &params)
 	switch canonicalTaskType(task.TaskType) {
+	case "skills_scan":
+		return TaskInputSummary{
+			Language: safeLanguage(task.CountryIsoCode), ModelID: safeModelID(params.ModelID), ScanMode: "static",
+		}
 	case "mcp_scan":
 		return TaskInputSummary{
 			Language: safeLanguage(task.CountryIsoCode),
@@ -186,6 +191,8 @@ func safeModelID(value string) string {
 
 func canonicalTaskType(value string) string {
 	switch value {
+	case "skills_scan", "Skills-Scan":
+		return "skills_scan"
 	case "mcp_scan", "Mcp-Scan":
 		return "mcp_scan"
 	case "ai_infra_scan", "AI-Infra-Scan":

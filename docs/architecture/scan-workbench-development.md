@@ -4,9 +4,11 @@
 
 代码基线：`883ecbb9509e4018385a6897d1757239aad71a43`（2026-09-05，本地 `develop` 合并提交）；功能分支为 `codex/ai-infra-scan`。编写时该合并尚未成功推送 GitHub，不能假定远端 `develop` 已包含这些代码。本文记录这一实现快照，项目整体进度仍以[项目状态](../project/status.md)为准。
 
-文中的“已实现”描述上述基线；“后续要求”是其他三类接入时需要落实的规范；建议路由和组件名不代表当前已存在。
+除后文单独标明的 Agent、Skills 增补外，文中的“已实现”描述上述基线；“后续要求”是其他三类接入时需要落实的规范；建议路由和组件名不代表当前已存在。
 
 2026-09-05 Agent 增补：`codex/agent-workflow-scan` 从 `ddb045545` 开始接入 Agent 动态扫描专属工作台、治理校验、执行判定与报告关联。第 8.3 节记录该分支的实现合同；第 9.3 节仍是原 AI 基线验证，第 9.4 节单独记录本次验证边界，不能混用两轮结果。
+
+Skills ZIP 首期在 `codex/skills-scan` 分支基于 `ddb045545` 补齐，见[第 11 节](#11-skills-zip-首期接入)。第 1–10 节以 AI 工作台合并时的历史快照为基础，并包含上述 Agent 增补；其中 Skills 的待定项由第 11 节的明确合同替代，不能据此推断历史基线已有 Skills 能力。
 
 ## 1. 四类扫描与开发范围
 
@@ -455,3 +457,32 @@ docker compose -p aig-scan-backend-check -f deploy/compose/docker-compose.postgr
 - [平台前端设计交接](../product/frontend-design-handoff.md)
 
 历史设计中的“待实现”和未勾选计划保留了编写时上下文，不能据此覆盖本文所核对的实现快照。后续更改标准字段、状态含义、指标统计范围或公共组件时，需同步更新本文对应章节与类型专属交接文档。
+
+## 11. Skills ZIP 首期接入
+
+本期提供独立 `skills_scan` 平台身份和 `Skills-Scan` Agent 能力，复用既有任务、附件、模型治理、权限、幂等、调度、取消和不可变报告服务。列表筛选在服务端分页前完成；报告采用相同风险映射算法，但始终保存 Skills 类型。
+
+| 项目 | 实施合同 |
+| --- | --- |
+| 页面 | `/tasks/skills`、`/tasks/skills/new`、`/tasks/skills/:taskId`；通用创建入口也可选择 Skills。 |
+| 输入 | 一个已上传 ready 的 ZIP；`content` 为空；`params` 仅允许必选 `model_id`；备注沿用 2,000 Unicode 码点。 |
+| ZIP | 压缩 20 MiB、实际解压 100 MiB、单文件 5 MiB；原始 ZIP 条目和规范化文件/目录总数（含隐式目录）均最多 2,000。 |
+| 根目录 | 唯一精确命名的 `SKILL.md`，位于根或单层包装目录，所有内容同属此根；仅有说明文件也可提交。 |
+| 元数据 | UTF-8、单份 YAML frontmatter 对象；name/description 非空字符串，最多 128/2,000 码点；拒绝重复键和尾随 YAML。 |
+| 执行 | `mcp-scan/main.py --mode skills`；三阶段静态审计；调用入口只允许有界的 read/list/search/think/finish。 |
+| 模型/语言 | 全部阶段、压缩、结果格式化沿用所选治理模型；前端固定中文，API 保留 zh/en 规范化合同。 |
+| 详情 | 只显示 language、model_id、固定 static 的 scan_mode 和可选备注；无包路径、文件内容、密钥或 AI 目标数量。 |
+| 结果 | 严格解析全部发现；空响应、损坏/混合 XML、缺失/重复结果、错误事件、非零退出均失败，不生成成功空报告。 |
+
+ZIP 解析在 `internal/skillarchive` 共享。平台在附件归属和 ready 校验后预检，Agent 在独立临时目录再次验证并提取；目录条目也执行类型、实际数据和 CRC 校验。结束、失败和取消均清理任务临时目录。不会执行包内脚本、安装依赖或连接包内声明的远程 MCP。这里的静态边界限制的是技能文件行为；扫描仍需调用用户选择的治理模型。
+
+Python 运行环境沿用 `Dockerfile_Agent` 的 mcp-scan 依赖。Agent 优先选择 `mcp-scan/.venv` 的解释器，再查找 PATH；本地可用 `AIG_SKILLS_PYTHON_BIN` 指定已准备的解释器。直接启动 Python，使取消作用于真实扫描进程。接收任务时仅记录类型和任务标识，禁止记录包含治理凭据的原始帧。
+
+真实执行的自动化验证使用固定 OpenAI 协议夹具，验证上传→治理模型→Go Agent→Python→状态→报告的连接，以及损坏结果和运行中取消。可复现环境叠加既有控制台 E2E Compose：
+
+```bash
+docker compose -p aig-skills-e2e -f deploy/compose/docker-compose.console-e2e.yml -f deploy/compose/docker-compose.skills-e2e.yml build
+docker compose -p aig-skills-e2e -f deploy/compose/docker-compose.console-e2e.yml -f deploy/compose/docker-compose.skills-e2e.yml run --rm console-e2e
+```
+
+该环境使用专用种子账号和本地固定响应，不代表实际模型检出率或安全评测结论。验证时不依赖真实 API Key。运行记录与未决项见[Skills 实施计划](../superpowers/plans/2026-09-05-skills-scan.md)，接口示例见[中文 API 参考](../api/reference.md#skills-zip-静态扫描)。

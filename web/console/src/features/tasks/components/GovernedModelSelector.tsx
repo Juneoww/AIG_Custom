@@ -17,7 +17,7 @@ import { MODEL_CATALOG_PAGE_SIZE, canonicalModels, hasRepeatedCatalogPage, model
 const useStyles = makeStyles({
   field: { minWidth: 0 },
   container: { display: 'flex', flexDirection: 'column', gap: tokens.spacingVerticalS, minWidth: 0 },
-  select: { minWidth: 0, width: '100%', '& select': { minWidth: 0, maxWidth: '100%' } },
+  select: { minWidth: 0, width: '100%', maxWidth: '100%', boxSizing: 'border-box', '& select': { minWidth: 0, maxWidth: '100%' } },
   actions: { display: 'flex', alignItems: 'center', gap: tokens.spacingHorizontalS, flexWrap: 'wrap' },
 })
 
@@ -80,9 +80,9 @@ export function GovernedModelSelector({ value, onChange, onAvailabilityChange, d
       : firstPageFailed || catalog.isFetchNextPageError
       ? `已选模型（ID: ${pendingSelectedModelID}）：目录加载失败，保留待重试`
       : `已选模型（ID: ${pendingSelectedModelID}）：正在验证`
-  const availability: GovernedModelAvailability = selectedModelID === undefined && required ? 'unavailable' : selectedModelID === undefined || selectedIsAvailable
-    ? 'available'
-    : unavailableSelectedModel ? 'unavailable' : 'pending'
+  const availability: GovernedModelAvailability = selectedModelID === undefined
+    ? required ? catalog.isPending || catalogRefreshInProgress ? 'pending' : 'unavailable' : 'available'
+    : selectedIsAvailable ? 'available' : unavailableSelectedModel ? 'unavailable' : 'pending'
   const catalogRefreshFailureMessage = selectedModelID === undefined ? '模型目录刷新失败' : '模型目录刷新失败，当前选择待确认'
   const emptyCatalog = catalogTrusted && Boolean(catalog.data) && models.length === 0
   const nextPageButtonLabel = catalog.isFetchingNextPage
@@ -153,7 +153,7 @@ export function GovernedModelSelector({ value, onChange, onAvailabilityChange, d
           disabled={disabled || catalog.isPending}
           onChange={(_, data) => onChange(data.value || undefined)}
         >
-          <option value="">{required ? '请选择模型' : '不使用模型'}</option>
+          <option value="" disabled={required}>{required ? '请选择可用模型' : '不使用模型'}</option>
           {pendingSelectedModelID === undefined ? null : <option value={pendingSelectedModelID} disabled>{pendingModelLabel}</option>}
           {models.map((model) => <option key={model.id} value={model.id}>{modelOptionLabel(model)}</option>)}
         </Select>

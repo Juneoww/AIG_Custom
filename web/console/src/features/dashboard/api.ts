@@ -50,6 +50,7 @@ export interface DashboardView {
 const TASK_TYPES = new Set<TaskType>([
   'mcp_scan',
   'ai_infra_scan',
+  'skills_scan',
   'model_redteam_report',
   'agent_scan',
   'unknown',
@@ -57,6 +58,7 @@ const TASK_TYPES = new Set<TaskType>([
 const ATTENTION_TASK_TYPES = new Set<AttentionItem['task_type']>([
   'mcp_scan',
   'ai_infra_scan',
+  'skills_scan',
   'model_redteam_report',
   'agent_scan',
 ])

@@ -241,8 +241,7 @@ func (a *Agent) handleReceive() {
 				a.conn = nil
 				return
 			}
-			// 任务载荷含模型密钥和 provider 配置，只记录接收事件。
-			gologger.Debugln("received server message")
+			// 任务帧包含受治理模型凭据，只在解析后记录安全的消息元数据。
 			if err = a.processMessage(message); err != nil {
 				gologger.WithError(err).Errorln("Failed to send message")
 			}
@@ -260,11 +259,13 @@ func (a *Agent) processMessage(data []byte) error {
 
 	switch baseMsg.Type {
 	case ServerMsgTypeRegisterResp:
+		gologger.Debugln("Agent message received: type=register_ack")
 	case ServerMsgTypeTaskAssign:
 		var task TaskRequest
 		if err := json.Unmarshal(baseMsg.Content, &task); err != nil {
 			return err
 		}
+		gologger.Debugf("Agent message received: type=task_assign sessionId=%q", task.SessionId)
 		taskType := task.TaskType
 		taskCtx, cancel := context.WithCancel(a.ctx)
 		// 创建任务上下文
@@ -344,6 +345,7 @@ func (a *Agent) processMessage(data []byte) error {
 		if terminateReq.SessionID == "" {
 			return fmt.Errorf("terminate message missing session_id")
 		}
+		gologger.Debugf("Agent message received: type=terminate sessionId=%q", terminateReq.SessionID)
 		if !a.cancelTask(terminateReq.SessionID) {
 			gologger.Warningf("未找到可终止的任务: sessionId=%s", terminateReq.SessionID)
 		}

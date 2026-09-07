@@ -24,6 +24,7 @@ const contexts = [
   { label: '通用', type: 'mcp_scan', dedicated: undefined, title: undefined },
   { label: 'AI', type: 'ai_infra_scan', dedicated: 'ai_infra_scan', title: 'AI 基础设施扫描' },
   { label: 'Agent', type: 'agent_scan', dedicated: 'agent_scan', title: 'Agent 工作流扫描' },
+  { label: 'Skills', type: 'skills_scan', dedicated: 'skills_scan', title: 'Skills 扫描' },
 ] as const
 
 function task(id: string, type: TaskType = 'agent_scan'): TaskDetail {
@@ -122,7 +123,7 @@ describe.each(contexts)('$label 工作台刷新边界', ({ type, dedicated, titl
   })
 })
 
-describe.each(['ai_infra_scan', 'agent_scan'] satisfies DedicatedTaskType[])('%s 取消请求路由隔离', (type) => {
+describe.each(['ai_infra_scan', 'agent_scan', 'skills_scan'] satisfies DedicatedTaskType[])('%s 取消请求路由隔离', (type) => {
   it.each(['uncertain', 'confirmed', 'error', 'aborted'])('A 的 %s 迟到结果不能更新 B 缓存或提示', async (outcome) => {
     const queryClient = client()
     const source = task('task-a', type)

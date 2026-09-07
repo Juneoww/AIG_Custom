@@ -18,12 +18,12 @@ import { DataTable, type DataTableColumn } from '../../shared/components/DataTab
 import { PageHeader } from '../../shared/components/PageHeader'
 import { StatePanel } from '../../shared/components/StatePanel'
 import { fetchTaskList } from './api'
-import { taskWorkbench } from './taskWorkbenches'
 import { AIInfraTaskOperationsSummary } from './components/AIInfraTaskOperationsSummary'
 import { AIInfraTaskTable } from './components/AIInfraTaskTable'
 import { AIInfraWorkbenchHeader } from './components/AIInfraWorkbenchHeader'
 import { useAIInfraWorkbenchStyles } from './components/AIInfraWorkbench.styles'
 import { TaskOperationsSummary } from './components/TaskOperationsSummary'
+import { taskWorkbenchFor } from './taskWorkbenches'
 
 const useStyles = makeStyles({
   page: { display: 'flex', flexDirection: 'column', gap: tokens.spacingVerticalL, minWidth: 0 },
@@ -104,6 +104,7 @@ const useStyles = makeStyles({
 export const taskTypeLabels: Record<TaskType, string> = {
   mcp_scan: 'MCP 扫描',
   ai_infra_scan: 'AI 基础设施扫描',
+  skills_scan: 'Skills 扫描',
   model_redteam_report: '模型红队评测',
   agent_scan: 'Agent 扫描',
   unknown: '未知任务',
@@ -161,8 +162,7 @@ export function TaskListPage({ fixedTaskType }: TaskListPageProps) {
   const styles = useStyles()
   const aiStyles = useAIInfraWorkbenchStyles()
   const { state } = useSession()
-  const isAiInfraList = fixedTaskType === 'ai_infra_scan'
-  const workbench = taskWorkbench(fixedTaskType)
+  const workbench = taskWorkbenchFor(fixedTaskType)
   const [searchParams, setSearchParams] = useSearchParams()
   const page = positivePage(searchParams.get('page'))
   const statusValue = searchParams.get('status') as TaskStatus | null
@@ -205,26 +205,7 @@ export function TaskListPage({ fixedTaskType }: TaskListPageProps) {
     dispatch_unknown: styles.statusAttention,
     cancelled: styles.statusTerminal,
   }
-  const columns: readonly DataTableColumn<TaskSummary>[] = isAiInfraList ? [
-    { id: 'id', header: '任务 ID', render: (task) => task.id },
-    { id: 'owner', header: '负责人', render: (task) => task.owner },
-    {
-      id: 'status',
-      header: '状态',
-      render: (task) => <span className={mergeClasses(styles.statusMark, statusMarkStyles[task.status])}>{taskStatusLabels[task.status]}</span>,
-    },
-    { id: 'created', header: '创建时间', render: (task) => formatTaskTime(task.created_at) },
-    { id: 'updated', header: '更新时间', render: (task) => formatTaskTime(task.updated_at) },
-    {
-      id: 'action',
-      header: '操作',
-      render: (task) => (
-        <Link className={styles.taskLink} to={`/tasks/ai-infra/${encodeURIComponent(task.id)}`} aria-label={`查看任务 ${task.id}`}>
-          查看
-        </Link>
-      ),
-    },
-  ] : [
+  const columns: readonly DataTableColumn<TaskSummary>[] = [
     { id: 'type', header: '任务类型', render: (task) => taskTypeLabels[task.task_type] },
     { id: 'owner', header: '负责人', render: (task) => task.owner },
     {
@@ -281,7 +262,7 @@ export function TaskListPage({ fixedTaskType }: TaskListPageProps) {
             ) : null}
           </div>
         </div>
-        {query.isSuccess ? <AIInfraTaskOperationsSummary tasks={query.data.items} total={query.data.total} label={workbench.title} /> : null}
+        {query.isSuccess ? <AIInfraTaskOperationsSummary tasks={query.data.items} total={query.data.total} taskLabel={workbench.title} /> : null}
         {query.isPending ? <StatePanel state="loading" title={`正在加载 ${workbench.title}任务`} /> : null}
         {query.isError && query.error instanceof ApiError && query.error.kind === 'forbidden' ? (
           <StatePanel state="forbidden" title={`无权查看 ${workbench.title}任务台账`} />
@@ -293,7 +274,7 @@ export function TaskListPage({ fixedTaskType }: TaskListPageProps) {
         {query.isSuccess && (query.data.items.length > 0 || query.data.total > 0) ? (
           <AIInfraTaskTable
             tasks={query.data.items}
-            label={workbench.title}
+            taskLabel={workbench.title}
             detailPath={(task) => `${workbench.path}/${encodeURIComponent(task.id)}`}
             pagination={{
               total: query.data.total,

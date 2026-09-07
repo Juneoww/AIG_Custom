@@ -41,7 +41,7 @@ function matchingGroupFor(pathname: string): NavigationGroupID | undefined {
 
 function isSecondaryActive(item: SecondaryNavigationItem, pathname: string, search: string) {
   const [targetPathname, targetQuery] = item.path.split('?')
-  if (item.id === 'ai-infra-scan' || item.id === 'agent-workflow-scan') {
+  if (item.id === 'ai-infra-scan' || item.id === 'agent-workflow-scan' || item.id === 'skills-scan') {
     return isPathWithin(pathname, targetPathname)
   }
   if (pathname !== targetPathname) {

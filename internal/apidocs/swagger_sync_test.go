@@ -500,7 +500,7 @@ func TestSwaggerDocumentsEnterpriseConsoleContracts(t *testing.T) {
 			assertExactProperties(t, document, "dashboard.AttentionItem", "report_id", "task_id", "task_type", "completed_at", "score", "high", "medium", "low")
 			assertExactProperties(t, document, "tasks.TaskSummary", "id", "owner", "task_type", "status", "created_at", "updated_at")
 			assertExactProperties(t, document, "tasks.TaskDetail", "id", "owner", "task_type", "status", "remark", "report_id", "created_at", "updated_at", "input_summary")
-			assertExactProperties(t, document, "tasks.TaskInputSummary", "language", "agent_id", "eval_model_id", "model_id", "num_prompts", "port_scan_mode", "target_count", "thread", "timeout")
+			assertExactProperties(t, document, "tasks.TaskInputSummary", "language", "agent_id", "eval_model_id", "model_id", "num_prompts", "port_scan_mode", "scan_mode", "target_count", "thread", "timeout")
 			modelID := swaggerValue(t, document, "definitions", "tasks.TaskInputSummary", "properties", "model_id")
 			if got := swaggerValue(t, modelID, "type"); got != "string" {
 				t.Errorf("tasks.TaskInputSummary.model_id type = %v, want string", got)
@@ -652,7 +652,7 @@ func TestSwaggerDocumentsTaskCreateAndLegacySecurityCorrections(t *testing.T) {
 				t.Errorf("attachment id maxLength = %v", got)
 			}
 			taskTypes := swaggerValue(t, body, "properties", "task_type", "enum").([]interface{})
-			if !reflect.DeepEqual(taskTypes, []interface{}{"mcp_scan", "ai_infra_scan", "model_redteam_report", "agent_scan"}) {
+			if !reflect.DeepEqual(taskTypes, []interface{}{"mcp_scan", "ai_infra_scan", "model_redteam_report", "agent_scan", "skills_scan"}) {
 				t.Errorf("task create type enum = %v", taskTypes)
 			}
 			badRequestDescription := strings.ToLower(swaggerValue(t, document, "paths", createPath, "post", "responses", "400", "description").(string))
@@ -804,7 +804,7 @@ func TestSwaggerDocumentsTaskListExactFilters(t *testing.T) {
 				t.Errorf("task status filter enum = %v", status)
 			}
 			taskType := swaggerParameterValue(t, document, path, "get", "task_type", "enum").([]interface{})
-			if !reflect.DeepEqual(taskType, []interface{}{"mcp_scan", "ai_infra_scan", "model_redteam_report", "agent_scan"}) {
+			if !reflect.DeepEqual(taskType, []interface{}{"mcp_scan", "ai_infra_scan", "model_redteam_report", "agent_scan", "skills_scan"}) {
 				t.Errorf("task_type filter enum = %v", taskType)
 			}
 			description := swaggerValue(t, document, "paths", path, "get", "responses", "400", "description").(string)

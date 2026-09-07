@@ -88,3 +88,18 @@ python -m pytest agent-scan/test_scan_execution.py -k 'dify or http_sse_error or
 用户随后授权合并到 `develop` 并推送 GitHub。2026-09-05 的合并前复核完成前端 41 个文件、603 项测试，以及 lint、typecheck、build；Go 平台全部包、API 规格、CLI、Agent 执行器和 provider 定向测试通过。
 
 2026-09-07 恢复工作后，确认功能源码与上述验证版本一致，重新完整执行 Python 受控套件（增加 `test_http_stream_events.py`）：131 项通过、2 项外部手工演示排除，耗时 331.08 秒。此记录针对 Agent 功能分支；与后续并行功能的合并结果需要另行验证。
+
+## 与 Skills 的合并回归（2026-09-07）
+
+Agent 功能提交 `eed1afa44` 整合 Skills 已发布的 `develop` 提交 `0eeb3d096`。共用工作台保留 AI 基础设施、Agent、Skills 三种入口；接口同时保留 Agent 执行说明与 provider 校验、报告授权关联，以及 Skills 单 ZIP 静态扫描合同。两类功能的幂等、治理引用、备注隔离和取消请求边界均保留。
+
+| 范围 | 合并结果验证 |
+| --- | --- |
+| 前端完整回归 | `pnpm test:run --maxWorkers=2`：43 个文件、639 项通过，耗时 222.41 秒；新增 Skills 生命周期 11 项，覆盖刷新失败与取消迟到响应。 |
+| 前端静态检查与构建 | `pnpm lint`、`pnpm typecheck`、`pnpm build` 全部通过；构建仅有既有产物体积提示。 |
+| Go 平台与构建 | CLI、Agent 均构建成功；`go test -p 1 ./internal/platform/... ./cmd/cli -count=1` 通过，使用隔离测试数据库。 |
+| API 与压缩包合同 | `go test ./internal/apidocs ./internal/skillarchive -count=1` 通过，三份 Swagger 全量结构一致。 |
+| 执行与适配 | `common/agent` 的 `TestAgentTask`、`TestAgentReceive`、`TestAgentConnect`、`TestSkills` 前缀用例，以及 `common/websocket` 的 `TestAgentWorkflow`、`TestTaskModelResolver`、`TestSkills` 前缀用例通过。 |
+| 审查 | 非前端独立合并审查通过；前端逐项核对了共享路由、摘要、模型选择器与请求生命周期；`git diff --check` 通过。 |
+
+本次整合没有修改 `agent-scan/`、`mcp-scan/` 或 Skills 压缩包实现相对于各自已验证版本的代码，因此保留对应功能分支的 Python 验证结论，没有重新累计通过数。前述全量 Go 基线失败和外部版本兼容边界仍然适用；此次没有将局部回归宣称为全项目全绿。

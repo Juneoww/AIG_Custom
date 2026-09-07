@@ -85,6 +85,15 @@ function renderDashboard() {
 afterEach(() => vi.unstubAllGlobals())
 
 describe('DashboardPage', () => {
+  it('接纳 Skills 最近任务与待关注报告，保持总览可读', async () => {
+    const response = dashboardResponse()
+    response.recent_tasks[0].task_type = 'skills_scan'
+    response.attention[0].task_type = 'skills_scan'
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(jsonResponse(response)))
+    renderDashboard()
+    expect(await screen.findAllByText('Skills 扫描')).toHaveLength(2)
+  })
+
   it('在单屏语义区域展示管理者摘要、管理者信号、30 日趋势、高风险待办和最近任务', async () => {
     let requestSignal: AbortSignal | undefined
     const fetchMock = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {

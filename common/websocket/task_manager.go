@@ -482,6 +482,8 @@ func (tm *TaskManager) SubmitTask(ctx context.Context, task platformtasks.Engine
 
 func platformEngineTaskType(taskType string) (string, bool) {
 	switch taskType {
+	case "skills_scan":
+		return "Skills-Scan", true
 	case "mcp_scan":
 		return "Mcp-Scan", true
 	case "ai_infra_scan":

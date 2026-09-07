@@ -46,6 +46,7 @@ export interface PublicBrandConfig {
 export type TaskType =
   | 'mcp_scan'
   | 'ai_infra_scan'
+  | 'skills_scan'
   | 'model_redteam_report'
   | 'agent_scan'
   | 'unknown'
@@ -81,6 +82,7 @@ export interface TaskInputSummary {
   target_count?: number
   num_prompts?: number
   port_scan_mode?: InfrastructurePortScanMode
+  scan_mode?: 'static'
 }
 
 export interface TaskDetail extends TaskSummary {

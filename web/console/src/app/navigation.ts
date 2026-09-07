@@ -41,7 +41,7 @@ export const navigationItems: readonly NavigationItem[] = [
 const secondaryNavigation: Readonly<Record<string, readonly SecondaryNavigationItem[]>> = {
   tasks: [
     { id: 'mcp-scan', path: '/tasks/new?scan=mcp', label: 'MCP 扫描', allowedRoles: ALL_ROLES },
-    { id: 'skills-scan', path: '/tasks/new?scan=skills', label: 'Skills 扫描', allowedRoles: ALL_ROLES },
+    { id: 'skills-scan', path: '/tasks/skills', label: 'Skills 扫描', allowedRoles: ALL_ROLES },
     { id: 'ai-infra-scan', path: '/tasks/ai-infra', label: 'AI 基础设施扫描', allowedRoles: ALL_ROLES },
     { id: 'agent-workflow-scan', path: '/tasks/agent-workflow', label: 'Agent 工作流扫描', allowedRoles: ALL_ROLES },
   ],
