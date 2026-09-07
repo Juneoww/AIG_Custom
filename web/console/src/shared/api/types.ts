@@ -72,6 +72,8 @@ export interface TaskSummary {
 }
 
 export interface TaskInputSummary {
+  agent_id?: string
+  eval_model_id?: string
   model_id?: string
   language?: 'zh' | 'en'
   thread?: number
@@ -84,6 +86,7 @@ export interface TaskInputSummary {
 export interface TaskDetail extends TaskSummary {
   input_summary: TaskInputSummary
   remark?: string
+  report_id?: string
 }
 
 export interface TaskListResponse {

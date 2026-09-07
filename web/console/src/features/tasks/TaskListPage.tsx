@@ -1,6 +1,6 @@
 /**
  * 功能：展示按当前主体限定的任务分页台账和服务端精确筛选。
- * 实现：用 TanStack Query 将分页、状态和类型传给真实列表 API，并以原生表格呈现安全摘要。
+ * 实现：用 TanStack Query 将分页、状态和类型传给真实列表 API，仅在读取成功时呈现摘要、表格与分页。
  * 输入：当前会话角色和 GET /platform/tasks 的分页响应。
  * 输出：任务台账、筛选、分页及独立加载/空/失败/403状态。
  * 依赖：Fluent UI、React Query、React Router 与共享监管组件。
@@ -18,6 +18,7 @@ import { DataTable, type DataTableColumn } from '../../shared/components/DataTab
 import { PageHeader } from '../../shared/components/PageHeader'
 import { StatePanel } from '../../shared/components/StatePanel'
 import { fetchTaskList } from './api'
+import { taskWorkbench } from './taskWorkbenches'
 import { AIInfraTaskOperationsSummary } from './components/AIInfraTaskOperationsSummary'
 import { AIInfraTaskTable } from './components/AIInfraTaskTable'
 import { AIInfraWorkbenchHeader } from './components/AIInfraWorkbenchHeader'
@@ -161,6 +162,7 @@ export function TaskListPage({ fixedTaskType }: TaskListPageProps) {
   const aiStyles = useAIInfraWorkbenchStyles()
   const { state } = useSession()
   const isAiInfraList = fixedTaskType === 'ai_infra_scan'
+  const workbench = taskWorkbench(fixedTaskType)
   const [searchParams, setSearchParams] = useSearchParams()
   const page = positivePage(searchParams.get('page'))
   const statusValue = searchParams.get('status') as TaskStatus | null
@@ -246,18 +248,20 @@ export function TaskListPage({ fixedTaskType }: TaskListPageProps) {
   const pageDescription = '按权限范围查看任务状态，筛选由服务端在分页前执行。'
   const tableCaption = '扫描任务台账'
 
-  if (isAiInfraList) {
+  if (workbench) {
     return (
       <section className={aiStyles.page}>
         <AIInfraWorkbenchHeader
+          title={workbench.title}
+          description={workbench.description}
           action={canCreate ? (
-            <Link className={aiStyles.primaryAction} to="/tasks/ai-infra/new" aria-label="新建 AI 基础设施扫描任务">
+            <Link className={aiStyles.primaryAction} to={`${workbench.path}/new`} aria-label={`新建 ${workbench.title}任务`}>
               <AddRegular aria-hidden="true" />
-              <span>新建 AI 基础设施扫描任务</span>
+              <span>新建 {workbench.title}任务</span>
             </Link>
           ) : undefined}
         />
-        <div className={aiStyles.surface} role="group" aria-label="AI 基础设施扫描状态筛选">
+        <div className={aiStyles.surface} role="group" aria-label={`${workbench.title}状态筛选`}>
           <div className={aiStyles.filterControls}>
             <Field className={aiStyles.filterField} label="任务状态">
               <Select
@@ -277,18 +281,20 @@ export function TaskListPage({ fixedTaskType }: TaskListPageProps) {
             ) : null}
           </div>
         </div>
-        {query.isSuccess ? <AIInfraTaskOperationsSummary tasks={query.data.items} total={query.data.total} /> : null}
-        {query.isPending ? <StatePanel state="loading" title="正在加载 AI 基础设施扫描任务" /> : null}
+        {query.isSuccess ? <AIInfraTaskOperationsSummary tasks={query.data.items} total={query.data.total} label={workbench.title} /> : null}
+        {query.isPending ? <StatePanel state="loading" title={`正在加载 ${workbench.title}任务`} /> : null}
         {query.isError && query.error instanceof ApiError && query.error.kind === 'forbidden' ? (
-          <StatePanel state="forbidden" title="无权查看 AI 基础设施扫描任务台账" />
+          <StatePanel state="forbidden" title={`无权查看 ${workbench.title}任务台账`} />
         ) : null}
         {query.isError && !(query.error instanceof ApiError && query.error.kind === 'forbidden') ? (
-          <StatePanel state="error" title="暂时无法加载 AI 基础设施扫描任务" description="请稍后重试。" actionLabel="重试" onAction={() => void query.refetch()} />
+          <StatePanel state="error" title={`暂时无法加载 ${workbench.title}任务`} description="请稍后重试。" actionLabel="重试" onAction={() => void query.refetch()} />
         ) : null}
-        {query.data?.items.length === 0 ? <StatePanel state="empty" title="暂无匹配任务" description="调整状态筛选或创建新的扫描任务。" /> : null}
-        {query.data && (query.data.items.length > 0 || query.data.total > 0) ? (
+        {query.isSuccess && query.data.items.length === 0 ? <StatePanel state="empty" title="暂无匹配任务" description="调整状态筛选或创建新的扫描任务。" /> : null}
+        {query.isSuccess && (query.data.items.length > 0 || query.data.total > 0) ? (
           <AIInfraTaskTable
             tasks={query.data.items}
+            label={workbench.title}
+            detailPath={(task) => `${workbench.path}/${encodeURIComponent(task.id)}`}
             pagination={{
               total: query.data.total,
               page: query.data.page,
@@ -369,13 +375,13 @@ export function TaskListPage({ fixedTaskType }: TaskListPageProps) {
       {query.isError && !(query.error instanceof ApiError && query.error.kind === 'forbidden') ? (
         <StatePanel state="error" title="暂时无法加载任务" description="请稍后重试。" actionLabel="重试" onAction={() => void query.refetch()} />
       ) : null}
-      {query.data?.items.length === 0 ? <StatePanel state="empty" title="暂无匹配任务" description="调整筛选条件或创建新的扫描任务。" /> : null}
-      {query.data?.items.length ? (
+      {query.isSuccess && query.data.items.length === 0 ? <StatePanel state="empty" title="暂无匹配任务" description="调整筛选条件或创建新的扫描任务。" /> : null}
+      {query.isSuccess && query.data.items.length > 0 ? (
         <div className={styles.tableViewport}>
           <DataTable caption={tableCaption} columns={columns} rows={query.data.items} getRowKey={(task) => task.id} />
         </div>
       ) : null}
-      {query.data ? (
+      {query.isSuccess ? (
         <nav className={styles.pagination} aria-label="任务分页">
           <span>共 {query.data.total} 条，第 {query.data.page} 页</span>
           <div className={styles.paginationActions}>

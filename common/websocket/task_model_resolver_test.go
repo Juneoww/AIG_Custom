@@ -94,7 +94,7 @@ func TestTaskReferenceValidationUsesGovernedAgentConfigRegistry(t *testing.T) {
 	require.NoError(t, os.Chdir(temporary))
 	t.Cleanup(func() { _ = os.Chdir(workingDirectory) })
 	require.NoError(t, os.MkdirAll(filepath.Join("data", "agents", PublicUser), 0o700))
-	require.NoError(t, os.WriteFile(filepath.Join("data", "agents", PublicUser, "safe-agent.yaml"), []byte("provider: safe\n"), 0o600))
+	require.NoError(t, os.WriteFile(filepath.Join("data", "agents", PublicUser, "safe-agent.yaml"), []byte(validWorkflowProvider), 0o600))
 
 	taskManager := NewTaskManager(NewAgentManager(), nil, nil, nil, NewSSEManager())
 	require.NoError(t, taskManager.ValidateTaskReferences(context.Background(), platformtasks.EngineTask{

@@ -15,8 +15,10 @@ import { ApiError } from '../../../shared/api/errors'
 import { MODEL_CATALOG_PAGE_SIZE, canonicalModels, hasRepeatedCatalogPage, modelOptionLabel, nextCatalogPage, selectableModels } from '../governedModels'
 
 const useStyles = makeStyles({
-  container: { display: 'flex', flexDirection: 'column', gap: tokens.spacingVerticalS },
-  actions: { display: 'flex', alignItems: 'center', gap: tokens.spacingHorizontalS },
+  field: { minWidth: 0 },
+  container: { display: 'flex', flexDirection: 'column', gap: tokens.spacingVerticalS, minWidth: 0 },
+  select: { minWidth: 0, width: '100%', '& select': { minWidth: 0, maxWidth: '100%' } },
+  actions: { display: 'flex', alignItems: 'center', gap: tokens.spacingHorizontalS, flexWrap: 'wrap' },
 })
 
 export interface GovernedModelSelectorProps {
@@ -24,11 +26,13 @@ export interface GovernedModelSelectorProps {
   onChange: (modelID: string | undefined) => void
   onAvailabilityChange?: (availability: GovernedModelAvailability) => void
   disabled?: boolean
+  label?: string
+  required?: boolean
 }
 
 export type GovernedModelAvailability = 'available' | 'pending' | 'unavailable'
 
-export function GovernedModelSelector({ value, onChange, onAvailabilityChange, disabled = false }: GovernedModelSelectorProps) {
+export function GovernedModelSelector({ value, onChange, onAvailabilityChange, disabled = false, label = '扫描模型', required = false }: GovernedModelSelectorProps) {
   const styles = useStyles()
   const clearedModelIDRef = useRef<string | undefined>(undefined)
   const verifiedPageParamsRef = useRef<string | undefined>(undefined)
@@ -76,7 +80,7 @@ export function GovernedModelSelector({ value, onChange, onAvailabilityChange, d
       : firstPageFailed || catalog.isFetchNextPageError
       ? `已选模型（ID: ${pendingSelectedModelID}）：目录加载失败，保留待重试`
       : `已选模型（ID: ${pendingSelectedModelID}）：正在验证`
-  const availability: GovernedModelAvailability = selectedModelID === undefined || selectedIsAvailable
+  const availability: GovernedModelAvailability = selectedModelID === undefined && required ? 'unavailable' : selectedModelID === undefined || selectedIsAvailable
     ? 'available'
     : unavailableSelectedModel ? 'unavailable' : 'pending'
   const catalogRefreshFailureMessage = selectedModelID === undefined ? '模型目录刷新失败' : '模型目录刷新失败，当前选择待确认'
@@ -122,7 +126,7 @@ export function GovernedModelSelector({ value, onChange, onAvailabilityChange, d
   }, [canAutomaticallyVerifySelection, catalog.fetchNextPage, verificationPageParamsKey])
 
   return (
-    <Field label="扫描模型">
+    <Field className={styles.field} label={label} required={required}>
       <div className={styles.container}>
         {catalog.isPending ? <span role="status">正在加载模型…</span> : null}
         {firstPageFailed ? (
@@ -142,12 +146,14 @@ export function GovernedModelSelector({ value, onChange, onAvailabilityChange, d
           </MessageBar>
         ) : null}
         <Select
-          aria-label="扫描模型"
+          className={styles.select}
+          aria-label={label}
+          required={required}
           value={value ?? ''}
           disabled={disabled || catalog.isPending}
           onChange={(_, data) => onChange(data.value || undefined)}
         >
-          <option value="">不使用模型</option>
+          <option value="">{required ? '请选择模型' : '不使用模型'}</option>
           {pendingSelectedModelID === undefined ? null : <option value={pendingSelectedModelID} disabled>{pendingModelLabel}</option>}
           {models.map((model) => <option key={model.id} value={model.id}>{modelOptionLabel(model)}</option>)}
         </Select>

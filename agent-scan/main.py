@@ -17,16 +17,16 @@
 # Tencent Zhuque Lab (https://github.com/Tencent/AI-Infra-Guard) in its
 # documentation or user interface, as detailed in the NOTICE file.
 
-"""
-Agent Framework - 主入口文件
-
-这是一个模仿 Claude Code / Gemini CLI 的 Agent 框架。
-Agent 可以自动调用工具完成任务。
+"""功能：启动 Agent 动态扫描并以结构化事件输出执行结果。
+实现：读取 CLI 或平台说明文件，选择模型，测试连接，再运行三阶段。
+输入：CLI 参数、UTF-8 说明文件、provider YAML 和环境凭据。
+输出：阶段事件、报告或非零退出；平台模式主辅模型统一使用选定模型。
 """
 import asyncio
 import os
 import sys
 import argparse
+from pathlib import Path
 from core.agent import Agent
 from core.agent_adapter.adapter import AIProviderClient
 from core.agent_adapter.connectivity import connectivity
@@ -56,11 +56,15 @@ def parse_args():
     )
 
     # 可选参数
-    parser.add_argument(
+    prompt_options = parser.add_mutually_exclusive_group()
+    prompt_options.add_argument(
         "-p", "--prompt",
         default="",
         help="自定义扫描提示词（可选）"
     )
+
+    prompt_options.add_argument("--prompt-file", help="包含任务说明的 UTF-8 文件")
+    parser.add_argument("--governed-model", action="store_true", help="主模型和辅助模型统一使用本次明确选择的模型")
 
     parser.add_argument(
         "-m", "--model",
@@ -109,7 +113,10 @@ async def main():
     llm_manager = LLMManager(api_key=api_key, base_url=args.base_url)
 
     # 获取专用LLM实例字典
-    specialized_llms = llm_manager.get_specialized_llms(["thinking", "coding"])
+    if args.governed_model:
+        specialized_llms = {"thinking": llm, "coding": llm}
+    else:
+        specialized_llms = llm_manager.get_specialized_llms(["thinking", "coding"])
 
     # 载入 agent provider
     agent_provider = args.agent_provider
@@ -119,16 +126,14 @@ async def main():
         if not connectivity(default_client, agent_provider):
             logger.error("Agent provider is not valid")
             scanLogger.error_log("Agent provider is not valid")
-            return
+            raise RuntimeError("Agent provider connectivity check failed")
 
     logger.info(f"Starting scan on: {args.repo}")
-    prompt = args.prompt
+    prompt = Path(args.prompt_file).read_text(encoding="utf-8") if args.prompt_file else args.prompt
     if args.language == "en":
         prompt += " All responses should be in English."
     elif args.language == "zh":
         prompt += " 所有回复都应使用中文。"
-    if prompt:
-        logger.info(f"Custom prompt: {prompt}")
 
     agent = Agent(llm=llm, specialized_llms=specialized_llms,
                   debug=True, language=args.language, agent_provider=agent_provider)
@@ -138,6 +143,7 @@ async def main():
     except KeyboardInterrupt:
         print("\n\nTask interrupted by user.")
         logger.warning("Task interrupted by user")
+        raise
     except Exception as e:
         print(f"\n\nError during execution: {e}")
         import traceback
@@ -148,7 +154,4 @@ async def main():
 
 
 if __name__ == "__main__":
-    # 先解析参数以检查是否为 debug 模式
-    args = parse_args()
-    # 如果是 debug 模式，初始化 Laminar
     asyncio.run(main())

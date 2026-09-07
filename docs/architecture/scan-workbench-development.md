@@ -6,6 +6,8 @@
 
 文中的“已实现”描述上述基线；“后续要求”是其他三类接入时需要落实的规范；建议路由和组件名不代表当前已存在。
 
+2026-09-05 Agent 增补：`codex/agent-workflow-scan` 从 `ddb045545` 开始接入 Agent 动态扫描专属工作台、治理校验、执行判定与报告关联。第 8.3 节记录该分支的实现合同；第 9.3 节仍是原 AI 基线验证，第 9.4 节单独记录本次验证边界，不能混用两轮结果。
+
 ## 1. 四类扫描与开发范围
 
 | 产品类别 | 平台 `task_type` | 引擎历史类型 | 本文基线中的入口情况 |
@@ -17,7 +19,7 @@
 
 以上顺序和名称以侧栏为准。平台新请求使用服务端已支持的小写标准枚举；历史引擎类型由服务端规范化。业务分类不等同于当前后端枚举全集，新页面不能直接把侧栏显示文字当成任务类型。
 
-当前 `navigation.ts` 中，除 AI 基础设施扫描外的三个入口仍指向 `/tasks/new?scan=...`。当前通用创建页没有根据这些 `scan` 查询值选择类型，因此**链接上带了参数不等于专属功能已经接通**。现有标准任务枚举中没有 `skills_scan`，Skills 的类型或其他明确区分机制需在接入时设计并贯通前后端，不能只增加页面文案。后续接入必须明确名称、路由、任务身份与引擎能力的对应关系，并补路由测试。
+上述 AI 基线的 `navigation.ts` 中，除 AI 基础设施扫描外的三个入口仍指向 `/tasks/new?scan=...`；通用创建页没有根据这些 `scan` 查询值选择类型，因此**链接上带了参数不等于专属功能已经接通**。本次 Agent 分支已增加第 8.3 节的专属路由。现有标准任务枚举中没有 `skills_scan`，Skills 的类型或其他明确区分机制需在接入时设计并贯通前后端，不能只增加页面文案。后续接入必须明确名称、路由、任务身份与引擎能力的对应关系，并补路由测试。
 
 后端现有 `model_redteam_report` / `Model-Redteam-Report` 是模型红队评测能力，不属于本文约定的四个侧栏分类，也不能用它替代 Skills 扫描。本次文档分类修正不删除或重命名这项已有后端能力。
 
@@ -156,7 +158,7 @@ Skills 当前不在已有标准任务类型中，不能仅向 `fixedTaskType` �
 
 备注按 Unicode 码点计数，最大 2,000；前端拒绝不完整代理字符，后端校验 UTF-8 和 rune 数。空白备注省略。修改备注属于修改创建请求，必须使旧提交对象失效；同幂等键而备注不同会被服务端拒绝。
 
-其他类型的 `content` 应按各自引擎定义表达扫描对象或执行说明，例如工作流任务说明，不能机械套用 AI 的 IP 解析器。但“发给引擎的说明”和“不参与执行的任务备注”始终需要分开。通用后端和详情合同已具备 `remark`，其余专属 UI 的录入与展示还需各自接入。
+其他类型的 `content` 应按各自引擎定义表达扫描对象或执行说明，例如工作流任务说明，不能机械套用 AI 的 IP 解析器。但“发给引擎的说明”和“不参与执行的任务备注”始终需要分开。通用后端和详情合同已具备 `remark`，本次 Agent 专属表单也已接入；MCP、Skills 专属 UI 的录入与展示仍需各自接入。
 
 ### 5.2 AI 目标与端口约束
 
@@ -247,7 +249,7 @@ Idempotency-Key: <本次逻辑提交的唯一键>
 }
 ```
 
-列表仅保留 `id/owner/task_type/status/created_at/updated_at`。`TaskDetail` 才增加 `input_summary` 和可选 `remark`。前端继续做字段白名单和类型、长度校验，不能把响应整体展开进组件状态或界面。
+列表仅保留 `id/owner/task_type/status/created_at/updated_at`。`TaskDetail` 才增加 `input_summary` 和可选 `remark`。本次详情 GET 还可提供 `report_id`，仅在任务为 `succeeded` 且已有获当前 Subject 授权的不可变报告快照时返回；没有快照时省略。创建 `202` 与 `503.task` 始终不含 `report_id`，包括历史任务的幂等确认。前端继续做字段白名单和类型、长度校验，不能把响应整体展开进组件状态或界面，也不能猜测或遍历报告 ID。
 
 创建失败不一定代表任务未保存：调度失败可返回 503 和安全的 `task` 详情。必须沿用同一逻辑提交键处理确认与重试，不能收到 5xx 就生成新键再次创建。非法请求通常为 400，授权错误为 403；详情还需区分不存在和加载失败。
 
@@ -256,7 +258,7 @@ Idempotency-Key: <本次逻辑提交的唯一键>
 1. 前端完成校验，构造稳定输入，通过 `createTaskSubmission` 建立一次逻辑提交；网络失败不自动重放 POST。
 2. 服务端校验身份、任务类型、字段边界和精确参数结构。未知配置键不能悄悄穿透到引擎。
 3. 使用所有者与幂等键派生稳定任务 ID，在创建锁内检查已有请求。相同键和相同输入复用任务，不同输入返回无效请求。
-4. 新任务校验受治理引用、附件所有者与 ready 状态；AI 同时完成目标合并和最终数量计算。
+4. 新任务校验受治理引用以及支持的附件所有者与 ready 状态；AI 同时完成目标合并和最终数量计算。Agent 要求非空白有效 UTF-8 说明、无附件和合法单 provider；新约束在历史请求比较之后执行。
 5. 在既有审计事务中保存任务并绑定附件，再领取调度租约、构造引擎任务。
 6. 引擎以 `PlatformTaskID` 作为稳定会话标识，重复提交不能产生第二次扫描。
 
@@ -279,7 +281,7 @@ Idempotency-Key: <本次逻辑提交的唯一键>
 
 ## 7. 后端、数据库与文档变更规则
 
-本次 v10 迁移通过追加迁移新增：
+AI 基线的 v10 迁移通过追加迁移新增：
 
 | 列 | SQL 定义 | 兼容意义 |
 | --- | --- | --- |
@@ -340,6 +342,26 @@ Agent 目录选择器不能简单改造模型 ID 文案代替，应对照实际 
 | 生命周期 | 引擎提交映射、状态同步、取消、幂等重试和失败确认。 |
 | 验收 | 对应测试、实际浏览器结果、真实执行证据和未支持项。 |
 
+### 8.3 Agent 工作流扫描本次实现
+
+本次沿用 `agent_scan` → `Agent-Scan`、既有任务生命周期、所有者授权、审计、取消与幂等机制。工作台通过 `taskWorkbenches.ts` 复用标题、指标和表格配置；表单使用独立 `AgentWorkflowTaskCreatePage`，路由为 `/tasks/agent-workflow`、`/tasks/agent-workflow/new`、`/tasks/agent-workflow/:taskId`。列表固定 `agent_scan`，详情类型不符停止轮询并隐藏操作；审计员只读。
+
+| 合同 | 本次实现边界 |
+| --- | --- |
+| 执行说明 | `content` 非空白、有效 UTF-8、最多 32 KiB（32,768 字节），传给全部三个阶段；不套用 IP 目标解析，也不表示工作流文件导入。 |
+| 备注 | 可选 `remark`，去首尾空白后最多 2,000 Unicode 码点；只存任务及授权详情，不进入引擎、审计元数据或报告。 |
+| 治理引用 | `params` 只能含必填 `agent_id`、`eval_model_id`。`GovernedAgentSelector` 只读 `/knowledge/agent/names` 并处理目录去重与待确认状态；必选模型使用治理目录，不提供“不使用模型”。 |
+| 附件 | 新 Agent 任务不支持附件，`attachment_ids` 省略或空数组；服务端和执行器均拒绝非空附件。历史相同幂等请求先匹配已有载荷，避免新约束破坏确认。 |
+| Provider | 保存前及下发时校验单目标配置；允许 HTTP/HTTPS、WebSocket、Dify。Dify 显式要求 `apiKey`、`apiBaseUrl`、`extra.dify_type=chat/workflow`，拒绝冲突路由字段。Coze、未知模式、多目标、YAML 别名、歧义标量和不合法结构暂拒绝。 |
+| 安全摘要 | `input_summary.agent_id/eval_model_id` 仅用于 Agent；完整参数合同不合法时不提取，敏感、超长及不安全历史引用省略。名称来自当前治理目录时不宣称创建快照或当前网络可用。 |
+| 报告入口 | 仅使用详情 GET 的可选 `report_id`，受成功状态、现存快照和读取权限约束；创建响应省略，无快照时不构造入口。 |
+
+执行器把说明写到受控 UTF-8 临时文件，通过 `--prompt-file` 传入 Python；模型密钥通过环境变量传递，并在结束后清理临时文件。平台模式显式启用 `--governed-model`，主模型及 thinking/coding 辅助模型统一采用本次 `eval_model_id`，三阶段为信息收集 → 漏洞检测 → 漏洞复核。独立 CLI 未启用该开关时继续保留明确的原有专用模型配置兼容性。
+
+阶段连续模型错误、迭代耗尽、格式化失败或不完整复核均按失败处理。最终复核必须有 `<review_complete>true</review_complete>`，零发现另需 `<no_findings>true</no_findings>`，漏洞块必须完整且可解析。Go 缓冲并验证唯一 `agent-security-report@1` 结果，只有子进程成功退出、无错误事件且未取消时发布；空文本或进程退出码 0 本身不能形成安全报告。本次未新增任务表、状态枚举或迁移，复用已有 v10 备注和报告快照存储。
+
+允许的 provider 是当前实现白名单，外部平台的版本和具体应用配置仍需逐项验证。工作流文件静态分析、节点拓扑、执行日志流和 Coze 不属于本次完成范围。
+
 ## 9. 验证与交付清单
 
 ### 9.1 必测行为
@@ -398,6 +420,14 @@ docker compose -p aig-scan-backend-check -f deploy/compose/docker-compose.postgr
 
 后续类型的“完成”必须同时有真实页面、正确请求、服务端校验、状态/取消链路和可解释的测试证据；仅新增侧栏链接、渲染原型或通过 Mock 测试不构成完整交付。
 
+### 9.4 Agent 分支的验证记录边界
+
+本次 API 合同测试先补齐再修改规格，已观察到旧规格缺少 Agent 引用、`remark/report_id` 和执行约束而失败；Swagger 采用四个相关子树的受控增量同步，未运行默认 `swag init`。2026-09-05，`docker exec aig-agent-workflow-go go test ./internal/apidocs -count=1` 返回退出码 0，三件套全量一致性、新旧 API 合同与双语指南校验通过。
+
+本节不沿用第 9.3 节的 AI 前端测试数量作为 Agent 证据。本轮前端完整套件 600 项通过，随后侧栏和模型选择器定向 39 项、Agent 合同 12 项通过；lint、typecheck、build 通过。Python 完整受控套件 80 项通过，流式终态补充回归单列于验收记录。相关 Go 平台、执行器、provider 与规格测试通过；完整 Go 回归仍有在干净基线复现的依赖/旧断言失败，不能声称全项目全绿。
+
+隔离平台、真实 Windows Agent 和受控 HTTP 目标/模型已验证成功零发现、有漏洞、失败、取消、幂等、说明传递及报告授权。浏览器真实创建至报告跳转通过；浅/深色 1440/768/320px 均无横向溢出，审计员新建入口受限。完整证据与外部 provider 兼容性边界见 [Agent 验收记录](agent-workflow-scan-verification.md)，核查历史与实现对照见 [Agent 开发核查](agent-workflow-scan-development-review.md)。
+
 ## 10. 代码与相关文档索引
 
 以下路径相对本仓库；阅读时优先看当前代码，再对照历史设计。
@@ -406,6 +436,7 @@ docker compose -p aig-scan-backend-check -f deploy/compose/docker-compose.postgr
 | --- | --- |
 | 路由与导航 | [routes.tsx](../../web/console/src/app/routes.tsx)、[navigation.ts](../../web/console/src/app/navigation.ts)、[Sidebar.tsx](../../web/console/src/app/layout/Sidebar.tsx) |
 | 三个任务页面 | [TaskListPage](../../web/console/src/features/tasks/TaskListPage.tsx)、[TaskCreatePage](../../web/console/src/features/tasks/TaskCreatePage.tsx)、[TaskDetailPage](../../web/console/src/features/tasks/TaskDetailPage.tsx) |
+| Agent 专属接入 | [AgentWorkflowTaskCreatePage](../../web/console/src/features/tasks/AgentWorkflowTaskCreatePage.tsx)、[GovernedAgentSelector](../../web/console/src/features/tasks/components/GovernedAgentSelector.tsx)、[工作台配置](../../web/console/src/features/tasks/taskWorkbenches.ts)、[provider 校验](../../common/websocket/agent_workflow.go)、[安全引用](../../internal/platform/tasks/agent_workflow.go) |
 | 工作台组件与样式 | [标题](../../web/console/src/features/tasks/components/AIInfraWorkbenchHeader.tsx)、[指标](../../web/console/src/features/tasks/components/AIInfraTaskOperationsSummary.tsx)、[表格](../../web/console/src/features/tasks/components/AIInfraTaskTable.tsx)、[样式](../../web/console/src/features/tasks/components/AIInfraWorkbench.styles.ts) |
 | 模型与目标输入 | [GovernedModelSelector](../../web/console/src/features/tasks/components/GovernedModelSelector.tsx)、[governedModels](../../web/console/src/features/tasks/governedModels.ts)、[目标预览](../../web/console/src/features/tasks/targetExpressionPreview.ts)、[附件客户端](../../web/console/src/features/tasks/attachments.ts) |
 | 浏览器合同 | [共享类型](../../web/console/src/shared/api/types.ts)、[任务 API 与解析器](../../web/console/src/features/tasks/api.ts)、[Go DTO](../../internal/platform/tasks/dto.go) |

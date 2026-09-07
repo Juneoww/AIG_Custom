@@ -71,9 +71,13 @@ AIG Custom Platform 是基于 Tencent Zhuque Lab AI-Infra-Guard（https://github
 
 `GET /api/v1/platform/tasks/{taskID}` 返回 `TaskDetail`，其 `input_summary` 仅含有界展示元数据。只有 `ai_infra_scan` 的详情可以包含 `model_id`：它是用于恢复当前模型目录标签的 opaque、已持久化/已验证模型引用。模型被删除、禁用或对当前用户不可见时，必须使用安全 ID 回退展示。该字段不是 Token、Base URL、凭据、原始参数对象，也不代表当前可用性；原始 params、嵌套凭据和 model 对象仍不会返回。普通用户只看本人任务，审计员/管理员全局只读；任务不存在或对普通用户不可见时返回 `404`。`GET /api/v1/platform/tasks/{taskID}/result` 已退役：通过认证与首次改密门禁后恒定返回 `410 Gone`，且绝不读取引擎输出。
 
+只有 `agent_scan` 的 `input_summary` 可以额外包含 `agent_id`、`eval_model_id`，两者都是已持久化引用的安全投影，不代表当前目录或网络可用。服务端先验证完整参数合同，再省略非法、超长、类似凭据或路径的历史引用；不会从内联配置中抽取展示值。Agent 名称的解析使用任务所有者上下文；当前目录无法确认时显示安全 ID，不能拿管理员自己的同名配置替换它。详情可带去首尾空白、最多 2,000 Unicode 码点的 `remark`；空白或不合法的历史备注省略，列表不返回备注。
+
+详情 GET 可选返回 `report_id`，条件是任务为 `succeeded`，该任务已有不可变报告快照，且当前 Subject 获准读取该快照。尚未成功或没有快照时省略；浏览器不能根据任务 ID 猜测报告 ID，也不能扫描报告列表寻找关联。创建的 `202` 与 `503.task` 均省略 `report_id`，包括对已完成历史任务的幂等确认；查看报告应使用详情 GET 返回的引用访问 `/api/v1/platform/reports/{reportID}`。
+
 ### 任务创建响应的安全加固迁移
 
-**破坏性变更：** `POST /api/v1/platform/tasks` 不再返回旧的内部任务 `View`。成功的 `202` 现在返回 `TaskDetail`，精确包含 `id`、用于展示的安全 `owner`、规范化 `task_type`、`status`、`created_at`、`updated_at` 和有界 `input_summary`。此变更阻止持久化请求与引擎内部字段越过浏览器边界。
+**破坏性变更：** `POST /api/v1/platform/tasks` 不再返回旧的内部任务 `View`。成功的 `202` 现在返回 `TaskDetail`，必含 `id`、用于展示的安全 `owner`、规范化 `task_type`、`status`、`created_at`、`updated_at` 和有界 `input_summary`，可带安全 `remark`，始终省略 `report_id`。此变更阻止持久化请求与引擎内部字段越过浏览器边界。
 
 | 旧 `View` 字段 | 新客户端行为 |
 |---|---|
@@ -90,7 +94,35 @@ AIG Custom Platform 是基于 Tencent Zhuque Lab AI-Infra-Guard（https://github
 
 浏览器任务执行只能使用上文受保护的平台任务 API。原 `/api/v1/app/taskapi*` 和 `/api/v1/app/tasks*` 浏览器路由族仅是历史名称，不是可调用的兼容 API；只有通过正常会话、首次改密与 CSRF 校验后才返回 `410 Gone`（CSRF 适用于变更请求）。它们不能用于创建任务、上传、查询状态、获取结果、流式更新，也不能在连接中断后作为回退。
 
-平台任务创建 JSON body 最大 256 KiB，`content` 最大 32 KiB，最多引用 10 个不重复且不超过 128 字节的 opaque 附件 ID；只接受 canonical `mcp_scan`、`ai_infra_scan`、`model_redteam_report`、`agent_scan`，服务端在私有 Adapter 边界分别映射为真实 Agent Alias。参数采用逐类型白名单：MCP 仅 `model_id`/`thread`；基础设施仅 `model_id`/`timeout`/`port_scan_mode`；模型红队要求 `model_id` 字符串数组和 `eval_model_id`，可带 `dataset.numPrompts/randomSeed/promptColumn` 与 `techniques`；Agent 扫描要求 `agent_id` 与 `eval_model_id`。`ai_infra_scan.params.port_scan_mode` 只能精确为 `fixed_ai` 或 `full_tcp`，省略时规范化为 `fixed_ai`；前者对裸 IPv4 发现 `11434,1337,7000-9000,18789`（2,004 个）TCP 端口，后者发现全部 `1-65535` TCP 端口。它不接受自定义端口、UDP 或版本识别选项，且 URL、域名、带端口 IP、IPv6 不触发该端口发现步骤。安全 `TaskDetail.input_summary.port_scan_mode` 仅在可验证时返回上述规范化枚举值，绝不返回原始参数。所有 `model_id`/`eval_model_id` 必须在持久化任务前通过受治理模型解析器验证，`agent_id` 必须解析到该用户或公共只读 Agent 配置；未知或不可见引用固定拒绝且不写入任务。未知字段、嵌套凭据对象、明文模型凭据、旧 model 对象和任务 Alias 均被拒绝。浏览器附件只使用 opaque 附件 ID，并按 owner 隔离。内部 Agent WebSocket 与旧形状制品传输属于独立的 internal-token 边界，不是浏览器 API。
+平台任务创建 JSON body 最大 256 KiB，`content` 最大 32 KiB；支持附件的任务类型最多引用 10 个不重复且不超过 128 字节的 opaque 附件 ID，新 Agent 扫描不支持附件。只接受 canonical `mcp_scan`、`ai_infra_scan`、`model_redteam_report`、`agent_scan`，服务端在私有 Adapter 边界分别映射为真实 Agent Alias。参数采用逐类型白名单：MCP 仅 `model_id`/`thread`；基础设施仅 `model_id`/`timeout`/`port_scan_mode`；模型红队要求 `model_id` 字符串数组和 `eval_model_id`，可带 `dataset.numPrompts/randomSeed/promptColumn` 与 `techniques`；Agent 扫描仅接受必填的 `agent_id` 与 `eval_model_id`。`ai_infra_scan.params.port_scan_mode` 只能精确为 `fixed_ai` 或 `full_tcp`，省略时规范化为 `fixed_ai`；前者对裸 IPv4 发现 `11434,1337,7000-9000,18789`（2,004 个）TCP 端口，后者发现全部 `1-65535` TCP 端口。它不接受自定义端口、UDP 或版本识别选项，且 URL、域名、带端口 IP、IPv6 不触发该端口发现步骤。安全 `TaskDetail.input_summary.port_scan_mode` 仅在可验证时返回上述规范化枚举值，绝不返回原始参数。所有 `model_id`/`eval_model_id` 必须在持久化任务前通过受治理模型解析器验证，`agent_id` 必须解析到该用户或公共只读 Agent 配置；未知或不可见引用固定拒绝且不写入任务。未知字段、嵌套凭据对象、明文模型凭据、旧 model 对象和任务 Alias 均被拒绝。浏览器附件只使用 opaque 附件 ID，并按 owner 隔离。内部 Agent WebSocket 与旧形状制品传输属于独立的 internal-token 边界，不是浏览器 API。
+
+### Agent 工作流扫描合同
+
+`agent_scan` 对已配置的单个 Agent 进行动态安全扫描。新建任务的 `content` 必须是非空白、有效 UTF-8 的执行说明，最多 32 KiB（32,768 字节），会传入信息收集、漏洞检测、漏洞复核三个阶段；这不是工作流文件或代码仓库导入接口。`attachment_ids` 应省略或设为 `[]`，非空附件会在保存前拒绝。可选 `remark` 独立保存，去首尾空白后最多 2,000 Unicode 码点，不进入引擎、审计元数据或报告快照。字节上限与备注码点上限不同。
+
+`params` 只能包含 `agent_id`、`eval_model_id` 两个必填引用。Agent 从 `/api/v1/knowledge/agent/names` 选择，模型从受治理模型目录选择；页面确认目录引用不等于连通性测试通过。新任务保存前与下发时均校验 provider，配置必须只有一个目标。当前允许 HTTP/HTTPS、WebSocket 和 Dify 适配器；Dify 必须显式提供 `config.apiKey`、`config.apiBaseUrl` 和 `config.extra.dify_type`（`chat` 或 `workflow`），不能夹带 `url`、`endpoint`、`method`、`body`、`headers`、`message_template` 等冲突路由字段。服务端拒绝未知模式、多目标、重复键、YAML 别名、歧义隐式标量以及格式或字段类型错误。Coze 尚未验证，当前拒绝；允许这些适配器不代表任意外部产品版本已验收。
+
+同 `Idempotency-Key` 的历史请求先与已持久化载荷比较，再进入仅针对新任务的说明/附件校验；原先存在的空说明或附件任务仍可确认。更改说明、备注、Agent 或模型即是不同载荷，必须使用新的逻辑提交；不能自动重发状态不确定的任务。
+
+平台模式中 `eval_model_id` 是整个扫描的模型来源，主模型和 thinking/coding 辅助模型统一使用该治理配置。只有三个阶段完整完成、最终复核包含 `<review_complete>true</review_complete>` 且漏洞块结构完整时，才可生成 `agent-security-report@1`。零发现还必须显式包含 `<no_findings>true</no_findings>`；空字符串、截断复核、连接失败、模型错误或迭代耗尽均不能当作安全结果。执行器仅在子进程成功、无错误事件且得到一个有效结果后发布报告，失败或取消不发布成功报告。
+
+以下示例 ID 为占位值；请求还需携带有效会话、CSRF 和 `Idempotency-Key`：
+
+```json
+{
+  "task_type": "agent_scan",
+  "content": "检查测试客服 Agent 的数据泄漏、工具滥用和权限边界。",
+  "remark": "上线前复测",
+  "country_iso_code": "zh_CN",
+  "attachment_ids": [],
+  "params": {
+    "agent_id": "customer-service-test",
+    "eval_model_id": "model-example"
+  }
+}
+```
+
+该功能复用现有任务、备注和报告快照数据结构，不新增任务表或数据库迁移。
 
 ### 受保护平台边界
 
@@ -100,7 +132,7 @@ AIG Custom Platform 是基于 Tencent Zhuque Lab AI-Infra-Guard（https://github
 
 独立受治理模型 API 是 `/api/v1/platform/models`。`POST /api/v1/platform/models/{modelID}/rotate-encryption` 只允许管理员对可写全局 platform 模型执行存量 Token 主密钥重加密；私有模型和只读 YAML 模型均不可轮换。已弃用的 `/api/v1/app/models/{modelId}` facade 仅保留模型兼容：集合 DELETE 与嵌套请求体继续使用 `{status,message,data}` envelope 和 HTTP `200` 应用错误约定。响应凭据始终脱敏。YAML 模型 ID 不能遮蔽加密平台行；YAML 加载失败时，在数据库或审计变更前失败关闭。
 
-只有 `aig migrate` 可以执行数据库 DDL。全新或升级后的 PostgreSQL schema 到达 v9；runtime 启动只做校验。迁移可安全处理旧表为空的情况，且不依赖 runtime AutoMigrate。版本 8 新增 `idx_platform_tasks_updated_at` 与 `idx_platform_tasks_owner_updated_at`，分别支持全局和 owner 范围按 `updated_at DESC, id DESC` 稳定读取最近任务；版本 9 将已被历史任务引用的 ready 附件幂等回填为 attached，未绑定 ready 附件保持可回收。
+只有 `aig migrate` 可以执行数据库 DDL。全新或升级后的 PostgreSQL schema 到达 v10；runtime 启动只做校验。迁移可安全处理旧表为空的情况，且不依赖 runtime AutoMigrate。版本 8 新增 `idx_platform_tasks_updated_at` 与 `idx_platform_tasks_owner_updated_at`，分别支持全局和 owner 范围按 `updated_at DESC, id DESC` 稳定读取最近任务；版本 9 将已被历史任务引用的 ready 附件幂等回填为 attached，未绑定 ready 附件保持可回收。已有版本 10 增加 `platform_tasks.remark` 与 `platform_tasks.target_count`；Agent 工作流扫描复用该基线，不新增迁移。
 
 ## 知识库兼容治理 API
 

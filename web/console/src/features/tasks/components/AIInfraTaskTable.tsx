@@ -55,6 +55,7 @@ function statusTone(styles: ReturnType<typeof useAIInfraWorkbenchStyles>, status
 
 interface AIInfraTaskTableProps {
   tasks: readonly TaskSummary[]
+  label?: string
   detailPath?: (task: TaskSummary) => string
   pagination?: {
     total: number
@@ -65,20 +66,20 @@ interface AIInfraTaskTableProps {
   }
 }
 
-export function AIInfraTaskTable({ tasks, detailPath, pagination }: AIInfraTaskTableProps) {
+export function AIInfraTaskTable({ tasks, detailPath, pagination, label = 'AI 基础设施扫描' }: AIInfraTaskTableProps) {
   const styles = useAIInfraWorkbenchStyles()
   const pathOf = detailPath ?? ((task: TaskSummary) => `/tasks/ai-infra/${encodeURIComponent(task.id)}`)
 
   return (
-    <section className={styles.tableShell} aria-label="AI 基础设施扫描任务列表">
+    <section className={styles.tableShell} aria-label={`${label}任务列表`}>
       <div
         className={styles.tableViewport}
         role="region"
-        aria-label="可横向滚动的 AI 基础设施扫描任务表格"
+        aria-label={`可横向滚动的 ${label}任务表格`}
         tabIndex={0}
       >
         <Table className={styles.table}>
-          <caption className={styles.tableCaption}>AI 基础设施扫描任务台账</caption>
+          <caption className={styles.tableCaption}>{label}任务台账</caption>
           <TableHeader>
             <TableRow>
               {['任务 ID', '负责人', '状态', '创建时间', '更新时间', '操作'].map((header) => (
@@ -105,7 +106,7 @@ export function AIInfraTaskTable({ tasks, detailPath, pagination }: AIInfraTaskT
         </Table>
       </div>
       {pagination ? (
-        <nav className={styles.tablePagination} aria-label="AI 基础设施扫描任务分页">
+        <nav className={styles.tablePagination} aria-label={`${label}任务分页`}>
           <div className={styles.tablePaginationMeta}>
             <span>共 {pagination.total} 条</span>
             <span>第 {pagination.page} 页</span>

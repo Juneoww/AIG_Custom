@@ -241,7 +241,8 @@ func (a *Agent) handleReceive() {
 				a.conn = nil
 				return
 			}
-			gologger.Debugln("recv", string(message))
+			// 任务载荷含模型密钥和 provider 配置，只记录接收事件。
+			gologger.Debugln("received server message")
 			if err = a.processMessage(message); err != nil {
 				gologger.WithError(err).Errorln("Failed to send message")
 			}
@@ -286,33 +287,33 @@ func (a *Agent) processMessage(data []byte) error {
 				// 创建回调函数集合
 				callbacks := TaskCallbacks{
 					ResultCallback: func(result map[string]interface{}) {
-						gologger.Debugln("ResultCallback", result)
+						gologger.Debugln("ResultCallback", task.SessionId)
 						a.SendTaskResult(task.SessionId, result)
 						gologger.Debugln("ResultCallback end")
 					},
 					ToolUseLogCallback: func(actionId, tool, planStepId, actionLog string) {
 						a.SendsToolUsedLog(task.SessionId, actionId, tool, planStepId, actionLog)
-						gologger.Debugln("ToolUseLogCallback", actionId, tool, planStepId, actionLog)
+						gologger.Debugln("ToolUseLogCallback", actionId, planStepId)
 					},
 					ToolUsedCallback: func(planStepId, statusId, description string, tools []Tool) {
 						a.SendToolUsed(task.SessionId, planStepId, statusId, description, tools)
-						gologger.Debugln("ToolUsedCallback", planStepId, statusId, description, tools)
+						gologger.Debugln("ToolUsedCallback", planStepId, statusId)
 					},
 					NewPlanStepCallback: func(stepId, title string) {
 						a.SendNewPlanStep(task.SessionId, stepId, title)
-						gologger.Debugln("NewPlanStepCallback", stepId, title)
+						gologger.Debugln("NewPlanStepCallback", stepId)
 					},
 					StepStatusUpdateCallback: func(planStepId, statusId, agentStatus, brief, description string) {
 						a.SendStepStatusUpdate(task.SessionId, planStepId, statusId, agentStatus, brief, description)
-						gologger.Debugln("StepStatusUpdateCallback", planStepId, statusId, agentStatus, brief, description)
+						gologger.Debugln("StepStatusUpdateCallback", planStepId, statusId, agentStatus)
 					},
 					PlanUpdateCallback: func(tasks []SubTask) {
 						a.SendPlanUpdate(task.SessionId, tasks)
-						gologger.Debugln("PlanUpdateCallback", tasks)
+						gologger.Debugln("PlanUpdateCallback", len(tasks))
 					},
 					ErrorCallback: func(error string) {
 						a.SendError(task.SessionId, error)
-						gologger.Debugln("ErrorCallback", error)
+						gologger.Debugln("ErrorCallback", task.SessionId)
 					},
 				}
 				go func() {

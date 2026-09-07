@@ -207,6 +207,9 @@ func (service *Service) createLocked(
 	} else if !errors.Is(getErr, ErrNotFound) {
 		return nil, getErr
 	} else {
+		if input.TaskType == "agent_scan" && !validNewAgentInput(input) {
+			return nil, ErrInvalid
+		}
 		if err := service.engine.ValidateTaskReferences(ctx, EngineTask{
 			OwnerUsername: subject.Username, TaskType: input.TaskType, Params: append(json.RawMessage(nil), params...),
 		}); err != nil {
@@ -757,7 +760,21 @@ func (service *Service) BrowserGet(ctx context.Context, subject identity.Subject
 	if err != nil {
 		return TaskDetail{}, err
 	}
-	return taskDetailOf(task), nil
+	detail := taskDetailOf(task)
+	if task.Status == StatusSucceeded {
+		if reader, ok := service.reportSnapshots.(interface {
+			TaskReportID(context.Context, identity.Subject, string) (string, error)
+		}); ok {
+			reportID, reportErr := reader.TaskReportID(ctx, subject, task.ID)
+			if reportErr != nil && !errors.Is(reportErr, reports.ErrNotFound) {
+				return TaskDetail{}, reportErr
+			}
+			if reportErr == nil {
+				detail.ReportID = reportID
+			}
+		}
+	}
+	return detail, nil
 }
 
 func (service *Service) Browse(ctx context.Context, subject identity.Subject, page, pageSize int, filters TaskListFilters) (TaskListResponse, error) {

@@ -1,6 +1,6 @@
 /**
  * 功能：展示任务安全详情、受控短轮询、角色化取消和专属 AI 模型名称恢复。
- * 实现：查询信号随路由/卸载取消，非终态有界退避；模型目录仅以安全白名单分页读取。
+ * 实现：查询和写请求随路由/卸载取消，刷新失败隐藏旧摘要；非终态有界退避，模型目录仅以安全白名单分页读取。
  * 输入：opaque 任务 ID、可选预期类型、当前 Subject 与安全任务/模型 DTO。
  * 输出：安全输入摘要、状态、更新时间、允许的取消按钮和模型安全标签。
  * 依赖：Fluent UI、React Query、React Router、Session、任务与模型目录 API。
@@ -18,12 +18,13 @@ import { fetchModelCatalog } from '../models/api'
 import { cancelTaskGoverned, fetchTaskDetail, taskPollDelay } from './api'
 import { MODEL_CATALOG_PAGE_SIZE, canonicalModels, fallbackModelLabel, hasRepeatedCatalogPage, modelOptionLabel, nextCatalogPage, selectableModels } from './governedModels'
 import { formatTaskTime, taskStatusLabels, taskTypeLabels } from './TaskListPage'
+import { taskWorkbench, type DedicatedTaskType } from './taskWorkbenches'
 
 const useStyles = makeStyles({
-  page: { display: 'flex', flexDirection: 'column', gap: tokens.spacingVerticalL },
+  page: { display: 'flex', flexDirection: 'column', gap: tokens.spacingVerticalL, minWidth: 0 },
   panel: { padding: tokens.spacingVerticalL, boxShadow: 'none' },
-  facts: { display: 'grid', gridTemplateColumns: 'repeat(3, minmax(0, 1fr))', gap: tokens.spacingHorizontalL },
-  fact: { display: 'flex', flexDirection: 'column', gap: tokens.spacingVerticalXS },
+  facts: { display: 'grid', gridTemplateColumns: 'repeat(3, minmax(0, 1fr))', gap: tokens.spacingHorizontalL, '@media (max-width: 768px)': { gridTemplateColumns: 'minmax(0, 1fr)' } },
+  fact: { display: 'flex', flexDirection: 'column', gap: tokens.spacingVerticalXS, minWidth: 0, overflowWrap: 'anywhere' },
   label: { color: tokens.colorNeutralForeground2 },
   back: { color: tokens.colorBrandForegroundLink },
 })
@@ -109,15 +110,22 @@ function RestoredModelName({ modelID }: { modelID: string }) {
 }
 
 export interface TaskDetailPageProps {
-  expectedTaskType?: 'ai_infra_scan'
+  expectedTaskType?: DedicatedTaskType
   returnTo?: string
+}
+
+interface TaskCancellation {
+  taskId: string
+  controller: AbortController
 }
 
 export function TaskDetailPage({ expectedTaskType, returnTo }: TaskDetailPageProps) {
   const styles = useStyles()
   const queryClient = useQueryClient()
+  const workbench = taskWorkbench(expectedTaskType)
   const { taskId = '' } = useParams<{ taskId: string }>()
   const { state } = useSession()
+  const activeCancellation = useRef<AbortController | null>(null)
   const query = useQuery({
     queryKey: ['task', taskId],
     queryFn: ({ signal }) => fetchTaskDetail(taskId, signal),
@@ -129,20 +137,41 @@ export function TaskDetailPage({ expectedTaskType, returnTo }: TaskDetailPagePro
     },
   })
   const cancel = useMutation({
-    mutationFn: () => cancelTaskGoverned(taskId),
+    mutationFn: (request: TaskCancellation) => cancelTaskGoverned(request.taskId, request.controller.signal),
     retry: false,
-    onSuccess: (result) => {
+    onSuccess: (result, request) => {
+      if (request.controller.signal.aborted || activeCancellation.current !== request.controller) return
+      const queryKey = ['task', request.taskId]
+      if (queryClient.getQueryState(queryKey)?.status !== 'success') return
       if (result.status === 'uncertain') {
-        queryClient.setQueryData(['task', taskId], result.task)
+        queryClient.setQueryData(queryKey, result.task)
         return
       }
-      void query.refetch()
+      return queryClient.refetchQueries({ queryKey, exact: true, type: 'active' })
+    },
+    onSettled: (_result, _error, request) => {
+      if (activeCancellation.current === request.controller) activeCancellation.current = null
     },
   })
+  useEffect(() => {
+    cancel.reset()
+    return () => {
+      activeCancellation.current?.abort()
+      activeCancellation.current = null
+    }
+  }, [taskId, query.isError, cancel.reset])
+
+  const requestCancellation = () => {
+    if (activeCancellation.current) return
+    const controller = new AbortController()
+    activeCancellation.current = controller
+    cancel.mutate({ taskId, controller })
+  }
+  const currentCancellation = cancel.variables?.taskId === taskId && !cancel.variables.controller.signal.aborted
   const subject = state.status === 'authenticated' ? state.subject : undefined
-  const typeMismatch = expectedTaskType !== undefined && query.data?.task_type !== undefined && query.data.task_type !== expectedTaskType
+  const typeMismatch = query.isSuccess && expectedTaskType !== undefined && query.data.task_type !== expectedTaskType
   const canCancel = Boolean(
-    query.data &&
+    query.isSuccess &&
     !typeMismatch &&
     subject &&
     subject.role !== 'auditor' &&
@@ -152,12 +181,12 @@ export function TaskDetailPage({ expectedTaskType, returnTo }: TaskDetailPagePro
   return (
     <section className={styles.page}>
       <PageHeader
-        title={expectedTaskType === 'ai_infra_scan' ? 'AI 基础设施扫描任务详情' : '任务详情'}
-        description="仅展示任务类型、状态、时间和有界输入摘要，不读取原始结果。"
+        title={workbench ? `${workbench.title}任务详情` : '任务详情'}
+        description="查看扫描状态、配置摘要与报告。"
       >
-        {canCancel ? <Button appearance="secondary" disabled={cancel.isPending} onClick={() => cancel.mutate()}>取消任务</Button> : null}
+        {canCancel ? <Button appearance="secondary" disabled={currentCancellation && cancel.isPending} onClick={requestCancellation}>取消任务</Button> : null}
       </PageHeader>
-      <Link className={styles.back} to={returnTo ?? '/tasks'}>返回任务台账</Link>
+      <Link className={styles.back} to={returnTo ?? workbench?.path ?? '/tasks'}>返回任务台账</Link>
       {!taskId ? <StatePanel state="error" title="任务标识无效" /> : null}
       {query.isPending && taskId ? <StatePanel state="loading" title="正在加载任务详情" /> : null}
       {query.isError && query.error instanceof ApiError && query.error.kind === 'forbidden' ? <StatePanel state="forbidden" title="无权查看该任务" /> : null}
@@ -165,10 +194,10 @@ export function TaskDetailPage({ expectedTaskType, returnTo }: TaskDetailPagePro
       {query.isError && !(query.error instanceof ApiError && ['forbidden', 'not-found'].includes(query.error.kind)) ? (
         <StatePanel state="error" title="暂时无法加载任务详情" actionLabel="重试" onAction={() => void query.refetch()} />
       ) : null}
-      {typeMismatch ? <StatePanel state="error" title="该任务不属于 AI 基础设施扫描" /> : null}
-      {!typeMismatch && cancel.isError ? <MessageBar intent="error"><MessageBarBody>取消状态尚未确认，请先刷新任务状态。</MessageBarBody></MessageBar> : null}
-      {!typeMismatch && cancel.data?.status === 'uncertain' ? <MessageBar intent="warning"><MessageBarBody>网络确认中断，已重新读取任务状态，未自动重复取消。</MessageBarBody></MessageBar> : null}
-      {query.data && !typeMismatch ? (
+      {typeMismatch ? <StatePanel state="error" title={`该任务不属于 ${workbench?.title ?? '当前扫描类型'}`} /> : null}
+      {query.isSuccess && !typeMismatch && currentCancellation && cancel.isError ? <MessageBar intent="error"><MessageBarBody>取消状态尚未确认，请先刷新任务状态。</MessageBarBody></MessageBar> : null}
+      {query.isSuccess && !typeMismatch && currentCancellation && cancel.data?.status === 'uncertain' ? <MessageBar intent="warning"><MessageBarBody>网络确认中断，已重新读取任务状态，未自动重复取消。</MessageBarBody></MessageBar> : null}
+      {query.isSuccess && !typeMismatch ? (
         <Card className={styles.panel} role="region" aria-label="任务安全摘要">
           <div className={styles.facts}>
             <div className={styles.fact}><Text className={styles.label}>任务类型</Text><Text>{taskTypeLabels[query.data.task_type]}</Text></div>
@@ -183,6 +212,10 @@ export function TaskDetailPage({ expectedTaskType, returnTo }: TaskDetailPagePro
             {query.data.input_summary.target_count ? <div className={styles.fact}><Text className={styles.label}>目标数量</Text><Text>{query.data.input_summary.target_count}</Text></div> : null}
             {query.data.input_summary.num_prompts ? <div className={styles.fact}><Text className={styles.label}>提示词数量</Text><Text>{query.data.input_summary.num_prompts}</Text></div> : null}
             {expectedTaskType === 'ai_infra_scan' && query.data.task_type === 'ai_infra_scan' && query.data.input_summary.model_id ? <div className={styles.fact}><Text className={styles.label}>扫描模型</Text><RestoredModelName modelID={query.data.input_summary.model_id} /></div> : null}
+            {query.data.task_type === 'agent_scan' && query.data.input_summary.agent_id ? <div className={styles.fact}><Text className={styles.label}>Agent 配置</Text><Text>{query.data.input_summary.agent_id}</Text></div> : null}
+            {query.data.task_type === 'agent_scan' && query.data.input_summary.eval_model_id ? <div className={styles.fact}><Text className={styles.label}>扫描 / 裁判模型</Text><RestoredModelName key={query.data.input_summary.eval_model_id} modelID={query.data.input_summary.eval_model_id} /></div> : null}
+            {query.data.task_type === 'agent_scan' && query.data.remark ? <div className={styles.fact}><Text className={styles.label}>任务备注</Text><Text>{query.data.remark}</Text></div> : null}
+            {query.data.report_id ? <div className={styles.fact}><Text className={styles.label}>扫描报告</Text><Link to={`/reports/${encodeURIComponent(query.data.report_id)}`}>查看扫描报告</Link></div> : null}
             {expectedTaskType === 'ai_infra_scan' && query.data.task_type === 'ai_infra_scan' && query.data.remark ? (
               <div className={styles.fact}><Text className={styles.label}>任务说明</Text><Text>{query.data.remark}</Text></div>
             ) : null}

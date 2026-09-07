@@ -180,13 +180,13 @@ func agentTechnicalFindings(raw json.RawMessage) ([]technicalFindingCandidate, e
 	var payload struct {
 		SchemaVersion string `json:"schema_version"`
 		Results       []struct {
-			ID          string `json:"id"`
-			Type        string `json:"type"`
-			Title       string `json:"title"`
-			Description string `json:"description"`
-			Level       string `json:"level"`
-			OWASP       string `json:"owasp"`
-			Suggestion  string `json:"suggestion"`
+			ID          string          `json:"id"`
+			Type        string          `json:"type"`
+			Title       string          `json:"title"`
+			Description string          `json:"description"`
+			Level       string          `json:"level"`
+			OWASP       json.RawMessage `json:"owasp"`
+			Suggestion  string          `json:"suggestion"`
 		} `json:"results"`
 	}
 	if json.Unmarshal(raw, &payload) != nil || payload.SchemaVersion != "agent-security-report@1" || payload.Results == nil {
@@ -194,9 +194,13 @@ func agentTechnicalFindings(raw json.RawMessage) ([]technicalFindingCandidate, e
 	}
 	candidates := make([]technicalFindingCandidate, 0, len(payload.Results))
 	for _, finding := range payload.Results {
+		owaspText, err := agentOWASPText(finding.OWASP)
+		if err != nil {
+			return nil, err
+		}
 		identifier := safeFindingText(finding.ID, "", 128, 256)
 		category := safeFindingText(finding.Type, "未分类", 128, 256)
-		owasp := safeFindingText(finding.OWASP, "", 128, 256)
+		owasp := safeFindingText(owaspText, "", 128, 256)
 		evidenceParts := compactNonEmpty(
 			safeFindingText(finding.Description, "", maxFindingTextRunes, maxFindingTextBytes),
 			labelIfPresent("发现编号", identifier), labelIfPresent("分类", category), labelIfPresent("OWASP", owasp),
@@ -212,6 +216,35 @@ func agentTechnicalFindings(raw json.RawMessage) ([]technicalFindingCandidate, e
 		})
 	}
 	return candidates, nil
+}
+
+// agentOWASPText 兼容 Python 分类数组与历史字符串；缺失或 null 保持历史空值语义。
+func agentOWASPText(raw json.RawMessage) (string, error) {
+	if len(raw) == 0 {
+		return "", nil
+	}
+	var value any
+	if json.Unmarshal(raw, &value) != nil {
+		return "", ErrInvalidFindings
+	}
+	switch categories := value.(type) {
+	case nil:
+		return "", nil
+	case string:
+		return categories, nil
+	case []any:
+		labels := make([]string, 0, len(categories))
+		for _, category := range categories {
+			label, ok := category.(string)
+			if !ok {
+				return "", ErrInvalidFindings
+			}
+			labels = append(labels, label)
+		}
+		return strings.Join(labels, ", "), nil
+	default:
+		return "", ErrInvalidFindings
+	}
 }
 
 func promptTechnicalFindings(raw json.RawMessage) ([]technicalFindingCandidate, error) {

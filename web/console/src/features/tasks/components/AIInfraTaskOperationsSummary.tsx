@@ -46,6 +46,7 @@ export function deriveAIInfraTaskMetrics(tasks: readonly TaskSummary[], total: n
 interface AIInfraTaskOperationsSummaryProps {
   tasks: readonly TaskSummary[]
   total: number
+  label?: string
 }
 
 interface MetricCardProps {
@@ -81,12 +82,12 @@ function MetricCard({ label, scope, value, icon: Icon, tone }: MetricCardProps) 
   )
 }
 
-export function AIInfraTaskOperationsSummary({ tasks, total }: AIInfraTaskOperationsSummaryProps) {
+export function AIInfraTaskOperationsSummary({ tasks, total, label = 'AI 基础设施扫描' }: AIInfraTaskOperationsSummaryProps) {
   const styles = useAIInfraWorkbenchStyles()
   const metrics = deriveAIInfraTaskMetrics(tasks, total)
 
   return (
-    <section className={styles.surface} role="region" aria-label="AI 基础设施扫描运行态势">
+    <section className={styles.surface} role="region" aria-label={`${label}运行态势`}>
       <h2 className={styles.sectionHeading}>任务运行态势</h2>
       <div className={styles.metrics}>
         <MetricCard label="匹配任务" scope="当前查询" value={metrics.matching} icon={ClipboardTaskRegular} tone="matching" />

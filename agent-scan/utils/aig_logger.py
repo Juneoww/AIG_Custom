@@ -16,14 +16,13 @@
 # Tencent Zhuque Lab (https://github.com/Tencent/AI-Infra-Guard) in its
 # documentation or user interface, as detailed in the NOTICE file.
 
-"""
-Agent scan logger module.
-
-Provides structured logging for the agent security scanning pipeline,
-including step progress, tool usage, and result reporting.
+"""功能：输出扫描进度、工具调用和终态事件。
+实现：平台进程用环境中的专属帧前缀区分事件与普通日志，独立 CLI 保持 JSON 行。
+输入：阶段/工具/报告数据及可选 AIG_SCAN_EVENT_PREFIX；输出：结构化日志事件。
 """
 
 import json
+import os
 import time
 from typing import Literal
 import logging
@@ -109,7 +108,7 @@ class ScanLogger:
         if isinstance(content, BaseModel):
             content.timestamp = str(time.time())
             content = content.model_dump()
-        self.logger.info(AgentMsg(type=type, content=content).model_dump_json())
+        self.logger.info(os.environ.get("AIG_SCAN_EVENT_PREFIX", "") + AgentMsg(type=type, content=content).model_dump_json())
 
     def new_plan_step(self, stepId: str, stepName: str):
         """Log a new pipeline step."""

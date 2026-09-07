@@ -48,7 +48,7 @@ describe('role navigation', () => {
       expect.objectContaining({ label: 'MCP 扫描', path: '/tasks/new?scan=mcp' }),
       expect.objectContaining({ label: 'Skills 扫描', path: '/tasks/new?scan=skills' }),
       expect.objectContaining({ label: 'AI 基础设施扫描', path: '/tasks/ai-infra' }),
-      expect.objectContaining({ label: 'Agent 工作流扫描', path: '/tasks/new?scan=agent-workflow' }),
+      expect.objectContaining({ label: 'Agent 工作流扫描', path: '/tasks/agent-workflow' }),
     ]
     const credentialChildren = [
       expect.objectContaining({ label: '模型配置', path: '/models' }),

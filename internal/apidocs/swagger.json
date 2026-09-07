@@ -1183,7 +1183,7 @@
                 "consumes": [
                     "application/json"
                 ],
-                "description": "Breaking security hardening: create responses now use the browser-safe TaskDetail with bounded input_summary instead of the former internal task View; clients must migrate field access. The JSON body is limited to 256 KiB. Creates an owner-scoped platform task from the authenticated Cookie Subject. Idempotency-Key is required and unique per owner. A retry with the same persisted request payload returns the existing task without revalidating live governed references; reusing that key with a different payload returns 400 invalid task request. Only exact canonical task types are accepted and the platform maps them to private Agent aliases: mcp_scan params allow model_id and thread; ai_infra_scan params allow model_id, timeout, and port_scan_mode (fixed_ai or full_tcp; omission defaults to fixed_ai); model_redteam_report params require model_id as a bounded string array plus eval_model_id and may include dataset numPrompts/randomSeed/promptColumn and techniques; agent_scan params require agent_id and eval_model_id. Every model_id/eval_model_id must resolve through the governed model boundary, and agent_id through the user or public Agent registry, before persistence; unknown or invisible references write no task. Unknown fields, nested credential objects, raw model credentials, and legacy aliases are rejected. Attachments are supplied only as at most ten opaque attachment IDs. Dispatch uses persisted claims and a global attempt budget. An uncertain network acknowledgement becomes dispatch_unknown and is never submitted automatically again; this is at-most-once dispatch, not exactly-once execution. Requires CSRF protection.",
+                "description": "Breaking security hardening: create responses now use the browser-safe TaskDetail with bounded input_summary and optional remark instead of the former internal task View; clients must migrate field access. The JSON body is limited to 256 KiB. Creates an owner-scoped platform task from the authenticated Cookie Subject. Idempotency-Key is required and unique per owner. A retry with the same persisted request payload returns the existing task without revalidating live governed references; reusing that key with a different payload returns 400 invalid task request. Historical same-key requests are compared before the new Agent input constraints, so matching historical tasks are not rejected for empty content or attachments. Only exact canonical task types are accepted and the platform maps them to private Agent aliases: mcp_scan params allow model_id and thread; ai_infra_scan params allow model_id, timeout, and port_scan_mode (fixed_ai or full_tcp; omission defaults to fixed_ai); model_redteam_report params require model_id as a bounded string array plus eval_model_id and may include dataset numPrompts/randomSeed/promptColumn and techniques; agent_scan params require only agent_id and eval_model_id. Every model_id/eval_model_id must resolve through the governed model boundary, and agent_id through the user or public Agent registry, before persistence; unknown or invisible references write no task. New agent_scan tasks require non-whitespace valid UTF-8 content of at most 32 KiB (32768 bytes) and do not support attachments. The Agent configuration must contain a single provider validated before persistence and again at dispatch: HTTP/HTTPS, WebSocket, or Dify; Coze and unknown providers are rejected. Dify requires explicit apiKey, apiBaseUrl, and extra.dify_type equal to chat or workflow; conflicting routing fields, ambiguous YAML scalars, aliases, and malformed configuration are rejected. The three stages of information collection, vulnerability detection, and review use the selected eval_model_id for primary and auxiliary models in platform mode. Failed or incomplete execution, invalid final review, and missing results produce no successful report. Unknown fields, nested credential objects, raw model credentials, and legacy aliases are rejected. Task types supporting attachments accept at most ten opaque attachment IDs. Dispatch uses persisted claims and a global attempt budget. An uncertain network acknowledgement becomes dispatch_unknown and is never submitted automatically again; this is at-most-once dispatch, not exactly-once execution. Requires CSRF protection.",
                 "parameters": [
                     {
                         "in": "header",
@@ -1199,38 +1199,45 @@
                         "schema": {
                             "properties": {
                                 "attachment_ids": {
+                                    "description": "Opaque owner-scoped attachment references for supported task types. Attachments are unsupported for new agent_scan tasks; the field must be omitted or an empty array.",
                                     "items": {
-                                        "type": "string",
-                                        "maxLength": 128
+                                        "maxLength": 128,
+                                        "type": "string"
                                     },
-                                    "type": "array",
-                                    "maxItems": 10
+                                    "maxItems": 10,
+                                    "type": "array"
                                 },
                                 "content": {
-                                    "type": "string",
-                                    "maxLength": 32768
+                                    "description": "Task execution input, limited to 32 KiB (32768 bytes); the character maxLength does not replace this byte limit. New agent_scan tasks require non-whitespace valid UTF-8 execution instructions that are passed to all three scan stages.",
+                                    "maxLength": 32768,
+                                    "type": "string"
                                 },
                                 "country_iso_code": {
-                                    "type": "string",
                                     "enum": [
                                         "",
                                         "zh",
                                         "zh_CN",
                                         "en"
-                                    ]
+                                    ],
+                                    "type": "string"
                                 },
                                 "params": {
-                                    "type": "object",
-                                    "description": "Exact per-task schema described by this operation; arbitrary and credential-bearing fields are rejected."
+                                    "description": "Exact per-task schema described by this operation; agent_scan accepts only agent_id and eval_model_id, both required governed string references. Arbitrary and credential-bearing fields are rejected.",
+                                    "type": "object"
+                                },
+                                "remark": {
+                                    "description": "Optional task note, trimmed and limited to 2000 Unicode code points of valid UTF-8. Stored separately from content and included in idempotency comparison; never passed to the scan engine, audit metadata, or report snapshot.",
+                                    "maxLength": 2000,
+                                    "type": "string"
                                 },
                                 "task_type": {
-                                    "type": "string",
                                     "enum": [
                                         "mcp_scan",
                                         "ai_infra_scan",
                                         "model_redteam_report",
                                         "agent_scan"
-                                    ]
+                                    ],
+                                    "type": "string"
                                 }
                             },
                             "required": [
@@ -1242,7 +1249,7 @@
                 ],
                 "responses": {
                     "202": {
-                        "description": "Browser-safe persisted task detail; raw request, attachment, identity, and engine fields are absent.",
+                        "description": "Browser-safe persisted task detail with optional remark; report_id is omitted even when acknowledging a previously completed task. Raw request, attachment, identity, and engine fields are absent.",
                         "schema": {
                             "$ref": "#/definitions/tasks.TaskDetail"
                         }
@@ -1263,7 +1270,7 @@
                         "description": "Persistence or durable audit failed; internal details are not exposed."
                     },
                     "503": {
-                        "description": "Fixed safe error plus persisted browser-safe task detail; dispatch diagnostics are not exposed.",
+                        "description": "Fixed safe error plus persisted browser-safe task detail; report_id is omitted and dispatch diagnostics are not exposed.",
                         "schema": {
                             "$ref": "#/definitions/tasks.TaskCreateErrorResponse"
                         }
@@ -1277,7 +1284,7 @@
         },
         "/api/v1/platform/tasks/{taskID}": {
             "get": {
-                "description": "Short-poll browser-safe TaskDetail using the authenticated Cookie Subject. Users read only their own task; auditors and administrators have global read access. The input_summary is a narrow display projection; browser-supplied identity headers are ignored.",
+                "description": "Short-poll browser-safe TaskDetail using the authenticated Cookie Subject. Users read only their own task; auditors and administrators have global read access. The input_summary is a narrow display projection; agent_id and eval_model_id are optional safe references for agent_scan only. Optional remark is display metadata and is never sent to the engine. Optional report_id is available only for a succeeded task when its existing immutable report snapshot is authorized for this Subject; absent snapshots produce no report link. Browser-supplied identity headers are ignored.",
                 "parameters": [
                     {
                         "in": "path",
@@ -3945,7 +3952,7 @@
             "type": "object"
         },
         "tasks.TaskDetail": {
-            "description": "Browser-safe task detail with only display-safe input metadata.",
+            "description": "Browser-safe task detail with display-safe input metadata and optional remark. Only a detail GET may additionally provide an authorized report_id for a succeeded task with an existing immutable snapshot; create responses omit report_id.",
             "properties": {
                 "created_at": {
                     "format": "date-time",
@@ -3958,6 +3965,15 @@
                     "$ref": "#/definitions/tasks.TaskInputSummary"
                 },
                 "owner": {
+                    "type": "string"
+                },
+                "remark": {
+                    "description": "Optional task note, trimmed and limited to 2000 Unicode code points of valid UTF-8; blank or invalid historical values are omitted. Never passed to the scan engine, audit metadata, or report snapshot.",
+                    "maxLength": 2000,
+                    "type": "string"
+                },
+                "report_id": {
+                    "description": "Opaque report reference available only on a detail GET for a succeeded task with an authorized existing immutable snapshot. It is omitted from every create response and when no snapshot exists; clients must not guess it from the task ID or search other reports.",
                     "type": "string"
                 },
                 "status": {
@@ -4035,8 +4051,20 @@
             "type": "object"
         },
         "tasks.TaskInputSummary": {
-            "description": "Task-type-specific display metadata; source content, arbitrary parameters, credentials, URLs, attachment references, and engine data are absent.",
+            "description": "Task-type-specific display metadata; source content, arbitrary parameters, credentials, URLs, attachment references, and engine data are absent. Agent references appear only for agent_scan after validating the complete persisted reference contract; malformed historical inline parameters are omitted.",
             "properties": {
+                "agent_id": {
+                    "description": "agent_scan only. Safe persisted Agent configuration reference, not a credential or current availability claim. Invalid, overlong, path-like, or credential-like historical values are omitted; the name resolves in the task owner's registry context.",
+                    "maxLength": 128,
+                    "pattern": "^[A-Za-z0-9][A-Za-z0-9._ -]{0,127}$",
+                    "type": "string"
+                },
+                "eval_model_id": {
+                    "description": "agent_scan only. Safe persisted governed scan and review model reference, not a credential or current availability claim. Invalid, overlong, or credential-like historical values are omitted; unavailable catalog entries use the safe ID fallback.",
+                    "maxLength": 128,
+                    "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$",
+                    "type": "string"
+                },
                 "language": {
                     "enum": [
                         "zh",
