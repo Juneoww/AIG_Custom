@@ -248,7 +248,7 @@ func TestSkillsGormPersistsAndFiltersBeforePagination(t *testing.T) {
 		require.NoError(t, replayErr)
 		assert.Equal(t, created.ID, replayed.ID)
 	}
-	_, err = service.Create(context.Background(), owner, CreateInput{IdempotencyKey: "mcp-other", TaskType: "mcp_scan", Content: "legacy"})
+	_, err = service.Create(context.Background(), owner, CreateInput{IdempotencyKey: "mcp-other", TaskType: "mcp_scan", Content: "https://example.com/repository.git", Params: json.RawMessage(`{"source_kind":"repository"}`)})
 	require.NoError(t, err)
 	list, err := service.Browse(context.Background(), owner, 2, 2, TaskListFilters{TaskType: "skills_scan"})
 	require.NoError(t, err)

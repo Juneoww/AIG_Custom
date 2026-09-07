@@ -29,6 +29,23 @@ type ambiguousTransactionRecorder struct {
 	transactions int
 }
 
+func TestMutationRunMarksGovernedContext(t *testing.T) {
+	ctx := context.Background()
+	service := NewService(NewMemoryRepository())
+	actor := identity.Subject{UserID: "governed-mutation-owner", Role: identity.RoleUser}
+	assert.False(t, InGovernedMutation(ctx))
+	mutation, err := BeginMutation(ctx, service, actor, EventInput{
+		Action: ActionKnowledgeChanged, ResourceType: "governed-mutation", ResourceID: "governed-mutation-resource",
+	})
+	require.NoError(t, err)
+
+	require.NoError(t, mutation.Run(ctx, "governed-mutation-resource", nil, func(transactionContext context.Context) error {
+		assert.True(t, InGovernedMutation(transactionContext))
+		return nil
+	}))
+	assert.False(t, InGovernedMutation(ctx), "the governance marker must stay scoped to the mutation callback context")
+}
+
 func (recorder *ambiguousTransactionRecorder) WithinTransaction(ctx context.Context, apply func(context.Context) error) error {
 	recorder.transactions++
 	if err := apply(ctx); err != nil {
@@ -142,6 +159,31 @@ func TestServiceRecordsQueryableSanitizedEvents(t *testing.T) {
 	assert.Contains(t, string(encoded), RedactedValue)
 	assert.Contains(t, string(encoded), "kept")
 	assert.Contains(t, string(encoded), "typed-kept")
+}
+
+func TestSanitizedMetadataPreservesBooleanAuthorizationConfirmedOnly(t *testing.T) {
+	for _, test := range []struct {
+		name  string
+		key   string
+		input map[string]any
+		want  any
+	}{
+		{name: "true", key: "authorization_confirmed", input: map[string]any{"authorization_confirmed": true}, want: true},
+		{name: "false", key: "authorization_confirmed", input: map[string]any{"authorization_confirmed": false}, want: false},
+		{name: "string", key: "authorization_confirmed", input: map[string]any{"authorization_confirmed": "true"}, want: RedactedValue},
+		{name: "object", key: "authorization_confirmed", input: map[string]any{"authorization_confirmed": map[string]any{"value": true}}, want: RedactedValue},
+		{name: "array", key: "authorization_confirmed", input: map[string]any{"authorization_confirmed": []any{true}}, want: RedactedValue},
+		{name: "other authorization key", key: "authorization_status", input: map[string]any{"authorization_status": true}, want: RedactedValue},
+		{name: "case variant", key: "Authorization_Confirmed", input: map[string]any{"Authorization_Confirmed": true}, want: RedactedValue},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			metadata, err := sanitizedMetadata(test.input)
+			require.NoError(t, err)
+			decoded := map[string]any{}
+			require.NoError(t, json.Unmarshal(metadata, &decoded))
+			assert.Equal(t, test.want, decoded[test.key])
+		})
+	}
 }
 
 func TestAuditQueryIsReadOnlyForAdminAndAuditor(t *testing.T) {

@@ -27,6 +27,17 @@ describe('role navigation', () => {
     expect(new Set(navigationItems.map(({ path }) => path)).size).toBe(navigationItems.length)
   })
 
+  it('keeps the four ordered scan-task classifications beneath the shared task entry', () => {
+    const scanTasks = navigationItems.find((item) => item.id === 'tasks')
+
+    expect(scanTasks?.children?.map(({ label, path }) => ({ label, path }))).toEqual([
+      { label: 'MCP 安全扫描', path: '/tasks/mcp' },
+      { label: 'Skills 扫描', path: '/tasks/skills' },
+      { label: 'AI 基础设施扫描', path: '/tasks/ai-infra' },
+      { label: 'Agent 工作流扫描', path: '/tasks/agent-workflow' },
+    ])
+  })
+
   it('shows the exact approved items for each role', () => {
     expect(visibleNavigationFor('user').map(({ label }) => label)).toEqual(common)
     expect(visibleNavigationFor('auditor').map(({ label }) => label)).toEqual([
@@ -45,7 +56,7 @@ describe('role navigation', () => {
 
   it('exposes grouped scan navigation for regular users', () => {
     const scanChildren = [
-      expect.objectContaining({ label: 'MCP 扫描', path: '/tasks/new?scan=mcp' }),
+      expect.objectContaining({ label: 'MCP 安全扫描', path: '/tasks/mcp' }),
       expect.objectContaining({ label: 'Skills 扫描', path: '/tasks/skills' }),
       expect.objectContaining({ label: 'AI 基础设施扫描', path: '/tasks/ai-infra' }),
       expect.objectContaining({ label: 'Agent 工作流扫描', path: '/tasks/agent-workflow' }),
@@ -53,6 +64,7 @@ describe('role navigation', () => {
     const credentialChildren = [
       expect.objectContaining({ label: '模型配置', path: '/models' }),
       expect.objectContaining({ label: '智能体配置', path: '/knowledge/agents' }),
+      expect.objectContaining({ label: 'MCP 连接配置', path: '/credentials/mcp-connections' }),
     ]
 
     for (const role of ['user', 'auditor', 'admin'] as const) {

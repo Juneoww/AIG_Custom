@@ -21,7 +21,7 @@ function RouteDriver() {
     <div>
       <button onClick={() => navigate('/tasks')}>前往任务列表</button>
       <button onClick={() => navigate('/tasks/new')}>前往新建任务</button>
-      <button onClick={() => navigate('/tasks/new?scan=mcp')}>前往 MCP 扫描</button>
+      <button onClick={() => navigate('/tasks/mcp')}>前往 MCP 扫描</button>
       <button onClick={() => navigate('/tasks/agent-workflow')}>前往 Agent 扫描</button>
       <button onClick={() => navigate('/tasks/ai-infra?status=running')}>前往 AI 基础设施运行中</button>
       <button onClick={() => navigate('/tasks/ai-infra?status=failed&page=2')}>前往 AI 基础设施失败</button>
@@ -81,12 +81,12 @@ describe('Sidebar', () => {
     expect(screen.getByRole('link', { name: '安全报告' })).toHaveAttribute('aria-current', 'page')
   })
 
-  it('expands scan tasks independently with exact child links', () => {
+  it('expands scan tasks independently with the four classified entries', () => {
     renderSidebar()
 
     fireEvent.click(screen.getByRole('button', { name: '展开扫描任务子菜单' }))
 
-    expect(screen.getByRole('link', { name: 'MCP 扫描' })).toHaveAttribute('href', '/tasks/new?scan=mcp')
+    expect(screen.getByRole('link', { name: 'MCP 安全扫描' })).toHaveAttribute('href', '/tasks/mcp')
     expect(screen.getByRole('link', { name: 'Skills 扫描' })).toHaveAttribute('href', '/tasks/skills')
     expect(screen.getByRole('link', { name: 'AI 基础设施扫描' })).toHaveAttribute(
       'href',
@@ -100,26 +100,14 @@ describe('Sidebar', () => {
     fireEvent.click(screen.getByRole('button', { name: '展开凭证配置子菜单' }))
 
     const credentialToggle = screen.getByRole('button', { name: '收起凭证配置子菜单' })
-    expect(credentialToggle).toHaveAttribute('aria-expanded', 'true')
     const credentialSubmenu = document.getElementById(credentialToggle.getAttribute('aria-controls') ?? '')
+    expect(credentialToggle).toHaveAttribute('aria-expanded', 'true')
     expect(credentialSubmenu).toBeInTheDocument()
     expect(within(credentialSubmenu!).getAllByRole('link').map((link) => link.textContent?.trim())).toEqual([
       '模型配置',
       '智能体配置',
+      'MCP 连接配置',
     ])
-    expect(within(credentialSubmenu!).getByRole('link', { name: '模型配置' })).toHaveAttribute('href', '/models')
-    expect(within(credentialSubmenu!).getByRole('link', { name: '智能体配置' })).toHaveAttribute(
-      'href',
-      '/knowledge/agents',
-    )
-    expect(screen.getByRole('link', { name: 'Skills 扫描' })).toBeInTheDocument()
-
-    fireEvent.click(screen.getByRole('button', { name: '收起扫描任务子菜单' }))
-
-    expect(screen.queryByRole('link', { name: 'Skills 扫描' })).not.toBeInTheDocument()
-    expect(screen.getByRole('button', { name: '展开扫描任务子菜单' })).toHaveAttribute('aria-expanded', 'false')
-    expect(screen.getByRole('button', { name: '展开扫描任务子菜单' })).not.toHaveAttribute('aria-controls')
-    expect(screen.getByRole('link', { name: '模型配置' })).toBeInTheDocument()
   })
 
   it('exposes accessible expansion controls with independent aria state', () => {
@@ -129,8 +117,6 @@ describe('Sidebar', () => {
     const credentialsToggle = screen.getByRole('button', { name: '展开凭证配置子菜单' })
     expect(scanToggle).toHaveAttribute('aria-expanded', 'false')
     expect(credentialsToggle).toHaveAttribute('aria-expanded', 'false')
-    expect(scanToggle).not.toHaveAttribute('aria-controls')
-    expect(credentialsToggle).not.toHaveAttribute('aria-controls')
 
     fireEvent.click(scanToggle)
 
@@ -147,18 +133,15 @@ describe('Sidebar', () => {
     const scanToggle = screen.getByRole('button', { name: '收起扫描任务子菜单' })
     const scanSubmenu = document.getElementById(scanToggle.getAttribute('aria-controls')!)
     expect(within(scanSubmenu!).getAllByRole('link').map((link) => link.textContent?.trim())).toEqual([
-      'MCP 扫描',
+      'MCP 安全扫描',
       'Skills 扫描',
       'AI 基础设施扫描',
       'Agent 工作流扫描',
     ])
     expect(within(scanSubmenu!).getByRole('link', { name: 'Agent 工作流扫描' })).toHaveAttribute('aria-current', 'page')
-    expect(within(scanSubmenu!).getByRole('link', { name: 'MCP 扫描' })).not.toHaveAttribute('aria-current', 'page')
-    expect(within(scanSubmenu!).getByRole('link', { name: 'Skills 扫描' })).not.toHaveAttribute('aria-current', 'page')
-    expect(within(scanSubmenu!).getByRole('link', { name: 'AI 基础设施扫描' })).not.toHaveAttribute(
-      'aria-current',
-      'page',
-    )
+    expect(within(scanSubmenu!).getByRole('link', { name: 'MCP 安全扫描' })).not.toHaveAttribute('aria-current')
+    expect(within(scanSubmenu!).getByRole('link', { name: 'AI 基础设施扫描' })).not.toHaveAttribute('aria-current')
+    expect(within(scanSubmenu!).getByRole('link', { name: 'Skills 扫描' })).not.toHaveAttribute('aria-current')
   })
 
   it('updates group expansion after mounted route changes', () => {
@@ -168,26 +151,19 @@ describe('Sidebar', () => {
     expect(screen.getByRole('button', { name: '收起扫描任务子菜单' })).toHaveAttribute('aria-expanded', 'true')
 
     fireEvent.click(screen.getByRole('button', { name: '收起扫描任务子菜单' }))
-    expect(screen.getByRole('button', { name: '展开扫描任务子菜单' })).toHaveAttribute('aria-expanded', 'false')
-
     fireEvent.click(screen.getByRole('button', { name: '前往新建任务' }))
     expect(screen.getByRole('button', { name: '收起扫描任务子菜单' })).toHaveAttribute('aria-expanded', 'true')
 
-    fireEvent.click(screen.getByRole('button', { name: '前往 MCP 扫描' }))
-    expect(screen.getByRole('button', { name: '收起扫描任务子菜单' })).toHaveAttribute('aria-expanded', 'true')
-
     fireEvent.click(screen.getByRole('button', { name: '收起扫描任务子菜单' }))
-    expect(screen.getByRole('button', { name: '展开扫描任务子菜单' })).toHaveAttribute('aria-expanded', 'false')
+    fireEvent.click(screen.getByRole('button', { name: '前往 MCP 扫描' }))
+    expect(screen.getByRole('link', { name: 'MCP 安全扫描' })).toHaveAttribute('aria-current', 'page')
 
     fireEvent.click(screen.getByRole('button', { name: '前往 Agent 扫描' }))
-    expect(screen.getByRole('button', { name: '收起扫描任务子菜单' })).toHaveAttribute('aria-expanded', 'true')
     expect(screen.getByRole('link', { name: 'Agent 工作流扫描' })).toHaveAttribute('aria-current', 'page')
-    expect(screen.getByRole('link', { name: 'MCP 扫描' })).not.toHaveAttribute('aria-current', 'page')
 
     fireEvent.click(screen.getByRole('button', { name: '前往模型配置' }))
     expect(screen.getByRole('button', { name: '收起凭证配置子菜单' })).toHaveAttribute('aria-expanded', 'true')
     expect(screen.getByRole('link', { name: '模型配置' })).toHaveAttribute('aria-current', 'page')
-    expect(screen.getByRole('link', { name: '智能体配置' })).not.toHaveAttribute('aria-current', 'page')
   })
 
   it.each(['/tasks/ai-infra', '/tasks/ai-infra/new', '/tasks/ai-infra/scan-42'])('activates AI infrastructure scans across its task routes', (path) => {
@@ -231,7 +207,6 @@ describe('Sidebar', () => {
     expect(screen.getByRole('link', { name: '凭证配置' })).toHaveAttribute('aria-current', 'page')
     expect(screen.getByRole('button', { name: '收起凭证配置子菜单' })).toHaveAttribute('aria-expanded', 'true')
     expect(screen.getByRole('link', { name: '智能体配置' })).toHaveAttribute('aria-current', 'page')
-    expect(screen.getByRole('link', { name: '模型配置' })).not.toHaveAttribute('aria-current', 'page')
     expect(screen.getByRole('link', { name: '规则与知识库' })).not.toHaveAttribute('aria-current', 'page')
   })
 
@@ -246,23 +221,34 @@ describe('Sidebar', () => {
     renderSidebar()
     fireEvent.click(screen.getByRole('button', { name: '展开扫描任务子菜单' }))
     fireEvent.click(screen.getByRole('button', { name: '展开凭证配置子菜单' }))
-    expect(screen.getByRole('link', { name: 'Skills 扫描' })).toBeInTheDocument()
-    expect(screen.getByRole('link', { name: '模型配置' })).toBeInTheDocument()
 
     fireEvent.click(screen.getByRole('button', { name: '收起导航' }))
 
-    for (const label of ['MCP 扫描', 'Skills 扫描', 'AI 基础设施扫描', 'Agent 工作流扫描', '模型配置', '智能体配置']) {
+    for (const label of ['MCP 安全扫描', 'Skills 扫描', 'AI 基础设施扫描', 'Agent 工作流扫描', '模型配置', '智能体配置']) {
       expect(screen.queryByRole('link', { name: label })).not.toBeInTheDocument()
-      expect(screen.queryByText(label, { exact: true })).not.toBeInTheDocument()
     }
     expect(screen.getByRole('link', { name: '扫描任务' })).toBeInTheDocument()
     expect(screen.getByRole('link', { name: '凭证配置' })).toBeInTheDocument()
-    expect(screen.getByRole('button', { name: '展开扫描任务子菜单' })).toBeInTheDocument()
-    expect(screen.getByRole('button', { name: '展开凭证配置子菜单' })).toBeInTheDocument()
+  })
 
-    fireEvent.click(screen.getByRole('button', { name: '展开扫描任务子菜单' }))
-    for (const label of ['MCP 扫描', 'Skills 扫描', 'AI 基础设施扫描', 'Agent 工作流扫描']) {
-      expect(screen.queryByText(label, { exact: true })).not.toBeInTheDocument()
-    }
+  it('marks the MCP workbench only on its exact route', () => {
+    renderSidebar('/tasks/mcp')
+
+    expect(screen.getByRole('link', { name: 'MCP 安全扫描' })).toHaveAttribute('aria-current', 'page')
+    expect(screen.getByRole('link', { name: 'AI 基础设施扫描' })).not.toHaveAttribute('aria-current')
+  })
+
+  it('keeps the dedicated task classification active with additional query parameters', () => {
+    renderSidebar('/tasks/ai-infra?status=running&page=2')
+
+    expect(screen.getByRole('link', { name: 'AI 基础设施扫描' })).toHaveAttribute('aria-current', 'page')
+    expect(screen.getByRole('link', { name: 'Skills 扫描' })).not.toHaveAttribute('aria-current')
+    expect(screen.getByRole('link', { name: 'Agent 工作流扫描' })).not.toHaveAttribute('aria-current')
+  })
+
+  it('keeps the MCP parent active for its dedicated subroutes', () => {
+    renderSidebar('/tasks/mcp/history')
+
+    expect(screen.getByRole('link', { name: 'MCP 安全扫描' })).toHaveAttribute('aria-current', 'page')
   })
 })

@@ -13,6 +13,7 @@ import type {
   TaskDetail,
   TaskInputSummary,
   TaskListResponse,
+  MCPSourceKind,
   TaskStatus,
   TaskSummary,
   TaskType,
@@ -40,6 +41,7 @@ const TASK_STATUSES = new Set<TaskStatus>([
 ])
 const TERMINAL_STATUSES = new Set<TaskStatus>(['succeeded', 'failed', 'cancelled'])
 const MAX_POLL_COUNT = 8
+const MCP_SOURCE_KINDS = new Set<MCPSourceKind>(['repository', 'service', 'legacy_unknown'])
 const MAX_TASK_REMARK_CODE_POINTS = 2_000
 
 function recordOf(value: unknown): Record<string, unknown> | undefined {
@@ -141,6 +143,11 @@ function parseInputSummary(value: unknown, taskType?: TaskType): TaskInputSummar
   if (source.port_scan_mode !== undefined) {
     if (source.port_scan_mode !== 'fixed_ai' && source.port_scan_mode !== 'full_tcp') return undefined
     result.port_scan_mode = source.port_scan_mode
+  }
+  if (source.source_kind !== undefined) {
+    const sourceKind = boundedString(source.source_kind, 32) as MCPSourceKind | undefined
+    if (!sourceKind || !MCP_SOURCE_KINDS.has(sourceKind)) return undefined
+    result.source_kind = sourceKind
   }
   for (const [wire, key, maximum] of [
     ['thread', 'thread', 1_024],

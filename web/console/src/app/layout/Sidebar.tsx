@@ -33,7 +33,7 @@ function matchingGroupFor(pathname: string): NavigationGroupID | undefined {
   if (isPathWithin(pathname, '/tasks')) {
     return 'tasks'
   }
-  if (isPathWithin(pathname, '/models') || isPathWithin(pathname, '/knowledge/agents')) {
+  if (isPathWithin(pathname, '/models') || isPathWithin(pathname, '/knowledge/agents') || isPathWithin(pathname, '/credentials/mcp-connections')) {
     return 'credentials'
   }
   return undefined
@@ -41,7 +41,7 @@ function matchingGroupFor(pathname: string): NavigationGroupID | undefined {
 
 function isSecondaryActive(item: SecondaryNavigationItem, pathname: string, search: string) {
   const [targetPathname, targetQuery] = item.path.split('?')
-  if (item.id === 'ai-infra-scan' || item.id === 'agent-workflow-scan' || item.id === 'skills-scan') {
+  if (item.id === 'mcp-connections' || item.id === 'mcp-scan' || item.id === 'ai-infra-scan' || item.id === 'agent-workflow-scan' || item.id === 'skills-scan') {
     return isPathWithin(pathname, targetPathname)
   }
   if (pathname !== targetPathname) {
@@ -52,8 +52,17 @@ function isSecondaryActive(item: SecondaryNavigationItem, pathname: string, sear
   }
 
   const targetSearch = new URLSearchParams(targetQuery)
-  const currentSearch = new URLSearchParams(search)
-  return currentSearch.get('scan') === targetSearch.get('scan')
+  const unmatchedCurrentParameters = Array.from(new URLSearchParams(search).entries())
+  return Array.from(targetSearch.entries()).every(([targetName, targetValue]) => {
+    const matchIndex = unmatchedCurrentParameters.findIndex(
+      ([currentName, currentValue]) => currentName === targetName && currentValue === targetValue,
+    )
+    if (matchIndex === -1) {
+      return false
+    }
+    unmatchedCurrentParameters.splice(matchIndex, 1)
+    return true
+  })
 }
 
 const useStyles = makeStyles({
@@ -230,6 +239,43 @@ const useStyles = makeStyles({
     width: '24px',
     textAlign: 'center',
   },
+  childNav: {
+    display: 'flex',
+    flexDirection: 'column',
+    gap: '2px',
+    marginLeft: tokens.spacingHorizontalL,
+    paddingLeft: tokens.spacingHorizontalS,
+    borderLeft: `1px solid ${tokens.colorNeutralStroke1}`,
+  },
+  compactChildNav: {
+    marginLeft: 0,
+    paddingLeft: 0,
+    borderLeft: 0,
+  },
+  childLink: {
+    minHeight: '34px',
+    display: 'flex',
+    alignItems: 'center',
+    padding: `0 ${tokens.spacingHorizontalS}`,
+    borderRadius: tokens.borderRadiusSmall,
+    color: tokens.colorNeutralForeground2,
+    fontSize: tokens.fontSizeBase200,
+    textDecorationLine: 'none',
+    ':hover': {
+      backgroundColor: tokens.colorNeutralBackground1Hover,
+      color: tokens.colorNeutralForeground1,
+    },
+    ':focus-visible': {
+      outlineColor: tokens.colorStrokeFocus2,
+      outlineStyle: 'solid',
+      outlineWidth: '2px',
+      outlineOffset: '2px',
+    },
+  },
+  compactChildLink: {
+    justifyContent: 'center',
+    padding: 0,
+  },
   controls: {
     marginTop: 'auto',
     paddingTop: tokens.spacingVerticalXXL,
@@ -262,7 +308,7 @@ export function Sidebar({ role }: SidebarProps) {
 
   const isPrimaryActive = (item: NavigationItem) => {
     if (item.id === 'models') {
-      return isPathWithin(location.pathname, '/models') || isPathWithin(location.pathname, '/knowledge/agents')
+      return isPathWithin(location.pathname, '/models') || isPathWithin(location.pathname, '/knowledge/agents') || isPathWithin(location.pathname, '/credentials/mcp-connections')
     }
     if (item.id === 'knowledge') {
       return isPathWithin(location.pathname, '/knowledge') && !isPathWithin(location.pathname, '/knowledge/agents')

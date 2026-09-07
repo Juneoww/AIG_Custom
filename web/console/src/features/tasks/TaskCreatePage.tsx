@@ -1,6 +1,6 @@
 /**
  * 功能：提供分步任务创建、附件上传与同逻辑提交幂等重试。
- * 实现：表单只收安全参数和模型ID，附件先换取opaque ID；失败重试复用原Submission。
+ * 实现：表单只收安全参数和模型 ID；附件先换取 opaque ID；失败重试复用原Submission。
  * 输入：任务类型、目标/说明、安全参数和本地 File。
  * 输出：202 后导航到任务详情；错误时保留可核对表单但不自动重放写请求。
  * 依赖：Fluent UI、React Router、Session、任务及附件 API。
@@ -17,8 +17,8 @@ import {
   makeStyles,
   tokens,
 } from '@fluentui/react-components'
-import { useEffect, useMemo, useRef, useState, type FormEvent } from 'react'
-import { useNavigate } from 'react-router-dom'
+import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from 'react'
+import { Navigate, useLocation, useNavigate } from 'react-router-dom'
 
 import { useSession } from '../auth/session'
 import { ApiError } from '../../shared/api/errors'
@@ -81,7 +81,9 @@ export interface TaskCreatePageProps {
 }
 
 export function TaskCreatePage({ fixedTaskType, returnTo }: TaskCreatePageProps) {
-  const [taskType, setTaskType] = useState<TaskCreateRequest['task_type']>('mcp_scan')
+  const [taskType, setTaskType] = useState<TaskCreateRequest['task_type']>('ai_infra_scan')
+  const location = useLocation()
+  if (!fixedTaskType && ['mcp_scan', 'Mcp-Scan'].includes(new URLSearchParams(location.search).get('task_type') ?? '')) return <Navigate replace to="/tasks/mcp/new" />
   if ((fixedTaskType ?? taskType) === 'skills_scan') {
     return <SkillsTaskCreatePage returnTo={returnTo ?? (fixedTaskType ? '/tasks/skills' : '/tasks')} onTaskTypeChange={fixedTaskType ? undefined : setTaskType} />
   }
@@ -106,7 +108,6 @@ function StandardTaskCreatePage({ fixedTaskType, returnTo, taskType, setTaskType
   const [modelAvailability, setModelAvailability] = useState<GovernedModelAvailability>('available')
   const [evalModelID, setEvalModelID] = useState('')
   const [agentID, setAgentID] = useState('')
-  const [thread, setThread] = useState('4')
   const [timeout, setTimeoutValue] = useState('300')
   const [portScanMode, setPortScanMode] = useState<InfrastructurePortScanMode>('fixed_ai')
   const [numPrompts, setNumPrompts] = useState('100')
@@ -118,29 +119,55 @@ function StandardTaskCreatePage({ fixedTaskType, returnTo, taskType, setTaskType
   const submissionRef = useRef<TaskSubmission | null>(null)
   const mutexRef = useRef(false)
   const mountedRef = useRef(true)
-  const controllerRef = useRef<AbortController | null>(null)
   const effectiveTaskType = fixedTaskType ?? taskType
   const isDedicatedAI = fixedTaskType === 'ai_infra_scan'
+  const uploadControllerRef = useRef<AbortController | null>(null)
+  const submitControllerRef = useRef<AbortController | null>(null)
+  const downloadControllerRef = useRef<AbortController | null>(null)
+  const configurationVersionRef = useRef(0)
   const targetPreview = useMemo(
     () => (effectiveTaskType === 'ai_infra_scan' ? previewTargetExpressions(content) : null),
     [content, effectiveTaskType],
   )
   const remarkCodePointCount = codePointLength(remark)
 
+  const invalidateSubmission = () => {
+    if (!mutexRef.current) submissionRef.current = null
+  }
+
+  const clearAttachmentContext = useCallback(() => {
+    uploadControllerRef.current?.abort()
+    uploadControllerRef.current = null
+    setFiles([])
+    setAttachments([])
+    setUploading(false)
+  }, [])
+
+  const transitionTaskType = (nextTaskType: TaskCreateRequest['task_type']) => {
+    if (submitting || nextTaskType === 'mcp_scan') return
+    configurationVersionRef.current += 1
+    clearAttachmentContext()
+    setTaskType(nextTaskType)
+    invalidateSubmission()
+  }
+
+  const handleContentChange = (value: string) => {
+    setContent(value)
+    invalidateSubmission()
+  }
+
   useEffect(() => {
     mountedRef.current = true
     return () => {
       mountedRef.current = false
-      controllerRef.current?.abort()
+      uploadControllerRef.current?.abort()
+      submitControllerRef.current?.abort()
+      downloadControllerRef.current?.abort()
     }
   }, [])
 
-  const invalidateSubmission = () => {
-    submissionRef.current = null
-  }
-
   const handleUpload = async () => {
-    if (uploading || files.length === 0) return
+    if (uploading || submitting || files.length === 0) return
     setError('')
     if (isDedicatedAI && files.some((file) => file.size > MAX_AI_TARGET_LIST_BYTES)) {
       setError('目标清单文件不能超过 1 MiB，请缩小后重试。')
@@ -152,23 +179,28 @@ function StandardTaskCreatePage({ fixedTaskType, returnTo, taskType, setTaskType
       setError(caught instanceof Error ? caught.message : '附件校验失败。')
       return
     }
+    const uploadConfigurationVersion = configurationVersionRef.current
     const controller = new AbortController()
-    controllerRef.current?.abort()
-    controllerRef.current = controller
+    uploadControllerRef.current?.abort()
+    uploadControllerRef.current = controller
     setUploading(true)
     try {
       for (const file of files) {
         const uploaded = await uploadAttachment(file, controller.signal)
-        if (!mountedRef.current || controller.signal.aborted) return
+        if (!mountedRef.current || controller.signal.aborted || configurationVersionRef.current !== uploadConfigurationVersion) return
         setAttachments((current) => [...current, uploaded])
         setFiles((current) => current.filter((candidate) => candidate !== file))
         invalidateSubmission()
       }
     } catch {
-      if (mountedRef.current && !controller.signal.aborted) setError('附件上传失败，请核对后显式重试。')
+      if (mountedRef.current && !controller.signal.aborted && configurationVersionRef.current === uploadConfigurationVersion) {
+        setError('附件上传失败，请核对后显式重试。')
+      }
     } finally {
-      if (controllerRef.current === controller) controllerRef.current = null
-      if (mountedRef.current) setUploading(false)
+      if (uploadControllerRef.current === controller) {
+        uploadControllerRef.current = null
+        if (mountedRef.current) setUploading(false)
+      }
     }
   }
 
@@ -191,8 +223,7 @@ function StandardTaskCreatePage({ fixedTaskType, returnTo, taskType, setTaskType
     setSubmitting(true)
     setError('')
     const controller = new AbortController()
-    controllerRef.current?.abort()
-    controllerRef.current = controller
+    submitControllerRef.current = controller
     try {
       const hasManualTarget = content.trim().length > 0
       const hasImportedTargetList = attachments.length > 0
@@ -204,12 +235,6 @@ function StandardTaskCreatePage({ fixedTaskType, returnTo, taskType, setTaskType
         throw new Error('任务说明不能超过 2,000 个字符。')
       }
       const params: TaskCreateRequest['params'] = {}
-      if (effectiveTaskType === 'mcp_scan') {
-        if (modelID.trim()) params.model_id = modelID.trim()
-        const parsed = Number(thread)
-        if (!Number.isInteger(parsed) || parsed < 1 || parsed > 1_024) throw new Error('请填写有效的并发数。')
-        params.thread = parsed
-      }
       if (effectiveTaskType === 'ai_infra_scan') {
         if (modelID.trim()) params.model_id = modelID.trim()
         const parsed = Number(timeout)
@@ -260,7 +285,7 @@ function StandardTaskCreatePage({ fixedTaskType, returnTo, taskType, setTaskType
         }
       }
     } finally {
-      if (controllerRef.current === controller) controllerRef.current = null
+      if (submitControllerRef.current === controller) submitControllerRef.current = null
       mutexRef.current = false
       if (mountedRef.current) setSubmitting(false)
     }
@@ -268,15 +293,15 @@ function StandardTaskCreatePage({ fixedTaskType, returnTo, taskType, setTaskType
 
   const handleDownload = async (attachmentID: string) => {
     const controller = new AbortController()
-    controllerRef.current?.abort()
-    controllerRef.current = controller
+    downloadControllerRef.current?.abort()
+    downloadControllerRef.current = controller
     setError('')
     try {
       await downloadAttachment(attachmentID, role, controller.signal)
     } catch {
       if (mountedRef.current && !controller.signal.aborted) setError('附件下载失败，请稍后重试。')
     } finally {
-      if (controllerRef.current === controller) controllerRef.current = null
+      if (downloadControllerRef.current === controller) downloadControllerRef.current = null
     }
   }
 
@@ -418,16 +443,16 @@ function StandardTaskCreatePage({ fixedTaskType, returnTo, taskType, setTaskType
       <PageHeader title="创建扫描任务" description="按类型、参数、附件和确认顺序提交；浏览器不接收模型密钥。" />
       {error ? <MessageBar intent="error"><MessageBarBody>{error}</MessageBarBody></MessageBar> : null}
       <form className={styles.form} onSubmit={submit}>
-        <fieldset className={styles.step} aria-label="第一步：任务类型">
+        <fieldset className={styles.step} aria-label="第一步：任务类型" disabled={submitting}>
           <Text weight="semibold">第一步：任务类型</Text>
-          <TaskTypeSelector value={taskType} onChange={(type) => { setTaskType(type); invalidateSubmission() }} disabled={uploading || submitting} />
+          <TaskTypeSelector value={taskType} onChange={transitionTaskType} disabled={submitting} />
         </fieldset>
-        <fieldset className={styles.step} aria-label="第二步：参数">
+        <fieldset className={styles.step} aria-label="第二步：参数" disabled={submitting}>
           <Text weight="semibold">第二步：参数</Text>
           <Field label="扫描目标或任务说明" required>
             <Textarea
               value={content}
-              onChange={(_, data) => { setContent(data.value); invalidateSubmission() }}
+              onChange={(_, data) => handleContentChange(data.value)}
               resize="vertical"
               aria-invalid={effectiveTaskType === 'ai_infra_scan' && targetPreview && !targetPreview.ok ? true : undefined}
               aria-describedby={effectiveTaskType === 'ai_infra_scan' ? 'ai-infra-target-guidance ai-infra-target-preview' : undefined}
@@ -458,7 +483,7 @@ function StandardTaskCreatePage({ fixedTaskType, returnTo, taskType, setTaskType
                 <option value="zh_CN">中文</option><option value="en">英文</option>
               </Select>
             </Field>
-            {effectiveTaskType === 'mcp_scan' || effectiveTaskType === 'ai_infra_scan' ? (
+            {effectiveTaskType === 'ai_infra_scan' ? (
               <Field label="模型 ID" hint="仅填写平台模型 ID，不填写密钥。">
                 <Input value={modelID} onChange={(_, data) => { setModelID(data.value); invalidateSubmission() }} autoComplete="off" />
               </Field>
@@ -478,7 +503,6 @@ function StandardTaskCreatePage({ fixedTaskType, returnTo, taskType, setTaskType
                 <Input value={evalModelID} onChange={(_, data) => { setEvalModelID(data.value); invalidateSubmission() }} autoComplete="off" />
               </Field>
             ) : null}
-            {effectiveTaskType === 'mcp_scan' ? <Field label="并发数"><Input type="number" min={1} max={1024} value={thread} onChange={(_, data) => { setThread(data.value); invalidateSubmission() }} /></Field> : null}
             {effectiveTaskType === 'ai_infra_scan' ? <Field label="超时秒数"><Input type="number" min={1} max={86400} value={timeout} onChange={(_, data) => { setTimeoutValue(data.value); invalidateSubmission() }} /></Field> : null}
             {effectiveTaskType === 'ai_infra_scan' ? (
               <div className={styles.portScanMode}>
@@ -504,17 +528,17 @@ function StandardTaskCreatePage({ fixedTaskType, returnTo, taskType, setTaskType
           </div>
         </fieldset>
         <fieldset className={styles.step} aria-label="第三步：附件">
-          <Text weight="semibold">第三步：附件</Text>
-          <Field label="选择附件" hint="单文件最大 50 MiB，超过 5 MiB 时自动分片。">
-            <input type="file" multiple disabled={uploading || submitting} onChange={(event) => setFiles(Array.from(event.currentTarget.files ?? []))} />
-          </Field>
-          <Button type="button" appearance="secondary" disabled={uploading || files.length === 0} onClick={() => void handleUpload()}>{uploading ? '正在上传' : '上传附件'}</Button>
-          {attachments.map((attachment) => (
-            <div className={styles.attachment} key={attachment.id}>
-              <Text>{attachment.filename}（{attachment.size} 字节）</Text>
-              {role !== 'auditor' ? <Button type="button" appearance="subtle" disabled={uploading || submitting} onClick={() => void handleDownload(attachment.id)}>下载附件 {attachment.filename}</Button> : null}
-            </div>
-          ))}
+            <Text weight="semibold">第三步：附件</Text>
+            <Field label="选择附件" hint="单文件最大 50 MiB，超过 5 MiB 时自动分片。">
+              <input type="file" multiple disabled={uploading || submitting} onChange={(event) => { setFiles(Array.from(event.currentTarget.files ?? [])); invalidateSubmission() }} />
+            </Field>
+            <Button type="button" appearance="secondary" disabled={uploading || submitting || files.length === 0} onClick={() => void handleUpload()}>{uploading ? '正在上传' : '上传附件'}</Button>
+            {attachments.map((attachment) => (
+              <div className={styles.attachment} key={attachment.id}>
+                <Text>{attachment.filename}（{attachment.size} 字节）</Text>
+                {role !== 'auditor' ? <Button type="button" appearance="subtle" disabled={uploading || submitting} onClick={() => void handleDownload(attachment.id)}>下载附件 {attachment.filename}</Button> : null}
+              </div>
+            ))}
         </fieldset>
         <fieldset className={styles.step} aria-label="第四步：确认">
           <Text weight="semibold">第四步：确认</Text>

@@ -63,7 +63,7 @@ func TestProtectedTaskHandlerUsesCookieSubjectAndSafeOwner(t *testing.T) {
 	router, tokens, engine := newTaskHandlerFixture(t)
 
 	created := performTaskJSON(t, router, tokens["alice"], http.MethodPost, "/tasks", "owner-key", map[string]any{
-		"task_type": "mcp_scan", "content": "scan", "username": "mallory",
+		"task_type": "ai_infra_scan", "content": "https://example.com/service", "params": map[string]any{"timeout": 300}, "username": "mallory",
 	})
 	require.Equal(t, http.StatusAccepted, created.Code, created.Body.String())
 	var task TaskDetail
@@ -88,15 +88,15 @@ func TestTaskCreateAcceptedResponseUsesSafeDetailWire(t *testing.T) {
 	router, tokens := newTaskHandlerFixtureWithEngine(t, engine)
 
 	response := performTaskJSON(t, router, tokens["alice"], http.MethodPost, "/tasks", "safe-create-accepted", map[string]any{
-		"task_type": "mcp_scan", "content": "content-sentinel", "country_iso_code": "zh",
-		"params": map[string]any{"thread": 7},
+		"task_type": "ai_infra_scan", "content": "https://github.com/example/content-sentinel.git", "country_iso_code": "zh",
+		"params": map[string]any{"timeout": 300, "port_scan_mode": "fixed_ai"},
 	})
 	require.Equal(t, http.StatusAccepted, response.Code, response.Body.String())
 
 	assertSafeTaskCreateDetail(t, response.Body.Bytes(), map[string]any{
-		"task_type":     "mcp_scan",
-		"input_summary": map[string]any{"language": "zh", "thread": float64(7)},
-	}, "user-alice", "content-sentinel", "engine-session-sentinel")
+		"task_type":     "ai_infra_scan",
+		"input_summary": map[string]any{"language": "zh", "timeout": float64(300), "target_count": float64(1), "port_scan_mode": "fixed_ai"},
+	}, "user-alice", "https://github.com/example/content-sentinel.git", "engine-session-sentinel")
 	assert.Zero(t, engine.statusReads.Load(), "rendering the response must not read the engine")
 }
 
@@ -155,8 +155,8 @@ func TestTaskCreateDispatchFailureUsesFixedErrorAndSafeTaskWire(t *testing.T) {
 	router, tokens := newTaskHandlerFixtureWithEngine(t, engine)
 
 	response := performTaskJSON(t, router, tokens["alice"], http.MethodPost, "/tasks", "safe-create-unavailable", map[string]any{
-		"task_type": "mcp_scan", "content": "failure-content-sentinel", "remark": "  调度失败时仍可见  ",
-		"params": map[string]any{"thread": 4},
+		"task_type": "ai_infra_scan", "remark": "  调度失败时仍可见  ", "content": "https://github.com/example/failure-content-sentinel.git",
+		"params": map[string]any{"timeout": 300, "port_scan_mode": "fixed_ai"},
 	})
 	require.Equal(t, http.StatusServiceUnavailable, response.Code, response.Body.String())
 
@@ -169,10 +169,10 @@ func TestTaskCreateDispatchFailureUsesFixedErrorAndSafeTaskWire(t *testing.T) {
 	encoded, err := json.Marshal(task)
 	require.NoError(t, err)
 	assertSafeTaskCreateDetail(t, encoded, map[string]any{
-		"task_type":     "mcp_scan",
+		"task_type":     "ai_infra_scan",
 		"remark":        "调度失败时仍可见",
-		"input_summary": map[string]any{"thread": float64(4)},
-	}, "user-alice", "failure-content-sentinel", "dispatch-error-sentinel")
+		"input_summary": map[string]any{"timeout": float64(300), "target_count": float64(1), "port_scan_mode": "fixed_ai"},
+	}, "user-alice", "https://github.com/example/failure-content-sentinel.git", "dispatch-error-sentinel")
 	assert.Zero(t, engine.statusReads.Load(), "rendering the response must not read the engine")
 }
 
@@ -190,7 +190,7 @@ func TestTaskCreateMapsUnavailableAttachmentsToSafeBadRequest(t *testing.T) {
 	} {
 		t.Run(name, func(t *testing.T) {
 			response := performTaskJSON(t, router, tokens["alice"], http.MethodPost, "/tasks", "attachment-"+strings.ReplaceAll(name, " ", "-"), map[string]any{
-				"task_type": "mcp_scan", "content": "safe scan", "attachment_ids": []string{attachmentID},
+				"task_type": "ai_infra_scan", "content": "", "params": map[string]any{"timeout": 300}, "attachment_ids": []string{attachmentID},
 			})
 			require.Equal(t, http.StatusBadRequest, response.Code, response.Body.String())
 			assert.JSONEq(t, `{"error":"attachment unavailable"}`, response.Body.String())
@@ -204,8 +204,8 @@ func TestTaskCreateMapsUnavailableAttachmentsToSafeBadRequest(t *testing.T) {
 
 func TestProtectedTaskListRejectsHeadersAndAppliesOwnerRBAC(t *testing.T) {
 	router, tokens, _ := newTaskHandlerFixture(t)
-	aliceCreated := performTaskJSON(t, router, tokens["alice"], http.MethodPost, "/tasks", "list-alice", map[string]any{"task_type": "mcp_scan", "content": "scan"})
-	bobCreated := performTaskJSON(t, router, tokens["bob"], http.MethodPost, "/tasks", "list-bob", map[string]any{"task_type": "mcp_scan", "content": "scan"})
+	aliceCreated := performTaskJSON(t, router, tokens["alice"], http.MethodPost, "/tasks", "list-alice", map[string]any{"task_type": "ai_infra_scan", "content": "https://example.com/alice", "params": map[string]any{"timeout": 300}})
+	bobCreated := performTaskJSON(t, router, tokens["bob"], http.MethodPost, "/tasks", "list-bob", map[string]any{"task_type": "ai_infra_scan", "content": "https://example.com/bob", "params": map[string]any{"timeout": 300}})
 	require.Equal(t, http.StatusAccepted, aliceCreated.Code)
 	require.Equal(t, http.StatusAccepted, bobCreated.Code)
 
@@ -229,7 +229,7 @@ func TestProtectedTaskListRejectsHeadersAndAppliesOwnerRBAC(t *testing.T) {
 func TestProtectedTaskHandlerRequiresIdempotencyKey(t *testing.T) {
 	router, tokens, _ := newTaskHandlerFixture(t)
 	response := performTaskJSON(t, router, tokens["alice"], http.MethodPost, "/tasks", "", map[string]any{
-		"task_type": "mcp_scan", "content": "scan",
+		"task_type": "ai_infra_scan", "content": "https://example.com/service",
 	})
 	assert.Equal(t, http.StatusBadRequest, response.Code)
 	assert.JSONEq(t, `{"error":"invalid task request"}`, response.Body.String())

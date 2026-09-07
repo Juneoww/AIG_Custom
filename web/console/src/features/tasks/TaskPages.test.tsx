@@ -6,7 +6,7 @@
  * 依赖：Testing Library、TanStack Query、React Router 与 SessionProvider。
  */
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
-import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { StrictMode } from 'react'
 import { MemoryRouter, Route, Routes, useLocation } from 'react-router-dom'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
@@ -123,6 +123,8 @@ beforeEach(() => {
 })
 
 afterEach(() => {
+  // StrictMode 卸载会重放布局引用；先卸载页面，再恢复 ResizeObserver 等浏览器替身。
+  cleanup()
   vi.useRealTimers()
   vi.unstubAllGlobals()
   vi.restoreAllMocks()
@@ -171,7 +173,7 @@ describe('任务页面', () => {
     expect(table).toBeInTheDocument()
     expect(within(table).getByText('执行中')).toBeVisible()
     expect(within(table).getByText('调度状态待确认')).toBeVisible()
-    expect(within(table).getByRole('link', { name: '查看任务 task-running' })).toHaveAttribute('href', '/tasks/task-running')
+    expect(within(table).getByRole('link', { name: '查看任务 task-running' })).toHaveAttribute('href', '/tasks/mcp/task-running')
     for (const { id } of operationalTasks) {
       expect(screen.getByRole('link', { name: `查看任务 ${id}` })).toBeInTheDocument()
     }
@@ -454,6 +456,28 @@ describe('任务页面', () => {
     expect(await screen.findByRole('button', { name: '取消任务' })).toBeInTheDocument()
   })
 
+  it('MCP 详情只展示白名单来源类别，不展示目标或授权材料', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(jsonResponse({
+      ...task,
+      input_summary: {
+        source_kind: 'service',
+        endpoint: 'https://private.example/mcp',
+        authorization_confirmed: true,
+      },
+    })))
+    renderPage(
+      <TaskDetailPage />,
+      { id: 'user-1', username: 'alice', role: 'user', must_change_password: false },
+      '/tasks/task-opaque-1',
+      '/tasks/:taskId',
+    )
+
+    expect(await screen.findByText('MCP 扫描对象')).toBeInTheDocument()
+    expect(screen.getByText('受控运行服务')).toBeInTheDocument()
+    expect(screen.queryByText('https://private.example/mcp')).not.toBeInTheDocument()
+    expect(screen.queryByText('authorization_confirmed')).not.toBeInTheDocument()
+  })
+
   it('专属 AI 基础设施详情显示安全摘要并恢复受治理模型名称', async () => {
     const fetchMock = vi.fn()
       .mockResolvedValueOnce(jsonResponse(aiInfraDetail))
@@ -707,6 +731,15 @@ describe('任务页面', () => {
     expect(screen.getByRole('group', { name: '第二步：参数' })).toBeInTheDocument()
     expect(screen.getByRole('group', { name: '第三步：附件' })).toBeInTheDocument()
     expect(screen.queryByLabelText(/密钥|Token|API Key/i)).not.toBeInTheDocument()
+  })
+
+  it.each(['mcp_scan', 'Mcp-Scan'])('旧 MCP 创建链接 %s 清除参数并跳到专属创建页', (type) => {
+    const fetcher = vi.fn(() => new Promise<Response>(() => undefined))
+    vi.stubGlobal('fetch', fetcher)
+    renderPage(<TaskCreatePage />, { id: 'user-1', username: 'alice', role: 'user', must_change_password: false }, `/tasks/new?task_type=${type}&endpoint=SECRET`)
+    expect(screen.getByLabelText('当前任务路由')).toHaveTextContent('/tasks/mcp/new')
+    expect(screen.queryByLabelText('MCP 扫描对象')).not.toBeInTheDocument()
+    expect(fetcher).not.toHaveBeenCalled()
   })
 
   it('专属 AI 基础设施创建页以三段式信息引导组织扫描对象、配置和提交', () => {
@@ -1029,6 +1062,9 @@ describe('任务页面', () => {
       { id: 'user-1', username: 'alice', role: 'user', must_change_password: false },
       '/tasks/new',
     )
+    fireEvent.change(screen.getByRole('combobox', { name: '扫描类型' }), { target: { value: 'agent_scan' } })
+    fireEvent.change(screen.getByRole('textbox', { name: 'Agent 配置 ID' }), { target: { value: 'agent-1' } })
+    fireEvent.change(screen.getByRole('textbox', { name: '裁判模型 ID' }), { target: { value: 'model-1' } })
     expect(screen.queryByRole('combobox', { name: '端口扫描模式' })).not.toBeInTheDocument()
     fireEvent.change(screen.getByRole('textbox', { name: '扫描目标或任务说明' }), { target: { value: 'https://example.test' } })
 
@@ -1036,16 +1072,11 @@ describe('任务页面', () => {
 
     await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1))
     const body = JSON.parse(String((fetchMock.mock.calls[0]?.[1] as RequestInit).body))
-    expect(body.params).toEqual({ thread: 4 })
+    expect(body.params).toEqual({ agent_id: 'agent-1', eval_model_id: 'model-1' })
     expect(body.params).not.toHaveProperty('port_scan_mode')
   })
 
   it.each([
-    {
-      taskType: 'mcp_scan',
-      fields: [] as Array<[string, string]>,
-      params: { thread: 4 },
-    },
     {
       taskType: 'model_redteam_report',
       fields: [
@@ -1229,17 +1260,12 @@ describe('任务页面', () => {
       '/tasks/new',
     )
 
-    expect(screen.queryByText('AI 基础设施扫描目标格式')).not.toBeInTheDocument()
-    expect(screen.queryByRole('combobox', { name: '端口扫描模式' })).not.toBeInTheDocument()
-
-    fireEvent.change(screen.getByRole('combobox', { name: '扫描类型' }), { target: { value: 'ai_infra_scan' } })
-
     expect(screen.getByText('AI 基础设施扫描目标格式')).toBeInTheDocument()
     expect(screen.getByText(/最多 65,536 个展开后的唯一目标/)).toBeInTheDocument()
     expect(screen.getByRole('combobox', { name: '端口扫描模式' })).toHaveValue('fixed_ai')
     expect(screen.getByText('固定 AI 端口：11434、1337、7000–9000、18789（共 2,004 个端口）。')).toBeInTheDocument()
 
-    fireEvent.change(screen.getByRole('combobox', { name: '扫描类型' }), { target: { value: 'mcp_scan' } })
+    fireEvent.change(screen.getByRole('combobox', { name: '扫描类型' }), { target: { value: 'agent_scan' } })
 
     expect(screen.queryByText('AI 基础设施扫描目标格式')).not.toBeInTheDocument()
     expect(screen.queryByRole('combobox', { name: '端口扫描模式' })).not.toBeInTheDocument()

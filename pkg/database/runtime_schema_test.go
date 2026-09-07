@@ -76,6 +76,102 @@ func TestRuntimeStoreInitializationValidatesRequiredObjectsWithoutDDL(t *testing
 	assert.False(t, db.Migrator().HasIndex(&Session{}, "idx_sessions_status"), "runtime initialization must not recreate indexes")
 }
 
+func TestRuntimeSchemaRejectsVersionNineWithoutMCPConnectionSchemaDDL(t *testing.T) {
+	db := openPostgresTestDB(t)
+	resetPostgresTestDB(t, db)
+	dropMCPConnectionSchemaTables(t, db)
+	require.NoError(t, db.AutoMigrate(&SchemaMigration{}))
+	for _, apply := range []func(*gorm.DB) error{
+		migrateInitialSchema,
+		migrateIdentitySchema,
+		migrateGovernanceSchema,
+		migrateAuditCompletionSchema,
+		migratePlatformTaskSchema,
+		migratePlatformTaskDispatchClaimSchema,
+		migrateReportSchema,
+		migratePlatformTaskDashboardIndexes,
+		migratePlatformAttachmentLifecycle,
+	} {
+		require.NoError(t, apply(db))
+	}
+	for version := int64(1); version <= 9; version++ {
+		require.NoError(t, db.Create(&SchemaMigration{Version: version}).Error)
+	}
+
+	beforeVersions := migrationVersions(t, db)
+	beforeTables := mcpConnectionRuntimeTablePresence(db)
+	for table, present := range beforeTables {
+		assert.Falsef(t, present, "v9 fixture must not include %s", table)
+	}
+	err := ValidateRuntimeSchema(db)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "aig migrate")
+	assert.Equal(t, beforeVersions, migrationVersions(t, db), "runtime validation must not update migration history")
+	assert.Equal(t, beforeTables, mcpConnectionRuntimeTablePresence(db), "runtime validation must not create MCP schema tables")
+}
+
+func TestRuntimeSchemaRejectsMissingMCPProbeRateLimitColumnWithoutDDL(t *testing.T) {
+	db := openPostgresTestDB(t)
+	resetPostgresTestDB(t, db)
+	require.NoError(t, Migrate(db))
+	require.NoError(t, db.Exec("ALTER TABLE platform_mcp_connection_configs DROP COLUMN last_probe_started_at").Error)
+	t.Cleanup(func() {
+		_ = db.Exec("ALTER TABLE platform_mcp_connection_configs ADD COLUMN IF NOT EXISTS last_probe_started_at TIMESTAMPTZ").Error
+	})
+	beforeVersions := migrationVersions(t, db)
+
+	err := ValidateRuntimeSchema(db)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "platform_mcp_connection_configs.last_probe_started_at")
+	assert.Equal(t, beforeVersions, migrationVersions(t, db), "runtime validation must not update migration history")
+	assert.False(t, db.Migrator().HasColumn("platform_mcp_connection_configs", "last_probe_started_at"), "runtime validation must not repair the v11 column")
+}
+
+func TestRuntimeSchemaRejectsIncompatibleMCPIndexesWithoutDDL(t *testing.T) {
+	db := openPostgresTestDB(t)
+	for _, requirement := range mcpConnectionSchemaTestIndexRequirements {
+		t.Run(requirement.name, func(t *testing.T) {
+			resetPostgresTestDB(t, db)
+			dropMCPConnectionSchemaTables(t, db)
+			require.NoError(t, Migrate(db))
+			require.NoError(t, db.Exec("DROP INDEX "+requirement.name).Error)
+			require.NoError(t, db.Exec(requirement.incompatibleCreateStatement()).Error)
+
+			beforeVersions := migrationVersions(t, db)
+			beforeCatalog := mcpConnectionRuntimeCatalogState(t, db)
+			err := ValidateRuntimeSchema(db)
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), requirement.name)
+			assert.Equal(t, beforeVersions, migrationVersions(t, db), "runtime validation must not update migration history")
+			assert.Equal(t, beforeCatalog, mcpConnectionRuntimeCatalogState(t, db), "runtime validation must not repair MCP indexes")
+		})
+	}
+}
+
+func TestRuntimeSchemaRejectsDeferrableUniqueMCPIndexesWithoutDDL(t *testing.T) {
+	db := openPostgresTestDB(t)
+	for _, requirement := range mcpConnectionSchemaTestIndexRequirements {
+		if !requirement.unique {
+			continue
+		}
+		t.Run(requirement.name, func(t *testing.T) {
+			resetPostgresTestDB(t, db)
+			dropMCPConnectionSchemaTables(t, db)
+			t.Cleanup(func() { dropMCPConnectionSchemaTables(t, db) })
+			require.NoError(t, Migrate(db))
+			replaceMCPIndexWithDeferrableUniqueConstraint(t, db, requirement)
+
+			beforeVersions := migrationVersions(t, db)
+			beforeCatalog := mcpConnectionRuntimeCatalogState(t, db)
+			err := ValidateRuntimeSchema(db)
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), requirement.name)
+			assert.Equal(t, beforeVersions, migrationVersions(t, db), "runtime validation must not update migration history")
+			assert.Equal(t, beforeCatalog, mcpConnectionRuntimeCatalogState(t, db), "runtime validation must not repair MCP indexes")
+		})
+	}
+}
+
 func TestRuntimeSchemaRejectsMissingDispatchClaimColumnWithoutDDL(t *testing.T) {
 	db := openPostgresTestDB(t)
 	resetPostgresTestDB(t, db)
@@ -336,4 +432,43 @@ func runtimeTablePresence(db *gorm.DB) map[string]bool {
 		presence[table] = db.Migrator().HasTable(table)
 	}
 	return presence
+}
+
+func mcpConnectionRuntimeTablePresence(db *gorm.DB) map[string]bool {
+	tables := []string{
+		"platform_mcp_connection_configs",
+		"platform_mcp_connection_versions",
+		"platform_mcp_task_bindings",
+		"platform_mcp_runtime_capabilities",
+		"platform_idempotency_records",
+	}
+	presence := make(map[string]bool, len(tables))
+	for _, table := range tables {
+		presence[table] = db.Migrator().HasTable(table)
+	}
+	return presence
+}
+
+func mcpConnectionRuntimeCatalogState(t *testing.T, db *gorm.DB) []string {
+	t.Helper()
+	var rows []struct {
+		Object string `gorm:"column:object"`
+	}
+	require.NoError(t, db.Raw(`
+SELECT 'index:' || tablename || '.' || indexname || ':' || indexdef AS object
+FROM pg_catalog.pg_indexes
+WHERE schemaname = current_schema()
+  AND tablename IN (
+    'platform_mcp_connection_configs',
+    'platform_mcp_connection_versions',
+    'platform_mcp_task_bindings',
+    'platform_mcp_runtime_capabilities',
+    'platform_idempotency_records'
+  )
+ORDER BY object`).Scan(&rows).Error)
+	objects := make([]string, len(rows))
+	for index, row := range rows {
+		objects[index] = row.Object
+	}
+	return objects
 }

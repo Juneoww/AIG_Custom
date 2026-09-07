@@ -16,6 +16,8 @@ package database
 
 import (
 	"encoding/json"
+	"fmt"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -80,7 +82,7 @@ func TestMigrationAppliesIdentitySchemaAsVersionTwo(t *testing.T) {
 
 	var versions []SchemaMigration
 	require.NoError(t, db.Order("version ASC").Find(&versions).Error)
-	require.Len(t, versions, 10)
+	require.Len(t, versions, 12)
 	assert.Equal(t, int64(1), versions[0].Version)
 	assert.Equal(t, int64(2), versions[1].Version)
 	assert.Equal(t, int64(3), versions[2].Version)
@@ -91,9 +93,10 @@ func TestMigrationAppliesIdentitySchemaAsVersionTwo(t *testing.T) {
 	assert.Equal(t, int64(8), versions[7].Version)
 	assert.Equal(t, int64(9), versions[8].Version)
 	assert.Equal(t, int64(10), versions[9].Version)
+	assert.Equal(t, int64(11), versions[10].Version)
 }
 
-func TestMigrationAppliesGovernanceAndPlatformTaskSchemaThroughVersionTen(t *testing.T) {
+func TestMigrationAppliesGovernanceAndPlatformTaskSchemaThroughVersionTwelve(t *testing.T) {
 	db := openPostgresTestDB(t)
 	resetPostgresTestDB(t, db)
 
@@ -112,7 +115,7 @@ func TestMigrationAppliesGovernanceAndPlatformTaskSchemaThroughVersionTen(t *tes
 
 	var versions []SchemaMigration
 	require.NoError(t, db.Order("version ASC").Find(&versions).Error)
-	require.Len(t, versions, 10)
+	require.Len(t, versions, 12)
 	assert.Equal(t, int64(3), versions[2].Version)
 	assert.Equal(t, int64(4), versions[3].Version)
 	assert.Equal(t, int64(5), versions[4].Version)
@@ -121,15 +124,82 @@ func TestMigrationAppliesGovernanceAndPlatformTaskSchemaThroughVersionTen(t *tes
 	assert.Equal(t, int64(8), versions[7].Version)
 	assert.Equal(t, int64(9), versions[8].Version)
 	assert.Equal(t, int64(10), versions[9].Version)
+	assert.Equal(t, int64(11), versions[10].Version)
 }
 
-func TestMigrationVersionFiveLeavesRemarkAndTargetCountForVersionTen(t *testing.T) {
+func TestMigrationAppliesMCPConnectionSchemaThroughVersionTwelve(t *testing.T) {
 	db := openPostgresTestDB(t)
 	resetPostgresTestDB(t, db)
-	require.NoError(t, migratePlatformTaskSchema(db))
+	dropMCPConnectionSchemaTables(t, db)
+	for table, present := range mcpConnectionRuntimeTablePresence(db) {
+		assert.Falsef(t, present, "empty fixture must not include %s", table)
+	}
 
-	assert.False(t, db.Migrator().HasColumn("platform_tasks", "remark"))
-	assert.False(t, db.Migrator().HasColumn("platform_tasks", "target_count"))
+	require.NoError(t, Migrate(db))
+	assertMCPConnectionSchema(t, db)
+	assert.Equal(t, []int64{1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12}, migrationVersions(t, db))
+
+	require.NoError(t, Migrate(db), "v11 migration must remain idempotent")
+	assertMCPConnectionSchema(t, db)
+}
+
+func TestMigrationVersionTwelveAddsProbeTimestampToExistingVersionElevenSchema(t *testing.T) {
+	db := openPostgresTestDB(t)
+	resetPostgresTestDB(t, db)
+	require.NoError(t, Migrate(db))
+	require.NoError(t, db.Exec("ALTER TABLE platform_mcp_connection_configs DROP COLUMN last_probe_started_at").Error)
+	require.NoError(t, db.Where("version = ?", int64(12)).Delete(&SchemaMigration{}).Error)
+	assert.False(t, db.Migrator().HasColumn("platform_mcp_connection_configs", "last_probe_started_at"))
+
+	// v10 only validates its released table layout. It must not secretly recreate the v11 column.
+	require.NoError(t, migratePlatformMCPConnectionSchema(db))
+	assert.False(t, db.Migrator().HasColumn("platform_mcp_connection_configs", "last_probe_started_at"))
+
+	require.NoError(t, Migrate(db))
+	require.NoError(t, Migrate(db), "v11 probe timestamp migration must remain idempotent")
+	assert.True(t, db.Migrator().HasColumn("platform_mcp_connection_configs", "last_probe_started_at"))
+	assert.Equal(t, []int64{1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12}, migrationVersions(t, db))
+}
+
+func TestMigrationVersionElevenRejectsIncompatibleExistingMCPIndexes(t *testing.T) {
+	db := openPostgresTestDB(t)
+	for _, requirement := range mcpConnectionSchemaTestIndexRequirements {
+		t.Run(requirement.name, func(t *testing.T) {
+			resetPostgresTestDB(t, db)
+			dropMCPConnectionSchemaTables(t, db)
+			require.NoError(t, Migrate(db))
+			require.NoError(t, db.Exec("DROP INDEX "+requirement.name).Error)
+			require.NoError(t, db.Exec(requirement.incompatibleCreateStatement()).Error)
+			require.NoError(t, db.Where("version >= ?", int64(11)).Delete(&SchemaMigration{}).Error)
+
+			err := Migrate(db)
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), requirement.name)
+			assert.NotContains(t, migrationVersions(t, db), int64(11))
+		})
+	}
+}
+
+func TestMigrationVersionElevenRejectsDeferrableUniqueMCPIndexes(t *testing.T) {
+	db := openPostgresTestDB(t)
+	for _, requirement := range mcpConnectionSchemaTestIndexRequirements {
+		if !requirement.unique {
+			continue
+		}
+		t.Run(requirement.name, func(t *testing.T) {
+			resetPostgresTestDB(t, db)
+			dropMCPConnectionSchemaTables(t, db)
+			t.Cleanup(func() { dropMCPConnectionSchemaTables(t, db) })
+			require.NoError(t, Migrate(db))
+			replaceMCPIndexWithDeferrableUniqueConstraint(t, db, requirement)
+			require.NoError(t, db.Where("version >= ?", int64(11)).Delete(&SchemaMigration{}).Error)
+
+			err := Migrate(db)
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), requirement.name)
+			assert.NotContains(t, migrationVersions(t, db), int64(11))
+		})
+	}
 }
 
 func TestMigrationUpgradesExistingVersionThreeWithoutRewritingIt(t *testing.T) {
@@ -150,8 +220,8 @@ func TestMigrationUpgradesExistingVersionThreeWithoutRewritingIt(t *testing.T) {
 	require.True(t, db.Migrator().HasTable("audit_completion_outbox"))
 	var versions []SchemaMigration
 	require.NoError(t, db.Order("version ASC").Find(&versions).Error)
-	require.Len(t, versions, 10)
-	assert.Equal(t, []int64{1, 2, 3, 4, 5, 6, 7, 8, 9, 10}, []int64{versions[0].Version, versions[1].Version, versions[2].Version, versions[3].Version, versions[4].Version, versions[5].Version, versions[6].Version, versions[7].Version, versions[8].Version, versions[9].Version})
+	require.Len(t, versions, 12)
+	assert.Equal(t, []int64{1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12}, []int64{versions[0].Version, versions[1].Version, versions[2].Version, versions[3].Version, versions[4].Version, versions[5].Version, versions[6].Version, versions[7].Version, versions[8].Version, versions[9].Version, versions[10].Version, versions[11].Version})
 }
 
 func TestMigrationVersionFourRepairsDuplicateLegacyCompletionOutboxRows(t *testing.T) {
@@ -264,7 +334,7 @@ func TestMigrationIsIdempotentAndRecordsVersion(t *testing.T) {
 
 	var versions []SchemaMigration
 	require.NoError(t, db.Order("version ASC").Find(&versions).Error)
-	require.Len(t, versions, 10)
+	require.Len(t, versions, 12)
 	assert.Equal(t, int64(1), versions[0].Version)
 	assert.Equal(t, int64(2), versions[1].Version)
 	assert.Equal(t, int64(3), versions[2].Version)
@@ -275,6 +345,7 @@ func TestMigrationIsIdempotentAndRecordsVersion(t *testing.T) {
 	assert.Equal(t, int64(8), versions[7].Version)
 	assert.Equal(t, int64(9), versions[8].Version)
 	assert.Equal(t, int64(10), versions[9].Version)
+	assert.Equal(t, int64(11), versions[10].Version)
 	assert.NotZero(t, versions[0].AppliedAt)
 	assert.NotZero(t, versions[1].AppliedAt)
 	assert.NotZero(t, versions[2].AppliedAt)
@@ -307,7 +378,7 @@ func TestMigrationSerializesConcurrentPostgresCalls(t *testing.T) {
 
 	var versions []SchemaMigration
 	require.NoError(t, first.Order("version ASC").Find(&versions).Error)
-	require.Len(t, versions, 10)
+	require.Len(t, versions, 12)
 	assert.Equal(t, int64(1), versions[0].Version)
 	assert.Equal(t, int64(2), versions[1].Version)
 	assert.Equal(t, int64(3), versions[2].Version)
@@ -318,6 +389,7 @@ func TestMigrationSerializesConcurrentPostgresCalls(t *testing.T) {
 	assert.Equal(t, int64(8), versions[7].Version)
 	assert.Equal(t, int64(9), versions[8].Version)
 	assert.Equal(t, int64(10), versions[9].Version)
+	assert.Equal(t, int64(11), versions[10].Version)
 	assert.True(t, first.Migrator().HasTable(&User{}))
 	assert.True(t, first.Migrator().HasTable(&Session{}))
 	assert.True(t, first.Migrator().HasTable(&TaskMessage{}))
@@ -384,7 +456,7 @@ func TestMigrationUpgradesReleasedVersionFiveWithDispatchClaimColumn(t *testing.
 	require.NoError(t, Migrate(db))
 	require.NoError(t, Migrate(db), "v6 upgrade must remain idempotent")
 	assert.True(t, db.Migrator().HasColumn("platform_tasks", "dispatch_claim_token"))
-	assert.Equal(t, []int64{1, 2, 3, 4, 5, 6, 7, 8, 9, 10}, migrationVersions(t, db))
+	assert.Equal(t, []int64{1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12}, migrationVersions(t, db))
 }
 
 func TestMigrationUpgradesReleasedVersionSixWithReportTables(t *testing.T) {
@@ -404,12 +476,12 @@ func TestMigrationUpgradesReleasedVersionSixWithReportTables(t *testing.T) {
 	assert.False(t, db.Migrator().HasTable("report_brand_settings"))
 
 	require.NoError(t, Migrate(db))
-	require.NoError(t, Migrate(db), "v7 through v10 upgrades must remain idempotent")
+	require.NoError(t, Migrate(db), "v7 through v11 upgrades must remain idempotent")
 	assert.True(t, db.Migrator().HasTable("report_snapshots"))
 	assert.True(t, db.Migrator().HasTable("report_brand_settings"))
 	assertReportTrendIndexDefinitions(t, db)
 	assertPlatformTaskDashboardIndexDefinitions(t, db)
-	assert.Equal(t, []int64{1, 2, 3, 4, 5, 6, 7, 8, 9, 10}, migrationVersions(t, db))
+	assert.Equal(t, []int64{1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12}, migrationVersions(t, db))
 }
 
 func TestMigrationUpgradesReleasedVersionSevenWithDashboardTaskIndexes(t *testing.T) {
@@ -435,9 +507,286 @@ func TestMigrationUpgradesReleasedVersionSevenWithDashboardTaskIndexes(t *testin
 	}
 
 	require.NoError(t, Migrate(db))
-	require.NoError(t, Migrate(db), "v8 through v10 upgrades must remain idempotent")
+	require.NoError(t, Migrate(db), "v8 through v11 upgrades must remain idempotent")
 	assertPlatformTaskDashboardIndexDefinitions(t, db)
-	assert.Equal(t, []int64{1, 2, 3, 4, 5, 6, 7, 8, 9, 10}, migrationVersions(t, db))
+	assert.Equal(t, []int64{1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12}, migrationVersions(t, db))
+}
+
+func TestMigrationVersionNineBindsOnlyReadyAttachmentsReferencedByTasks(t *testing.T) {
+	db := openPostgresTestDB(t)
+	resetPostgresTestDB(t, db)
+	require.NoError(t, db.AutoMigrate(&SchemaMigration{}))
+	for _, apply := range []func(*gorm.DB) error{
+		migrateInitialSchema,
+		migrateIdentitySchema,
+		migrateGovernanceSchema,
+		migrateAuditCompletionSchema,
+		migratePlatformTaskSchema,
+		migratePlatformTaskDispatchClaimSchema,
+		migrateReportSchema,
+		migratePlatformTaskDashboardIndexes,
+	} {
+		require.NoError(t, apply(db))
+	}
+	for version := int64(1); version <= 8; version++ {
+		require.NoError(t, db.Create(&SchemaMigration{Version: version}).Error)
+	}
+	now := time.Date(2026, 8, 18, 0, 0, 0, 0, time.UTC)
+	for _, attachment := range []map[string]any{
+		{"id": "referenced-ready", "owner_user_id": "owner", "original_name": "bound.txt", "storage_name": "bound", "size": 4, "chunk_bytes": 4, "state": "ready", "created_at": now, "updated_at": now},
+		{"id": "unbound-ready", "owner_user_id": "owner", "original_name": "unbound.txt", "storage_name": "unbound", "size": 4, "chunk_bytes": 4, "state": "ready", "created_at": now, "updated_at": now},
+	} {
+		require.NoError(t, db.Table("platform_attachments").Create(attachment).Error)
+	}
+	require.NoError(t, db.Table("platform_tasks").Create(map[string]any{
+		"id": "task-with-attachment", "owner_user_id": "owner", "owner_username": "owner", "idempotency_key": "migration-v9",
+		"engine_session_id": "engine-v9", "task_type": "ai_infra_scan", "content": "scan", "params": json.RawMessage(`{}`),
+		"attachment_refs": json.RawMessage(`["referenced-ready"]`), "status": "pending", "dispatch_error": "", "dispatch_attempts": 0,
+		"dispatch_claim_token": "", "created_at": now, "updated_at": now,
+	}).Error)
+
+	require.NoError(t, Migrate(db))
+	require.NoError(t, migratePlatformAttachmentLifecycle(db), "回填本身也必须可安全重跑")
+	var states []struct {
+		ID    string
+		State string
+	}
+	require.NoError(t, db.Table("platform_attachments").Order("id ASC").Find(&states).Error)
+	require.Equal(t, []struct {
+		ID    string
+		State string
+	}{{ID: "referenced-ready", State: "attached"}, {ID: "unbound-ready", State: "ready"}}, states)
+	assert.Equal(t, []int64{1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12}, migrationVersions(t, db))
+}
+
+func assertReportTrendIndexDefinitions(t *testing.T, db *gorm.DB) {
+	t.Helper()
+	for _, requirement := range []struct {
+		name, columns string
+	}{
+		{name: "idx_report_snapshots_completed_at", columns: "(completed_at DESC)"},
+		{name: "idx_report_snapshots_owner_completed_at", columns: "(owner_user_id, completed_at DESC)"},
+	} {
+		t.Run(requirement.name, func(t *testing.T) {
+			var definition string
+			require.NoError(t, db.Raw(`
+SELECT indexdef
+FROM pg_catalog.pg_indexes
+WHERE schemaname = current_schema() AND tablename = 'report_snapshots' AND indexname = ?`, requirement.name).Scan(&definition).Error)
+			assert.Contains(t, definition, requirement.columns)
+		})
+	}
+}
+
+func assertPlatformTaskDashboardIndexDefinitions(t *testing.T, db *gorm.DB) {
+	t.Helper()
+	for _, requirement := range []struct {
+		name, columns string
+	}{
+		{name: "idx_platform_tasks_updated_at", columns: "(updated_at DESC, id DESC)"},
+		{name: "idx_platform_tasks_owner_updated_at", columns: "(owner_user_id, updated_at DESC, id DESC)"},
+	} {
+		t.Run(requirement.name, func(t *testing.T) {
+			var definition string
+			require.NoError(t, db.Raw(`
+SELECT indexdef
+FROM pg_catalog.pg_indexes
+WHERE schemaname = current_schema() AND tablename = 'platform_tasks' AND indexname = ?`, requirement.name).Scan(&definition).Error)
+			assert.Contains(t, definition, requirement.columns)
+		})
+	}
+}
+
+type mcpConnectionSchemaTestIndexRequirement struct {
+	table               string
+	name                string
+	columns             []string
+	unique              bool
+	incompatibleColumns []string
+}
+
+func (requirement mcpConnectionSchemaTestIndexRequirement) incompatibleCreateStatement() string {
+	statement := "CREATE INDEX"
+	if requirement.unique {
+		statement = "CREATE UNIQUE INDEX"
+	}
+	return fmt.Sprintf(
+		"%s %s ON %s(%s)",
+		statement,
+		requirement.name,
+		requirement.table,
+		strings.Join(requirement.incompatibleColumns, ", "),
+	)
+}
+
+func replaceMCPIndexWithDeferrableUniqueConstraint(t *testing.T, db *gorm.DB, requirement mcpConnectionSchemaTestIndexRequirement) {
+	t.Helper()
+	require.True(t, requirement.unique)
+	require.NoError(t, db.Exec("DROP INDEX "+requirement.name).Error)
+	require.NoError(t, db.Exec(fmt.Sprintf(
+		"ALTER TABLE %s ADD CONSTRAINT %s UNIQUE (%s) DEFERRABLE INITIALLY DEFERRED",
+		requirement.table,
+		requirement.name,
+		strings.Join(requirement.columns, ", "),
+	)).Error)
+	require.True(t, db.Migrator().HasIndex(requirement.table, requirement.name))
+
+	var immediate bool
+	require.NoError(t, db.Raw(`
+SELECT index_definition.indimmediate
+FROM pg_catalog.pg_index AS index_definition
+JOIN pg_catalog.pg_class AS index_name ON index_name.oid = index_definition.indexrelid
+JOIN pg_catalog.pg_class AS table_definition ON table_definition.oid = index_definition.indrelid
+JOIN pg_catalog.pg_namespace AS table_namespace ON table_namespace.oid = table_definition.relnamespace
+WHERE table_namespace.nspname = current_schema()
+  AND table_definition.relname = ?
+  AND index_name.relname = ?`, requirement.table, requirement.name).Scan(&immediate).Error)
+	require.False(t, immediate, "fixture must use a deferrable unique constraint index")
+}
+
+var mcpConnectionSchemaTestIndexRequirements = []mcpConnectionSchemaTestIndexRequirement{
+	{
+		table: "platform_mcp_connection_configs", name: "idx_platform_mcp_connection_configs_owner_scope",
+		columns: []string{"owner_user_id", "scope"}, incompatibleColumns: []string{"enabled"},
+	},
+	{
+		table: "platform_mcp_connection_versions", name: "ux_platform_mcp_connection_versions_config_version", unique: true,
+		columns: []string{"connection_config_id", "version"}, incompatibleColumns: []string{"id"},
+	},
+	{
+		table: "platform_mcp_task_bindings", name: "ux_platform_mcp_task_bindings_task_id", unique: true,
+		columns: []string{"task_id"}, incompatibleColumns: []string{"id"},
+	},
+	{
+		table: "platform_mcp_task_bindings", name: "idx_platform_mcp_task_bindings_config_version",
+		columns: []string{"connection_config_id", "connection_config_version"}, incompatibleColumns: []string{"task_id"},
+	},
+	{
+		table: "platform_mcp_runtime_capabilities", name: "ux_platform_mcp_runtime_capabilities_task_rotation", unique: true,
+		columns: []string{"task_id", "rotation"}, incompatibleColumns: []string{"id"},
+	},
+	{
+		table: "platform_mcp_runtime_capabilities", name: "ux_platform_mcp_runtime_capabilities_hash", unique: true,
+		columns: []string{"capability_hash"}, incompatibleColumns: []string{"id"},
+	},
+	{
+		table: "platform_mcp_runtime_capabilities", name: "idx_platform_mcp_runtime_capabilities_expires_at",
+		columns: []string{"expires_at"}, incompatibleColumns: []string{"task_id"},
+	},
+	{
+		table: "platform_idempotency_records", name: "ux_platform_idempotency_records_scope", unique: true,
+		columns: []string{"principal_id", "scope_key", "method", "path", "idempotency_key"}, incompatibleColumns: []string{"id"},
+	},
+	{
+		table: "platform_idempotency_records", name: "idx_platform_idempotency_records_expires_at",
+		columns: []string{"expires_at"}, incompatibleColumns: []string{"principal_id"},
+	},
+}
+
+func dropMCPConnectionSchemaTables(t *testing.T, db *gorm.DB) {
+	t.Helper()
+	require.NoError(t, db.Migrator().DropTable(
+		"platform_idempotency_records",
+		"platform_mcp_runtime_capabilities",
+		"platform_mcp_task_bindings",
+		"platform_mcp_connection_versions",
+		"platform_mcp_connection_configs",
+	))
+}
+
+func assertMCPConnectionSchema(t *testing.T, db *gorm.DB) {
+	t.Helper()
+	for table, columns := range map[string][]string{
+		"platform_mcp_connection_configs": {
+			"id", "owner_user_id", "scope", "name", "description", "current_version", "resource_revision", "enabled", "last_probe_started_at", "created_at", "updated_at",
+		},
+		"platform_mcp_connection_versions": {
+			"id", "connection_config_id", "version", "encrypted_payload", "payload_nonce", "key_id", "transport", "detected_transport", "probe_status", "created_at",
+		},
+		"platform_mcp_task_bindings": {
+			"id", "task_id", "source_kind", "connection_config_id", "connection_config_version", "encrypted_repository_url", "repository_url_nonce", "repository_url_key_id", "created_at", "updated_at",
+		},
+		"platform_mcp_runtime_capabilities": {
+			"id", "task_id", "capability_hash", "issued_at", "expires_at", "rotation", "version", "created_at",
+		},
+		"platform_idempotency_records": {
+			"id", "principal_id", "scope_key", "method", "path", "idempotency_key", "payload_hash", "status_code", "safe_response", "expires_at", "created_at",
+		},
+	} {
+		t.Run(table, func(t *testing.T) {
+			assert.True(t, db.Migrator().HasTable(table))
+			for _, column := range columns {
+				assert.Truef(t, db.Migrator().HasColumn(table, column), "missing column %s.%s", table, column)
+			}
+		})
+	}
+
+	for _, requirement := range mcpConnectionSchemaTestIndexRequirements {
+		t.Run(requirement.name, func(t *testing.T) {
+			var index struct {
+				Unique     bool   `gorm:"column:unique"`
+				Valid      bool   `gorm:"column:valid"`
+				Ready      bool   `gorm:"column:ready"`
+				Definition string `gorm:"column:definition"`
+			}
+			require.NoError(t, db.Raw(`
+
+SELECT index_definition.indisunique AS unique,
+       index_definition.indisvalid AS valid,
+       index_definition.indisready AS ready,
+       pg_get_indexdef(index_definition.indexrelid) AS definition
+FROM pg_catalog.pg_class AS table_definition
+JOIN pg_catalog.pg_namespace AS table_namespace ON table_namespace.oid = table_definition.relnamespace
+JOIN pg_catalog.pg_index AS index_definition ON index_definition.indrelid = table_definition.oid
+JOIN pg_catalog.pg_class AS index_name ON index_name.oid = index_definition.indexrelid
+WHERE table_namespace.nspname = current_schema()
+  AND table_definition.relname = ?
+  AND index_name.relname = ?`, requirement.table, requirement.name).Scan(&index).Error)
+			assert.Equal(t, requirement.unique, index.Unique)
+			assert.True(t, index.Valid)
+			assert.True(t, index.Ready)
+			assert.Contains(t, index.Definition, "("+strings.Join(requirement.columns, ", ")+")")
+		})
+	}
+}
+
+func TestMigrationAppliesGovernanceAndPlatformTaskSchemaThroughVersionTen(t *testing.T) {
+	db := openPostgresTestDB(t)
+	resetPostgresTestDB(t, db)
+
+	require.NoError(t, Migrate(db))
+	assert.True(t, db.Migrator().HasTable("audit_events"))
+	assert.True(t, db.Migrator().HasTable("audit_completion_outbox"))
+	assert.True(t, db.Migrator().HasTable("platform_models"))
+	assert.True(t, db.Migrator().HasTable("platform_tasks"))
+	assert.True(t, db.Migrator().HasTable("platform_attachments"))
+	assert.True(t, db.Migrator().HasTable("report_snapshots"))
+	assert.True(t, db.Migrator().HasTable("report_brand_settings"))
+	assert.True(t, db.Migrator().HasColumn("platform_tasks", "remark"))
+	assert.True(t, db.Migrator().HasColumn("platform_tasks", "target_count"))
+	assertReportTrendIndexDefinitions(t, db)
+	assertPlatformTaskDashboardIndexDefinitions(t, db)
+
+	var versions []SchemaMigration
+	require.NoError(t, db.Order("version ASC").Find(&versions).Error)
+	require.Len(t, versions, 12)
+	assert.Equal(t, int64(3), versions[2].Version)
+	assert.Equal(t, int64(4), versions[3].Version)
+	assert.Equal(t, int64(5), versions[4].Version)
+	assert.Equal(t, int64(6), versions[5].Version)
+	assert.Equal(t, int64(7), versions[6].Version)
+	assert.Equal(t, int64(8), versions[7].Version)
+	assert.Equal(t, int64(9), versions[8].Version)
+	assert.Equal(t, int64(10), versions[9].Version)
+}
+
+func TestMigrationVersionFiveLeavesRemarkAndTargetCountForVersionTen(t *testing.T) {
+	db := openPostgresTestDB(t)
+	resetPostgresTestDB(t, db)
+	require.NoError(t, migratePlatformTaskSchema(db))
+
+	assert.False(t, db.Migrator().HasColumn("platform_tasks", "remark"))
+	assert.False(t, db.Migrator().HasColumn("platform_tasks", "target_count"))
 }
 
 func TestMigrationUpgradesReleasedVersionNineWithRemarkAndTargetCount(t *testing.T) {
@@ -522,90 +871,5 @@ ORDER BY column_name ASC`).Scan(&columns).Error)
 	require.NoError(t, db.Table("platform_tasks").Select("remark", "target_count").Where("id = ?", "released-v9-task").Scan(&row).Error)
 	assert.Equal(t, "", row.Remark)
 	assert.Equal(t, 0, row.TargetCount)
-	assert.Equal(t, []int64{1, 2, 3, 4, 5, 6, 7, 8, 9, 10}, migrationVersions(t, db))
-}
-
-func TestMigrationVersionNineBindsOnlyReadyAttachmentsReferencedByTasks(t *testing.T) {
-	db := openPostgresTestDB(t)
-	resetPostgresTestDB(t, db)
-	require.NoError(t, db.AutoMigrate(&SchemaMigration{}))
-	for _, apply := range []func(*gorm.DB) error{
-		migrateInitialSchema,
-		migrateIdentitySchema,
-		migrateGovernanceSchema,
-		migrateAuditCompletionSchema,
-		migratePlatformTaskSchema,
-		migratePlatformTaskDispatchClaimSchema,
-		migrateReportSchema,
-		migratePlatformTaskDashboardIndexes,
-	} {
-		require.NoError(t, apply(db))
-	}
-	for version := int64(1); version <= 8; version++ {
-		require.NoError(t, db.Create(&SchemaMigration{Version: version}).Error)
-	}
-	now := time.Date(2026, 8, 18, 0, 0, 0, 0, time.UTC)
-	for _, attachment := range []map[string]any{
-		{"id": "referenced-ready", "owner_user_id": "owner", "original_name": "bound.txt", "storage_name": "bound", "size": 4, "chunk_bytes": 4, "state": "ready", "created_at": now, "updated_at": now},
-		{"id": "unbound-ready", "owner_user_id": "owner", "original_name": "unbound.txt", "storage_name": "unbound", "size": 4, "chunk_bytes": 4, "state": "ready", "created_at": now, "updated_at": now},
-	} {
-		require.NoError(t, db.Table("platform_attachments").Create(attachment).Error)
-	}
-	require.NoError(t, db.Table("platform_tasks").Create(map[string]any{
-		"id": "task-with-attachment", "owner_user_id": "owner", "owner_username": "owner", "idempotency_key": "migration-v9",
-		"engine_session_id": "engine-v9", "task_type": "ai_infra_scan", "content": "scan", "params": json.RawMessage(`{}`),
-		"attachment_refs": json.RawMessage(`["referenced-ready"]`), "status": "pending", "dispatch_error": "", "dispatch_attempts": 0,
-		"dispatch_claim_token": "", "created_at": now, "updated_at": now,
-	}).Error)
-
-	require.NoError(t, Migrate(db))
-	require.NoError(t, migratePlatformAttachmentLifecycle(db), "回填本身也必须可安全重跑")
-	var states []struct {
-		ID    string
-		State string
-	}
-	require.NoError(t, db.Table("platform_attachments").Order("id ASC").Find(&states).Error)
-	require.Equal(t, []struct {
-		ID    string
-		State string
-	}{{ID: "referenced-ready", State: "attached"}, {ID: "unbound-ready", State: "ready"}}, states)
-	assert.Equal(t, []int64{1, 2, 3, 4, 5, 6, 7, 8, 9, 10}, migrationVersions(t, db))
-}
-
-func assertReportTrendIndexDefinitions(t *testing.T, db *gorm.DB) {
-	t.Helper()
-	for _, requirement := range []struct {
-		name, columns string
-	}{
-		{name: "idx_report_snapshots_completed_at", columns: "(completed_at DESC)"},
-		{name: "idx_report_snapshots_owner_completed_at", columns: "(owner_user_id, completed_at DESC)"},
-	} {
-		t.Run(requirement.name, func(t *testing.T) {
-			var definition string
-			require.NoError(t, db.Raw(`
-SELECT indexdef
-FROM pg_catalog.pg_indexes
-WHERE schemaname = current_schema() AND tablename = 'report_snapshots' AND indexname = ?`, requirement.name).Scan(&definition).Error)
-			assert.Contains(t, definition, requirement.columns)
-		})
-	}
-}
-
-func assertPlatformTaskDashboardIndexDefinitions(t *testing.T, db *gorm.DB) {
-	t.Helper()
-	for _, requirement := range []struct {
-		name, columns string
-	}{
-		{name: "idx_platform_tasks_updated_at", columns: "(updated_at DESC, id DESC)"},
-		{name: "idx_platform_tasks_owner_updated_at", columns: "(owner_user_id, updated_at DESC, id DESC)"},
-	} {
-		t.Run(requirement.name, func(t *testing.T) {
-			var definition string
-			require.NoError(t, db.Raw(`
-SELECT indexdef
-FROM pg_catalog.pg_indexes
-WHERE schemaname = current_schema() AND tablename = 'platform_tasks' AND indexname = ?`, requirement.name).Scan(&definition).Error)
-			assert.Contains(t, definition, requirement.columns)
-		})
-	}
+	assert.Equal(t, []int64{1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12}, migrationVersions(t, db))
 }

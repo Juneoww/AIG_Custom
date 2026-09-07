@@ -57,11 +57,16 @@ func (handler *Handler) list(c *gin.Context) {
 		respondTaskError(c, ErrInvalid)
 		return
 	}
+	if canonicalTaskType(c.Query("task_type")) == "mcp_scan" {
+		specializedMCP(c, "/api/v1/platform/mcp-scans")
+		return
+	}
 	filters, err := taskFilters(c)
 	if err != nil {
 		respondTaskError(c, ErrInvalid)
 		return
 	}
+	filters.ExcludeMCP = true
 	response, err := handler.service.Browse(c.Request.Context(), subject, page, pageSize, filters)
 	switch {
 	case errors.Is(err, ErrForbidden):
@@ -292,6 +297,10 @@ func (handler *Handler) create(c *gin.Context) {
 		return
 	}
 	input.IdempotencyKey = c.GetHeader("Idempotency-Key")
+	if canonicalTaskType(input.TaskType) == "mcp_scan" {
+		specializedMCP(c, "/api/v1/platform/mcp-scans")
+		return
+	}
 	view, err := handler.service.Create(c.Request.Context(), subject, input)
 	detail := taskDetailOfView(view)
 	switch {
@@ -317,6 +326,10 @@ func (handler *Handler) get(c *gin.Context) {
 		return
 	}
 	detail, err := handler.service.BrowserGet(c.Request.Context(), subject, c.Param("taskID"))
+	if err == nil && detail.TaskType == "mcp_scan" {
+		specializedMCP(c, "/api/v1/platform/mcp-scans/"+url.PathEscape(detail.ID))
+		return
+	}
 	switch {
 	case errors.Is(err, ErrForbidden):
 		respondTaskError(c, err)
@@ -335,7 +348,16 @@ func (handler *Handler) cancel(c *gin.Context) {
 		c.Status(http.StatusUnauthorized)
 		return
 	}
-	err := handler.service.Cancel(c.Request.Context(), subject, c.Param("taskID"))
+	detail, err := handler.service.BrowserGet(c.Request.Context(), subject, c.Param("taskID"))
+	if err != nil {
+		respondTaskError(c, err)
+		return
+	}
+	if detail.TaskType == "mcp_scan" {
+		specializedMCP(c, "/api/v1/platform/mcp-scans/"+url.PathEscape(detail.ID)+"/cancel")
+		return
+	}
+	err = handler.service.Cancel(c.Request.Context(), subject, c.Param("taskID"))
 	switch {
 	case errors.Is(err, ErrForbidden):
 		c.Status(http.StatusForbidden)
@@ -346,4 +368,8 @@ func (handler *Handler) cancel(c *gin.Context) {
 	default:
 		c.Status(http.StatusNoContent)
 	}
+}
+
+func specializedMCP(c *gin.Context, path string) {
+	c.JSON(http.StatusConflict, gin.H{"error": "MCP 扫描请使用专属接口", "code": "MCP_SPECIALIZED_ENDPOINT_REQUIRED", "specialized_path": path})
 }

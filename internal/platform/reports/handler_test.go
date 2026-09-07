@@ -110,6 +110,33 @@ func TestReportDetailNeverExposesNaturalLanguageOrStructuredCredentials(t *testi
 	}
 }
 
+func TestMCPReportDetailDoesNotExposeTargetOrRepositoryIdentifiers(t *testing.T) {
+	now := time.Now().UTC()
+	snapshot, err := BuildSnapshotAt("mcp-detail-task", "user-alice", "mcp_scan", event(`{
+		"score": 100,
+		"results": [{
+			"title": "Service https://customer-mcp.example.internal/rpc permits command execution",
+			"description": "Repository git@customer-repos.internal:team/mcp-server.git is reachable through ssh://git@customer-repos.internal/team/mcp-server.git",
+			"risk_type": "command_injection",
+			"level": "high",
+			"suggestion": "Restrict https://customer-mcp.example.internal/rpc and rotate token=customer-token"
+		}]
+	}`), brand.Config{ProductName: "企业安全平台", PrimaryColor: "#1677FF"}, now, now)
+	require.NoError(t, err)
+	snapshot.ID = "mcp-detail-report"
+
+	detail, err := detailOf(snapshot)
+	require.NoError(t, err)
+	encoded, err := json.Marshal(detail)
+	require.NoError(t, err)
+	for _, sentinel := range []string{"customer-mcp.example.internal", "customer-repos.internal", "mcp-server.git", "customer-token"} {
+		assert.NotContains(t, string(encoded), sentinel)
+	}
+	require.Len(t, detail.Render.TechnicalFindings, 1)
+	assert.Equal(t, "command_file", detail.Render.TechnicalFindings[0].Category)
+	assert.Equal(t, "high", detail.Render.TechnicalFindings[0].Severity)
+}
+
 func TestReportDetailDropsUntrustedInfrastructurePortScanCombination(t *testing.T) {
 	now := time.Now().UTC()
 	snapshot, err := BuildSnapshotAt("invalid-port-task", "user-alice", "ai_infra_scan", event(`{"score":100,"results":[]}`), brand.Config{ProductName: "企业安全平台", PrimaryColor: "#1677FF"}, now, now)

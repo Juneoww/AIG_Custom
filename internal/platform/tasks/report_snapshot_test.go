@@ -76,7 +76,8 @@ func TestTrustedSuccessSnapshotNeverContainsTaskRemark(t *testing.T) {
 	owner := identity.Subject{UserID: "remark-snapshot-owner", Username: "alice", Role: identity.RoleUser}
 	remark := "remark-must-not-enter-report-snapshot"
 	created, err := tasks.Create(ctx, owner, CreateInput{
-		IdempotencyKey: "remark-snapshot", TaskType: "mcp_scan", Content: "scan", Remark: remark,
+		IdempotencyKey: "remark-snapshot", TaskType: "mcp_scan", Content: "https://example.com/repository.git", Remark: remark,
+		Params: json.RawMessage(`{"source_kind":"repository"}`),
 	})
 	require.NoError(t, err)
 	setEngineResult(engine, created.EngineSessionID, json.RawMessage(`{"id":"remark-event","type":"resultUpdate","timestamp":1,"result":{"score":100,"results":[]}}`))
@@ -227,7 +228,7 @@ func TestTrustedSuccessKeepsTaskRunningWhenSnapshotPersistenceFails(t *testing.T
 
 func createRunningTask(t *testing.T, service *Service, owner identity.Subject, key string) View {
 	t.Helper()
-	created, err := service.Create(context.Background(), owner, CreateInput{IdempotencyKey: key, TaskType: "mcp_scan", Content: "scan"})
+	created, err := service.Create(context.Background(), owner, mcpRepositoryCreateInput(key))
 	require.NoError(t, err)
 	require.Equal(t, StatusRunning, created.Status)
 	return created

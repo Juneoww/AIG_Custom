@@ -91,6 +91,27 @@ type TechnicalFinding struct {
 	Evidence    string `json:"evidence"`
 	Impact      string `json:"impact"`
 	Remediation string `json:"remediation"`
+	Category    string `json:"category,omitempty"`
+	Severity    string `json:"severity,omitempty"`
+}
+
+// MCPWorkbenchProjection is the intentionally narrow report read model used
+// by the MCP workbench. It must never grow into a report or render-data DTO.
+type MCPWorkbenchProjection struct {
+	Completed30d int                `json:"completed_30d"`
+	HighRisk     int                `json:"high_risk"`
+	Highlights   []MCPRiskHighlight `json:"highlights"`
+}
+
+// MCPRiskHighlight contains only server-derived, safe-to-display MCP risk
+// metadata. It deliberately excludes raw scan output and render artifacts.
+type MCPRiskHighlight struct {
+	ReportID    string    `json:"report_id"`
+	TaskID      string    `json:"task_id"`
+	Severity    string    `json:"severity"`
+	Category    string    `json:"category"`
+	Summary     string    `json:"summary"`
+	CompletedAt time.Time `json:"completed_at"`
 }
 
 type TrendQuery struct {

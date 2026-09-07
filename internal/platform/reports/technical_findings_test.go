@@ -56,7 +56,9 @@ func TestBuildSnapshotMapsProductionTechnicalFindingsWithoutRawSecrets(t *testin
 				assert.Contains(t, finding.Title, "Unsafe command execution")
 				assert.Contains(t, finding.Evidence, "[REDACTED]")
 				assert.Contains(t, finding.Evidence, "[USER_PATH]")
-				assert.Contains(t, finding.Impact, "command_injection")
+				assert.Equal(t, "command_file", finding.Category)
+				assert.Equal(t, "high", finding.Severity)
+				assert.NotContains(t, finding.Impact, "command_injection")
 				assert.Contains(t, finding.Remediation, "[REDACTED]")
 			},
 			secrets: []string{"mcp-bearer", "mcp-api-key", `C:\Users\alice`, "readme-secret"},
@@ -152,6 +154,42 @@ func TestBuildSnapshotTechnicalFindingsUseStableSeverityOrderAndSafetyBudgets(t 
 		assert.LessOrEqual(t, len([]rune(finding.Impact)), 1000)
 		assert.LessOrEqual(t, len([]rune(finding.Remediation)), 1000)
 	}
+}
+
+func TestBuildSnapshotMapsMCPFindingCategoryAndSeverityWithoutRawRiskType(t *testing.T) {
+	const unknownRiskType = "future-private-risk-type-sentinel"
+	results := []map[string]any{
+		{"title": "Dangerous tool", "risk_type": "dangerous_tool", "level": "critical"},
+		{"title": "Command execution", "risk_type": "MCP05 Command Injection & Execution", "level": "high"},
+		{"title": "Authorization", "risk_type": "MCP07 Insufficient Auth & Authz", "level": "medium"},
+		{"title": "Leakage", "risk_type": "MCP01 Token Mismanagement & Secret Exposure", "level": "low"},
+		{"title": "Poisoning", "risk_type": "MCP03 Tool Poisoning", "level": "high"},
+		{"title": "Skill mismatch", "risk_type": "skill mismatch", "level": "medium"},
+		{"title": "Unknown: " + unknownRiskType, "risk_type": unknownRiskType, "level": "unexpected"},
+		{"title": "Near miss", "risk_type": "MCP030 private extension", "level": "low"},
+	}
+	payload, err := json.Marshal(map[string]any{"score": 50, "results": results})
+	require.NoError(t, err)
+
+	render, encoded := renderForTechnicalTest(t, "Mcp-Scan", string(payload))
+	require.Len(t, render.TechnicalFindings, len(results))
+	want := map[string]struct{ category, severity string }{
+		"Dangerous tool":                {"dangerous_tool", "high"},
+		"Command execution":             {"command_file", "high"},
+		"Authorization":                 {"authorization", "medium"},
+		"Leakage":                       {"data_leakage", "low"},
+		"Poisoning":                     {"tool_poisoning", "high"},
+		"[REDACTED_RISK_TYPE]":          {"skill_mismatch", "medium"},
+		"Unknown: [REDACTED_RISK_TYPE]": {"other", "low"},
+		"Near miss":                     {"other", "low"},
+	}
+	for _, finding := range render.TechnicalFindings {
+		expected, ok := want[finding.Title]
+		require.True(t, ok, finding.Title)
+		assert.Equal(t, expected.category, finding.Category)
+		assert.Equal(t, expected.severity, finding.Severity)
+	}
+	assert.NotContains(t, encoded, unknownRiskType)
 }
 
 func renderForTechnicalTest(t *testing.T, taskType, result string) (RenderModel, string) {

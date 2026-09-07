@@ -500,7 +500,7 @@ func TestSwaggerDocumentsEnterpriseConsoleContracts(t *testing.T) {
 			assertExactProperties(t, document, "dashboard.AttentionItem", "report_id", "task_id", "task_type", "completed_at", "score", "high", "medium", "low")
 			assertExactProperties(t, document, "tasks.TaskSummary", "id", "owner", "task_type", "status", "created_at", "updated_at")
 			assertExactProperties(t, document, "tasks.TaskDetail", "id", "owner", "task_type", "status", "remark", "report_id", "created_at", "updated_at", "input_summary")
-			assertExactProperties(t, document, "tasks.TaskInputSummary", "language", "agent_id", "eval_model_id", "model_id", "num_prompts", "port_scan_mode", "scan_mode", "target_count", "thread", "timeout")
+			assertExactProperties(t, document, "tasks.TaskInputSummary", "language", "source_kind", "agent_id", "eval_model_id", "model_id", "num_prompts", "port_scan_mode", "scan_mode", "target_count", "thread", "timeout")
 			modelID := swaggerValue(t, document, "definitions", "tasks.TaskInputSummary", "properties", "model_id")
 			if got := swaggerValue(t, modelID, "type"); got != "string" {
 				t.Errorf("tasks.TaskInputSummary.model_id type = %v, want string", got)
@@ -652,7 +652,7 @@ func TestSwaggerDocumentsTaskCreateAndLegacySecurityCorrections(t *testing.T) {
 				t.Errorf("attachment id maxLength = %v", got)
 			}
 			taskTypes := swaggerValue(t, body, "properties", "task_type", "enum").([]interface{})
-			if !reflect.DeepEqual(taskTypes, []interface{}{"mcp_scan", "ai_infra_scan", "model_redteam_report", "agent_scan", "skills_scan"}) {
+			if !reflect.DeepEqual(taskTypes, []interface{}{"ai_infra_scan", "model_redteam_report", "agent_scan", "skills_scan"}) {
 				t.Errorf("task create type enum = %v", taskTypes)
 			}
 			badRequestDescription := strings.ToLower(swaggerValue(t, document, "paths", createPath, "post", "responses", "400", "description").(string))
@@ -714,84 +714,116 @@ func TestSwaggerDocumentsTaskCreateAndLegacySecurityCorrections(t *testing.T) {
 	}
 }
 
-func TestSwaggerDocumentsAgentWorkflowCreateAndSafeDetailContract(t *testing.T) {
+func TestSwaggerDocumentsGovernedMCPCreateAndWorkbenchContract(t *testing.T) {
 	for name, document := range loadSwaggerDocuments(t) {
 		t.Run(name, func(t *testing.T) {
-			createPath := "/api/v1/platform/tasks"
-			body := swaggerBodyParameterSchema(t, document, createPath, "post")
-			checks := []struct {
-				value interface{}
-				terms []string
-			}{
-				{swaggerValue(t, body, "properties", "content", "description"), []string{"agent_scan", "non-whitespace", "valid UTF-8", "32 KiB", "bytes", "execution instructions"}},
-				{swaggerValue(t, body, "properties", "attachment_ids", "description"), []string{"agent_scan", "unsupported", "omitted", "empty array"}},
-				{swaggerValue(t, body, "properties", "params", "description"), []string{"agent_scan", "only agent_id and eval_model_id"}},
-				{swaggerValue(t, document, "paths", createPath, "post", "description"), []string{"before the new Agent input constraints", "single provider", "HTTP", "WebSocket", "Dify", "Coze", "apiKey", "apiBaseUrl", "extra.dify_type", "chat", "workflow", "three stages", "primary and auxiliary", "no successful report"}},
-				{swaggerValue(t, document, "definitions", "tasks.TaskDetail", "properties", "report_id", "description"), []string{"GET", "succeeded", "authorized", "existing immutable snapshot", "omitted", "create"}},
-				{swaggerValue(t, document, "paths", "/api/v1/platform/tasks/{taskID}", "get", "description"), []string{"agent_id", "eval_model_id", "agent_scan", "report_id", "succeeded", "authorized", "snapshot"}},
+			const createPath = "/api/v1/platform/mcp-scans"
+			createDescription := strings.ToLower(swaggerValue(t, document, "paths", createPath, "post", "description").(string))
+			for _, term := range []string{"mcp_scan", "source_kind", "repository", "service", "authorization_confirmed", "audit", "source-related audit metadata", "safe phase metadata"} {
+				if !strings.Contains(createDescription, term) {
+					t.Errorf("governed MCP create description lacks %q", term)
+				}
 			}
-			for _, check := range checks {
-				for _, term := range check.terms {
-					if !strings.Contains(check.value.(string), term) {
-						t.Errorf("Agent workflow contract description lacks %q", term)
+
+			params := swaggerValue(t, document, "definitions", "mcpscans.CreateRequest").(map[string]interface{})
+			assertSwaggerStringEnum(t, swaggerValue(t, params, "properties").(map[string]interface{}), "source_kind", []string{"repository", "service"})
+			authorization := swaggerValue(t, params, "properties", "authorization_confirmed").(map[string]interface{})
+			if authorization["type"] != "boolean" {
+				t.Errorf("authorization_confirmed type = %v, want boolean", authorization["type"])
+			}
+			for _, term := range []string{"service", "true", "repository"} {
+				if !strings.Contains(strings.ToLower(authorization["description"].(string)), term) {
+					t.Errorf("authorization_confirmed description lacks %q", term)
+				}
+			}
+			assertSwaggerStringEnum(t, swaggerValue(t, document, "definitions", "tasks.TaskInputSummary", "properties").(map[string]interface{}), "source_kind", []string{"repository", "service", "legacy_unknown"})
+
+			const workbenchPath = "/api/v1/platform/mcp-workbench"
+			for _, status := range []string{"200", "401", "403", "500"} {
+				_ = swaggerValue(t, document, "paths", workbenchPath, "get", "responses", status)
+			}
+			if got := swaggerNestedRef(t, swaggerValue(t, document, "paths", workbenchPath, "get", "responses", "200", "schema")); got != "#/definitions/mcpworkbench.View" {
+				t.Errorf("MCP workbench response schema = %q, want safe View", got)
+			}
+			workbenchDescription := strings.ToLower(swaggerValue(t, document, "paths", workbenchPath, "get", "description").(string))
+			for _, term := range []string{"read-only", "30", "utc", "created_at", "completed_at", "users", "auditors", "administrators", "10", "5", "legacy_unknown", "other", "raw"} {
+				if !strings.Contains(workbenchDescription, term) {
+					t.Errorf("MCP workbench description lacks %q", term)
+				}
+			}
+
+			assertExactProperties(t, document, "mcpworkbench.View", "metrics", "active_tasks", "recent_risks")
+			assertExactProperties(t, document, "mcpworkbench.Metrics", "running", "pending", "high_risk", "completed_30d")
+			assertExactProperties(t, document, "mcpworkbench.ActiveTask", "task_id", "label", "source_kind", "phase", "status", "updated_at")
+			assertExactProperties(t, document, "mcpworkbench.RecentRisk", "report_id", "task_id", "severity", "category", "summary", "completed_at")
+			assertSwaggerStringEnum(t, swaggerValue(t, document, "definitions", "mcpworkbench.ActiveTask", "properties").(map[string]interface{}), "source_kind", []string{"repository", "service", "legacy_unknown"})
+			assertSwaggerStringEnum(t, swaggerValue(t, document, "definitions", "mcpworkbench.ActiveTask", "properties").(map[string]interface{}), "status", []string{"pending", "dispatching", "running", "dispatch_failed", "dispatch_unknown"})
+			assertSwaggerStringEnum(t, swaggerValue(t, document, "definitions", "mcpworkbench.RecentRisk", "properties").(map[string]interface{}), "severity", []string{"high", "medium", "low"})
+			assertSwaggerStringEnum(t, swaggerValue(t, document, "definitions", "mcpworkbench.RecentRisk", "properties").(map[string]interface{}), "category", []string{"dangerous_tool", "command_file", "authorization", "data_leakage", "tool_poisoning", "skill_mismatch", "other"})
+			if got := swaggerValue(t, document, "definitions", "mcpworkbench.RecentRisk", "properties", "summary", "maxLength"); got != float64(160) && got != 160 {
+				t.Errorf("MCP workbench summary maxLength = %v, want 160", got)
+			}
+			for field, limit := range map[string]int{"active_tasks": 10, "recent_risks": 5} {
+				if got := swaggerValue(t, document, "definitions", "mcpworkbench.View", "properties", field, "maxItems"); got != float64(limit) && got != limit {
+					t.Errorf("MCP workbench %s maxItems = %v, want %d", field, got, limit)
+				}
+			}
+			if got := swaggerValue(t, document, "definitions", "mcpworkbench.ActiveTask", "properties", "phase", "x-nullable"); got != true {
+				t.Errorf("MCP workbench phase x-nullable = %v, want true", got)
+			}
+
+			for _, definition := range []string{"mcpworkbench.View", "mcpworkbench.Metrics", "mcpworkbench.ActiveTask", "mcpworkbench.RecentRisk"} {
+				properties := swaggerValue(t, document, "definitions", definition, "properties").(map[string]interface{})
+				for _, forbidden := range []string{"content", "endpoint", "raw_result", "render_data", "model_id", "headers", "params", "authorization_confirmed", "attachment_ids", "owner"} {
+					if _, exists := properties[forbidden]; exists {
+						t.Errorf("MCP workbench definition %s exposes forbidden %s", definition, forbidden)
 					}
-				}
-			}
-			for _, reference := range []struct{ name, pattern string }{
-				{"agent_id", "^[A-Za-z0-9][A-Za-z0-9._ -]{0,127}$"},
-				{"eval_model_id", "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"},
-			} {
-				field := swaggerValue(t, document, "definitions", "tasks.TaskInputSummary", "properties", reference.name)
-				if got := swaggerValue(t, field, "type"); got != "string" {
-					t.Errorf("Agent reference %s type = %v", reference.name, got)
-				}
-				if got := swaggerValue(t, field, "maxLength"); got != float64(128) && got != 128 {
-					t.Errorf("Agent reference %s maxLength = %v", reference.name, got)
-				}
-				if got := swaggerValue(t, field, "pattern"); got != reference.pattern {
-					t.Errorf("Agent reference %s pattern = %v", reference.name, got)
-				}
-				description := swaggerValue(t, field, "description").(string)
-				for _, term := range []string{"agent_scan only", "persisted", "not a credential", "omitted", "current availability"} {
-					if !strings.Contains(description, term) {
-						t.Errorf("Agent reference %s description lacks %q", reference.name, term)
-					}
-				}
-			}
-			for _, schema := range []interface{}{body, swaggerValue(t, document, "definitions", "tasks.TaskDetail")} {
-				remark := swaggerValue(t, schema, "properties", "remark")
-				if got := swaggerValue(t, remark, "maxLength"); got != float64(2000) && got != 2000 {
-					t.Errorf("task remark maxLength = %v, want 2000 Unicode code points", got)
-				}
-				for _, required := range swaggerValue(t, schema, "required").([]interface{}) {
-					if required == "remark" || required == "report_id" {
-						t.Errorf("optional task field %s is required", required)
-					}
-				}
-			}
-			for _, status := range []string{"202", "503"} {
-				description := swaggerValue(t, document, "paths", createPath, "post", "responses", status, "description").(string)
-				if !strings.Contains(description, "report_id is omitted") {
-					t.Errorf("task create %s must explicitly omit report_id", status)
 				}
 			}
 		})
 	}
-}
 
-func TestAPIGuidesDocumentAgentWorkflowContract(t *testing.T) {
-	for _, path := range []string{"../../docs/api/reference.md", "../../docs/api/reference.en.md"} {
-		t.Run(path, func(t *testing.T) {
-			contents, err := os.ReadFile(path)
-			if err != nil {
-				t.Fatal(err)
+	for _, guide := range []struct {
+		path                string
+		required, forbidden []string
+	}{
+		{
+			path: "../../docs/api/reference.en.md",
+			required: []string{
+				"GET /api/v1/platform/mcp-workbench", "source_kind", "authorization_confirmed", "fixed 30 UTC-day window",
+				"created_at", "completed_at", "legacy_unknown", "other", "at most 10", "at most 5", "read-only",
+				"raw result", "endpoint", "model ID", "headers",
+				"MCP requires `source_kind`", "strict Git reference or ready code attachment", "`service` requires `authorization_confirmed=true` and permits no attachment",
+				"Source-related audit metadata contains source kind and the Boolean authorization confirmation", "safe phase metadata",
+			},
+			forbidden: []string{"MCP permits `model_id`/`thread`"},
+		},
+		{
+			path: "../../docs/api/reference.md",
+			required: []string{
+				"GET /api/v1/platform/mcp-workbench", "source_kind", "authorization_confirmed", "固定 30 个 UTC 日窗口",
+				"created_at", "completed_at", "legacy_unknown", "other", "最多 10", "最多 5", "只读",
+				"原始结果", "端点", "模型 ID", "headers",
+				"MCP 要求 `source_kind`", "严格 Git 引用或 ready 代码附件", "`service` 要求 `authorization_confirmed=true` 且不允许附件",
+				"来源相关审计元数据包含 source kind 与布尔授权确认", "安全的 phase 元数据",
+			},
+			forbidden: []string{"MCP 仅 `model_id`/`thread`"},
+		},
+	} {
+		contents, err := os.ReadFile(guide.path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, required := range guide.required {
+			if !strings.Contains(string(contents), required) {
+				t.Errorf("%s does not document %q", guide.path, required)
 			}
-			for _, term := range []string{"agent_scan", "agent_id", "eval_model_id", "32 KiB", "UTF-8", "2,000", "remark", "HTTP", "WebSocket", "Dify", "Coze", "extra.dify_type", "review_complete", "no_findings", "report_id", "succeeded", "agent-security-report@1"} {
-				if !strings.Contains(string(contents), term) {
-					t.Errorf("Agent workflow API guide lacks %q", term)
-				}
+		}
+		for _, forbidden := range guide.forbidden {
+			if strings.Contains(string(contents), forbidden) {
+				t.Errorf("%s retains obsolete MCP whitelist %q", guide.path, forbidden)
 			}
-		})
+		}
 	}
 }
 
@@ -804,7 +836,7 @@ func TestSwaggerDocumentsTaskListExactFilters(t *testing.T) {
 				t.Errorf("task status filter enum = %v", status)
 			}
 			taskType := swaggerParameterValue(t, document, path, "get", "task_type", "enum").([]interface{})
-			if !reflect.DeepEqual(taskType, []interface{}{"mcp_scan", "ai_infra_scan", "model_redteam_report", "agent_scan", "skills_scan"}) {
+			if !reflect.DeepEqual(taskType, []interface{}{"ai_infra_scan", "model_redteam_report", "agent_scan", "skills_scan"}) {
 				t.Errorf("task_type filter enum = %v", taskType)
 			}
 			description := swaggerValue(t, document, "paths", path, "get", "responses", "400", "description").(string)
@@ -1203,4 +1235,85 @@ func decodeSwaggerJSON(t *testing.T, data []byte) interface{} {
 		}
 	}
 	return document
+}
+
+func TestSwaggerDocumentsAgentWorkflowCreateAndSafeDetailContract(t *testing.T) {
+	for name, document := range loadSwaggerDocuments(t) {
+		t.Run(name, func(t *testing.T) {
+			createPath := "/api/v1/platform/tasks"
+			body := swaggerBodyParameterSchema(t, document, createPath, "post")
+			checks := []struct {
+				value interface{}
+				terms []string
+			}{
+				{swaggerValue(t, body, "properties", "content", "description"), []string{"agent_scan", "non-whitespace", "valid UTF-8", "32 KiB", "bytes", "execution instructions"}},
+				{swaggerValue(t, body, "properties", "attachment_ids", "description"), []string{"agent_scan", "unsupported", "omitted", "empty array"}},
+				{swaggerValue(t, body, "properties", "params", "description"), []string{"agent_scan", "only agent_id and eval_model_id"}},
+				{swaggerValue(t, document, "paths", createPath, "post", "description"), []string{"before the new Agent input constraints", "single provider", "HTTP", "WebSocket", "Dify", "Coze", "apiKey", "apiBaseUrl", "extra.dify_type", "chat", "workflow", "three stages", "primary and auxiliary", "no successful report"}},
+				{swaggerValue(t, document, "definitions", "tasks.TaskDetail", "properties", "report_id", "description"), []string{"GET", "succeeded", "authorized", "existing immutable snapshot", "omitted", "create"}},
+				{swaggerValue(t, document, "paths", "/api/v1/platform/tasks/{taskID}", "get", "description"), []string{"agent_id", "eval_model_id", "agent_scan", "report_id", "succeeded", "authorized", "snapshot"}},
+			}
+			for _, check := range checks {
+				for _, term := range check.terms {
+					if !strings.Contains(check.value.(string), term) {
+						t.Errorf("Agent workflow contract description lacks %q", term)
+					}
+				}
+			}
+			for _, reference := range []struct{ name, pattern string }{
+				{"agent_id", "^[A-Za-z0-9][A-Za-z0-9._ -]{0,127}$"},
+				{"eval_model_id", "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"},
+			} {
+				field := swaggerValue(t, document, "definitions", "tasks.TaskInputSummary", "properties", reference.name)
+				if got := swaggerValue(t, field, "type"); got != "string" {
+					t.Errorf("Agent reference %s type = %v", reference.name, got)
+				}
+				if got := swaggerValue(t, field, "maxLength"); got != float64(128) && got != 128 {
+					t.Errorf("Agent reference %s maxLength = %v", reference.name, got)
+				}
+				if got := swaggerValue(t, field, "pattern"); got != reference.pattern {
+					t.Errorf("Agent reference %s pattern = %v", reference.name, got)
+				}
+				description := swaggerValue(t, field, "description").(string)
+				for _, term := range []string{"agent_scan only", "persisted", "not a credential", "omitted", "current availability"} {
+					if !strings.Contains(description, term) {
+						t.Errorf("Agent reference %s description lacks %q", reference.name, term)
+					}
+				}
+			}
+			for _, schema := range []interface{}{body, swaggerValue(t, document, "definitions", "tasks.TaskDetail")} {
+				remark := swaggerValue(t, schema, "properties", "remark")
+				if got := swaggerValue(t, remark, "maxLength"); got != float64(2000) && got != 2000 {
+					t.Errorf("task remark maxLength = %v, want 2000 Unicode code points", got)
+				}
+				for _, required := range swaggerValue(t, schema, "required").([]interface{}) {
+					if required == "remark" || required == "report_id" {
+						t.Errorf("optional task field %s is required", required)
+					}
+				}
+			}
+			for _, status := range []string{"202", "503"} {
+				description := swaggerValue(t, document, "paths", createPath, "post", "responses", status, "description").(string)
+				if !strings.Contains(description, "report_id is omitted") {
+					t.Errorf("task create %s must explicitly omit report_id", status)
+				}
+			}
+		})
+	}
+}
+
+func TestAPIGuidesDocumentAgentWorkflowContract(t *testing.T) {
+	for _, path := range []string{"../../docs/api/reference.md", "../../docs/api/reference.en.md"} {
+		t.Run(path, func(t *testing.T) {
+			contents, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, term := range []string{"agent_scan", "agent_id", "eval_model_id", "32 KiB", "UTF-8", "2,000", "remark", "HTTP", "WebSocket", "Dify", "Coze", "extra.dify_type", "review_complete", "no_findings", "report_id", "succeeded", "agent-security-report@1"} {
+				if !strings.Contains(string(contents), term) {
+					t.Errorf("Agent workflow API guide lacks %q", term)
+				}
+			}
+		})
+	}
 }

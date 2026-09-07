@@ -75,6 +75,16 @@ type CreateInput struct {
 	CountryIsoCode string          `json:"country_iso_code,omitempty"`
 }
 
+// SpecializedCreateInput is the internal-only, MCP-specific task persistence
+// contract. Browser request values such as repository URLs, connection IDs,
+// credentials, language, task type, and idempotency keys are intentionally
+// absent: mcpscans owns those boundaries and passes only safe task fields.
+type SpecializedCreateInput struct {
+	TaskID        string
+	Params        json.RawMessage
+	AttachmentIDs []string
+}
+
 type View struct {
 	ID               string          `json:"id"`
 	OwnerUserID      string          `json:"owner_user_id"`

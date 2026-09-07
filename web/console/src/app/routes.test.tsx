@@ -43,6 +43,22 @@ function renderRoute(initialState: SessionState, path: string) {
 afterEach(() => vi.unstubAllGlobals())
 
 describe('production routes', () => {
+  it.each(['mcp_scan', 'Mcp-Scan'])('redirects legacy %s create links to a clean dedicated page', (type) => {
+    vi.stubGlobal('fetch', vi.fn(() => new Promise<Response>(() => undefined)))
+    renderRoute(subjectState('user'), `/tasks/new?task_type=${type}&server_url=SECRET`)
+    expect(screen.getByRole('heading', { name: '新建 MCP 扫描' })).toBeInTheDocument()
+    expect(screen.getByLabelText('当前位置')).toHaveTextContent('"path":"/tasks/mcp/new"')
+    expect(screen.queryByDisplayValue('SECRET')).not.toBeInTheDocument()
+  })
+
+  it('registers MCP history before generic detail and uses no generic task query', () => {
+    const fetcher = vi.fn<(url: RequestInfo | URL) => Promise<Response>>(() => new Promise<Response>(() => undefined))
+    vi.stubGlobal('fetch', fetcher)
+    renderRoute(subjectState('auditor'), '/tasks/mcp/scans')
+    expect(screen.getByRole('heading', { name: 'MCP 扫描历史' })).toBeInTheDocument()
+    expect(fetcher.mock.calls.some((call) => String(call[0]).includes('/platform/tasks'))).toBe(false)
+  })
+
   it('allows anonymous users to open password reset outside the shell', () => {
     renderRoute({ status: 'anonymous' }, '/reset-password')
 
@@ -175,6 +191,23 @@ describe('production routes', () => {
 
     expect(screen.getByRole('heading', { name: '无权访问' })).toBeInTheDocument()
     expect(screen.queryByRole('heading', { name: '页面不存在' })).not.toBeInTheDocument()
+  })
+
+  it.each(['user', 'auditor', 'admin'] as const)('routes %s to the MCP workbench before the task-detail matcher', (role) => {
+    vi.stubGlobal('fetch', vi.fn(() => new Promise<Response>(() => undefined)))
+    renderRoute(subjectState(role), '/tasks/mcp')
+
+    expect(screen.getByRole('heading', { name: 'MCP 安全扫描' })).toBeInTheDocument()
+    expect(screen.getByRole('progressbar', { name: '正在加载 MCP 安全扫描工作台' })).toBeInTheDocument()
+    expect(screen.queryByRole('heading', { name: '任务详情' })).not.toBeInTheDocument()
+  })
+
+  it('keeps the MCP workbench read-only for auditors', () => {
+    vi.stubGlobal('fetch', vi.fn(() => new Promise<Response>(() => undefined)))
+    renderRoute(subjectState('auditor'), '/tasks/mcp')
+
+    expect(screen.queryByRole('link', { name: '创建仓库 MCP 扫描' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('link', { name: '创建受控服务 MCP 扫描' })).not.toBeInTheDocument()
   })
 
   it.each(['user', 'admin'] as const)('routes %s to the dedicated AI infrastructure creation page', (role) => {

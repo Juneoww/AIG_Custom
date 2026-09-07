@@ -69,6 +69,21 @@ describe('任务服务端列表合同', () => {
       input_summary: { port_scan_mode: 'not-approved' },
     })).toThrow(ApiError)
   })
+
+  it('MCP 详情只保留来源类别，不接受端点或授权材料', () => {
+    const detail = parseTaskDetail({
+      ...runningTask,
+      input_summary: {
+        source_kind: 'service',
+        endpoint: 'https://private.example/mcp',
+        authorization_confirmed: true,
+      },
+    })
+
+    expect(detail.input_summary).toEqual({ source_kind: 'service' })
+    expect(JSON.stringify(detail)).not.toContain('private.example')
+    expect(JSON.stringify(detail)).not.toContain('authorization_confirmed')
+  })
 })
 
 describe('任务详情模型摘要白名单', () => {

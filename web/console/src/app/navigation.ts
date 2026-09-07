@@ -13,6 +13,14 @@ export interface NavigationItem {
   label: string
   description: string
   allowedRoles: readonly SubjectRole[]
+  children?: readonly NavigationChild[]
+}
+
+export interface NavigationChild {
+  id: string
+  path: string
+  label: string
+  description: string
 }
 
 export interface SecondaryNavigationItem {
@@ -28,7 +36,19 @@ const ADMIN_ONLY: readonly SubjectRole[] = ['admin']
 
 export const navigationItems: readonly NavigationItem[] = [
   { id: 'overview', path: '/', label: '治理总览', description: '查看安全评分、30 日趋势、风险待办与最近任务。', allowedRoles: ALL_ROLES },
-  { id: 'tasks', path: '/tasks', label: '扫描任务', description: '创建、筛选并跟踪受治理的扫描任务。', allowedRoles: ALL_ROLES },
+  {
+    id: 'tasks',
+    path: '/tasks',
+    label: '扫描任务',
+    description: '创建、筛选并跟踪受治理的扫描任务。',
+    allowedRoles: ALL_ROLES,
+    children: [
+      { id: 'mcp', path: '/tasks/mcp', label: 'MCP 安全扫描', description: '查看 MCP 扫描入口、状态和安全风险摘要。' },
+      { id: 'skills', path: '/tasks/skills', label: 'Skills 扫描', description: '查看技能包的静态安全扫描任务。' },
+      { id: 'ai-infra', path: '/tasks/ai-infra', label: 'AI 基础设施扫描', description: '查看 AI 基础设施扫描任务。' },
+      { id: 'agent-workflow', path: '/tasks/agent-workflow', label: 'Agent 工作流扫描', description: '查看 Agent 工作流扫描任务。' },
+    ],
+  },
   { id: 'reports', path: '/reports', label: '安全报告', description: '查看不可变报告快照并执行受审计 PDF 导出。', allowedRoles: ALL_ROLES },
   { id: 'models', path: '/models', label: '凭证配置', description: '查看受治理模型，并按角色管理加密凭据。', allowedRoles: ALL_ROLES },
   { id: 'knowledge', path: '/knowledge', label: '规则与知识库', description: '浏览六类规则与知识资产，并按角色执行受审计治理。', allowedRoles: ALL_ROLES },
@@ -40,7 +60,7 @@ export const navigationItems: readonly NavigationItem[] = [
 
 const secondaryNavigation: Readonly<Record<string, readonly SecondaryNavigationItem[]>> = {
   tasks: [
-    { id: 'mcp-scan', path: '/tasks/new?scan=mcp', label: 'MCP 扫描', allowedRoles: ALL_ROLES },
+    { id: 'mcp-scan', path: '/tasks/mcp', label: 'MCP 安全扫描', allowedRoles: ALL_ROLES },
     { id: 'skills-scan', path: '/tasks/skills', label: 'Skills 扫描', allowedRoles: ALL_ROLES },
     { id: 'ai-infra-scan', path: '/tasks/ai-infra', label: 'AI 基础设施扫描', allowedRoles: ALL_ROLES },
     { id: 'agent-workflow-scan', path: '/tasks/agent-workflow', label: 'Agent 工作流扫描', allowedRoles: ALL_ROLES },
@@ -48,6 +68,7 @@ const secondaryNavigation: Readonly<Record<string, readonly SecondaryNavigationI
   credentials: [
     { id: 'model-config', path: '/models', label: '模型配置', allowedRoles: ALL_ROLES },
     { id: 'agent-config', path: '/knowledge/agents', label: '智能体配置', allowedRoles: ALL_ROLES },
+    { id: 'mcp-connections', path: '/credentials/mcp-connections', label: 'MCP 连接配置', allowedRoles: ALL_ROLES },
   ],
 }
 

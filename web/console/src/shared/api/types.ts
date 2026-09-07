@@ -53,6 +53,19 @@ export type TaskType =
 
 export type InfrastructurePortScanMode = 'fixed_ai' | 'full_tcp'
 
+export type MCPSourceKind = 'repository' | 'service' | 'legacy_unknown'
+
+export type MCPRiskSeverity = 'high' | 'medium' | 'low'
+
+export type MCPRiskCategory =
+  | 'dangerous_tool'
+  | 'command_file'
+  | 'authorization'
+  | 'data_leakage'
+  | 'tool_poisoning'
+  | 'skill_mismatch'
+  | 'other'
+
 export type TaskStatus =
   | 'pending'
   | 'dispatching'
@@ -82,6 +95,7 @@ export interface TaskInputSummary {
   target_count?: number
   num_prompts?: number
   port_scan_mode?: InfrastructurePortScanMode
+  source_kind?: MCPSourceKind
   scan_mode?: 'static'
 }
 
@@ -111,9 +125,42 @@ export interface TaskCreateRequest {
     port_scan_mode?: InfrastructurePortScanMode
     dataset?: { numPrompts: number; randomSeed?: number; promptColumn?: string }
     techniques?: string[]
+    source_kind?: Exclude<MCPSourceKind, 'legacy_unknown'>
+    authorization_confirmed?: true
   }
   attachment_ids?: string[]
   country_iso_code?: 'zh' | 'zh_CN' | 'en'
+}
+
+export interface MCPWorkbenchMetrics {
+  running: number
+  pending: number
+  high_risk: number
+  completed_30d: number
+}
+
+export interface MCPWorkbenchActiveTask {
+  task_id: string
+  label: string
+  source_kind: MCPSourceKind
+  phase: string | null
+  status: TaskStatus
+  updated_at: string
+}
+
+export interface MCPWorkbenchRecentRisk {
+  report_id: string
+  task_id: string
+  severity: MCPRiskSeverity
+  category: MCPRiskCategory
+  summary: string
+  completed_at: string
+}
+
+export interface MCPWorkbenchView {
+  metrics: MCPWorkbenchMetrics
+  active_tasks: MCPWorkbenchActiveTask[]
+  recent_risks: MCPWorkbenchRecentRisk[]
 }
 
 export type AttachmentState = 'uploading' | 'ready'

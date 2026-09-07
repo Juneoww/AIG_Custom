@@ -48,6 +48,29 @@ type transactionDBProvider interface {
 	TransactionDB() *gorm.DB
 }
 
+// governedMutationContextKey is intentionally private: only the audit package
+// may mark a context as being inside a mutation that has a durable intent.
+type governedMutationContextKey struct{}
+
+type governedMutationMarker struct{}
+
+var activeGovernedMutation = &governedMutationMarker{}
+
+// InGovernedMutation reports whether ctx was supplied to a Mutation.Run
+// callback after its audit intent was persisted. It is a capability check for
+// internal write ports that must not be callable from an arbitrary database
+// transaction or a transaction with no durable audit intent.
+func InGovernedMutation(ctx context.Context) bool {
+	if ctx == nil {
+		return false
+	}
+	return ctx.Value(governedMutationContextKey{}) == activeGovernedMutation
+}
+
+func withGovernedMutation(ctx context.Context) context.Context {
+	return context.WithValue(ctx, governedMutationContextKey{}, activeGovernedMutation)
+}
+
 // Mutation is a durable write-ahead audit ticket. The pending event is stored
 // before the governed state change begins, so a later audit outage cannot
 // leave an otherwise invisible mutation. Completion events share RequestID and
@@ -129,7 +152,7 @@ func (mutation *Mutation) Run(ctx context.Context, resourceID string, metadata m
 	completionID := stableCompletionID(completionInput.RequestID, "outbox")
 	var businessErr error
 	apply := func(transactionContext context.Context) error {
-		if err := mutate(transactionContext); err != nil {
+		if err := mutate(withGovernedMutation(transactionContext)); err != nil {
 			businessErr = err
 			return err
 		}
@@ -518,6 +541,12 @@ func sanitizeMap(input map[string]any) map[string]any {
 	}
 	out := make(map[string]any, len(input))
 	for key, value := range input {
+		if key == "authorization_confirmed" {
+			if confirmed, ok := value.(bool); ok {
+				out[key] = confirmed
+				continue
+			}
+		}
 		if sensitiveKey(key) {
 			out[key] = RedactedValue
 			continue

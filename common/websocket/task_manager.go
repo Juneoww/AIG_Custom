@@ -44,6 +44,7 @@ import (
 	"github.com/Juneoww/AIG_Custom/pkg/database"
 	"github.com/gin-gonic/gin"
 	"gorm.io/datatypes"
+	"gorm.io/gorm"
 	"trpc.group/trpc-go/trpc-go/log"
 )
 
@@ -62,21 +63,29 @@ const (
 )
 
 type TaskManager struct {
-	mu              sync.RWMutex
-	tasks           map[string]*TaskCreateRequest // sessionId -> 任务请求
-	agentManager    *AgentManager                 // 新增：引用 AgentManager
-	taskStore       *database.TaskStore           // 新增：引用 TaskStore
-	modelStore      *database.ModelStore          // 新增：引用 ModelStore
-	modelResolver   taskModelResolver
-	yamlModels      taskYAMLModelSource
-	fileConfig      *FileUploadConfig // 新增：文件上传配置
-	sseManager      *SSEManager       // 新增：SSE管理器
-	dispatchCounter uint64            // round-robin 计数器（原子操作）
-	platformEvents  platformTaskEventSink
+	mu               sync.RWMutex
+	tasks            map[string]*TaskCreateRequest // sessionId -> 任务请求
+	agentManager     *AgentManager                 // 新增：引用 AgentManager
+	taskStore        *database.TaskStore           // 新增：引用 TaskStore
+	modelStore       *database.ModelStore          // 新增：引用 ModelStore
+	modelResolver    taskModelResolver
+	yamlModels       taskYAMLModelSource
+	fileConfig       *FileUploadConfig // 新增：文件上传配置
+	sseManager       *SSEManager       // 新增：SSE管理器
+	dispatchCounter  uint64            // round-robin 计数器（原子操作）
+	platformEvents   platformTaskEventSink
+	mcpEventRedactor MCPEventRedactor
 }
 
 type platformTaskEventSink interface {
 	RecordEngineEvent(context.Context, string, platformtasks.EngineState, string) error
+}
+
+// MCPEventRedactor resolves only the immutable MCP binding needed to remove
+// sensitive runtime material from an Agent event. A failed redaction is
+// handled fail-closed at TaskManager's event boundary.
+type MCPEventRedactor interface {
+	RedactMCPEvent(context.Context, string, any) (any, error)
 }
 
 type taskModelResolver interface {
@@ -122,6 +131,12 @@ func (tm *TaskManager) SetYAMLModelSource(source taskYAMLModelSource) {
 
 func (tm *TaskManager) SetPlatformTaskEventSink(sink platformTaskEventSink) {
 	tm.platformEvents = sink
+}
+
+func (tm *TaskManager) SetMCPEventRedactor(redactor MCPEventRedactor) {
+	if tm != nil {
+		tm.mcpEventRedactor = redactor
+	}
 }
 
 func (tm *TaskManager) resolveTaskModel(ctx context.Context, username, modelID string) (*database.ModelParams, error) {
@@ -440,6 +455,7 @@ func (tm *TaskManager) SubmitTask(ctx context.Context, task platformtasks.Engine
 	req := &TaskCreateRequest{
 		ID: task.PlatformTaskID, SessionID: task.PlatformTaskID, Username: task.OwnerUsername,
 		Task: engineTaskType, Timestamp: time.Now().UnixMilli(), Content: task.Content, Params: params,
+		RuntimeParams: cloneRuntimeParams(task.RuntimeParams), runtimeIssuer: task.RuntimeIssuer,
 		Attachments: append([]string(nil), task.Attachments...), CountryIsoCode: task.CountryIsoCode,
 	}
 	existing, err := tm.taskStore.GetSession(task.PlatformTaskID)
@@ -453,7 +469,18 @@ func (tm *TaskManager) SubmitTask(ctx context.Context, task platformtasks.Engine
 		if existing.Status != TaskStatusTodo {
 			return task.PlatformTaskID, nil
 		}
-	} else {
+	} else if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
+		return "", errors.New("engine task lookup failed")
+	}
+	// Reconciliation above is read-only, including historical MCP tasks. Only
+	// a genuinely new assignment may pass the strict governed-runtime boundary.
+	if (task.TaskType == "mcp_scan" && (task.Content != "" || len(task.Attachments) != 0 || task.CountryIsoCode != "zh_CN" ||
+		!platformtasks.ValidMCPSafeTaskParams(task.Params) || (len(task.RuntimeParams) == 0 && task.RuntimeIssuer == nil))) ||
+		(len(task.RuntimeParams) > 0 && !validRuntimeChannel(task.PlatformTaskID, task.TaskType, params, task.RuntimeParams)) ||
+		(task.TaskType != "mcp_scan" && task.RuntimeIssuer != nil) {
+		return "", platformtasks.ErrInvalid
+	}
+	if existing == nil {
 		session := &database.Session{
 			ID: task.PlatformTaskID, Username: task.OwnerUsername, Title: tm.generateTaskTitle(req),
 			TaskType: engineTaskType, Content: task.Content, Params: mustMarshalJSON(params),
@@ -468,7 +495,10 @@ func (tm *TaskManager) SubmitTask(ctx context.Context, task platformtasks.Engine
 	tm.mu.Lock()
 	tm.tasks[task.PlatformTaskID] = req
 	tm.mu.Unlock()
-	if err := tm.dispatchTask(task.PlatformTaskID, task.PlatformTaskID); err != nil {
+	// A no-Agent/model failure happens before takeRuntimeMaterial; clear the
+	// direct channel on every return so later retries need newly issued data.
+	defer tm.discardRuntimeParams(req)
+	if err := tm.dispatchTaskWithContext(ctx, task.PlatformTaskID, task.PlatformTaskID); err != nil {
 		if strings.Contains(err.Error(), "没有可用的Agent") || strings.Contains(err.Error(), "已不活跃") {
 			return "", platformtasks.NewTransientDispatchError(err)
 		}
@@ -478,6 +508,12 @@ func (tm *TaskManager) SubmitTask(ctx context.Context, task platformtasks.Engine
 		return "", err
 	}
 	return task.PlatformTaskID, nil
+}
+
+func (tm *TaskManager) discardRuntimeParams(request *TaskCreateRequest) {
+	tm.mu.Lock()
+	defer tm.mu.Unlock()
+	request.RuntimeParams = nil
 }
 
 func platformEngineTaskType(taskType string) (string, bool) {
@@ -575,6 +611,15 @@ func (tm *TaskManager) GetTask(sessionId string) (*TaskCreateRequest, bool) {
 
 // 新增：任务分发方法（简化版本，减少死锁风险）
 func (tm *TaskManager) dispatchTask(sessionId string, traceID string) error {
+	return tm.dispatchTaskWithContext(context.Background(), sessionId, traceID)
+}
+
+func (tm *TaskManager) dispatchTaskWithContext(ctx context.Context, sessionId string, traceID string) error {
+	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	log.Infof("开始分发任务: trace_id=%s, sessionId=%s", traceID, sessionId)
 
 	// 1. 获取任务
@@ -604,7 +649,7 @@ func (tm *TaskManager) dispatchTask(sessionId string, traceID string) error {
 		enhancedParams[k] = v
 	}
 	addModel := func(modelId string) (*database.ModelParams, error) {
-		model, err := tm.resolveTaskModel(context.Background(), task.Username, modelId)
+		model, err := tm.resolveTaskModel(ctx, task.Username, modelId)
 		if err != nil {
 			log.Errorf("模型解析失败: trace_id=%s, sessionId=%s", traceID, sessionId)
 			return nil, fmt.Errorf("模型引用不存在或不可用")
@@ -679,20 +724,6 @@ func (tm *TaskManager) dispatchTask(sessionId string, traceID string) error {
 			}
 		}
 	}
-
-	// 6. 构造任务分配消息
-	taskMsg := WSMessage{
-		Type: WSMsgTypeTaskAssign,
-		Content: TaskContent{
-			SessionID:      task.SessionID,
-			TaskType:       task.Task,
-			Content:        task.Content,
-			Params:         enhancedParams,
-			Attachments:    task.Attachments,
-			Timeout:        3600,
-			CountryIsoCode: task.CountryIsoCode,
-		},
-	}
 	// 5. 在写入前锁定连接，避免健康快照和网络写之间发生断开/重连。
 	selectedAgent.stateMu.RLock()
 	selectedAgent.writeMu.Lock()
@@ -712,6 +743,44 @@ func (tm *TaskManager) dispatchTask(sessionId string, traceID string) error {
 		log.Errorf("无法更新session的assigned_agent: trace_id=%s, sessionId=%s, agentId=%s, error=%v", traceID, task.SessionID, agentID, err)
 		return fmt.Errorf("无法更新session的assigned_agent")
 	}
+	runtimeParams, runtimeIssuer := tm.takeRuntimeMaterial(task.SessionID)
+	if len(runtimeParams) == 0 && runtimeIssuer != nil {
+		runtimeParams, err = runtimeIssuer(ctx)
+		if err != nil {
+			_ = tm.taskStore.ReleaseSessionAssignment(task.SessionID, agentID)
+			return platformtasks.NewTransientDispatchError(errors.New("MCP 运行时不可用"))
+		}
+	}
+	if ctx.Err() != nil {
+		_ = tm.taskStore.ReleaseSessionAssignment(task.SessionID, agentID)
+		return platformtasks.NewTransientDispatchError(errors.New("任务调度已取消或超时"))
+	}
+	if !validRuntimeChannel(task.SessionID, task.Task, task.Params, runtimeParams) {
+		_ = tm.taskStore.ReleaseSessionAssignment(task.SessionID, agentID)
+		return errors.New("MCP 运行时参数无效")
+	}
+	for key, value := range runtimeParams {
+		if _, exists := enhancedParams[key]; exists {
+			_ = tm.taskStore.ReleaseSessionAssignment(task.SessionID, agentID)
+			return fmt.Errorf("MCP 运行时参数与安全参数冲突")
+		}
+		enhancedParams[key] = value
+	}
+
+	// RuntimeParams now exists only in the local assignment frame. The task's
+	// in-memory request was cleared by takeRuntimeMaterial before this point.
+	taskMsg := WSMessage{
+		Type: WSMsgTypeTaskAssign,
+		Content: TaskContent{
+			SessionID:      task.SessionID,
+			TaskType:       task.Task,
+			Content:        task.Content,
+			Params:         enhancedParams,
+			Attachments:    task.Attachments,
+			Timeout:        3600,
+			CountryIsoCode: task.CountryIsoCode,
+		},
+	}
 
 	// 7. 直接发送给 Agent（简化：无重试，无额外健康检查）
 	log.Infof("任务分配消息已构造: trace_id=%s, sessionId=%s, taskType=%s, agentId=%s", traceID, sessionId, task.Task, agentID)
@@ -727,15 +796,88 @@ func (tm *TaskManager) dispatchTask(sessionId string, traceID string) error {
 	if err := tm.taskStore.ConfirmSessionAssignment(task.SessionID, agentID); err != nil {
 		return fmt.Errorf("确认任务分配失败")
 	}
+	tm.clearRuntimeIssuer(task.SessionID)
 
 	log.Infof("任务分发成功: trace_id=%s, sessionId=%s, agentId=%s", traceID, task.SessionID, agentID)
 	return nil
+}
+
+func cloneRuntimeParams(source map[string]any) map[string]any {
+	if len(source) == 0 {
+		return nil
+	}
+	cloned := make(map[string]any, len(source))
+	for key, value := range source {
+		cloned[key] = value
+	}
+	return cloned
+}
+
+// takeRuntimeMaterial atomically removes direct runtime material from the
+// in-memory task before an outbound assignment is written. A factory remains
+// until a successful write so a failed pre-write attempt can obtain a fresh
+// capability on retry without retaining an old one.
+func (tm *TaskManager) takeRuntimeMaterial(sessionID string) (map[string]any, platformtasks.RuntimeParamsIssuer) {
+	if tm == nil {
+		return nil, nil
+	}
+	tm.mu.Lock()
+	defer tm.mu.Unlock()
+	task, exists := tm.tasks[sessionID]
+	if !exists || task == nil {
+		return nil, nil
+	}
+	runtimeParams := task.RuntimeParams
+	task.RuntimeParams = nil
+	return runtimeParams, task.runtimeIssuer
+}
+
+func (tm *TaskManager) clearRuntimeIssuer(sessionID string) {
+	if tm == nil {
+		return
+	}
+	tm.mu.Lock()
+	defer tm.mu.Unlock()
+	if task, exists := tm.tasks[sessionID]; exists && task != nil {
+		task.runtimeIssuer = nil
+	}
+}
+
+// validRuntimeChannel admits only the server-issued, task-bound runtime
+// fields for a new MCP task. Keeping this validation before CreateSession
+// prevents a malformed internal caller from leaving secret-bearing state in
+// the engine database even when dispatch later fails.
+func validRuntimeChannel(taskID, taskType string, safeParams map[string]interface{}, runtimeParams map[string]any) bool {
+	if !isMCPTaskAlias(taskType) {
+		return len(runtimeParams) == 0
+	}
+	if strings.TrimSpace(taskID) == "" || len(runtimeParams) == 0 {
+		return false
+	}
+	safeRaw, err := json.Marshal(safeParams)
+	return err == nil && platformtasks.ValidMCPRuntimeAssignment(taskID, safeRaw, runtimeParams)
+}
+
+func isMCPTaskAlias(taskType string) bool {
+	return taskType == "mcp_scan" || taskType == "Mcp-Scan"
 }
 
 // HandleAgentEvent only accepts events from the authenticated connection that
 // owns the current non-terminal assignment.
 func (tm *TaskManager) HandleAgentEvent(agentID string, sessionId string, eventType string, event interface{}) bool {
 	log.Debugf("收到Agent事件: agentId=%s, sessionId=%s, eventType=%s", agentID, sessionId, eventType)
+	timestamp := getEventTimestamp(event)
+	session, lookupErr := tm.taskStore.GetSession(sessionId)
+	if lookupErr != nil || session == nil || session.AssignedAgent != agentID ||
+		(session.Status != TaskStatusTodo && session.Status != TaskStatusDoing && session.Status != TaskStatusDispatchUnknown) {
+		return false
+	}
+	event, redactionOK := tm.redactMCPAgentEvent(session, event, timestamp)
+	if !redactionOK && eventType == WSMsgTypeResultUpdate {
+		// An unusable redacted result cannot become a recoverable success.
+		// Never retain the raw result as fallback when sanitising fails.
+		eventType = WSMsgTypeError
+	}
 
 	terminalStatus := ""
 	engineState := platformtasks.EngineStateRunning
@@ -754,7 +896,7 @@ func (tm *TaskManager) HandleAgentEvent(agentID string, sessionId string, eventT
 	}
 	id := generateEventID()
 	accepted, err := tm.taskStore.StoreAssignedAgentEvent(
-		id, sessionId, agentID, eventType, persistedEvent, getEventTimestamp(event), terminalStatus,
+		id, sessionId, agentID, eventType, persistedEvent, timestamp, terminalStatus,
 	)
 	if err != nil {
 		log.Errorf("存储Agent事件失败: agentId=%s, sessionId=%s, eventType=%s, error=%v", agentID, sessionId, eventType, err)
@@ -828,6 +970,29 @@ func (tm *TaskManager) HandleAgentEvent(agentID string, sessionId string, eventT
 		log.Debugf("未知事件类型: sessionId=%s, eventType=%s", sessionId, eventType)
 	}
 	return true
+}
+
+func (tm *TaskManager) redactMCPAgentEvent(session *database.Session, event any, timestamp int64) (any, bool) {
+	if !isMCPTaskAlias(session.TaskType) {
+		return event, true
+	}
+	if tm.mcpEventRedactor == nil {
+		return safeMCPRedactionFallback(timestamp), false
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	redacted, err := tm.mcpEventRedactor.RedactMCPEvent(ctx, session.ID, event)
+	if err != nil || redacted == nil {
+		return safeMCPRedactionFallback(timestamp), false
+	}
+	return redacted, true
+}
+
+func safeMCPRedactionFallback(timestamp int64) map[string]any {
+	return map[string]any{
+		"message":   "MCP 任务事件已脱敏",
+		"timestamp": timestamp,
+	}
 }
 
 // convertToStruct 将 interface{} 转换为指定的结构体类型

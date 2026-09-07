@@ -245,6 +245,7 @@ func reportRuneWidth(pdf *gopdf.GoPdf, value rune, size float64, cache map[rune]
 }
 
 func reportLines(render RenderModel) []string {
+	sanitizeMCPRenderTechnicalFindings(render.TaskType, &render)
 	trendCompleted := 0
 	for _, point := range render.RiskTrend {
 		trendCompleted += point.Completed

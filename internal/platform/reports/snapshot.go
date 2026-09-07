@@ -82,10 +82,25 @@ type DashboardRepository interface {
 	Dashboard(context.Context, DashboardQuery) (DashboardProjection, error)
 }
 
+type MCPWorkbenchQuery struct {
+	OwnerUserID string
+	Now         time.Time
+}
+
+// MCPWorkbenchRepository is a separate bounded projection contract so report
+// writers do not need MCP workbench-specific persistence knowledge.
+type MCPWorkbenchRepository interface {
+	MCPWorkbench(context.Context, MCPWorkbenchQuery) (MCPWorkbenchProjection, error)
+}
+
 type DashboardTaskVerifier func(context.Context, string, string) (bool, error)
 
 const (
-	dashboardMaxRiskCount = 1<<31 - 1
+	dashboardMaxRiskCount     = 1<<31 - 1
+	mcpWorkbenchMaxHighlights = 5
+	mcpWorkbenchBatchSize     = 64
+	mcpWorkbenchSummaryRunes  = 160
+	mcpWorkbenchSummaryBytes  = 512
 	// This is Unicode White_Space, the same character set used by strings.TrimSpace.
 	dashboardTrimCharacters    = " \t\n\v\f\r\u0085\u00a0\u1680\u2000\u2001\u2002\u2003\u2004\u2005\u2006\u2007\u2008\u2009\u200a\u2028\u2029\u202f\u205f\u3000"
 	dashboardMappingVersionSQL = "btrim(reports.risk_summary ->> 'mapping_version', ?)"
@@ -274,6 +289,58 @@ func (repository *GormRepository) Dashboard(ctx context.Context, query Dashboard
 		return DashboardProjection{}, err
 	}
 	return projection, nil
+}
+
+func (repository *GormRepository) MCPWorkbench(ctx context.Context, query MCPWorkbenchQuery) (MCPWorkbenchProjection, error) {
+	if err := validateMCPWorkbenchQuery(query); err != nil {
+		return MCPWorkbenchProjection{}, err
+	}
+	if transaction, ok := txcontext.FromGorm(ctx); ok {
+		return repository.mcpWorkbenchWithDB(transaction.WithContext(ctx), query)
+	}
+	var projection MCPWorkbenchProjection
+	err := repository.db.WithContext(ctx).Transaction(func(transaction *gorm.DB) error {
+		var err error
+		projection, err = repository.mcpWorkbenchWithDB(transaction, query)
+		return err
+	}, &sql.TxOptions{Isolation: sql.LevelRepeatableRead, ReadOnly: true})
+	if err != nil {
+		return MCPWorkbenchProjection{}, err
+	}
+	return projection, nil
+}
+
+func (repository *GormRepository) mcpWorkbenchWithDB(db *gorm.DB, query MCPWorkbenchQuery) (MCPWorkbenchProjection, error) {
+	lowerBound, upperBound := mcpWorkbenchWindow(query.Now)
+	base := db.Table("report_snapshots AS reports").
+		Select("reports.id AS report_id, reports.task_id, reports.task_type, reports.completed_at, reports.risk_summary, reports.render_data").
+		Where("reports.task_type IN ?", mcpTaskTypeAliases()).
+		Where("reports.completed_at >= ? AND reports.completed_at < ?", lowerBound, upperBound)
+	if query.OwnerUserID != "" {
+		base = base.Where("reports.owner_user_id = ?", query.OwnerUserID)
+	}
+	accumulator := newMCPWorkbenchAccumulator()
+	lastReportID := ""
+	for {
+		records := make([]mcpWorkbenchRecord, 0, mcpWorkbenchBatchSize)
+		batch := base.Session(&gorm.Session{}).Order("reports.id ASC").Limit(mcpWorkbenchBatchSize)
+		if lastReportID != "" {
+			batch = batch.Where("reports.id > ?", lastReportID)
+		}
+		if err := batch.Find(&records).Error; err != nil {
+			return MCPWorkbenchProjection{}, err
+		}
+		for index := range records {
+			if err := accumulator.addRecord(records[index]); err != nil {
+				return MCPWorkbenchProjection{}, err
+			}
+		}
+		if len(records) < mcpWorkbenchBatchSize {
+			break
+		}
+		lastReportID = records[len(records)-1].ReportID
+	}
+	return accumulator.result(), nil
 }
 
 func (repository *GormRepository) dashboardWithDB(db *gorm.DB, query DashboardQuery) (DashboardProjection, error) {
@@ -630,6 +697,255 @@ func (repository *MemoryRepository) Dashboard(ctx context.Context, query Dashboa
 	return projection, nil
 }
 
+func (repository *MemoryRepository) MCPWorkbench(_ context.Context, query MCPWorkbenchQuery) (MCPWorkbenchProjection, error) {
+	if err := validateMCPWorkbenchQuery(query); err != nil {
+		return MCPWorkbenchProjection{}, err
+	}
+	lowerBound, upperBound := mcpWorkbenchWindow(query.Now)
+	repository.mu.RLock()
+	accumulator := newMCPWorkbenchAccumulator()
+	for _, snapshot := range repository.byID {
+		if !isMCPTaskType(snapshot.TaskType) ||
+			query.OwnerUserID != "" && snapshot.OwnerUserID != query.OwnerUserID ||
+			snapshot.CompletedAt.Before(lowerBound) || !snapshot.CompletedAt.Before(upperBound) {
+			continue
+		}
+		if err := accumulator.add(mcpWorkbenchReport{
+			ReportID: snapshot.ID, TaskID: snapshot.TaskID, TaskType: snapshot.TaskType,
+			CompletedAt: snapshot.CompletedAt, Risk: snapshot.Risk, RenderData: snapshot.RenderData,
+		}); err != nil {
+			repository.mu.RUnlock()
+			return MCPWorkbenchProjection{}, err
+		}
+	}
+	repository.mu.RUnlock()
+	return accumulator.result(), nil
+}
+
+type mcpWorkbenchRecord struct {
+	ReportID    string          `gorm:"column:report_id"`
+	TaskID      string          `gorm:"column:task_id"`
+	TaskType    string          `gorm:"column:task_type"`
+	CompletedAt time.Time       `gorm:"column:completed_at"`
+	RiskSummary json.RawMessage `gorm:"column:risk_summary"`
+	RenderData  json.RawMessage `gorm:"column:render_data"`
+}
+
+type mcpWorkbenchReport struct {
+	ReportID    string
+	TaskID      string
+	TaskType    string
+	CompletedAt time.Time
+	Risk        RiskSummary
+	RenderData  json.RawMessage
+}
+
+type mcpWorkbenchAccumulator struct {
+	projection MCPWorkbenchProjection
+}
+
+func newMCPWorkbenchAccumulator() *mcpWorkbenchAccumulator {
+	return &mcpWorkbenchAccumulator{projection: MCPWorkbenchProjection{Highlights: make([]MCPRiskHighlight, 0, mcpWorkbenchMaxHighlights)}}
+}
+
+func (accumulator *mcpWorkbenchAccumulator) addRecord(record mcpWorkbenchRecord) error {
+	var risk RiskSummary
+	_ = json.Unmarshal(record.RiskSummary, &risk)
+	return accumulator.add(mcpWorkbenchReport{
+		ReportID: record.ReportID, TaskID: record.TaskID, TaskType: record.TaskType,
+		CompletedAt: record.CompletedAt, Risk: risk, RenderData: record.RenderData,
+	})
+}
+
+func (accumulator *mcpWorkbenchAccumulator) add(report mcpWorkbenchReport) error {
+	if !isMCPTaskType(report.TaskType) {
+		return nil
+	}
+	if err := dashboardAccumulate(&accumulator.projection.Completed30d, 1); err != nil {
+		return err
+	}
+	if !validMCPWorkbenchRisk(report.Risk) {
+		return nil
+	}
+	if err := dashboardAccumulate(&accumulator.projection.HighRisk, report.Risk.High); err != nil {
+		return err
+	}
+	mcpWorkbenchVisitHighlights(report, accumulator.addHighlight)
+	return nil
+}
+
+func (accumulator *mcpWorkbenchAccumulator) addHighlight(highlight MCPRiskHighlight) {
+	accumulator.projection.Highlights = append(accumulator.projection.Highlights, highlight)
+	sortMCPWorkbenchHighlights(accumulator.projection.Highlights)
+	if len(accumulator.projection.Highlights) > mcpWorkbenchMaxHighlights {
+		accumulator.projection.Highlights = accumulator.projection.Highlights[:mcpWorkbenchMaxHighlights]
+	}
+}
+
+func (accumulator *mcpWorkbenchAccumulator) result() MCPWorkbenchProjection {
+	sortMCPWorkbenchHighlights(accumulator.projection.Highlights)
+	return accumulator.projection
+}
+
+func sortMCPWorkbenchHighlights(highlights []MCPRiskHighlight) {
+	sort.SliceStable(highlights, func(left, right int) bool {
+		first, second := highlights[left], highlights[right]
+		if mcpWorkbenchSeverityRank(first.Severity) != mcpWorkbenchSeverityRank(second.Severity) {
+			return mcpWorkbenchSeverityRank(first.Severity) < mcpWorkbenchSeverityRank(second.Severity)
+		}
+		if !first.CompletedAt.Equal(second.CompletedAt) {
+			return first.CompletedAt.After(second.CompletedAt)
+		}
+		if first.ReportID != second.ReportID {
+			return first.ReportID > second.ReportID
+		}
+		return first.Summary < second.Summary
+	})
+}
+
+func mcpWorkbenchVisitHighlights(report mcpWorkbenchReport, visit func(MCPRiskHighlight)) {
+	var header mcpWorkbenchRenderHeader
+	if json.Unmarshal(report.RenderData, &header) == nil && validMCPWorkbenchRenderHeader(report, header) {
+		var safeRender mcpWorkbenchSafeRender
+		if json.Unmarshal(report.RenderData, &safeRender) != nil {
+			mcpWorkbenchVisitGenericHighlights(report, visit)
+			return
+		}
+		found := false
+		for _, finding := range safeRender.TechnicalFindings {
+			if !validMCPFindingCategory(finding.Category) || !validMCPFindingSeverity(finding.Severity) {
+				continue
+			}
+			found = true
+			visit(MCPRiskHighlight{
+				ReportID: report.ReportID, TaskID: report.TaskID, Severity: finding.Severity, Category: finding.Category,
+				Summary:     mcpWorkbenchFindingSummary(finding.Category, finding.Severity),
+				CompletedAt: report.CompletedAt.UTC(),
+			})
+		}
+		if found {
+			return
+		}
+	}
+	mcpWorkbenchVisitGenericHighlights(report, visit)
+}
+
+// mcpWorkbenchRenderHeader intentionally omits TechnicalFindings so legacy
+// fallback never decodes historic title, evidence, impact, or remediation text.
+type mcpWorkbenchRenderHeader struct {
+	RenderVersion string      `json:"render_version"`
+	TaskID        string      `json:"task_id"`
+	TaskType      string      `json:"task_type"`
+	CompletedAt   time.Time   `json:"completed_at"`
+	Risk          RiskSummary `json:"risk"`
+}
+
+// mcpWorkbenchSafeRender is a projection of the only finding fields accepted
+// by the workbench. It deliberately has no scanner-controlled display text.
+type mcpWorkbenchSafeRender struct {
+	TechnicalFindings []struct {
+		Category string `json:"category"`
+		Severity string `json:"severity"`
+	} `json:"technical_findings"`
+}
+
+func validMCPWorkbenchRenderHeader(report mcpWorkbenchReport, header mcpWorkbenchRenderHeader) bool {
+	return header.RenderVersion == "report-render-v2" && header.TaskID == report.TaskID && header.TaskType == report.TaskType &&
+		header.CompletedAt.UTC().Equal(report.CompletedAt.UTC()) && header.Risk == report.Risk
+}
+
+func mcpWorkbenchVisitGenericHighlights(report mcpWorkbenchReport, visit func(MCPRiskHighlight)) {
+	for _, item := range []struct {
+		severity string
+		count    int
+		label    string
+	}{
+		{severity: "high", count: report.Risk.High, label: "高"},
+		{severity: "medium", count: report.Risk.Medium, label: "中"},
+		{severity: "low", count: report.Risk.Low, label: "低"},
+	} {
+		if item.count == 0 {
+			continue
+		}
+		visit(MCPRiskHighlight{
+			ReportID: report.ReportID, TaskID: report.TaskID, Severity: item.severity, Category: "other",
+			Summary:     safeFindingText(fmt.Sprintf("该 MCP 报告包含 %d 项%s风险发现。", item.count, item.label), "MCP 安全发现", mcpWorkbenchSummaryRunes, mcpWorkbenchSummaryBytes),
+			CompletedAt: report.CompletedAt.UTC(),
+		})
+	}
+}
+
+func mcpWorkbenchFindingSummary(category, severity string) string {
+	categoryLabel := "MCP 其他安全风险"
+	switch category {
+	case "dangerous_tool":
+		categoryLabel = "MCP 危险工具风险"
+	case "command_file":
+		categoryLabel = "MCP 命令或文件访问风险"
+	case "authorization":
+		categoryLabel = "MCP 授权边界风险"
+	case "data_leakage":
+		categoryLabel = "MCP 数据泄露风险"
+	case "tool_poisoning":
+		categoryLabel = "MCP 工具投毒风险"
+	case "skill_mismatch":
+		categoryLabel = "MCP 技能匹配风险"
+	}
+	severityLabel := "低"
+	switch severity {
+	case "high":
+		severityLabel = "高"
+	case "medium":
+		severityLabel = "中"
+	}
+	return safeFindingText(fmt.Sprintf("%s发现（%s风险）。", categoryLabel, severityLabel), "MCP 安全发现", mcpWorkbenchSummaryRunes, mcpWorkbenchSummaryBytes)
+}
+
+func validMCPFindingCategory(value string) bool {
+	switch value {
+	case "dangerous_tool", "command_file", "authorization", "data_leakage", "tool_poisoning", "skill_mismatch", "other":
+		return true
+	default:
+		return false
+	}
+}
+
+func validMCPFindingSeverity(value string) bool {
+	switch value {
+	case "high", "medium", "low":
+		return true
+	default:
+		return false
+	}
+}
+
+func mcpWorkbenchSeverityRank(value string) int {
+	switch value {
+	case "high":
+		return 0
+	case "medium":
+		return 1
+	default:
+		return 2
+	}
+}
+
+func validMCPWorkbenchRisk(risk RiskSummary) bool {
+	return risk.High >= 0 && risk.Medium >= 0 && risk.Low >= 0
+}
+
+func mcpWorkbenchWindow(now time.Time) (time.Time, time.Time) {
+	today := utcDay(now)
+	return today.AddDate(0, 0, -29), today.AddDate(0, 0, 1)
+}
+
+func validateMCPWorkbenchQuery(query MCPWorkbenchQuery) error {
+	if query.Now.IsZero() {
+		return ErrInvalidSnapshot
+	}
+	return nil
+}
+
 func validDashboardRisk(risk RiskSummary) bool {
 	return strings.TrimSpace(risk.MappingVersion) != "" && risk.Score >= 0 && risk.Score <= 100 &&
 		risk.High >= 0 && risk.High <= dashboardMaxRiskCount &&
@@ -781,6 +1097,7 @@ func buildSnapshotWithInfrastructurePortScanAt(taskID, ownerUserID, taskType str
 		render.PortScanMode = string(mode)
 		render.PortSpec = spec
 	}
+	applyMCPAnalysisCoverage(&render, taskType, raw)
 	renderData, err := json.Marshal(render)
 	if err != nil {
 		return nil, ErrInvalidSnapshot

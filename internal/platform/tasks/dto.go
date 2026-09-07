@@ -34,6 +34,7 @@ type TaskListResponse struct {
 // are intentionally not representable by this type.
 type TaskInputSummary struct {
 	Language     string `json:"language,omitempty"`
+	SourceKind   string `json:"source_kind,omitempty"`
 	AgentID      string `json:"agent_id,omitempty"`
 	EvalModelID  string `json:"eval_model_id,omitempty"`
 	ModelID      string `json:"model_id,omitempty"`
@@ -138,8 +139,9 @@ func safeInputSummary(task *Task) TaskInputSummary {
 		}
 	case "mcp_scan":
 		return TaskInputSummary{
-			Language: safeLanguage(task.CountryIsoCode),
-			Thread:   safePositiveInt(params.Thread, 1024),
+			Language:   safeLanguage(task.CountryIsoCode),
+			SourceKind: safeMCPSourceKind(task.Params),
+			Thread:     safePositiveInt(params.Thread, 1024),
 		}
 	case "ai_infra_scan":
 		targetCount := task.TargetCount
@@ -172,6 +174,19 @@ func safeInputSummary(task *Task) TaskInputSummary {
 	default:
 		return TaskInputSummary{}
 	}
+}
+
+func safeMCPSourceKind(raw json.RawMessage) string {
+	var params struct {
+		SourceKind string `json:"source_kind"`
+	}
+	if json.Unmarshal(raw, &params) == nil {
+		switch params.SourceKind {
+		case "repository", "service":
+			return params.SourceKind
+		}
+	}
+	return "legacy_unknown"
 }
 
 func safeTaskRemark(value string) string {

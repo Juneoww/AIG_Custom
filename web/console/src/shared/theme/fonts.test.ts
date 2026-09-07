@@ -223,7 +223,8 @@ describe('offline font assets', () => {
         resolve(fixtureRoot, 'assets/fonts/IBM_PLEX_LICENSE.txt'),
       )
       await writeFile(sentinel, 'outside must remain unchanged')
-      await symlink(externalTarget, resolve(fixtureRoot, '.generated'), 'dir')
+      // Windows 用同样受 lstat 检测的目录联接，避免测试依赖管理员符号链接权限。
+      await symlink(externalTarget, resolve(fixtureRoot, '.generated'), process.platform === 'win32' ? 'junction' : 'dir')
 
       await expect(runPrepare(fixtureRoot)).rejects.toThrow()
       await expect(readFile(sentinel, 'utf8')).resolves.toBe('outside must remain unchanged')

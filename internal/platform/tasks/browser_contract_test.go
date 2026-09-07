@@ -45,7 +45,7 @@ func TestTaskBrowserListReturnsSafePagedOwnerScopedContract(t *testing.T) {
 		putBrowserTask(t, repository, Task{
 			ID: fmt.Sprintf("task-%02d", index), OwnerUserID: ownerID, OwnerUsername: ownerName,
 			IdempotencyKey: fmt.Sprintf("key-%02d", index), EngineSessionID: "engine-secret",
-			TaskType: "mcp_scan", Content: "private-content", Params: json.RawMessage(`{"token":"params-secret"}`),
+			TaskType: "ai_infra_scan", Content: "private-content", Params: json.RawMessage(`{"token":"params-secret"}`),
 			Remark: "list-remark-secret", TargetCount: 4123,
 			AttachmentRefs: json.RawMessage(`["attachment-secret"]`), Status: StatusRunning,
 			DispatchError: "dispatch-secret", DispatchClaimToken: "claim-secret",
@@ -86,7 +86,7 @@ func TestTaskBrowserPaginationDefaultsCapsAndRejectsInvalidValues(t *testing.T) 
 	for index := range 105 {
 		putBrowserTask(t, repository, Task{
 			ID: fmt.Sprintf("page-%03d", index), OwnerUserID: "user-alice", OwnerUsername: "alice",
-			IdempotencyKey: fmt.Sprintf("page-key-%03d", index), TaskType: "mcp_scan", Status: StatusPending,
+			IdempotencyKey: fmt.Sprintf("page-key-%03d", index), TaskType: "ai_infra_scan", Status: StatusPending,
 			Params: json.RawMessage(`{}`), AttachmentRefs: json.RawMessage(`[]`), CreatedAt: now, UpdatedAt: now,
 		})
 	}
@@ -119,11 +119,11 @@ func TestTaskBrowserListFiltersStatusAndTaskTypeBeforePaging(t *testing.T) {
 	router, tokens, repository, _ := newTaskBrowserFixture(t)
 	now := time.Now().UTC()
 	fixtures := []Task{
-		{ID: "alice-canonical", OwnerUserID: "user-alice", OwnerUsername: "alice", TaskType: "mcp_scan", Status: StatusRunning},
-		{ID: "alice-alias", OwnerUserID: "user-alice", OwnerUsername: "alice", TaskType: "Mcp-Scan", Status: StatusRunning},
-		{ID: "alice-pending", OwnerUserID: "user-alice", OwnerUsername: "alice", TaskType: "mcp_scan", Status: StatusPending},
+		{ID: "alice-canonical", OwnerUserID: "user-alice", OwnerUsername: "alice", TaskType: "ai_infra_scan", Status: StatusRunning},
+		{ID: "alice-alias", OwnerUserID: "user-alice", OwnerUsername: "alice", TaskType: "AI-Infra-Scan", Status: StatusRunning},
+		{ID: "alice-pending", OwnerUserID: "user-alice", OwnerUsername: "alice", TaskType: "ai_infra_scan", Status: StatusPending},
 		{ID: "alice-agent", OwnerUserID: "user-alice", OwnerUsername: "alice", TaskType: "agent_scan", Status: StatusRunning},
-		{ID: "bob-running", OwnerUserID: "user-bob", OwnerUsername: "bob", TaskType: "mcp_scan", Status: StatusRunning},
+		{ID: "bob-running", OwnerUserID: "user-bob", OwnerUsername: "bob", TaskType: "ai_infra_scan", Status: StatusRunning},
 	}
 	for index := range fixtures {
 		fixtures[index].IdempotencyKey = fixtures[index].ID
@@ -134,7 +134,7 @@ func TestTaskBrowserListFiltersStatusAndTaskTypeBeforePaging(t *testing.T) {
 		putBrowserTask(t, repository, fixtures[index])
 	}
 
-	response := performTaskJSON(t, router, tokens["alice"], http.MethodGet, "/tasks?status=running&task_type=mcp_scan&page=1&page_size=1", "", nil)
+	response := performTaskJSON(t, router, tokens["alice"], http.MethodGet, "/tasks?status=running&task_type=ai_infra_scan&page=1&page_size=1", "", nil)
 	require.Equal(t, http.StatusOK, response.Code, response.Body.String())
 	var listed TaskListResponse
 	require.NoError(t, json.Unmarshal(response.Body.Bytes(), &listed))
@@ -142,7 +142,7 @@ func TestTaskBrowserListFiltersStatusAndTaskTypeBeforePaging(t *testing.T) {
 	require.Len(t, listed.Items, 1)
 	assert.Equal(t, "alice-alias", listed.Items[0].ID)
 
-	global := performTaskJSON(t, router, tokens["auditor"], http.MethodGet, "/tasks?status=running&task_type=mcp_scan&page_size=20", "", nil)
+	global := performTaskJSON(t, router, tokens["auditor"], http.MethodGet, "/tasks?status=running&task_type=ai_infra_scan&page_size=20", "", nil)
 	require.Equal(t, http.StatusOK, global.Code, global.Body.String())
 	require.NoError(t, json.Unmarshal(global.Body.Bytes(), &listed))
 	assert.Equal(t, int64(3), listed.Total)
@@ -155,7 +155,7 @@ func TestTaskBrowserListRejectsInvalidExactFilters(t *testing.T) {
 		"?status=done",
 		"?status=RUNNING",
 		"?task_type=unknown",
-		"?task_type=Mcp-Scan",
+		"?task_type=ai-infra",
 		"?task_type=not_registered",
 	} {
 		response := performTaskJSON(t, router, tokens["alice"], http.MethodGet, "/tasks"+query, "", nil)
@@ -195,8 +195,8 @@ func TestTaskBrowserCanonicalizesOnlyRegisteredTaskTypeAliases(t *testing.T) {
 		stored   string
 		expected string
 	}{
-		{id: "mcp-snake", stored: "mcp_scan", expected: "mcp_scan"},
-		{id: "mcp-agent", stored: "Mcp-Scan", expected: "mcp_scan"},
+		{id: "mcp-snake", stored: "mcp_scan", expected: ""},
+		{id: "mcp-agent", stored: "Mcp-Scan", expected: ""},
 		{id: "infra-snake", stored: "ai_infra_scan", expected: "ai_infra_scan"},
 		{id: "infra-agent", stored: "AI-Infra-Scan", expected: "ai_infra_scan"},
 		{id: "redteam-snake", stored: "model_redteam_report", expected: "model_redteam_report"},
@@ -303,68 +303,39 @@ func TestTaskBrowserDetailUsesTaskTypeWhitelistAndDropsUnsafeFields(t *testing.T
 	}
 }
 
-func TestTaskBrowserDetailAIInfraModelIDProjectionIsSafe(t *testing.T) {
-	router, tokens, repository, _ := newTaskBrowserFixture(t)
-	now := time.Now().UTC()
-	putBrowserTask(t, repository, Task{
-		ID: "infra-model-safe", OwnerUserID: "user-alice", OwnerUsername: "alice", IdempotencyKey: "infra-model-safe",
-		TaskType: "ai_infra_scan", Content: "first-target\nsecond-target", Remark: "本次扫描用于上线前复核", TargetCount: 9,
-		CountryIsoCode: "zh", Status: StatusPending,
-		Params: json.RawMessage(`{"model_id":"model-opaque-1","timeout":300,"port_scan_mode":"fixed_ai"}`),
-		AttachmentRefs: json.RawMessage(`[]`), CreatedAt: now, UpdatedAt: now,
-	})
-	putBrowserTask(t, repository, Task{
-		ID: "infra-model-unsafe", OwnerUserID: "user-alice", OwnerUsername: "alice", IdempotencyKey: "infra-model-unsafe",
-		TaskType: "ai_infra_scan", Content: "one-target", CountryIsoCode: "en", Status: StatusPending,
-		Params: json.RawMessage(`{"model_id":"model-opaque-2","timeout":60,"port_scan_mode":"fixed_ai","token":"token-sentinel","base_url":"https://credential.invalid","credentials":{"token":"nested-credential-sentinel"}}`),
-		AttachmentRefs: json.RawMessage(`[]`), CreatedAt: now, UpdatedAt: now,
-	})
-
-	response := performTaskJSON(t, router, tokens["alice"], http.MethodGet, "/tasks/infra-model-safe", "", nil)
-	require.Equal(t, http.StatusOK, response.Code, response.Body.String())
-	var safeWire map[string]any
-	require.NoError(t, json.Unmarshal(response.Body.Bytes(), &safeWire))
-	assert.Equal(t, "本次扫描用于上线前复核", safeWire["remark"])
-	assert.Equal(t, map[string]any{
-		"language": "zh", "model_id": "model-opaque-1", "timeout": float64(300), "target_count": float64(9), "port_scan_mode": "fixed_ai",
-	}, safeWire["input_summary"])
-
-	response = performTaskJSON(t, router, tokens["alice"], http.MethodGet, "/tasks/infra-model-unsafe", "", nil)
-	require.Equal(t, http.StatusOK, response.Code, response.Body.String())
-	var unsafeWire map[string]any
-	require.NoError(t, json.Unmarshal(response.Body.Bytes(), &unsafeWire))
-	assert.NotContains(t, unsafeWire, "remark", "empty remarks must preserve the existing wire shape")
-	assert.Equal(t, map[string]any{
-		"language": "en", "model_id": "model-opaque-2", "timeout": float64(60), "target_count": float64(1),
-	}, unsafeWire["input_summary"])
-	for _, forbidden := range []string{"token-sentinel", "https://credential.invalid", "nested-credential-sentinel", "credentials", "params"} {
-		assert.NotContains(t, response.Body.String(), forbidden)
-	}
-}
-
-func TestSafeInputSummaryUsesPersistedAIInfraTargetCountWithBoundedLegacyFallback(t *testing.T) {
-	tests := []struct {
-		name        string
-		targetCount int
-		content     string
-		expected    int
+func TestTaskDetailMCPBrowserSourceSummaryOnlyProjectsSafeEnum(t *testing.T) {
+	for _, test := range []struct {
+		name       string
+		params     json.RawMessage
+		wantSource string
+		wantThread bool
 	}{
-		{name: "attachment or expanded range count wins", targetCount: 9, content: "one-manual-line", expected: 9},
-		{name: "legacy zero falls back to nonempty lines", targetCount: 0, content: "first\n\n second ", expected: 2},
-		{name: "negative corrupt count is omitted", targetCount: -1, content: "first\nsecond", expected: 0},
-		{name: "oversized corrupt count is omitted", targetCount: runner.MaxTargetExpressions + 1, content: "one-safe-line", expected: 0},
-	}
-
-	for _, test := range tests {
+		{name: "repository", params: json.RawMessage(`{"source_kind":"repository","model_id":"private-model","thread":7}`), wantSource: "repository", wantThread: true},
+		{name: "service", params: json.RawMessage(`{"source_kind":"service","authorization_confirmed":true,"model_id":"private-model","thread":7}`), wantSource: "service", wantThread: true},
+		{name: "legacy missing source", params: json.RawMessage(`{"model_id":"private-model","thread":7}`), wantSource: "legacy_unknown", wantThread: true},
+		{name: "unknown source", params: json.RawMessage(`{"source_kind":"untrusted","thread":7}`), wantSource: "legacy_unknown", wantThread: true},
+		{name: "malformed params", params: json.RawMessage(`{`), wantSource: "legacy_unknown"},
+	} {
 		t.Run(test.name, func(t *testing.T) {
-			summary := safeInputSummary(&Task{
-				TaskType: "ai_infra_scan", Content: test.content, TargetCount: test.targetCount,
+			detail := taskDetailOf(&Task{
+				ID: "mcp-browser-" + strings.ReplaceAll(test.name, " ", "-"), OwnerUsername: "alice", TaskType: "mcp_scan",
+				Content: "https://user:private-password@mcp.example.test/rpc?token=private-token", Params: test.params,
+				CountryIsoCode: "zh", Status: StatusRunning, CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC(),
 			})
-			assert.Equal(t, test.expected, summary.TargetCount)
-			if test.expected == 0 {
-				encoded, err := json.Marshal(summary)
-				require.NoError(t, err)
-				assert.NotContains(t, string(encoded), "target_count")
+			encoded, err := json.Marshal(detail)
+			require.NoError(t, err)
+			var wire map[string]any
+			require.NoError(t, json.Unmarshal(encoded, &wire))
+			summary := wire["input_summary"].(map[string]any)
+			assert.Equal(t, test.wantSource, summary["source_kind"])
+			if test.wantThread {
+				assert.Equal(t, float64(7), summary["thread"])
+			} else {
+				assert.NotContains(t, summary, "thread")
+			}
+			assert.Equal(t, "zh", summary["language"])
+			for _, secret := range []string{"private-password", "private-token", "private-model", "authorization_confirmed", "https://user:"} {
+				assert.NotContains(t, string(encoded), secret)
 			}
 		})
 	}
@@ -410,7 +381,7 @@ func TestTaskAndViewDetailProjectionStayEquivalentAndSafe(t *testing.T) {
 		ID: "projection-task", OwnerUserID: "owner-id-sentinel", OwnerUsername: "alice",
 		EngineSessionID: "engine-session-sentinel", TaskType: "AI-Infra-Scan",
 		Content: "https://target.invalid\n\nhttps://second.invalid", Remark: " \n发布窗口扫描\t ", TargetCount: 9,
-		Params: json.RawMessage(`{"timeout":45,"secret_label":"params-sentinel"}`),
+		Params:         json.RawMessage(`{"timeout":45,"secret_label":"params-sentinel"}`),
 		AttachmentRefs: json.RawMessage(`["attachment-sentinel"]`), CountryIsoCode: "en", Status: StatusRunning,
 		DispatchError: "dispatch-error-sentinel", CreatedAt: now, UpdatedAt: now.Add(time.Minute),
 	}
@@ -533,6 +504,29 @@ func TestTaskBrowserGormRepositoryFiltersOwnerBeforePagingAndCountsFilteredTotal
 	require.ErrorIs(t, err, ErrNotFound)
 }
 
+func TestMCPBrowserGormSourceProjectionExcludesRawParams(t *testing.T) {
+	dsn := os.Getenv("AIG_TEST_DB_DSN")
+	require.NotEmpty(t, dsn)
+	db, err := gorm.Open(postgres.Open(dsn), &gorm.Config{DisableForeignKeyConstraintWhenMigrating: true})
+	require.NoError(t, err)
+	require.NoError(t, database.Migrate(db))
+	repository := NewGormRepository(db)
+	for _, kind := range []string{"repository", "service", "legacy"} {
+		id := "mcp-summary-" + kind
+		putBrowserTask(t, repository, Task{ID: id, OwnerUserID: "mcp-summary-owner", OwnerUsername: "alice", IdempotencyKey: id, EngineSessionID: id, TaskType: "mcp_scan", Status: StatusPending, Params: json.RawMessage(`{"source_kind":"` + kind + `","token":"sentinel-private"}`), AttachmentRefs: json.RawMessage(`[]`)})
+	}
+	rows, total, err := repository.ListBrowser(context.Background(), TaskListQuery{OwnerUserID: "mcp-summary-owner", TaskType: "mcp_scan", IncludeMCPSummary: true, Limit: 10})
+	require.NoError(t, err)
+	require.EqualValues(t, 3, total)
+	for _, row := range rows {
+		var projection map[string]string
+		require.NoError(t, json.Unmarshal(row.Params, &projection))
+		require.Len(t, projection, 1)
+		require.Contains(t, []string{"repository", "service", "legacy_unknown"}, projection["source_kind"])
+		require.NotContains(t, string(row.Params), "sentinel")
+	}
+}
+
 func newTaskBrowserFixture(t *testing.T) (http.Handler, map[string]string, *MemoryRepository, *recordingEngine) {
 	t.Helper()
 	gin.SetMode(gin.TestMode)
@@ -579,4 +573,71 @@ func mapKeys(value map[string]any) []string {
 		keys = append(keys, key)
 	}
 	return keys
+}
+
+func TestTaskBrowserDetailAIInfraModelIDProjectionIsSafe(t *testing.T) {
+	router, tokens, repository, _ := newTaskBrowserFixture(t)
+	now := time.Now().UTC()
+	putBrowserTask(t, repository, Task{
+		ID: "infra-model-safe", OwnerUserID: "user-alice", OwnerUsername: "alice", IdempotencyKey: "infra-model-safe",
+		TaskType: "ai_infra_scan", Content: "first-target\nsecond-target", Remark: "本次扫描用于上线前复核", TargetCount: 9,
+		CountryIsoCode: "zh", Status: StatusPending,
+		Params:         json.RawMessage(`{"model_id":"model-opaque-1","timeout":300,"port_scan_mode":"fixed_ai"}`),
+		AttachmentRefs: json.RawMessage(`[]`), CreatedAt: now, UpdatedAt: now,
+	})
+	putBrowserTask(t, repository, Task{
+		ID: "infra-model-unsafe", OwnerUserID: "user-alice", OwnerUsername: "alice", IdempotencyKey: "infra-model-unsafe",
+		TaskType: "ai_infra_scan", Content: "one-target", CountryIsoCode: "en", Status: StatusPending,
+		Params:         json.RawMessage(`{"model_id":"model-opaque-2","timeout":60,"port_scan_mode":"fixed_ai","token":"token-sentinel","base_url":"https://credential.invalid","credentials":{"token":"nested-credential-sentinel"}}`),
+		AttachmentRefs: json.RawMessage(`[]`), CreatedAt: now, UpdatedAt: now,
+	})
+
+	response := performTaskJSON(t, router, tokens["alice"], http.MethodGet, "/tasks/infra-model-safe", "", nil)
+	require.Equal(t, http.StatusOK, response.Code, response.Body.String())
+	var safeWire map[string]any
+	require.NoError(t, json.Unmarshal(response.Body.Bytes(), &safeWire))
+	assert.Equal(t, "本次扫描用于上线前复核", safeWire["remark"])
+	assert.Equal(t, map[string]any{
+		"language": "zh", "model_id": "model-opaque-1", "timeout": float64(300), "target_count": float64(9), "port_scan_mode": "fixed_ai",
+	}, safeWire["input_summary"])
+
+	response = performTaskJSON(t, router, tokens["alice"], http.MethodGet, "/tasks/infra-model-unsafe", "", nil)
+	require.Equal(t, http.StatusOK, response.Code, response.Body.String())
+	var unsafeWire map[string]any
+	require.NoError(t, json.Unmarshal(response.Body.Bytes(), &unsafeWire))
+	assert.NotContains(t, unsafeWire, "remark", "empty remarks must preserve the existing wire shape")
+	assert.Equal(t, map[string]any{
+		"language": "en", "model_id": "model-opaque-2", "timeout": float64(60), "target_count": float64(1),
+	}, unsafeWire["input_summary"])
+	for _, forbidden := range []string{"token-sentinel", "https://credential.invalid", "nested-credential-sentinel", "credentials", "params"} {
+		assert.NotContains(t, response.Body.String(), forbidden)
+	}
+}
+
+func TestSafeInputSummaryUsesPersistedAIInfraTargetCountWithBoundedLegacyFallback(t *testing.T) {
+	tests := []struct {
+		name        string
+		targetCount int
+		content     string
+		expected    int
+	}{
+		{name: "attachment or expanded range count wins", targetCount: 9, content: "one-manual-line", expected: 9},
+		{name: "legacy zero falls back to nonempty lines", targetCount: 0, content: "first\n\n second ", expected: 2},
+		{name: "negative corrupt count is omitted", targetCount: -1, content: "first\nsecond", expected: 0},
+		{name: "oversized corrupt count is omitted", targetCount: runner.MaxTargetExpressions + 1, content: "one-safe-line", expected: 0},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			summary := safeInputSummary(&Task{
+				TaskType: "ai_infra_scan", Content: test.content, TargetCount: test.targetCount,
+			})
+			assert.Equal(t, test.expected, summary.TargetCount)
+			if test.expected == 0 {
+				encoded, err := json.Marshal(summary)
+				require.NoError(t, err)
+				assert.NotContains(t, string(encoded), "target_count")
+			}
+		})
+	}
 }

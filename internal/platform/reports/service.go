@@ -143,6 +143,21 @@ func (service *Service) Dashboard(ctx context.Context, subject identity.Subject,
 	})
 }
 
+func (service *Service) MCPWorkbench(ctx context.Context, subject identity.Subject, now time.Time) (MCPWorkbenchProjection, error) {
+	query, err := listQueryFor(subject)
+	if err != nil {
+		return MCPWorkbenchProjection{}, err
+	}
+	if service == nil || service.repository == nil {
+		return MCPWorkbenchProjection{}, ErrInvalidSnapshot
+	}
+	repository, ok := service.repository.(MCPWorkbenchRepository)
+	if !ok {
+		return MCPWorkbenchProjection{}, ErrInvalidSnapshot
+	}
+	return repository.MCPWorkbench(ctx, MCPWorkbenchQuery{OwnerUserID: query.OwnerUserID, Now: now})
+}
+
 func (service *Service) SetDashboardTaskVerifier(verifier DashboardTaskVerifier) {
 	if repository, ok := service.repository.(*MemoryRepository); ok {
 		repository.SetDashboardTaskVerifier(verifier)

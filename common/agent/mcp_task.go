@@ -19,22 +19,143 @@
 package agent
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
+	"net/url"
 	"os"
-	"path/filepath"
 	"strconv"
 	"strings"
-	"time"
 
 	"github.com/Juneoww/AIG_Custom/common/utils"
-	"github.com/Juneoww/AIG_Custom/internal/gologger"
 )
 
 type McpTask struct {
 	Server string
+}
+
+type mcpExecutionPlan struct {
+	transport  string
+	taskTitles []string
+}
+
+func planMcpExecution(rawParams json.RawMessage, content string, attachments []string) (mcpExecutionPlan, error) {
+	var fields map[string]json.RawMessage
+	if len(rawParams) > 0 {
+		if err := json.Unmarshal(rawParams, &fields); err != nil {
+			return mcpExecutionPlan{}, errors.New("invalid MCP task parameters")
+		}
+	}
+	if fields == nil {
+		fields = map[string]json.RawMessage{}
+	}
+
+	rawSourceKind, explicitSourceKind := fields["source_kind"]
+	if !explicitSourceKind {
+		if len(attachments) > 0 || strings.Contains(content, "github.com") {
+			return mcpCodeExecutionPlan(), nil
+		}
+		return mcpServiceExecutionPlan(), nil
+	}
+
+	var sourceKind string
+	if err := json.Unmarshal(rawSourceKind, &sourceKind); err != nil || sourceKind == "" {
+		return mcpExecutionPlan{}, errors.New("invalid MCP source kind")
+	}
+	switch sourceKind {
+	case "repository":
+		if len(attachments) > 0 {
+			if content != "" {
+				return mcpExecutionPlan{}, errors.New("MCP repository source cannot include both content and attachments")
+			}
+			return mcpCodeExecutionPlan(), nil
+		}
+		if !validMcpRepositoryReference(content) {
+			return mcpExecutionPlan{}, errors.New("MCP repository source requires a Git repository reference")
+		}
+		return mcpCodeExecutionPlan(), nil
+	case "service":
+		if len(attachments) > 0 || !validMcpServiceEndpoint(content) {
+			return mcpExecutionPlan{}, errors.New("MCP service source requires a service endpoint without attachments")
+		}
+		rawAuthorization, authorizationProvided := fields["authorization_confirmed"]
+		var authorizationConfirmed bool
+		if !authorizationProvided || json.Unmarshal(rawAuthorization, &authorizationConfirmed) != nil || !authorizationConfirmed {
+			return mcpExecutionPlan{}, errors.New("MCP service source requires explicit authorization")
+		}
+		return mcpServiceExecutionPlan(), nil
+	default:
+		return mcpExecutionPlan{}, errors.New("unknown MCP source kind")
+	}
+}
+
+func mcpCodeExecutionPlan() mcpExecutionPlan {
+	return mcpExecutionPlan{
+		transport: "code",
+		taskTitles: []string{
+			"Info Collection",
+			"Code Audit",
+			"Vulnerability Review",
+		},
+	}
+}
+
+func mcpServiceExecutionPlan() mcpExecutionPlan {
+	return mcpExecutionPlan{
+		transport: "url",
+		taskTitles: []string{
+			"Info Collection",
+			"Malicious Testing",
+			"Vulnerability Testing",
+			"Vulnerability Review",
+		},
+	}
+}
+
+func validMcpRepositoryReference(value string) bool {
+	if value == "" || value != strings.TrimSpace(value) || strings.ContainsAny(value, "?#") {
+		return false
+	}
+	if parsed, err := url.ParseRequestURI(value); err == nil && parsed.Hostname() != "" &&
+		strings.Trim(parsed.Path, "/") != "" && parsed.RawQuery == "" && parsed.Fragment == "" {
+		switch strings.ToLower(parsed.Scheme) {
+		case "http", "https":
+			return parsed.User == nil
+		case "ssh":
+			if parsed.User == nil || parsed.User.Username() != "git" {
+				return false
+			}
+			_, hasPassword := parsed.User.Password()
+			return !hasPassword
+		}
+	}
+	return validMcpRepositorySCPReference(value)
+}
+
+func validMcpRepositorySCPReference(value string) bool {
+	if !strings.HasPrefix(value, "git@") || strings.ContainsAny(value, " \t\r\n?#") {
+		return false
+	}
+	hostAndPath := strings.TrimPrefix(value, "git@")
+	separator := strings.IndexByte(hostAndPath, ':')
+	if separator <= 0 || separator == len(hostAndPath)-1 {
+		return false
+	}
+	host, path := hostAndPath[:separator], hostAndPath[separator+1:]
+	return !strings.ContainsAny(host, "/@") && strings.Trim(path, "/") != ""
+}
+
+func validMcpServiceEndpoint(value string) bool {
+	if value == "" || value != strings.TrimSpace(value) {
+		return false
+	}
+	parsed, err := url.ParseRequestURI(value)
+	if err != nil || parsed.Hostname() == "" || parsed.User != nil || parsed.RawQuery != "" || parsed.ForceQuery || parsed.Fragment != "" || strings.Contains(value, "#") {
+		return false
+	}
+	scheme := strings.ToLower(parsed.Scheme)
+	return scheme == "http" || scheme == "https"
 }
 
 func (m *McpTask) GetName() string {
@@ -42,149 +163,61 @@ func (m *McpTask) GetName() string {
 }
 
 func (m *McpTask) Execute(ctx context.Context, request TaskRequest, callbacks TaskCallbacks) error {
-	type ScanMcpRequest struct {
-		Content string `json:"-"`
-		Model   struct {
-			Model   string `json:"model"`
-			Token   string `json:"token"`
-			BaseUrl string `json:"base_url"`
-		} `json:"model"`
-		Headers map[string]string `json:"headers"`
+	if ctx == nil {
+		ctx = context.Background()
 	}
-
-	var params ScanMcpRequest
-	if err := json.Unmarshal(request.Params, &params); err != nil {
+	if ctx.Err() != nil {
+		return ctx.Err()
+	}
+	params, err := parseMCPRuntime(m.Server, request)
+	if err != nil {
 		return err
 	}
-	params.Content = request.Content
-	files := request.Attachments
-	transport := "code" // code or url
-	if len(files) > 0 || strings.Contains(request.Content, "github.com") {
-		transport = "code"
-	} else {
-		transport = "url"
-	}
-	language := request.Language
-	if language == "" {
+	language := strings.ToLower(strings.TrimSpace(request.Language))
+	if language == "" || language == "zh_cn" || language == "zh-cn" {
 		language = "zh"
 	}
-
-	var folder string
-	var serverUrl string
-	if transport == "code" {
-		// 创建临时目录用于存储上传的文件
-		tempDir := "uploads"
-		if err := os.MkdirAll(tempDir, 0755); err != nil {
-			gologger.Errorf("%s: %v", "createTempDir", err)
+	if language != "zh" && language != "en" {
+		return errMCPRuntime
+	}
+	argv := []string{"run", "--no-project", "main.py", "--runtime-config-stdin", "--language", language}
+	plan := mcpServiceExecutionPlan()
+	if params.SourceKind == "repository" {
+		folder, err := os.MkdirTemp("", "aig-mcp-source-")
+		if err != nil {
+			return errMCPArchive
+		}
+		defer os.RemoveAll(folder)
+		if err = downloadMCPArchive(ctx, m.Server, request.SessionId, params.ArchiveRef, folder); err != nil {
 			return err
 		}
-		if len(files) > 0 {
-			// 远程下载
-			for _, file := range files {
-				// 下载文件
-				ext := ""
-				supports := []string{".zip", ".tar.gz", ".tgz", ".whl"}
-				for _, support := range supports {
-					if strings.HasSuffix(file, support) {
-						ext = support
-						break
-					}
-				}
-				if ext == "" {
-					gologger.Errorln("Unsupported file type", strings.Join(supports, ","))
-					continue
-				}
-
-				fileName := filepath.Join(tempDir, fmt.Sprintf("tmp-%d%s", time.Now().UnixMicro(), ext))
-				err := utils.DownloadFile(m.Server, request.SessionId, file, fileName)
-				if err != nil {
-					return fmt.Errorf("download failed: %v", err)
-				}
-				extractPath, _ := filepath.Abs(filepath.Join(tempDir, fmt.Sprintf("tmp-%d", time.Now().UnixMicro())))
-				switch ext {
-				case ".zip", ".whl":
-					err = utils.ExtractZipFile(fileName, extractPath)
-				case ".tgz", ".tar.gz":
-					err = utils.ExtractTGZ(fileName, extractPath)
-				default:
-					return errors.New("Unsupported file type: " + strings.Join(supports, ","))
-				}
-				if err != nil {
-					return errors.New(fmt.Sprintf("extract failed: %v", err))
-				}
-				folder = extractPath
-			}
-		} else {
-			extractPath, _ := filepath.Abs(filepath.Join(tempDir, fmt.Sprintf("tmp-%d", time.Now().UnixMicro())))
-			err := utils.GitClone(params.Content, extractPath, 10*time.Minute)
-			if err != nil {
-				return fmt.Errorf("clone failed: %v", err)
-			}
-			folder = extractPath
-		}
-
-		// 判断文件夹是否存在
-		if info, err := os.Stat(folder); os.IsNotExist(err) || !info.IsDir() {
-			return fmt.Errorf("folder does not exist or is not a directory: %s", folder)
-		}
-	} else if transport == "url" {
-		serverUrl = params.Content
-	}
-
-	var argv []string = make([]string, 0)
-	argv = append(argv, "run", "--no-project", "main.py")
-	argv = append(argv, "--model", params.Model.Model)
-	argv = append(argv, "--base_url", params.Model.BaseUrl)
-	argv = append(argv, "--api_key", params.Model.Token)
-	argv = append(argv, "--prompt", params.Content)
-	argv = append(argv, "--debug")
-	argv = append(argv, "--language", language)
-	if params.Headers != nil {
-		for k, v := range params.Headers {
-			argv = append(argv, "--header", fmt.Sprintf("%s:%s", k, v))
-		}
-	}
-
-	var taskTitles []string
-	if transport == "code" {
 		argv = append(argv, "--repo", folder)
-		taskTitles = []string{
-			"Info Collection",
-			"Code Audit",
-			"Vulnerability Review",
-		}
-	} else if transport == "url" {
-		argv = append(argv, "--server_url", serverUrl)
-		taskTitles = []string{
-			"Info Collection",
-			"Malicious Testing",
-			"Vulnerability Testing",
-			"Vulnerability Review",
-		}
+		plan = mcpCodeExecutionPlan()
 	}
-
-	var tasks []SubTask
-	//taskTitles := []string{
-	//	"信息收集",
-	//	"代码审计",
-	//	"漏洞整理",
-	//}
-
-	for i, title := range taskTitles {
-		tasks = append(tasks, CreateSubTask(SubTaskStatusTodo, title, 0, strconv.Itoa(i+1)))
+	if params.Model == nil {
+		plan.taskTitles = []string{"基础检查（未使用模型）"}
 	}
-	callbacks.PlanUpdateCallback(tasks)
-	config := CmdConfig{StatusId: ""}
+	private, err := json.Marshal(params.mcpPrivateConfig)
+	if err != nil {
+		return errMCPRuntime
+	}
 	mcpDir, err := utils.ResolveMcpScanDir()
 	if err != nil {
-		return fmt.Errorf("resolve mcp-scan directory: %v", err)
+		return errors.New("MCP scanner runtime unavailable")
 	}
 	uvBin, err := utils.ResolveUvBin()
 	if err != nil {
-		return fmt.Errorf("resolve uv binary: %v", err)
+		return errors.New("MCP scanner runtime unavailable")
 	}
-	err = utils.RunCmdWithContext(ctx, mcpDir, uvBin, argv, func(line string) {
+	var tasks []SubTask
+	for i, title := range plan.taskTitles {
+		tasks = append(tasks, CreateSubTask(SubTaskStatusTodo, title, 0, strconv.Itoa(i+1)))
+	}
+	if callbacks.PlanUpdateCallback != nil {
+		callbacks.PlanUpdateCallback(tasks)
+	}
+	config := CmdConfig{}
+	return utils.RunCmdWithContextInput(ctx, mcpDir, uvBin, argv, bytes.NewReader(private), []string{"AIG_SERVER=" + m.Server, "PYTHONUTF8=1", "PYTHONIOENCODING=utf-8"}, mcpRuntimeRedactor(params), func(line string) {
 		ParseStdoutLine(m.Server, request.SessionId, mcpDir, tasks, line, callbacks, &config, false)
 	})
-	return err
 }

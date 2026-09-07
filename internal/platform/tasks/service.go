@@ -3,11 +3,13 @@ package tasks
 import (
 	"bytes"
 	"context"
+	"database/sql"
 	"database/sql/driver"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"net/url"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -59,6 +61,7 @@ const (
 
 type Repository interface {
 	WithinCreateKeyLock(context.Context, string, string, func(context.Context) error) error
+	RequireSpecializedMCPUnitOfWork(context.Context) error
 	CreateOrGet(context.Context, *Task) (*Task, bool, error)
 	ClaimDispatch(context.Context, string, time.Time, time.Time) (string, bool, error)
 	ReserveDispatchAttempt(context.Context, string, string, time.Time) (int, bool, error)
@@ -76,21 +79,66 @@ type Repository interface {
 }
 
 type TaskListQuery struct {
-	OwnerUserID string
-	Status      Status
-	TaskType    string
-	Limit       int
-	Offset      int
+	IncludeMCPSummary bool
+	ExcludeMCP        bool
+	OwnerUserID       string
+	Status            Status
+	TaskType          string
+	Limit             int
+	Offset            int
 }
 
 type TaskListFilters struct {
-	Status   Status
-	TaskType string
+	ExcludeMCP bool
+	Status     Status
+	TaskType   string
 }
 
 // RecentRepository is an optional bounded browser-summary read model.
 type RecentRepository interface {
 	ListRecent(context.Context, TaskListQuery) ([]Task, error)
+}
+
+// MCPWorkbenchQuery defines the scoped, fixed-clock task read used by the
+// MCP workbench. It is deliberately separate from the browser task list so
+// it cannot grow a raw task payload by accident.
+type MCPWorkbenchQuery struct {
+	OwnerUserID string
+	Now         time.Time
+}
+
+// MCPWorkbenchTask contains the only task fields the MCP workbench may use.
+// In particular, source kind is a server-decoded enum, not the stored params
+// JSON that may contain private repository or service configuration.
+type MCPWorkbenchTask struct {
+	TaskID     string    `json:"task_id" gorm:"column:task_id"`
+	SourceKind string    `json:"source_kind" gorm:"column:source_kind"`
+	Status     Status    `json:"status" gorm:"column:status"`
+	UpdatedAt  time.Time `json:"updated_at" gorm:"column:updated_at"`
+}
+
+// MCPWorkbenchProjection is the narrow task-domain contribution to the
+// workbench. The combined browser DTO is owned by the mcpworkbench package.
+type MCPWorkbenchProjection struct {
+	Running     int                `json:"-"`
+	Pending     int                `json:"-"`
+	ActiveTasks []MCPWorkbenchTask `json:"-"`
+}
+
+// MCPWorkbenchRepository is an optional bounded task read model. Writers do
+// not need workbench-specific persistence behavior.
+type MCPWorkbenchRepository interface {
+	MCPWorkbench(context.Context, MCPWorkbenchQuery) (MCPWorkbenchProjection, error)
+}
+
+const mcpWorkbenchMaxActiveTasks = 10
+
+var mcpWorkbenchActiveStatuses = [...]Status{
+	StatusDispatching,
+	StatusPending,
+	StatusRunning,
+	StatusDispatchFailed,
+	StatusDispatchUnknown,
 }
 
 type dashboardTaskStatusRepository interface {
@@ -102,7 +150,9 @@ type Service struct {
 	engine              EngineAdapter
 	audits              audit.Recorder
 	attachments         *AttachmentService
+	mcpAttachments      *AttachmentService
 	reportSnapshots     reportSnapshotter
+	mcpRuntimeIssuer    MCPRuntimeIssuer
 	now                 func() time.Time
 	recoveryItemTimeout time.Duration
 	recoveryMu          sync.Mutex
@@ -112,6 +162,15 @@ type Service struct {
 type reportSnapshotter interface {
 	Prepare(context.Context, reports.CompletedTask) (*reports.Snapshot, error)
 	Persist(context.Context, *reports.Snapshot) error
+}
+
+// MCPRuntimeIssuer supplies the one-time, assignment-only material for a
+// dedicated MCP task. The map is never a task parameter or persistent value;
+// it is passed directly to the engine adapter and checked again at that edge.
+// Keeping this small interface here avoids coupling the task domain to the
+// mcpegress implementation package.
+type MCPRuntimeIssuer interface {
+	IssueRuntimeParams(context.Context, string) (map[string]any, error)
 }
 
 type engineEventCoordinator interface {
@@ -126,8 +185,22 @@ func (service *Service) SetAttachmentService(attachments *AttachmentService) {
 	service.attachments = attachments
 }
 
+func (service *Service) SetMCPAttachmentService(attachments *AttachmentService) {
+	if attachments != nil && attachments.config.MCPOnly {
+		service.mcpAttachments = attachments
+	} else {
+		service.mcpAttachments = nil
+	}
+}
+
 func (service *Service) SetReportSnapshotService(snapshotter reportSnapshotter) {
 	service.reportSnapshots = snapshotter
+}
+
+func (service *Service) SetMCPRuntimeIssuer(issuer MCPRuntimeIssuer) {
+	if service != nil {
+		service.mcpRuntimeIssuer = issuer
+	}
 }
 
 func (service *Service) Create(ctx context.Context, subject identity.Subject, input CreateInput) (View, error) {
@@ -143,15 +216,11 @@ func (service *Service) Create(ctx context.Context, subject identity.Subject, in
 	if input.TaskType == "skills_scan" && (input.Content != "" || len(input.AttachmentIDs) != 1) {
 		return View{}, ErrInvalid
 	}
-	params := input.Params
-	if len(params) == 0 {
-		params = json.RawMessage(`{}`)
+	rawParams := input.Params
+	if len(rawParams) == 0 {
+		rawParams = json.RawMessage(`{}`)
 	}
-	if len(params) > MaxTaskParamsLength {
-		return View{}, ErrInvalid
-	}
-	params, valid := normalizeTaskParams(input.TaskType, params)
-	if !valid {
+	if len(rawParams) > MaxTaskParamsLength {
 		return View{}, ErrInvalid
 	}
 	attachmentRefs, err := json.Marshal(input.AttachmentIDs)
@@ -160,13 +229,35 @@ func (service *Service) Create(ctx context.Context, subject identity.Subject, in
 	}
 	taskID := uuid.NewSHA1(taskIDNamespace, []byte(subject.UserID+"\x00"+input.IdempotencyKey)).String()
 	var persisted *Task
+	var legacyMCPRetry bool
 	err = service.repository.WithinCreateKeyLock(ctx, subject.UserID, input.IdempotencyKey, func(lockContext context.Context) error {
+		if input.TaskType == "mcp_scan" && mcpParamsOmitSourceKind(rawParams) {
+			existing, getErr := service.repository.Get(lockContext, taskID)
+			if getErr == nil && sameLegacyMCPRetry(existing, subject, input, rawParams, attachmentRefs, taskID) {
+				persisted = existing
+				legacyMCPRetry = true
+				return nil
+			}
+			if getErr != nil && !errors.Is(getErr, ErrNotFound) {
+				return getErr
+			}
+		}
+		params, valid := normalizeTaskParams(input.TaskType, rawParams)
+		if !valid {
+			return ErrInvalid
+		}
+		if input.TaskType == "mcp_scan" && !validMCPCreateSource(input, params) {
+			return ErrInvalid
+		}
 		var createErr error
 		persisted, createErr = service.createLocked(lockContext, subject, input, params, attachmentRefs, taskID)
 		return createErr
 	})
 	if err != nil {
 		return View{}, err
+	}
+	if legacyMCPRetry {
+		return viewOf(persisted), nil
 	}
 	now := service.now()
 	claim, claimed, err := service.repository.ClaimDispatch(ctx, persisted.ID, now, now.Add(dispatchLeaseDuration))
@@ -183,6 +274,119 @@ func (service *Service) Create(ctx context.Context, subject identity.Subject, in
 
 	current, err := service.dispatch(ctx, subject, persisted, claim)
 	return viewOf(current), err
+}
+
+// CreateSpecializedInUnitOfWork is the sole task-domain write port for the
+// MCP scan UoW. Its caller must already own the governing audit transaction;
+// this method deliberately starts neither a nested audit mutation nor engine
+// dispatch. It persists only the safe MCP task projection and binds ready
+// attachments through the transaction carried in ctx.
+func (service *Service) CreateSpecializedInUnitOfWork(ctx context.Context, subject identity.Subject, input SpecializedCreateInput) (*Task, error) {
+	if service == nil || service.repository == nil ||
+		(subject.Role != identity.RoleUser && subject.Role != identity.RoleAdmin) || strings.TrimSpace(subject.UserID) == "" ||
+		!validSpecializedMCPTaskID(input.TaskID) || len(input.Params) == 0 || len(input.Params) > MaxTaskParamsLength ||
+		!validTaskAttachmentIDs(input.AttachmentIDs) {
+		return nil, ErrInvalid
+	}
+	if !audit.InGovernedMutation(ctx) {
+		return nil, ErrInvalid
+	}
+	if err := service.repository.RequireSpecializedMCPUnitOfWork(ctx); err != nil {
+		return nil, err
+	}
+	attachmentIDs := append([]string{}, input.AttachmentIDs...)
+	params, valid := normalizeMCPTaskParams(input.Params)
+	if !valid || !validSpecializedMCPSource(params, attachmentIDs) {
+		return nil, ErrInvalid
+	}
+	attachmentRefs, err := json.Marshal(attachmentIDs)
+	if err != nil {
+		return nil, ErrInvalid
+	}
+	now := service.now()
+	candidate := &Task{
+		ID: input.TaskID, OwnerUserID: subject.UserID, OwnerUsername: subject.Username,
+		IdempotencyKey: input.TaskID, EngineSessionID: input.TaskID, TaskType: "mcp_scan",
+		Content: "", Params: append(json.RawMessage(nil), params...), AttachmentRefs: attachmentRefs,
+		CountryIsoCode: "zh_CN", Status: StatusPending, CreatedAt: now, UpdatedAt: now,
+	}
+	// Resolve an existing matching task before requiring attached files to still
+	// be ready. The first successful attempt turns its input attachments into
+	// attached; a legitimate retry must return that exact task rather than fail.
+	existing, getErr := service.repository.Get(ctx, input.TaskID)
+	if getErr == nil {
+		if !sameCreateRequest(existing, candidate) {
+			return nil, ErrInvalid
+		}
+		return existing, nil
+	}
+	if !errors.Is(getErr, ErrNotFound) {
+		return nil, getErr
+	}
+	if len(attachmentIDs) > 0 {
+		if service.mcpAttachments == nil {
+			return nil, ErrInvalid
+		}
+		if err := service.mcpAttachments.LockReady(ctx, subject.UserID, attachmentIDs); err != nil {
+			return nil, err
+		}
+	}
+	persisted, created, err := service.repository.CreateOrGet(ctx, candidate)
+	if err != nil {
+		return nil, err
+	}
+	if !sameCreateRequest(persisted, candidate) {
+		return nil, ErrInvalid
+	}
+	if created && len(attachmentIDs) > 0 {
+		if err := service.mcpAttachments.repository.BindReadyAttachments(ctx, subject.UserID, attachmentIDs, now); err != nil {
+			return nil, err
+		}
+	}
+	return persisted, nil
+}
+
+func validSpecializedMCPTaskID(value string) bool {
+	parsed, err := uuid.Parse(strings.TrimSpace(value))
+	return err == nil && parsed.String() == value
+}
+
+func validSpecializedMCPSource(raw json.RawMessage, attachmentIDs []string) bool {
+	params, valid := decodeMCPTaskParams(raw)
+	if !valid {
+		return false
+	}
+	switch params.SourceKind {
+	case "repository":
+		return params.AuthorizationConfirmed == nil
+	case "service":
+		return len(attachmentIDs) == 0 && params.AuthorizationConfirmed != nil && *params.AuthorizationConfirmed
+	default:
+		return false
+	}
+}
+
+func hasExplicitGormTransaction(ctx context.Context) bool {
+	database, carried := txcontext.FromGorm(ctx)
+	if !carried || database == nil || database.Statement == nil || database.Statement.ConnPool == nil {
+		return false
+	}
+	_, transactional := database.Statement.ConnPool.(interface {
+		Commit() error
+		Rollback() error
+	})
+	return transactional
+}
+
+// RequireSpecializedMCPUnitOfWork ensures that GORM-backed MCP task writes
+// receive the explicit transaction created by the audited UoW. It lives on
+// Repository so decorators must preserve the guard instead of silently
+// bypassing it through a concrete-type assertion.
+func (repository *GormRepository) RequireSpecializedMCPUnitOfWork(ctx context.Context) error {
+	if repository == nil || repository.db == nil || !hasExplicitGormTransaction(ctx) {
+		return ErrInvalid
+	}
+	return nil
 }
 
 func (service *Service) createLocked(
@@ -318,6 +522,36 @@ func sameCreateRequest(persisted, candidate *Task) bool {
 		sameAttachmentRefs(persisted.AttachmentRefs, candidate.AttachmentRefs)
 }
 
+func sameLegacyMCPRetry(
+	persisted *Task,
+	subject identity.Subject,
+	input CreateInput,
+	rawParams json.RawMessage,
+	attachmentRefs json.RawMessage,
+	taskID string,
+) bool {
+	if persisted == nil || input.TaskType != "mcp_scan" || persisted.TaskType != "mcp_scan" ||
+		!mcpParamsOmitSourceKind(rawParams) || !mcpParamsOmitSourceKind(persisted.Params) {
+		return false
+	}
+	candidate := &Task{
+		ID: taskID, OwnerUserID: subject.UserID, OwnerUsername: subject.Username,
+		IdempotencyKey: input.IdempotencyKey, EngineSessionID: taskID, TaskType: input.TaskType,
+		Content: input.Content, Params: append(json.RawMessage(nil), rawParams...), AttachmentRefs: attachmentRefs,
+		CountryIsoCode: input.CountryIsoCode,
+	}
+	return sameCreateRequest(persisted, candidate)
+}
+
+func mcpParamsOmitSourceKind(raw json.RawMessage) bool {
+	var fields map[string]json.RawMessage
+	if json.Unmarshal(raw, &fields) != nil || fields == nil {
+		return false
+	}
+	_, provided := fields["source_kind"]
+	return !provided
+}
+
 func sameAttachmentRefs(persisted, candidate json.RawMessage) bool {
 	var persistedIDs, candidateIDs []string
 	if json.Unmarshal(persisted, &persistedIDs) != nil || json.Unmarshal(candidate, &candidateIDs) != nil ||
@@ -347,8 +581,107 @@ func canonicalJSON(raw json.RawMessage) ([]byte, bool) {
 }
 
 type mcpTaskParams struct {
-	ModelID string `json:"model_id"`
-	Thread  *int   `json:"thread"`
+	SourceKind             string `json:"source_kind"`
+	ModelID                string `json:"model_id,omitempty"`
+	Thread                 *int   `json:"thread,omitempty"`
+	AuthorizationConfirmed *bool  `json:"authorization_confirmed,omitempty"`
+}
+
+func mcpTaskSourceKind(raw json.RawMessage) string {
+	var params mcpTaskParams
+	if json.Unmarshal(raw, &params) != nil {
+		return ""
+	}
+	return params.SourceKind
+}
+
+func validMCPCreateSource(input CreateInput, raw json.RawMessage) bool {
+	switch mcpTaskSourceKind(raw) {
+	case "repository":
+		if len(input.AttachmentIDs) > 0 {
+			return input.Content == ""
+		}
+		return validMCPRepositoryReference(input.Content)
+	case "service":
+		return len(input.AttachmentIDs) == 0 && validMCPServiceEndpoint(input.Content)
+	default:
+		return false
+	}
+}
+
+func validMCPRepositoryReference(value string) bool {
+	if value == "" || value != strings.TrimSpace(value) || strings.ContainsAny(value, "?#") {
+		return false
+	}
+	if parsed, err := url.ParseRequestURI(value); err == nil && parsed.Hostname() != "" &&
+		strings.Trim(parsed.Path, "/") != "" && parsed.RawQuery == "" && parsed.Fragment == "" {
+		switch strings.ToLower(parsed.Scheme) {
+		case "http", "https":
+			return parsed.User == nil
+		case "ssh":
+			if parsed.User == nil || parsed.User.Username() != "git" {
+				return false
+			}
+			_, hasPassword := parsed.User.Password()
+			return !hasPassword
+		}
+	}
+	return validMCPRepositorySCPReference(value)
+}
+
+func validMCPRepositorySCPReference(value string) bool {
+	if !strings.HasPrefix(value, "git@") || strings.ContainsAny(value, " \t\r\n?#") {
+		return false
+	}
+	hostAndPath := strings.TrimPrefix(value, "git@")
+	separator := strings.IndexByte(hostAndPath, ':')
+	if separator <= 0 || separator == len(hostAndPath)-1 {
+		return false
+	}
+	host, path := hostAndPath[:separator], hostAndPath[separator+1:]
+	return !strings.ContainsAny(host, "/@") && strings.Trim(path, "/") != ""
+}
+
+func validMCPServiceEndpoint(value string) bool {
+	if value == "" || value != strings.TrimSpace(value) {
+		return false
+	}
+	parsed, err := url.ParseRequestURI(value)
+	if err != nil || parsed.Hostname() == "" || parsed.User != nil || parsed.RawQuery != "" || parsed.ForceQuery || parsed.Fragment != "" || strings.Contains(value, "#") {
+		return false
+	}
+	scheme := strings.ToLower(parsed.Scheme)
+	return scheme == "http" || scheme == "https"
+}
+
+func decodeMCPTaskParams(raw json.RawMessage) (mcpTaskParams, bool) {
+	var fields map[string]json.RawMessage
+	if json.Unmarshal(raw, &fields) != nil || fields == nil {
+		return mcpTaskParams{}, false
+	}
+	var params mcpTaskParams
+	if !decodeExactJSON(raw, &params) || (params.SourceKind != "repository" && params.SourceKind != "service") ||
+		!validOptionalReference(fields, "model_id", params.ModelID) ||
+		(params.Thread != nil && (*params.Thread < 1 || *params.Thread > 1_024)) {
+		return mcpTaskParams{}, false
+	}
+	if params.SourceKind == "repository" {
+		_, authorizationSupplied := fields["authorization_confirmed"]
+		return params, !authorizationSupplied
+	}
+	return params, params.AuthorizationConfirmed != nil && *params.AuthorizationConfirmed
+}
+
+func normalizeMCPTaskParams(raw json.RawMessage) (json.RawMessage, bool) {
+	params, valid := decodeMCPTaskParams(raw)
+	if !valid {
+		return nil, false
+	}
+	normalized, err := json.Marshal(params)
+	if err != nil {
+		return nil, false
+	}
+	return json.RawMessage(normalized), true
 }
 
 type infrastructureTaskParams struct {
@@ -385,9 +718,8 @@ func validTaskParams(taskType string, raw json.RawMessage) bool {
 		var params skillsTaskParams
 		return decodeExactJSON(raw, &params) && validReference(params.ModelID)
 	case "mcp_scan":
-		var params mcpTaskParams
-		return decodeExactJSON(raw, &params) && validOptionalReference(fields, "model_id", params.ModelID) &&
-			(params.Thread == nil || *params.Thread >= 1 && *params.Thread <= 1_024)
+		_, valid := decodeMCPTaskParams(raw)
+		return valid
 	case "ai_infra_scan":
 		_, valid := normalizeInfrastructureTaskParams(raw)
 		return valid
@@ -409,6 +741,9 @@ func validTaskParams(taskType string, raw json.RawMessage) bool {
 }
 
 func normalizeTaskParams(taskType string, raw json.RawMessage) (json.RawMessage, bool) {
+	if taskType == "mcp_scan" {
+		return normalizeMCPTaskParams(raw)
+	}
 	if taskType == "ai_infra_scan" {
 		return normalizeInfrastructureTaskParams(raw)
 	}
@@ -480,6 +815,15 @@ func normalizedInfrastructurePortScanModeField(fields map[string]json.RawMessage
 }
 
 func taskCreatedAuditMetadata(taskType string, params json.RawMessage) map[string]any {
+	if taskType == "mcp_scan" {
+		mcpParams, valid := decodeMCPTaskParams(params)
+		if valid {
+			return map[string]any{
+				"source_kind":             mcpParams.SourceKind,
+				"authorization_confirmed": mcpParams.AuthorizationConfirmed != nil && *mcpParams.AuthorizationConfirmed,
+			}
+		}
+	}
 	metadata := map[string]any{"task_type": taskType}
 	if taskType != "ai_infra_scan" {
 		return metadata
@@ -652,9 +996,20 @@ func (service *Service) dispatch(ctx context.Context, subject identity.Subject, 
 		PlatformTaskID: task.ID, OwnerUsername: task.OwnerUsername, TaskType: task.TaskType,
 		Content: task.Content, Params: params, CountryIsoCode: task.CountryIsoCode,
 	}
+	// The dedicated MCP workflow supplies a factory, not an already-issued
+	// capability. The engine invokes it only after it has selected an Agent and
+	// committed to a new assignment frame, preventing a no-op/idempotent submit
+	// from rotating an existing Agent's capability.
+	if task.TaskType == "mcp_scan" && task.Content == "" && service.mcpRuntimeIssuer != nil {
+		issuer := service.mcpRuntimeIssuer
+		taskID := task.ID
+		engineTask.RuntimeIssuer = func(runtimeContext context.Context) (map[string]any, error) {
+			return issuer.IssueRuntimeParams(runtimeContext, taskID)
+		}
+	}
 	var attachmentIDs []string
 	_ = json.Unmarshal(task.AttachmentRefs, &attachmentIDs)
-	if len(attachmentIDs) > 0 {
+	if len(attachmentIDs) > 0 && canonicalTaskType(task.TaskType) != "mcp_scan" {
 		if service.attachments == nil {
 			return task, ErrInvalid
 		}
@@ -740,6 +1095,98 @@ func (service *Service) dispatch(ctx context.Context, subject identity.Subject, 
 	return current, fmt.Errorf("%w: %s", ErrDispatchFailed, safeError)
 }
 
+// DispatchMCPAfterCommit is the only post-commit entry point used by the
+// dedicated MCP create workflow. It reacquires the task and dispatch lease
+// after the binding transaction commits, so a runtime capability is never
+// issued from uncommitted task data.
+func (service *Service) DispatchMCPAfterCommit(ctx context.Context, subject identity.Subject, taskID string) error {
+	if service == nil || service.repository == nil || strings.TrimSpace(taskID) == "" {
+		return ErrInvalid
+	}
+	task, err := service.repository.Get(ctx, taskID)
+	if err != nil {
+		return err
+	}
+	if task.TaskType != "mcp_scan" || task.OwnerUserID != subject.UserID ||
+		(subject.Role != identity.RoleUser && subject.Role != identity.RoleAdmin) {
+		return ErrForbidden
+	}
+	now := service.now()
+	claim, claimed, err := service.repository.ClaimDispatch(ctx, task.ID, now, now.Add(dispatchLeaseDuration))
+	if err != nil {
+		return err
+	}
+	if !claimed {
+		return nil
+	}
+	_, err = service.dispatch(ctx, subject, task, claim)
+	return err
+}
+
+// ValidMCPSafeTaskParams validates the persistent channel before the engine
+// writes a Session, including when runtime material has not yet been issued.
+func ValidMCPSafeTaskParams(params json.RawMessage) bool {
+	_, valid := decodeMCPTaskParams(params)
+	return valid
+}
+
+// ValidMCPRuntimeAssignment admits only a fixed task gateway URL, capability
+// and concrete transport, or one opaque repository archive reference.
+func ValidMCPRuntimeAssignment(taskID string, params json.RawMessage, runtime map[string]any) bool {
+	safe, valid := decodeMCPTaskParams(params)
+	if !valid || strings.TrimSpace(taskID) == "" {
+		return false
+	}
+	switch safe.SourceKind {
+	case "service":
+		if len(runtime) != 3 {
+			return false
+		}
+		proxyURL, proxyOK := runtime["mcp_proxy_url"].(string)
+		capability, capabilityOK := runtime["task_capability"].(string)
+		transport, transportOK := runtime["effective_transport"].(string)
+		return proxyOK && validMCPRuntimeProxyURL(proxyURL, taskID) && capabilityOK && validMCPRuntimeCapability(capability) &&
+			transportOK && (transport == "http" || transport == "sse")
+	case "repository":
+		if len(runtime) != 1 {
+			return false
+		}
+		archiveRef, ok := runtime["archive_ref"].(string)
+		return ok && validMCPRuntimeArchiveReference(archiveRef)
+	default:
+		return false
+	}
+}
+
+func validMCPRuntimeProxyURL(raw, taskID string) bool {
+	parsed, err := url.Parse(raw)
+	return err == nil && parsed != nil && (parsed.Scheme == "http" || parsed.Scheme == "https") && parsed.Host != "" && parsed.User == nil &&
+		parsed.RawQuery == "" && !parsed.ForceQuery && parsed.Fragment == "" && parsed.Opaque == "" && parsed.RawPath == "" &&
+		parsed.Path == "/api/internal/mcp-egress/"+taskID
+}
+
+func validMCPRuntimeCapability(value string) bool {
+	return value != "" && value == strings.TrimSpace(value) && len(value) <= 512
+}
+
+func validMCPRuntimeArchiveReference(value string) bool {
+	const prefix = "archive:"
+	if value == "" || value != strings.TrimSpace(value) || !strings.HasPrefix(value, prefix) {
+		return false
+	}
+	identifier := strings.TrimPrefix(value, prefix)
+	if identifier == "" || len(identifier) > 128 {
+		return false
+	}
+	for _, character := range identifier {
+		if character >= 'a' && character <= 'z' || character >= 'A' && character <= 'Z' || character >= '0' && character <= '9' || character == '-' || character == '_' {
+			continue
+		}
+		return false
+	}
+	return true
+}
+
 func (service *Service) currentAfterLeaseLoss(ctx context.Context, fallback *Task, err error) (*Task, error) {
 	if !errors.Is(err, ErrDispatchLeaseLost) {
 		return fallback, err
@@ -800,6 +1247,7 @@ func (service *Service) Browse(ctx context.Context, subject identity.Subject, pa
 	}
 	query.Status = filters.Status
 	query.TaskType = filters.TaskType
+	query.ExcludeMCP = filters.ExcludeMCP
 	query.Limit = pageSize
 	query.Offset = (page - 1) * pageSize
 	tasks, total, err := service.repository.ListBrowser(ctx, query)
@@ -873,6 +1321,24 @@ func (service *Service) Recent(ctx context.Context, subject identity.Subject, li
 	return items, nil
 }
 
+// MCPWorkbench returns only task metrics and active task metadata that are
+// safe to combine with the reports-domain projection. The caller supplies the
+// clock so every workbench component shares one UTC-day window.
+func (service *Service) MCPWorkbench(ctx context.Context, subject identity.Subject, now time.Time) (MCPWorkbenchProjection, error) {
+	query, err := taskListQueryFor(subject)
+	if err != nil {
+		return MCPWorkbenchProjection{}, err
+	}
+	if service == nil || service.repository == nil || now.IsZero() {
+		return MCPWorkbenchProjection{}, ErrInvalid
+	}
+	repository, ok := service.repository.(MCPWorkbenchRepository)
+	if !ok {
+		return MCPWorkbenchProjection{}, ErrInvalid
+	}
+	return repository.MCPWorkbench(ctx, MCPWorkbenchQuery{OwnerUserID: query.OwnerUserID, Now: now})
+}
+
 func (service *Service) DashboardTaskSucceeded(ctx context.Context, taskID, ownerUserID string) (bool, error) {
 	if taskID == "" || ownerUserID == "" {
 		return false, nil
@@ -912,6 +1378,27 @@ func taskListQueryFor(subject identity.Subject) (TaskListQuery, error) {
 	default:
 		return TaskListQuery{}, ErrForbidden
 	}
+}
+
+func validMCPWorkbenchQuery(query MCPWorkbenchQuery) bool {
+	return !query.Now.IsZero()
+}
+
+// IsMCPWorkbenchActiveStatus reports whether a persisted task status is safe
+// and meaningful to show in the MCP workbench active-task list.
+func IsMCPWorkbenchActiveStatus(status Status) bool {
+	for _, allowed := range mcpWorkbenchActiveStatuses {
+		if status == allowed {
+			return true
+		}
+	}
+	return false
+}
+
+func mcpWorkbenchWindow(now time.Time) (time.Time, time.Time) {
+	today := now.UTC()
+	today = time.Date(today.Year(), today.Month(), today.Day(), 0, 0, 0, 0, time.UTC)
+	return today.AddDate(0, 0, -29), today.AddDate(0, 0, 1)
 }
 
 func (service *Service) Result(ctx context.Context, subject identity.Subject, id string) (json.RawMessage, error) {
@@ -974,6 +1461,25 @@ func (service *Service) refresh(ctx context.Context, subject identity.Subject, t
 }
 
 func (service *Service) Cancel(ctx context.Context, subject identity.Subject, id string) error {
+	return service.cancelWithCompletion(ctx, subject, id, nil)
+}
+
+// CancelMCPWithCompletion 把专属幂等结果与任务状态、完成审计原子提交。
+func (service *Service) CancelMCPWithCompletion(ctx context.Context, subject identity.Subject, id string, complete func(context.Context, Status) error) error {
+	if complete == nil {
+		return ErrInvalid
+	}
+	task, err := service.repository.Get(ctx, id)
+	if err != nil {
+		return err
+	}
+	if canonicalTaskType(task.TaskType) != "mcp_scan" {
+		return ErrNotFound
+	}
+	return service.cancelWithCompletion(ctx, subject, id, complete)
+}
+
+func (service *Service) cancelWithCompletion(ctx context.Context, subject identity.Subject, id string, complete func(context.Context, Status) error) error {
 	task, err := service.repository.Get(ctx, id)
 	if err != nil {
 		return err
@@ -985,7 +1491,14 @@ func (service *Service) Cancel(ctx context.Context, subject identity.Subject, id
 		return ErrForbidden
 	}
 	if task.Status == StatusCancelled || task.Status == StatusSucceeded || task.Status == StatusEngineFailed {
-		return nil
+		if complete == nil {
+			return nil
+		}
+		mutation, err := audit.BeginMutation(ctx, service.audits, subject, audit.EventInput{Action: audit.ActionTaskChanged, ResourceType: "task", ResourceID: task.ID})
+		if err != nil {
+			return err
+		}
+		return mutation.Run(ctx, task.ID, nil, func(tx context.Context) error { return complete(tx, task.Status) })
 	}
 	mutation, err := audit.BeginMutationWithCompletionAction(ctx, service.audits, subject, audit.EventInput{
 		Action: audit.ActionTaskCancelRequested, ResourceType: "task", ResourceID: task.ID,
@@ -1022,7 +1535,17 @@ func (service *Service) Cancel(ctx context.Context, subject identity.Subject, id
 		var transitioned bool
 		transitioned, businessErr = service.repository.TransitionStatus(transactionContext, task.ID, []Status{task.Status}, targetStatus, "", service.now())
 		if businessErr == nil && !transitioned {
-			businessErr = ErrStatusTransition
+			current, getErr := service.repository.Get(transactionContext, task.ID)
+			if getErr != nil {
+				businessErr = getErr
+			} else if isTerminalStatus(current.Status) {
+				targetStatus = current.Status
+			} else {
+				businessErr = ErrStatusTransition
+			}
+		}
+		if businessErr == nil && complete != nil {
+			businessErr = complete(transactionContext, targetStatus)
 		}
 		return businessErr
 	})
@@ -1443,15 +1966,23 @@ func (repository *GormRepository) withinSessionLock(
 	if repository == nil || repository.db == nil || apply == nil {
 		return ErrInvalid
 	}
-	database, err := repository.db.DB()
-	if err != nil {
-		return err
+	// 嵌套幂等锁与附件资源锁复用同一连接，避免连接池耗尽。
+	var connection *sql.Conn
+	if existing, ok := txcontext.FromGorm(ctx); ok {
+		connection, _ = existing.Statement.ConnPool.(*sql.Conn)
 	}
-	connection, err := database.Conn(ctx)
-	if err != nil {
-		return err
+	if connection == nil {
+		database, err := repository.db.DB()
+		if err != nil {
+			return err
+		}
+		connection, err = database.Conn(ctx)
+		if err != nil {
+			return err
+		}
+		defer connection.Close()
 	}
-	defer connection.Close()
+	var err error
 	if _, err = connection.ExecContext(ctx, "SELECT pg_advisory_lock(hashtextextended($1, 0))", lockKey); err != nil {
 		return err
 	}
@@ -1531,12 +2062,19 @@ func (repository *GormRepository) ListBrowser(ctx context.Context, query TaskLis
 	if query.TaskType != "" {
 		db = db.Where("task_type IN ?", browserStoredTaskTypes(query.TaskType))
 	}
+	if query.ExcludeMCP {
+		db = db.Where("task_type NOT IN ?", browserStoredTaskTypes("mcp_scan"))
+	}
 	var total int64
 	if err := db.Count(&total).Error; err != nil {
 		return nil, 0, err
 	}
 	db = db.Select("id", "owner_username", "task_type", "status", "created_at", "updated_at").
 		Order("created_at DESC, id DESC")
+	if query.IncludeMCPSummary && canonicalTaskType(query.TaskType) == "mcp_scan" {
+		// 仅投影白名单来源枚举，不把历史参数、地址或秘密读入浏览器查询。
+		db = db.Select("id, owner_username, task_type, status, created_at, updated_at, jsonb_build_object('source_kind', CASE WHEN params->>'source_kind' IN ('repository','service') THEN params->>'source_kind' ELSE 'legacy_unknown' END) AS params")
+	}
 	if query.Offset > 0 {
 		db = db.Offset(query.Offset)
 	}
@@ -1562,6 +2100,64 @@ func (repository *GormRepository) ListRecent(ctx context.Context, query TaskList
 		return nil, err
 	}
 	return recent, nil
+}
+
+func (repository *GormRepository) MCPWorkbench(ctx context.Context, query MCPWorkbenchQuery) (MCPWorkbenchProjection, error) {
+	if !validMCPWorkbenchQuery(query) {
+		return MCPWorkbenchProjection{}, ErrInvalid
+	}
+	if transaction, ok := txcontext.FromGorm(ctx); ok {
+		return repository.mcpWorkbenchWithDB(transaction.WithContext(ctx), query)
+	}
+	var projection MCPWorkbenchProjection
+	err := repository.db.WithContext(ctx).Transaction(func(transaction *gorm.DB) error {
+		var transactionErr error
+		projection, transactionErr = repository.mcpWorkbenchWithDB(transaction, query)
+		return transactionErr
+	}, &sql.TxOptions{Isolation: sql.LevelRepeatableRead, ReadOnly: true})
+	if err != nil {
+		return MCPWorkbenchProjection{}, err
+	}
+	return projection, nil
+}
+
+func (repository *GormRepository) mcpWorkbenchWithDB(db *gorm.DB, query MCPWorkbenchQuery) (MCPWorkbenchProjection, error) {
+	lowerBound, upperBound := mcpWorkbenchWindow(query.Now)
+	base := db.Model(&Task{}).
+		Where("task_type IN ?", browserStoredTaskTypes("mcp_scan")).
+		Where("created_at >= ? AND created_at < ?", lowerBound, upperBound)
+	if query.OwnerUserID != "" {
+		base = base.Where("owner_user_id = ?", query.OwnerUserID)
+	}
+	projection := MCPWorkbenchProjection{ActiveTasks: make([]MCPWorkbenchTask, 0, mcpWorkbenchMaxActiveTasks)}
+	count := func(statuses []Status) (int, error) {
+		var value int64
+		if err := base.Session(&gorm.Session{}).Where("status IN ?", statuses).Count(&value).Error; err != nil {
+			return 0, err
+		}
+		return int(value), nil
+	}
+	var err error
+	if projection.Running, err = count([]Status{StatusDispatching, StatusRunning}); err != nil {
+		return MCPWorkbenchProjection{}, err
+	}
+	if projection.Pending, err = count([]Status{StatusPending, StatusDispatchUnknown}); err != nil {
+		return MCPWorkbenchProjection{}, err
+	}
+	active := base.Session(&gorm.Session{}).
+		Where("status IN ?", mcpWorkbenchActiveStatuses[:]).
+		Select(
+			"id AS task_id",
+			"status",
+			"updated_at",
+			"CASE WHEN params ->> 'source_kind' IN ('repository', 'service') THEN params ->> 'source_kind' ELSE 'legacy_unknown' END AS source_kind",
+		).
+		Order("updated_at DESC, id DESC").
+		Limit(mcpWorkbenchMaxActiveTasks)
+	if err := active.Scan(&projection.ActiveTasks).Error; err != nil {
+		return MCPWorkbenchProjection{}, err
+	}
+	return projection, nil
 }
 
 func (repository *GormRepository) ListRecoverable(ctx context.Context, afterID string, limit int) ([]Task, error) {
@@ -1612,6 +2208,35 @@ func (repository *GormRepository) MarkAttachmentReady(ctx context.Context, id, o
 		Where("id = ? AND owner_user_id = ? AND state = ?", id, owner, AttachmentStateUploading).
 		Updates(map[string]any{"state": AttachmentStateReady, "size": size, "updated_at": now})
 	return affectedTaskError(result)
+}
+
+// LockReadyAttachments holds all requested ready rows in deterministic ID
+// order until the caller's transaction commits. MCP create uses this before
+// writing the task, so a competing transaction cannot consume the same source
+// attachment between readiness validation and BindReadyAttachments.
+func (repository *GormRepository) LockReadyAttachments(ctx context.Context, owner string, ids []string) error {
+	if repository == nil || repository.db == nil || strings.TrimSpace(owner) == "" || !validTaskAttachmentIDs(ids) {
+		return ErrInvalid
+	}
+	if len(ids) == 0 {
+		return nil
+	}
+	if !hasExplicitGormTransaction(ctx) {
+		return ErrInvalid
+	}
+	lockedIDs := append([]string(nil), ids...)
+	sort.Strings(lockedIDs)
+	var attachments []Attachment
+	err := txcontext.Gorm(ctx, repository.db).Clauses(clause.Locking{Strength: "UPDATE"}).
+		Where("owner_user_id = ? AND id IN ? AND state = ?", owner, lockedIDs, AttachmentStateReady).
+		Order("id ASC").Find(&attachments).Error
+	if err != nil {
+		return err
+	}
+	if len(attachments) != len(lockedIDs) {
+		return ErrAttachmentNotReady
+	}
+	return nil
 }
 
 func (repository *GormRepository) BindReadyAttachments(ctx context.Context, owner string, ids []string, now time.Time) error {
@@ -1686,6 +2311,7 @@ const (
 )
 
 type AttachmentConfig struct {
+	MCPOnly       bool
 	UploadDir     string
 	MaxFileBytes  int64
 	MaxChunkBytes int64
@@ -1734,6 +2360,7 @@ type AttachmentRepository interface {
 	GetAttachment(context.Context, string) (*Attachment, error)
 	AddAttachmentChunkBytes(context.Context, string, string, int64, int64, time.Time) error
 	MarkAttachmentReady(context.Context, string, string, int64, time.Time) error
+	LockReadyAttachments(context.Context, string, []string) error
 	BindReadyAttachments(context.Context, string, []string, time.Time) error
 	ListAttachmentCleanupCandidates(context.Context, time.Time, int) ([]Attachment, error)
 	MarkAttachmentDeleting(context.Context, string, string, time.Time, time.Time) (bool, error)
@@ -1779,6 +2406,27 @@ func NewAttachmentService(repository PlatformTaskAttachmentRepository, config At
 	}, nil
 }
 
+// scopedAttachment 使用服务端生成的存储命名空间隔离 MCP 附件。
+// 该名称不来自客户端，不对浏览器投影，不需要重写既有附件数据。
+func (service *AttachmentService) scopedAttachment(ctx context.Context, id string) (*Attachment, error) {
+	attachment, err := service.repository.GetAttachment(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	if strings.HasPrefix(attachment.StorageName, "mcp-") != service.config.MCPOnly {
+		return nil, ErrNotFound
+	}
+	return attachment, nil
+}
+func (service *AttachmentService) attachmentStorageName(id, filename string) string {
+	if service.config.MCPOnly {
+		id = "mcp-" + id
+	}
+	return id + strings.ToLower(filepath.Ext(filename))
+}
+func (service *AttachmentService) MaxChunkBytes() int64 { return service.config.MaxChunkBytes }
+func (service *AttachmentService) MCPOnly() bool        { return service.config.MCPOnly }
+
 func (service *AttachmentService) MaxFileBytes() int64 { return service.config.MaxFileBytes }
 
 func (service *AttachmentService) maxChunkCount() int64 {
@@ -1797,28 +2445,53 @@ func (service *AttachmentService) PurgeExpiredUploads(ctx context.Context) error
 	}
 	for index := range expired {
 		attachment := &expired[index]
-		marked, markErr := service.repository.MarkAttachmentDeleting(ctx, attachment.ID, attachment.OwnerUserID, before, service.now())
-		if markErr != nil {
-			return markErr
+		cleanup := func(ctx context.Context) error {
+			marked, markErr := service.repository.MarkAttachmentDeleting(ctx, attachment.ID, attachment.OwnerUserID, before, service.now())
+			if markErr != nil {
+				return markErr
+			}
+			if !marked {
+				return nil
+			}
+			if cleanupErr := service.cleanupAttachmentFiles(attachment); cleanupErr != nil {
+				return cleanupErr
+			}
+			if _, deleteErr := service.repository.DeleteMarkedAttachment(ctx, attachment.ID, attachment.OwnerUserID); deleteErr != nil {
+				return deleteErr
+			}
+			return nil
 		}
-		if !marked {
-			continue
+		if strings.HasPrefix(attachment.StorageName, "mcp-") {
+			err = service.withMCPAttachmentLock(ctx, attachment.ID, cleanup)
+		} else {
+			err = cleanup(ctx)
 		}
-		if cleanupErr := service.cleanupAttachmentFiles(attachment); cleanupErr != nil {
-			return cleanupErr
-		}
-		if _, deleteErr := service.repository.DeleteMarkedAttachment(ctx, attachment.ID, attachment.OwnerUserID); deleteErr != nil {
-			return deleteErr
+		if err != nil {
+			return err
 		}
 	}
 	return nil
 }
 
 func (service *AttachmentService) Abort(ctx context.Context, subject identity.Subject, id string) error {
+	if service.config.MCPOnly {
+		return service.withMCPAttachmentLock(ctx, id, func(locked context.Context) error { return service.abort(locked, subject, id) })
+	}
+	return service.abort(ctx, subject, id)
+}
+
+func (service *AttachmentService) withMCPAttachmentLock(ctx context.Context, id string, apply func(context.Context) error) error {
+	if len(id) > MaxTaskReferenceLength || id == "" {
+		return ErrInvalid
+	}
+	return service.tasks.WithinCreateKeyLock(ctx, "mcp-attachments", id, apply)
+}
+
+func (service *AttachmentService) abort(ctx context.Context, subject identity.Subject, id string) error {
 	if subject.Role == identity.RoleAuditor {
 		return ErrForbidden
 	}
-	attachment, err := service.repository.GetAttachment(ctx, id)
+	attachment, err := service.scopedAttachment(ctx, id)
 	if err != nil {
 		return err
 	}
@@ -1917,7 +2590,7 @@ func (service *AttachmentService) Upload(ctx context.Context, subject identity.S
 	if err != nil {
 		return AttachmentView{}, err
 	}
-	storageName := id + strings.ToLower(filepath.Ext(filename))
+	storageName := service.attachmentStorageName(id, filename)
 	path, err := service.storagePath(storageName)
 	if err != nil {
 		return AttachmentView{}, failAttachmentMutation(ctx, mutation, id, err)
@@ -1998,7 +2671,7 @@ func (service *AttachmentService) BeginChunked(ctx context.Context, subject iden
 	}
 	attachment := &Attachment{
 		ID: id, OwnerUserID: subject.UserID, OriginalName: filename,
-		StorageName: id + strings.ToLower(filepath.Ext(filename)), Size: size,
+		StorageName: service.attachmentStorageName(id, filename), Size: size,
 		State: AttachmentStateUploading, CreatedAt: now, UpdatedAt: now,
 	}
 	var createErr error
@@ -2016,10 +2689,24 @@ func (service *AttachmentService) BeginChunked(ctx context.Context, subject iden
 }
 
 func (service *AttachmentService) UploadChunk(ctx context.Context, subject identity.Subject, id string, index int, source io.Reader) error {
+	return service.uploadChunk(ctx, subject, id, index, source, nil)
+}
+
+// UploadMCPChunk 同步提交分片字节计数、幂等结果和审计完成记录。
+func (service *AttachmentService) UploadMCPChunk(ctx context.Context, subject identity.Subject, id string, index int, source io.Reader, complete func(context.Context, int64) error) error {
+	if !service.config.MCPOnly || complete == nil {
+		return ErrInvalid
+	}
+	return service.withMCPAttachmentLock(ctx, id, func(locked context.Context) error {
+		return service.uploadChunk(locked, subject, id, index, source, complete)
+	})
+}
+
+func (service *AttachmentService) uploadChunk(ctx context.Context, subject identity.Subject, id string, index int, source io.Reader, complete func(context.Context, int64) error) error {
 	if source == nil || index < 0 || int64(index) >= service.maxChunkCount() {
 		return ErrInvalid
 	}
-	attachment, err := service.repository.GetAttachment(ctx, id)
+	attachment, err := service.scopedAttachment(ctx, id)
 	if err != nil {
 		return err
 	}
@@ -2061,6 +2748,9 @@ func (service *AttachmentService) UploadChunk(ctx context.Context, subject ident
 	var updateErr error
 	err = mutation.Run(ctx, attachment.ID, map[string]any{"chunk_index": index, "size": written}, func(transactionContext context.Context) error {
 		updateErr = service.repository.AddAttachmentChunkBytes(transactionContext, attachment.ID, attachment.OwnerUserID, written, limit, service.now())
+		if updateErr == nil && complete != nil {
+			updateErr = complete(transactionContext, written)
+		}
 		return updateErr
 	})
 	if updateErr != nil {
@@ -2075,10 +2765,27 @@ func (service *AttachmentService) UploadChunk(ctx context.Context, subject ident
 }
 
 func (service *AttachmentService) Merge(ctx context.Context, subject identity.Subject, id string, totalChunks int, declaredSize int64) (AttachmentView, error) {
+	return service.merge(ctx, subject, id, totalChunks, declaredSize, nil)
+}
+
+func (service *AttachmentService) MergeMCP(ctx context.Context, subject identity.Subject, id string, totalChunks int, declaredSize int64, complete func(context.Context, int64) error) (AttachmentView, error) {
+	if !service.config.MCPOnly || complete == nil {
+		return AttachmentView{}, ErrInvalid
+	}
+	var view AttachmentView
+	err := service.withMCPAttachmentLock(ctx, id, func(locked context.Context) error {
+		var mergeErr error
+		view, mergeErr = service.merge(locked, subject, id, totalChunks, declaredSize, complete)
+		return mergeErr
+	})
+	return view, err
+}
+
+func (service *AttachmentService) merge(ctx context.Context, subject identity.Subject, id string, totalChunks int, declaredSize int64, complete func(context.Context, int64) error) (AttachmentView, error) {
 	if totalChunks <= 0 || int64(totalChunks) > service.maxChunkCount() || declaredSize <= 0 || declaredSize > service.config.MaxFileBytes {
 		return AttachmentView{}, ErrInvalid
 	}
-	attachment, err := service.repository.GetAttachment(ctx, id)
+	attachment, err := service.scopedAttachment(ctx, id)
 	if err != nil {
 		return AttachmentView{}, err
 	}
@@ -2102,6 +2809,13 @@ func (service *AttachmentService) Merge(ctx context.Context, subject identity.Su
 		return AttachmentView{}, failAttachmentMutation(ctx, mutation, attachment.ID, err)
 	}
 	temporary := finalPath + ".merging"
+	if complete != nil && service.config.MCPOnly {
+		for _, orphan := range []string{temporary, finalPath} {
+			if err := removeMCPMergeOrphan(orphan); err != nil {
+				return AttachmentView{}, failAttachmentMutation(ctx, mutation, attachment.ID, err)
+			}
+		}
+	}
 	destination, err := os.OpenFile(temporary, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
 	if err != nil {
 		return AttachmentView{}, failAttachmentMutation(ctx, mutation, attachment.ID, errors.New("无法合并附件"))
@@ -2141,6 +2855,9 @@ func (service *AttachmentService) Merge(ctx context.Context, subject identity.Su
 	var updateErr error
 	err = mutation.Run(ctx, attachment.ID, map[string]any{"size": actual, "chunks": totalChunks}, func(transactionContext context.Context) error {
 		updateErr = service.repository.MarkAttachmentReady(transactionContext, attachment.ID, attachment.OwnerUserID, actual, service.now())
+		if updateErr == nil && complete != nil {
+			updateErr = complete(transactionContext, actual)
+		}
 		return updateErr
 	})
 	if updateErr != nil {
@@ -2158,10 +2875,13 @@ func (service *AttachmentService) Merge(ctx context.Context, subject identity.Su
 }
 
 func (service *AttachmentService) Open(ctx context.Context, subject identity.Subject, id string) (*os.File, string, int64, error) {
+	if service.config.MCPOnly {
+		return nil, "", 0, ErrForbidden
+	}
 	if subject.Role == identity.RoleAuditor {
 		return nil, "", 0, ErrForbidden
 	}
-	attachment, err := service.repository.GetAttachment(ctx, id)
+	attachment, err := service.scopedAttachment(ctx, id)
 	if err != nil {
 		return nil, "", 0, err
 	}
@@ -2232,6 +2952,19 @@ func (service *AttachmentService) ResolveReady(ctx context.Context, ownerUserID 
 	return service.resolveWithState(ctx, ownerUserID, ids, AttachmentStateReady)
 }
 
+// LockReady validates and locks attachments for a state-changing MCP UoW.
+// Callers that only need a read view must keep using ResolveReady instead.
+func (service *AttachmentService) LockReady(ctx context.Context, ownerUserID string, ids []string) error {
+	if service == nil || service.repository == nil || strings.TrimSpace(ownerUserID) == "" || !validTaskAttachmentIDs(ids) {
+		return ErrInvalid
+	}
+	if err := service.repository.LockReadyAttachments(ctx, ownerUserID, ids); err != nil {
+		return err
+	}
+	_, err := service.ResolveReady(ctx, ownerUserID, ids)
+	return err
+}
+
 func (service *AttachmentService) ResolveAttached(ctx context.Context, ownerUserID string, ids []string) ([]string, error) {
 	return service.resolveWithState(ctx, ownerUserID, ids, AttachmentStateAttached)
 }
@@ -2242,7 +2975,7 @@ func (service *AttachmentService) ReadReadyTargetExpressions(ctx context.Context
 		return nil, err
 	}
 	for _, id := range ids {
-		attachment, err := service.repository.GetAttachment(ctx, id)
+		attachment, err := service.scopedAttachment(ctx, id)
 		if err != nil {
 			return nil, err
 		}
@@ -2308,7 +3041,7 @@ func (service *AttachmentService) resolveWithState(ctx context.Context, ownerUse
 			return nil, ErrInvalid
 		}
 		seen[id] = struct{}{}
-		attachment, err := service.repository.GetAttachment(ctx, id)
+		attachment, err := service.scopedAttachment(ctx, id)
 		if err != nil {
 			return nil, err
 		}
@@ -2434,6 +3167,16 @@ func (repository *MemoryRepository) WithinCreateKeyLock(
 	}
 	defer repository.releaseCreateKeyLock(key, lock, true)
 	return apply(ctx)
+}
+
+// RequireSpecializedMCPUnitOfWork keeps the in-memory repository usable in
+// service tests. The caller still has to carry the non-forgeable audit marker;
+// only the GORM implementation additionally requires a physical transaction.
+func (repository *MemoryRepository) RequireSpecializedMCPUnitOfWork(context.Context) error {
+	if repository == nil {
+		return ErrInvalid
+	}
+	return nil
 }
 
 func (repository *MemoryRepository) releaseCreateKeyLock(key string, lock *memoryCreateLock, acquired bool) {
@@ -2622,6 +3365,9 @@ func (repository *MemoryRepository) ListBrowser(_ context.Context, query TaskLis
 		if query.TaskType != "" && canonicalTaskType(task.TaskType) != query.TaskType {
 			continue
 		}
+		if query.ExcludeMCP && canonicalTaskType(task.TaskType) == "mcp_scan" {
+			continue
+		}
 		tasks = append(tasks, *cloneTask(task))
 	}
 	sort.Slice(tasks, func(left, right int) bool {
@@ -2665,6 +3411,44 @@ func (repository *MemoryRepository) ListRecent(_ context.Context, query TaskList
 		recent = recent[:query.Limit]
 	}
 	return recent, nil
+}
+
+func (repository *MemoryRepository) MCPWorkbench(_ context.Context, query MCPWorkbenchQuery) (MCPWorkbenchProjection, error) {
+	if !validMCPWorkbenchQuery(query) {
+		return MCPWorkbenchProjection{}, ErrInvalid
+	}
+	lowerBound, upperBound := mcpWorkbenchWindow(query.Now)
+	repository.mu.Lock()
+	defer repository.mu.Unlock()
+	projection := MCPWorkbenchProjection{ActiveTasks: make([]MCPWorkbenchTask, 0, mcpWorkbenchMaxActiveTasks)}
+	for _, task := range repository.tasks {
+		if query.OwnerUserID != "" && task.OwnerUserID != query.OwnerUserID ||
+			canonicalTaskType(task.TaskType) != "mcp_scan" ||
+			task.CreatedAt.Before(lowerBound) || !task.CreatedAt.Before(upperBound) {
+			continue
+		}
+		switch task.Status {
+		case StatusDispatching, StatusRunning:
+			projection.Running++
+		case StatusPending, StatusDispatchUnknown:
+			projection.Pending++
+		}
+		if IsMCPWorkbenchActiveStatus(task.Status) {
+			projection.ActiveTasks = append(projection.ActiveTasks, MCPWorkbenchTask{
+				TaskID: task.ID, SourceKind: safeMCPSourceKind(task.Params), Status: task.Status, UpdatedAt: task.UpdatedAt,
+			})
+		}
+	}
+	sort.Slice(projection.ActiveTasks, func(left, right int) bool {
+		if projection.ActiveTasks[left].UpdatedAt.Equal(projection.ActiveTasks[right].UpdatedAt) {
+			return projection.ActiveTasks[left].TaskID > projection.ActiveTasks[right].TaskID
+		}
+		return projection.ActiveTasks[left].UpdatedAt.After(projection.ActiveTasks[right].UpdatedAt)
+	})
+	if len(projection.ActiveTasks) > mcpWorkbenchMaxActiveTasks {
+		projection.ActiveTasks = projection.ActiveTasks[:mcpWorkbenchMaxActiveTasks]
+	}
+	return projection, nil
 }
 
 func (repository *MemoryRepository) DashboardTaskSucceeded(_ context.Context, taskID, ownerUserID string) (bool, error) {
@@ -2748,6 +3532,21 @@ func (repository *MemoryRepository) MarkAttachmentReady(_ context.Context, id, o
 		return ErrForbidden
 	}
 	attachment.State, attachment.Size, attachment.UpdatedAt = AttachmentStateReady, size, now
+	return nil
+}
+
+func (repository *MemoryRepository) LockReadyAttachments(_ context.Context, owner string, ids []string) error {
+	if repository == nil || strings.TrimSpace(owner) == "" || !validTaskAttachmentIDs(ids) {
+		return ErrInvalid
+	}
+	repository.mu.Lock()
+	defer repository.mu.Unlock()
+	for _, id := range ids {
+		attachment, exists := repository.attachments[id]
+		if !exists || attachment.OwnerUserID != owner || attachment.State != AttachmentStateReady {
+			return ErrAttachmentNotReady
+		}
+	}
 	return nil
 }
 
