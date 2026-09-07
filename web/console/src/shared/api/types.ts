@@ -123,6 +123,8 @@ export interface TaskCreateRequest {
     thread?: number
     timeout?: number
     port_scan_mode?: InfrastructurePortScanMode
+    target_credential_id?: string
+    target_credential_revision?: number
     dataset?: { numPrompts: number; randomSeed?: number; promptColumn?: string }
     techniques?: string[]
     source_kind?: Exclude<MCPSourceKind, 'legacy_unknown'>

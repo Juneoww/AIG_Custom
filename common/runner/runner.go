@@ -20,11 +20,13 @@
 package runner
 
 import (
+	"errors"
 	"fmt"
 	"net/http"
 	"os"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -47,6 +49,11 @@ import (
 	_ "github.com/projectdiscovery/fdmax/autofdmax"
 )
 
+var (
+	errTargetAuthScanRequest  = errors.New("基础设施认证目标请求失败")
+	errTargetAuthAccessDenied = errors.New("基础设施目标认证访问被拒绝")
+)
+
 // Runner struct 保存运行指纹扫描所需的所有组件
 type Runner struct {
 	Options              *options.Options          // 配置选项
@@ -61,6 +68,7 @@ type Runner struct {
 	callback             func(interface{})
 	runHostRequestFunc   func(string) error
 	runDomainRequestFunc func(string) error
+	targetAuthFailed     atomic.Bool
 }
 
 type Step01 struct {
@@ -122,12 +130,12 @@ func (r *Runner) initFingerprints() error {
 	} else {
 		// 初始化指纹
 		if !utils.IsFileExists(options2.FPTemplates) {
-			gologger.Fatalf("没有指定指纹模板文件:%s", options2.FPTemplates)
+			return fmt.Errorf("没有指定指纹模板文件:%s", options2.FPTemplates)
 		}
 		if utils.IsDir(options2.FPTemplates) {
 			files, err := utils.ScanDir(options2.FPTemplates)
 			if err != nil {
-				gologger.Fatalf("无法扫描指纹模板目录:%s", options2.FPTemplates)
+				return fmt.Errorf("无法扫描指纹模板目录:%s: %w", options2.FPTemplates, err)
 			}
 			for _, filename := range files {
 				if !strings.HasSuffix(filename, ".yaml") {
@@ -135,28 +143,34 @@ func (r *Runner) initFingerprints() error {
 				}
 				data, err := os.ReadFile(filename)
 				if err != nil {
-					gologger.Fatalf("无法读取指纹模板文件:%s", filename)
+					return fmt.Errorf("无法读取指纹模板文件:%s: %w", filename, err)
 				}
 				fp, err := parser.InitFingerPrintFromData(data)
 				if err != nil {
-					gologger.WithError(err).Fatalf("无法解析指纹模板文件:%s", filename)
+					return fmt.Errorf("无法解析指纹模板文件:%s: %w", filename, err)
+				}
+				if options2.TargetAuth != nil && (strings.TrimSpace(fp.Info.Name) == "" || len(fp.Http) == 0) {
+					return fmt.Errorf("无效指纹模板文件:%s: 缺少名称或 HTTP 规则", filename)
 				}
 				fps = append(fps, *fp)
 			}
 		} else {
 			data, err := os.ReadFile(options2.FPTemplates)
 			if err != nil {
-				gologger.Fatalf("无法读取指纹模板文件:%s", options2.FPTemplates)
+				return fmt.Errorf("无法读取指纹模板文件:%s: %w", options2.FPTemplates, err)
 			}
 			fp, err := parser.InitFingerPrintFromData(data)
 			if err != nil {
-				gologger.Fatalf("无法解析指纹模板文件:%s", options2.FPTemplates)
+				return fmt.Errorf("无法解析指纹模板文件:%s: %w", options2.FPTemplates, err)
+			}
+			if options2.TargetAuth != nil && (strings.TrimSpace(fp.Info.Name) == "" || len(fp.Http) == 0) {
+				return fmt.Errorf("无效指纹模板文件:%s: 缺少名称或 HTTP 规则", options2.FPTemplates)
 			}
 			fps = append(fps, *fp)
 		}
 	}
 	if len(fps) == 0 {
-		gologger.Fatalf("没有指定指纹模板")
+		return fmt.Errorf("没有指定指纹模板")
 	}
 	r.fpEngine = preload.New(r.hp, fps)
 	//text := fmt.Sprintf("加载指纹库,数量:%d", len(fps)+len(preload.CollectedFpReqs()))
@@ -212,6 +226,17 @@ func (r *Runner) collectTargetExpressions() ([]string, error) {
 
 // parseTargets parses all configured target sources as one batch.
 func (r *Runner) parseTargets() ([]string, error) {
+	if r.Options.TargetAuth != nil {
+		if r.Options.TargetFile != "" || r.Options.LocalScan {
+			return nil, fmt.Errorf("target authentication requires explicit URL targets")
+		}
+		if err := r.Options.TargetAuth.Validate(); err != nil {
+			return nil, err
+		}
+		if err := httpx.ValidateTargetURLs(r.Options.TargetAuth.Origin, r.Options.Target, r.Options.TargetAuth.AllowInsecureHTTP); err != nil {
+			return nil, err
+		}
+	}
 	expressions, err := r.collectTargetExpressions()
 	if err != nil {
 		return nil, err
@@ -272,6 +297,7 @@ func (r *Runner) initComponents() error {
 		DefaultUserAgent: httpx.GetRandomUserAgent(),
 		Dialer:           dialer,
 		CustomHeaders:    r.Options.Headers,
+		TargetAuth:       r.Options.TargetAuth,
 	}
 
 	// 创建HTTP客户端
@@ -303,7 +329,7 @@ func (r *Runner) extractContent(fullUrl string, resp *httpx.Response, respTime s
 	}
 	builder.WriteString("] ")
 	// 检测是否跳转,跳转则转过去，新建一个结果
-	if resp.StatusCode >= http.StatusMultipleChoices && resp.StatusCode < http.StatusBadRequest {
+	if r.Options.TargetAuth == nil && resp.StatusCode >= http.StatusMultipleChoices && resp.StatusCode < http.StatusBadRequest {
 		newUrl := resp.GetHeader("Location")
 		_ = r.runDomainRequest(newUrl)
 	}
@@ -404,7 +430,13 @@ func (r *Runner) runDomainRequest(fullUrl string) error {
 	}
 	resp, err := r.hp.Get(reqUrl, headers)
 	if err != nil {
+		if r.Options.TargetAuth != nil {
+			return errTargetAuthScanRequest
+		}
 		return err
+	}
+	if r.Options.TargetAuth != nil && (resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden) {
+		return errTargetAuthAccessDenied
 	}
 	r.extractContent(reqUrl, resp, time.Since(timeStart).String())
 	return nil
@@ -433,12 +465,16 @@ func (r *Runner) callbackProcess(current, total int) {
 }
 
 // RunEnumeration 开始扫描所有目标
-func (r *Runner) RunEnumeration() {
+func (r *Runner) RunEnumeration() error {
 	// 检查是否有输入目标
 	if r.total == 0 {
+		if r.Options.TargetAuth != nil {
+			return errTargetAuthScanRequest
+		}
 		gologger.Fatalf("没有指定输入，输入 -h 查看帮助")
-		return
+		return nil
 	}
+	r.targetAuthFailed.Store(false)
 	r.callbackProcess(0, r.total)
 
 	// 启动输出处理协程
@@ -449,6 +485,22 @@ func (r *Runner) RunEnumeration() {
 	timeStart := time.Now()
 	wg := sizedwaitgroup.New(r.Options.RateLimit)
 	var numTarget uint64 = 0
+	var requestError error
+	var requestErrorOnce sync.Once
+	recordRequestError := func(target string, err error) {
+		if r.Options.TargetAuth != nil {
+			r.targetAuthFailed.Store(true)
+			if errors.Is(err, errTargetAuthAccessDenied) {
+				err = errTargetAuthAccessDenied
+			} else {
+				err = errTargetAuthScanRequest
+			}
+			requestErrorOnce.Do(func() { requestError = err })
+		}
+		if r.Options.Callback != nil {
+			r.Options.Callback(CallbackErrorInfo{Target: target, Error: err})
+		}
+	}
 
 	r.hm.Scan(func(k, _ []byte) error {
 		wg.Add()
@@ -467,12 +519,7 @@ func (r *Runner) RunEnumeration() {
 				r.rateLimiter.Take()
 				err := runHostRequest(target)
 				if err != nil {
-					if r.Options.Callback != nil {
-						r.Options.Callback(CallbackErrorInfo{
-							Target: target,
-							Error:  err,
-						})
-					}
+					recordRequestError(target, err)
 				}
 				atomic.AddUint64(&numTarget, 1)
 				r.callbackProcess(int(atomic.LoadUint64(&numTarget)), r.total)
@@ -483,12 +530,7 @@ func (r *Runner) RunEnumeration() {
 				r.rateLimiter.Take()
 				err := runDomainRequest(target)
 				if err != nil {
-					if r.Options.Callback != nil {
-						r.Options.Callback(CallbackErrorInfo{
-							Target: target,
-							Error:  err,
-						})
-					}
+					recordRequestError(target, err)
 				}
 				atomic.AddUint64(&numTarget, 1)
 				r.callbackProcess(int(atomic.LoadUint64(&numTarget)), r.total)
@@ -499,8 +541,12 @@ func (r *Runner) RunEnumeration() {
 	wg.Wait()
 	close(r.result)
 	outputWg.Wait()
+	if requestError != nil {
+		return requestError
+	}
 	duration := time.Since(timeStart)
 	gologger.Infof("扫描完成～耗时:%s", utils.Duration2String(duration))
+	return nil
 }
 
 // handleOutput 处理扫描结果的输出
@@ -519,6 +565,10 @@ func (r *Runner) handleOutput(wg *sizedwaitgroup.SizedWaitGroup) {
 	for result := range r.result {
 		results = append(results, result)
 		r.writeResult(f, result)
+	}
+	// 主目标访问失败时保留已完成的证据，但不能生成成功汇总或安全评分。
+	if r.Options.TargetAuth != nil && r.targetAuthFailed.Load() {
+		return
 	}
 	// summary table
 	if len(results) > 0 {
@@ -708,10 +758,20 @@ func (r *Runner) initVulnerabilityDB() error {
 		if r.Options.Language == "en" {
 			vulDir = vulDir + "_en"
 		}
-		err = engine.LoadFromDirectory(vulDir)
+		if _, statErr := os.Stat(vulDir); statErr != nil {
+			return fmt.Errorf("无法读取漏洞库:%s: %w", vulDir, statErr)
+		}
+		if r.Options.TargetAuth != nil {
+			err = engine.LoadFromDirectoryStrict(vulDir)
+		} else {
+			err = engine.LoadFromDirectory(vulDir)
+		}
+		if err == nil && engine.GetCount() == 0 {
+			return fmt.Errorf("漏洞库为空:%s", vulDir)
+		}
 	}
 	if err != nil {
-		gologger.Fatalf("无法初始化漏洞库:%s", err)
+		return fmt.Errorf("无法初始化漏洞库: %w", err)
 	}
 	r.advEngine = engine
 	// Load vulnerability version database

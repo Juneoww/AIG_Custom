@@ -33,6 +33,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/Juneoww/AIG_Custom/pkg/httpx"
 	"github.com/Juneoww/AIG_Custom/pkg/vulstruct"
 
 	"github.com/Juneoww/AIG_Custom/common/portscan"
@@ -84,11 +85,14 @@ type TaskInterface interface {
 
 // ScanRequest 扫描请求结构
 type ScanRequest struct {
-	Target       []string          `json:"-"`
-	Headers      map[string]string `json:"headers"`
-	Timeout      int               `json:"timeout,omitempty"`
-	PortScanMode string            `json:"port_scan_mode,omitempty"`
-	Model        struct {
+	TargetAuth               *httpx.TargetAuth `json:"target_auth,omitempty"`
+	TargetCredentialID       string            `json:"target_credential_id,omitempty"`
+	TargetCredentialRevision int64             `json:"target_credential_revision,omitempty"`
+	Target                   []string          `json:"-"`
+	Headers                  map[string]string `json:"headers"`
+	Timeout                  int               `json:"timeout,omitempty"`
+	PortScanMode             string            `json:"port_scan_mode,omitempty"`
+	Model                    struct {
 		Model   string `json:"model"`
 		Token   string `json:"token"`
 		BaseUrl string `json:"base_url"`
@@ -144,6 +148,9 @@ func (t *AIInfraScanAgent) Execute(ctx context.Context, request TaskRequest, cal
 		return err
 	}
 	reqScan.Target = targets
+	if err := validateScanTargetAuth(request, reqScan); err != nil {
+		return err
+	}
 
 	if reqScan.Timeout == 0 {
 		reqScan.Timeout = 30
@@ -513,6 +520,7 @@ func (t *AIInfraScanAgent) executeScan(ctx context.Context, request TaskRequest,
 
 	// 配置选项
 	opts := &options.Options{
+		TargetAuth:   reqScan.TargetAuth,
 		TimeOut:      reqScan.Timeout,
 		RateLimit:    200,
 		FPTemplates:  t.Server,
@@ -520,6 +528,9 @@ func (t *AIInfraScanAgent) executeScan(ctx context.Context, request TaskRequest,
 		WebServer:    false,
 		Target:       reqScan.Target,
 		LoadRemote:   true,
+	}
+	if err := configureTargetCredentialRules(opts, request.Language); err != nil {
+		return err
 	}
 
 	headers := make([]string, 0)
@@ -668,6 +679,9 @@ target count:%s
 					callbacks.StepStatusUpdateCallback(step02, status, AgentStatusRunning, texts.scanResult, "AI analysis")
 
 					prompt := fmt.Sprintf("这是AI基础设施扫描的扫描结果，请你根据以下文本进行总结和归纳，你最后要补充一句(后面将调用未授权检测工具继续扫描,不需要一模一样的文字，大致意思是这样就可以):'我将进行截图分析,继续探索网页上可能的漏洞点'，扫描结果如下:\n%s\n", logMsg)
+					if reqScan.TargetAuth != nil {
+						prompt = fmt.Sprintf("这是携带访问凭据进行的AI基础设施HTTP扫描结果，请根据已脱敏的证据总结风险；认证后的成功访问不能单独证明未授权访问漏洞。本次不进行网页截图。扫描结果如下:\n%s\n", logMsg)
+					}
 					if request.Language == "en" {
 						prompt += "## 返回使用全英文"
 					}
@@ -686,15 +700,14 @@ target count:%s
 					var summary string
 					var err error
 
+					screenshotData, vulInfo, summary, err = captureInfrastructureVisualEvidence(reqScan.TargetAuth, result.TargetURL, result.Resp, request.Language, model)
 					if model != nil {
-						screenshotData, vulInfo, summary, err = runner.Analysis(result.TargetURL, result.Resp, request.Language, model)
 						if err != nil {
 							gologger.WithError(err).Errorf("AI分析失败: %v", err)
 							return
 						}
 						result.Reason = summary
 					} else {
-						screenshotData, err = runner.ScreenShot(result.TargetURL)
 						if err != nil {
 							gologger.WithError(err).Errorf("截图失败: %v", err)
 							return
@@ -753,11 +766,14 @@ target count:%s
 	defer r.Close()
 
 	// 执行扫描
-	r.RunEnumeration()
+	scanErr := r.RunEnumeration()
 
 	// Wait for all concurrent AI-analysis / screenshot goroutines to finish
 	// before computing the final score and generating the report.
 	analysisWg.Wait()
+	if scanErr != nil {
+		return scanErr
+	}
 
 	// 计算安全评分
 	advies := make([]vulstruct.Info, 0)

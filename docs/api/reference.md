@@ -140,7 +140,7 @@ MCP 只使用专属接口 `/api/v1/platform/mcp-scans`，不调用 AI 基础设�
 
 浏览器任务执行只能使用上文受保护的平台任务 API。原 `/api/v1/app/taskapi*` 和 `/api/v1/app/tasks*` 浏览器路由族仅是历史名称，不是可调用的兼容 API；只有通过正常会话、首次改密与 CSRF 校验后才返回 `410 Gone`（CSRF 适用于变更请求）。它们不能用于创建任务、上传、查询状态、获取结果、流式更新，也不能在连接中断后作为回退。
 
-平台任务创建 JSON body 最大 256 KiB，`content` 最大 32 KiB；支持附件的任务类型最多引用 10 个不重复且不超过 128 字节的 opaque 附件 ID，新 Agent 扫描不支持附件。只接受 canonical `ai_infra_scan`、`model_redteam_report`、`agent_scan`、`skills_scan`，服务端在私有 Adapter 边界分别映射为真实 Agent Alias。MCP 使用上文的专属接口。其余参数采用逐类型白名单：基础设施仅 `model_id`/`timeout`/`port_scan_mode`；模型红队要求 `model_id` 字符串数组和 `eval_model_id`，可带 `dataset.numPrompts/randomSeed/promptColumn` 与 `techniques`；Agent 扫描仅接受必填的 `agent_id` 与 `eval_model_id`；Skills 仅允许必填字符串 `model_id`，且必须使用恰好一个 ready ZIP 附件和空 `content`。`ai_infra_scan.params.port_scan_mode` 只能精确为 `fixed_ai` 或 `full_tcp`，省略时规范化为 `fixed_ai`；前者对裸 IPv4 发现 `11434,1337,7000-9000,18789`（2,004 个）TCP 端口，后者发现全部 `1-65535` TCP 端口。它不接受自定义端口、UDP 或版本识别选项，且 URL、域名、带端口 IP、IPv6 不触发该端口发现步骤。安全 `TaskDetail.input_summary.port_scan_mode` 仅在可验证时返回上述规范化枚举值，绝不返回原始参数。所有 `model_id`/`eval_model_id` 必须在持久化任务前通过受治理模型解析器验证，`agent_id` 必须解析到该用户或公共只读 Agent 配置；未知或不可见引用固定拒绝且不写入任务。未知字段、嵌套凭据对象、明文模型凭据、旧 model 对象和任务 Alias 均被拒绝。浏览器附件只使用 opaque 附件 ID，并按 owner 隔离。内部 Agent WebSocket 与旧形状制品传输属于独立的 internal-token 边界，不是浏览器 API。
+平台任务创建 JSON body 最大 256 KiB，`content` 最大 32 KiB；支持附件的任务类型最多引用 10 个不重复且不超过 128 字节的 opaque 附件 ID，新 Agent 扫描不支持附件。只接受 canonical `ai_infra_scan`、`model_redteam_report`、`agent_scan`、`skills_scan`，服务端在私有 Adapter 边界分别映射为真实 Agent Alias。MCP 使用上文的专属接口。其余参数采用逐类型白名单：基础设施允许 `model_id`/`timeout`/`port_scan_mode`，以及成对的 `target_credential_id`/`target_credential_revision`；模型红队要求 `model_id` 字符串数组和 `eval_model_id`，可带 `dataset.numPrompts/randomSeed/promptColumn` 与 `techniques`；Agent 扫描仅接受必填的 `agent_id` 与 `eval_model_id`；Skills 仅允许必填字符串 `model_id`，且必须使用恰好一个 ready ZIP 附件和空 `content`。`ai_infra_scan.params.port_scan_mode` 只能精确为 `fixed_ai` 或 `full_tcp`，省略时规范化为 `fixed_ai`；前者对裸 IPv4 发现 `11434,1337,7000-9000,18789`（2,004 个）TCP 端口，后者发现全部 `1-65535` TCP 端口。它不接受自定义端口、UDP 或版本识别选项，且 URL、域名、带端口 IP、IPv6 不触发该端口发现步骤。安全 `TaskDetail.input_summary.port_scan_mode` 仅在可验证时返回上述规范化枚举值，绝不返回原始参数。所有 `model_id`/`eval_model_id` 必须在持久化任务前通过受治理模型解析器验证，`agent_id` 必须解析到该用户或公共只读 Agent 配置；未知或不可见引用固定拒绝且不写入任务。未知字段、嵌套凭据对象、明文模型凭据、旧 model 对象和任务 Alias 均被拒绝。浏览器附件只使用 opaque 附件 ID，并按 owner 隔离。内部 Agent WebSocket 与旧形状制品传输属于独立的 internal-token 边界，不是浏览器 API。
 
 ### Agent 工作流扫描合同
 
@@ -818,6 +818,58 @@ except Exception as e:
 12. **YAML模型**: 通过YAML配置的模型为只读，不支持通过API修改或删除
 13. **批量删除**: 删除模型时支持传入多个model_id进行批量删除
 14. **权限控制**: 管理员可以跨所有者查看、修改和删除模型；审计员拥有全局只读权限；普通用户只能查看、修改和删除本人模型
+
+## 基础设施目标访问凭据
+
+控制台入口为“凭证配置 → 基础设施凭据”。目标凭据用于访问被扫描的服务；模型配置仍用于可选的分析模型。普通用户和管理员只管理各自的私有目标凭据，审计员不能读取或使用。所有写请求沿用 Cookie 身份、已完成强制改密和 `X-CSRF-Token` 校验，JSON 请求体上限为 16 KiB。
+
+| 方法 | 路径 | 用途 |
+| --- | --- | --- |
+| GET | `/api/v1/platform/target-credentials` | 返回 `{items: [...]}` 安全元数据，包含停用项 |
+| POST | `/api/v1/platform/target-credentials` | 创建凭据，返回 201 和安全元数据 |
+| GET | `/api/v1/platform/target-credentials/{id}` | 获取本人凭据安全元数据及 ETag |
+| PUT | `/api/v1/platform/target-credentials/{id}` | 更新、替换密钥或停用，返回 200 |
+| DELETE | `/api/v1/platform/target-credentials/{id}` | 删除，返回 204 |
+
+PUT/DELETE 必须提交带双引号的 `If-Match: "1"`。缺失或格式无效返回 428，版本冲突返回 409。读取响应包含 `id,name,origin,auth_type,header_name,disabled,revision,created_at,updated_at,allow_insecure_http`，设置 `Cache-Control: no-store`，绝不回传密钥、Basic 用户名或加密材料。
+
+创建示例（值均为示意，不是真实密钥）：
+
+```json
+{
+  "name": "测试环境推理服务",
+  "origin": "http://inference.internal:8080",
+  "auth_type": "bearer",
+  "secret": "REPLACE_WITH_TARGET_TOKEN",
+  "disabled": false
+}
+```
+
+支持 `bearer`、`api_key`、`basic`、`cookie`。Bearer 只填写 Token，系统添加前缀；API Key 同时填写 `header_name`（例如 `X-API-Key`）；Basic 同时填写 `username` 和作为密码的 `secret`；Cookie 的 `secret` 形如 `session=VALUE; tenant=VALUE`。禁止 Host、代理和传输控制类请求头、换行或控制字符。
+
+`origin` 默认支持 HTTP 和 HTTPS，创建或编辑时可直接填写地址，无需额外开关或许可字段。请求中的旧版可选 `allow_insecure_http` 字段仅用于兼容，其值会被忽略；省略、false 或 true 都由目标地址的协议决定实际行为。读取响应的该字段由已保存的协议推导：HTTP 返回 true，HTTPS 返回 false。无需新增数据库列，协议仍受现有密文 AAD 保护。
+
+目标地址仅含协议、主机与可选端口，不含路径、查询、片段或 URL 用户信息；根路径允许，HTTP 80 / HTTPS 443 归一化。更新时提交完整 `name,origin,auth_type`，`secret` 留空或省略保留原值；更改目标（包括 HTTP/HTTPS 协议）、认证类型或请求头名称时必须提供新密钥。替换 Basic 密码时同时提供用户名。每次更新递增版本，停用或删除会阻止新任务及尚未下发的旧任务继续解析，已发出的请求不被召回。
+
+创建 `ai_infra_scan` 时增加成对的安全引用；下面的 ID 以创建凭据接口实际返回值替换：
+
+```json
+{
+  "task_type": "ai_infra_scan",
+  "content": "http://inference.internal:8080/api/version",
+  "params": {
+    "target_credential_id": "REPLACE_WITH_CREDENTIAL_ID",
+    "target_credential_revision": 1,
+    "timeout": 300,
+    "port_scan_mode": "fixed_ai"
+  },
+  "country_iso_code": "zh_CN"
+}
+```
+
+仍须提交任务 `Idempotency-Key`；相同请求重试先返回原任务，不重新校验当前凭据状态。带凭据任务仅支持手动填写的同源 HTTP/HTTPS URL（协议、主机、有效端口必须一致），可多行多个路径；不接受附件、裸主机、IP 范围或端口发现表达式。创建和分配前均校验所有者、启用状态、版本及目标范围；错误不会回退成匿名扫描。任务和引擎 session 仅保存 ID/版本，明文只在下发时通过私有 `target_auth` 通道发给声明 `infra-target-auth-v2` 能力的认证 Agent。运行时 HTTP 认证必须带由服务端派生的 `allow_insecure_http: true`，缺失即拒绝；任务参数不能自行提供此运行时字段。服务端与 Agent 需要一起升级。
+
+认证扫描读取随 Agent 发布的指纹与漏洞规则库（默认 /app/data，可通过 AIG_DATA_DIR 明确指定），不借用浏览器知识库接口；规则更新需同步发布到 Agent。规则缺失、为空或格式错误时初始化失败。认证主目标出现证书、网络、范围校验错误或明确返回 401/403 时，任务失败且不生成成功报告。认证扫描使用 HTTP 证据和可选的文本模型分析，不生成网页截图或执行视觉分析；认证后可访问不能单独证明未授权访问漏洞。HTTPS 认证请求验证服务器证书；所有认证请求均拒绝跨源、跨端口、跨协议跳转和 Host 覆盖；响应中的认证反射在进入证据、模型分析或事件存储前脱敏。凭据使用现有 `MODEL_MASTER_KEY`/`MODEL_MASTER_KEY_ID`/`MODEL_PREVIOUS_MASTER_KEYS` 密钥环，以独立 AAD 绑定资源、所有者、目标和版本。部署前运行 `aig migrate` 应用迁移 13；运行时不执行 DDL。未使用凭据的现有扫描行为保持不变。
 
 ## 技术支持
 

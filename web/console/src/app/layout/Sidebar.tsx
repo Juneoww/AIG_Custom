@@ -33,7 +33,7 @@ function matchingGroupFor(pathname: string): NavigationGroupID | undefined {
   if (isPathWithin(pathname, '/tasks')) {
     return 'tasks'
   }
-  if (isPathWithin(pathname, '/models') || isPathWithin(pathname, '/knowledge/agents') || isPathWithin(pathname, '/credentials/mcp-connections')) {
+  if (isPathWithin(pathname, '/models') || isPathWithin(pathname, '/knowledge/agents') || isPathWithin(pathname, '/credentials')) {
     return 'credentials'
   }
   return undefined
@@ -41,7 +41,7 @@ function matchingGroupFor(pathname: string): NavigationGroupID | undefined {
 
 function isSecondaryActive(item: SecondaryNavigationItem, pathname: string, search: string) {
   const [targetPathname, targetQuery] = item.path.split('?')
-  if (item.id === 'mcp-connections' || item.id === 'mcp-scan' || item.id === 'ai-infra-scan' || item.id === 'agent-workflow-scan' || item.id === 'skills-scan') {
+  if (item.id === 'target-credentials' || item.id === 'mcp-connections' || item.id === 'mcp-scan' || item.id === 'ai-infra-scan' || item.id === 'agent-workflow-scan' || item.id === 'skills-scan') {
     return isPathWithin(pathname, targetPathname)
   }
   if (pathname !== targetPathname) {
@@ -308,7 +308,7 @@ export function Sidebar({ role }: SidebarProps) {
 
   const isPrimaryActive = (item: NavigationItem) => {
     if (item.id === 'models') {
-      return isPathWithin(location.pathname, '/models') || isPathWithin(location.pathname, '/knowledge/agents') || isPathWithin(location.pathname, '/credentials/mcp-connections')
+      return isPathWithin(location.pathname, '/models') || isPathWithin(location.pathname, '/knowledge/agents') || isPathWithin(location.pathname, '/credentials')
     }
     if (item.id === 'knowledge') {
       return isPathWithin(location.pathname, '/knowledge') && !isPathWithin(location.pathname, '/knowledge/agents')

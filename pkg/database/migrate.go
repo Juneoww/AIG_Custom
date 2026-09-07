@@ -50,6 +50,7 @@ var migrations = []migration{
 	{version: 10, apply: migratePlatformTaskRemarkAndTargetCount},
 	{version: 11, apply: migratePlatformMCPConnectionSchema},
 	{version: 12, apply: migratePlatformMCPCompatibilitySchema},
+	{version: 13, apply: migrateTargetCredentialSchema},
 }
 
 const migrationAdvisoryLockKey int64 = 301237729

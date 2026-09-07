@@ -75,6 +75,7 @@ type TaskManager struct {
 	dispatchCounter  uint64            // round-robin 计数器（原子操作）
 	platformEvents   platformTaskEventSink
 	mcpEventRedactor MCPEventRedactor
+	targetRedactors  sync.Map
 }
 
 type platformTaskEventSink interface {
@@ -477,7 +478,9 @@ func (tm *TaskManager) SubmitTask(ctx context.Context, task platformtasks.Engine
 	if (task.TaskType == "mcp_scan" && (task.Content != "" || len(task.Attachments) != 0 || task.CountryIsoCode != "zh_CN" ||
 		!platformtasks.ValidMCPSafeTaskParams(task.Params) || (len(task.RuntimeParams) == 0 && task.RuntimeIssuer == nil))) ||
 		(len(task.RuntimeParams) > 0 && !validRuntimeChannel(task.PlatformTaskID, task.TaskType, params, task.RuntimeParams)) ||
-		(task.TaskType != "mcp_scan" && task.RuntimeIssuer != nil) {
+		(isInfrastructureTask(task.TaskType) && (!platformtasks.ValidInfrastructureSafeTaskParams(task.Params) ||
+			(platformtasks.HasInfrastructureTargetCredential(task.Params) && task.RuntimeIssuer == nil && len(task.RuntimeParams) == 0))) ||
+		(task.TaskType != "mcp_scan" && !isInfrastructureTask(task.TaskType) && task.RuntimeIssuer != nil) {
 		return "", platformtasks.ErrInvalid
 	}
 	if existing == nil {
@@ -590,6 +593,7 @@ func (tm *TaskManager) cleanupFailedTask(sessionId string, traceID string) {
 	// 清理内存中的任务
 	tm.mu.Lock()
 	delete(tm.tasks, sessionId)
+	tm.targetRedactors.Delete(sessionId)
 	tm.mu.Unlock()
 
 	// 清理数据库中的预存任务
@@ -631,6 +635,15 @@ func (tm *TaskManager) dispatchTaskWithContext(ctx context.Context, sessionId st
 
 	// 2. 获取可用 Agent（简化：不做额外健康检查）
 	availableAgents := tm.agentManager.GetAvailableAgents()
+	if isInfrastructureTask(task.Task) && hasTargetCredential(task.Params) {
+		capable := availableAgents[:0]
+		for _, connection := range availableAgents {
+			if supportsTargetCredentials(connection) {
+				capable = append(capable, connection)
+			}
+		}
+		availableAgents = capable
+	}
 	if len(availableAgents) == 0 {
 		log.Warnf("没有可用的Agent: trace_id=%s, sessionId=%s", traceID, sessionId)
 		return fmt.Errorf("没有可用的Agent")
@@ -748,7 +761,7 @@ func (tm *TaskManager) dispatchTaskWithContext(ctx context.Context, sessionId st
 		runtimeParams, err = runtimeIssuer(ctx)
 		if err != nil {
 			_ = tm.taskStore.ReleaseSessionAssignment(task.SessionID, agentID)
-			return platformtasks.NewTransientDispatchError(errors.New("MCP 运行时不可用"))
+			return platformtasks.NewTransientDispatchError(errors.New("任务认证运行时不可用"))
 		}
 	}
 	if ctx.Err() != nil {
@@ -786,6 +799,9 @@ func (tm *TaskManager) dispatchTaskWithContext(ctx context.Context, sessionId st
 	log.Infof("任务分配消息已构造: trace_id=%s, sessionId=%s, taskType=%s, agentId=%s", traceID, sessionId, task.Task, agentID)
 
 	// 设置写超时并直接发送
+	if isInfrastructureTask(task.Task) && hasTargetCredential(task.Params) {
+		tm.rememberTargetRedactor(task.SessionID, runtimeParams)
+	}
 	selectedAgent.conn.SetWriteDeadline(time.Now().Add(writeWait))
 	err = selectedAgent.conn.WriteJSON(taskMsg)
 	if err != nil {
@@ -848,6 +864,10 @@ func (tm *TaskManager) clearRuntimeIssuer(sessionID string) {
 // prevents a malformed internal caller from leaving secret-bearing state in
 // the engine database even when dispatch later fails.
 func validRuntimeChannel(taskID, taskType string, safeParams map[string]interface{}, runtimeParams map[string]any) bool {
+	if isInfrastructureTask(taskType) {
+		safe, err := json.Marshal(safeParams)
+		return err == nil && platformtasks.ValidInfrastructureRuntimeAssignment(safe, runtimeParams)
+	}
 	if !isMCPTaskAlias(taskType) {
 		return len(runtimeParams) == 0
 	}
@@ -871,6 +891,11 @@ func (tm *TaskManager) HandleAgentEvent(agentID string, sessionId string, eventT
 	if lookupErr != nil || session == nil || session.AssignedAgent != agentID ||
 		(session.Status != TaskStatusTodo && session.Status != TaskStatusDoing && session.Status != TaskStatusDispatchUnknown) {
 		return false
+	}
+	event, targetOK := tm.redactTargetEvent(session, event)
+	if !targetOK {
+		event = map[string]any{"message": "基础设施任务认证上下文不可用", "timestamp": timestamp}
+		eventType = WSMsgTypeError
 	}
 	event, redactionOK := tm.redactMCPAgentEvent(session, event, timestamp)
 	if !redactionOK && eventType == WSMsgTypeResultUpdate {
@@ -905,6 +930,9 @@ func (tm *TaskManager) HandleAgentEvent(agentID string, sessionId string, eventT
 	if !accepted {
 		log.Warnf("拒绝非当前任务Agent事件: agentId=%s, sessionId=%s, eventType=%s", agentID, sessionId, eventType)
 		return false
+	}
+	if terminalStatus != "" {
+		tm.targetRedactors.Delete(sessionId)
 	}
 	if tm.platformEvents != nil {
 		if err := tm.platformEvents.RecordEngineEvent(context.Background(), sessionId, engineState, engineReason); err != nil {
@@ -1297,6 +1325,7 @@ func (tm *TaskManager) DeleteTask(sessionId string, subject identity.Subject, tr
 	// 清理内存中的任务数据
 	tm.mu.Lock()
 	delete(tm.tasks, sessionId)
+	tm.targetRedactors.Delete(sessionId)
 	tm.mu.Unlock()
 
 	// 关闭SSE连接
@@ -1850,6 +1879,7 @@ func (tm *TaskManager) cleanupTask(sessionId string) {
 	// 清理内存中的任务数据
 	tm.mu.Lock()
 	delete(tm.tasks, sessionId)
+	tm.targetRedactors.Delete(sessionId)
 	tm.mu.Unlock()
 
 	// 注意：SSE连接已在resultUpdate事件处理中立即清理

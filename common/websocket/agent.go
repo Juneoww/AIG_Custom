@@ -81,7 +81,8 @@ type AgentConnection struct {
 	stateMu sync.RWMutex // 保护连接状态（agentID, isActive）
 	writeMu sync.Mutex   // 保护写操作（发送消息）
 
-	isActive bool
+	isActive     bool
+	capabilities []string
 }
 
 // AgentManager 管理所有agent连接
@@ -326,6 +327,7 @@ func (ac *AgentConnection) handleRegister(am *AgentManager, content interface{})
 	// 更新连接状态
 	ac.stateMu.Lock()
 	ac.agentID = rc.AgentID
+	ac.capabilities = append([]string(nil), rc.Capabilities...)
 	ac.isActive = true
 	ac.stateMu.Unlock()
 
@@ -492,6 +494,9 @@ func (ac *AgentConnection) cleanup(am *AgentManager) {
 			failedSessions, err := am.taskManager.taskStore.FailAgentAssignments(agentID, "agent connection lost")
 			if err != nil {
 				log.Errorf("Agent失联任务收敛失败: agentId=%s, error=%v", agentID, err)
+			}
+			for _, sessionID := range failedSessions {
+				am.taskManager.targetRedactors.Delete(sessionID)
 			}
 			if am.taskManager.platformEvents != nil {
 				for _, sessionID := range failedSessions {

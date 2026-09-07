@@ -32,6 +32,8 @@ import { GovernedModelSelector, type GovernedModelAvailability } from './compone
 import { TaskTypeSelector } from './components/TaskTypeSelector'
 import { SkillsTaskCreatePage } from './SkillsTaskCreatePage'
 import { previewTargetExpressions } from './targetExpressionPreview'
+import { TargetCredentialSelector } from '../target-credentials/TargetCredentialSelector'
+import { targetURLsMatch, type TargetCredential } from '../target-credentials/api'
 
 const useStyles = makeStyles({
   page: { display: 'flex', flexDirection: 'column', gap: tokens.spacingVerticalL },
@@ -110,6 +112,9 @@ function StandardTaskCreatePage({ fixedTaskType, returnTo, taskType, setTaskType
   const [agentID, setAgentID] = useState('')
   const [timeout, setTimeoutValue] = useState('300')
   const [portScanMode, setPortScanMode] = useState<InfrastructurePortScanMode>('fixed_ai')
+  const [targetCredential, setTargetCredential] = useState<TargetCredential>()
+  const [targetCredentialAvailable, setTargetCredentialAvailable] = useState(true)
+  const targetListInputRef = useRef<HTMLInputElement>(null)
   const [numPrompts, setNumPrompts] = useState('100')
   const [files, setFiles] = useState<File[]>([])
   const [attachments, setAttachments] = useState<AttachmentView[]>([])
@@ -218,6 +223,10 @@ function StandardTaskCreatePage({ fixedTaskType, returnTo, taskType, setTaskType
       setError('扫描模型尚未确认可用，请等待目录验证完成或选择不使用模型。')
       return
     }
+    if (effectiveTaskType === 'ai_infra_scan' && targetCredential && !targetCredentialAvailable) {
+      setError('已选目标凭据尚未确认可用，请重新选择或明确选择不使用目标凭据。')
+      return
+    }
     if (mutexRef.current) return
     mutexRef.current = true
     setSubmitting(true)
@@ -236,6 +245,11 @@ function StandardTaskCreatePage({ fixedTaskType, returnTo, taskType, setTaskType
       }
       const params: TaskCreateRequest['params'] = {}
       if (effectiveTaskType === 'ai_infra_scan') {
+        if (targetCredential) {
+          if (hasImportedTargetList || !targetURLsMatch(targetCredential.origin, content)) throw new Error(`请填写与所选凭据同源的 ${targetCredential.allow_insecure_http ? 'HTTP' : 'HTTPS'} URL，并移除导入的目标清单。`)
+          params.target_credential_id = targetCredential.id
+          params.target_credential_revision = targetCredential.revision
+        }
         if (modelID.trim()) params.model_id = modelID.trim()
         const parsed = Number(timeout)
         if (!Number.isInteger(parsed) || parsed < 1 || parsed > 86_400) throw new Error('请填写有效的超时秒数。')
@@ -307,6 +321,7 @@ function StandardTaskCreatePage({ fixedTaskType, returnTo, taskType, setTaskType
 
   const aiConfigFields = (
     <div className={workbenchStyles.configurationGrid}>
+      <TargetCredentialSelector value={targetCredential} disabled={submitting || uploading} onAvailabilityChange={setTargetCredentialAvailable} onChange={(value) => { setTargetCredential(value); invalidateSubmission() }} />
       <GovernedModelSelector
         value={modelID || undefined}
         onChange={(modelID) => { setModelID(modelID ?? ''); invalidateSubmission() }}
@@ -368,21 +383,23 @@ function StandardTaskCreatePage({ fixedTaskType, returnTo, taskType, setTaskType
               </div>
               <div className={workbenchStyles.sourceCard}>
                 <Text className={workbenchStyles.sourceTitle}>导入目标清单</Text>
-                <Text className={workbenchStyles.sourceDescription}>目标清单会与手工填写内容在服务端合并、校验并去重，最终数量以服务端判定为准。</Text>
+                <Text className={workbenchStyles.sourceDescription}>{targetCredential ? `已选择目标凭据，请手工填写同源 ${targetCredential.allow_insecure_http ? 'HTTP' : 'HTTPS'} URL。可以移除已有清单并保留其他配置。` : '目标清单会与手工填写内容在服务端合并、校验并去重，最终数量以服务端判定为准。'}</Text>
                 <label className={workbenchStyles.sourceTitle} htmlFor="ai-infra-target-list">导入目标清单（可选）</label>
                 <input
                   id="ai-infra-target-list"
+                  ref={targetListInputRef}
                   type="file"
                   multiple
-                  disabled={uploading || submitting}
+                  disabled={uploading || submitting || Boolean(targetCredential)}
                   onChange={(event) => { setFiles(Array.from(event.currentTarget.files ?? [])); invalidateSubmission() }}
                 />
                 <Text className={workbenchStyles.sourceDescription} size={200}>UTF-8 文本清单；每个文件不超过 1 MiB，服务端会再次校验。</Text>
                 <div className={workbenchStyles.attachmentControls}>
-                  <Button type="button" appearance="secondary" disabled={uploading || submitting || files.length === 0} onClick={() => void handleUpload()}>
+                  <Button type="button" appearance="secondary" disabled={uploading || submitting || Boolean(targetCredential) || files.length === 0} onClick={() => void handleUpload()}>
                     {uploading ? '正在上传目标清单' : '上传目标清单'}
                   </Button>
                   {files.length > 0 ? <Text size={200}>已选择 {files.length} 个待上传清单</Text> : null}
+                  {files.length > 0 ? <Button type="button" disabled={uploading || submitting} onClick={() => { setFiles([]); if (targetListInputRef.current) targetListInputRef.current.value = ''; invalidateSubmission() }}>清空待上传清单</Button> : null}
                 </div>
                 {attachments.length > 0 ? (
                   <div className={workbenchStyles.attachmentList} aria-label="已上传目标清单">
@@ -390,6 +407,7 @@ function StandardTaskCreatePage({ fixedTaskType, returnTo, taskType, setTaskType
                       <div className={workbenchStyles.attachmentRow} key={attachment.id}>
                         <Text>{attachment.filename}（{attachment.size} 字节）</Text>
                         {role !== 'auditor' ? <Button type="button" appearance="subtle" disabled={uploading || submitting} onClick={() => void handleDownload(attachment.id)}>下载附件 {attachment.filename}</Button> : null}
+                        <Button type="button" appearance="subtle" disabled={uploading || submitting} onClick={() => { setAttachments((current) => current.filter((item) => item.id !== attachment.id)); invalidateSubmission() }}>移除目标清单 {attachment.filename}</Button>
                       </div>
                     ))}
                   </div>

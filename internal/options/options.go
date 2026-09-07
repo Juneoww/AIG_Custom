@@ -25,6 +25,7 @@ import (
 	"net/url"
 
 	"github.com/Juneoww/AIG_Custom/internal/gologger"
+	"github.com/Juneoww/AIG_Custom/pkg/httpx"
 )
 
 // Options 定义了程序的所有配置选项
@@ -48,6 +49,7 @@ type Options struct {
 	Callback           func(interface{}) `json:"-"` // 回调函数
 	LoadRemote         bool              `json:"-"`
 	PreExpandedTargets bool              `json:"-"` // Target 已由受信任调用方完成表达式解析
+	TargetAuth         *httpx.TargetAuth `json:"-"` // 只在执行内存中持有目标认证，禁止进入任务或配置 JSON
 }
 
 // multiStringFlag 用于支持命令行中多个相同参数的输入

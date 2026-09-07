@@ -1919,6 +1919,144 @@ definitions:
           - authentication_kind
     required:
     - items
+  targetcredentials.View:
+    type: object
+    additionalProperties: false
+    required:
+    - id
+    - name
+    - origin
+    - allow_insecure_http
+    - auth_type
+    - header_name
+    - disabled
+    - revision
+    - created_at
+    - updated_at
+    properties:
+      id:
+        type: string
+        description: Opaque owner-scoped reference.
+        maxLength: 128
+      name:
+        type: string
+        description: Display name of this private credential.
+        maxLength: 160
+      origin:
+        type: string
+        description: Canonical target origin; HTTP and HTTPS are accepted by default. Scheme, host and optional port only, without userinfo, path, query or fragment. Default HTTPS port 443 and HTTP port 80 are normalized.
+        maxLength: 2048
+      allow_insecure_http:
+        type: boolean
+        description: Derived from whether the saved origin uses HTTP. Target authentication remains restricted to the saved scheme, host and port, and HTTPS certificate verification remains enabled.
+      auth_type:
+        type: string
+        enum:
+        - bearer
+        - api_key
+        - basic
+        - cookie
+      header_name:
+        type: string
+        description: API Key header name. Host, proxy and transport control headers are forbidden; other auth types use an empty string.
+        maxLength: 128
+      disabled:
+        type: boolean
+      revision:
+        type: integer
+        format: int64
+        minimum: 1
+      created_at:
+        type: string
+        format: date-time
+      updated_at:
+        type: string
+        format: date-time
+  targetcredentials.CreateInput:
+    type: object
+    additionalProperties: false
+    required:
+    - name
+    - origin
+    - auth_type
+    - secret
+    properties:
+      name:
+        type: string
+        description: Display name of this private credential.
+        maxLength: 160
+      origin:
+        type: string
+        description: Canonical target origin; HTTP and HTTPS are accepted by default. Scheme, host and optional port only, without userinfo, path, query or fragment. Default HTTPS port 443 and HTTP port 80 are normalized.
+        maxLength: 2048
+      allow_insecure_http:
+        type: boolean
+        description: Legacy optional compatibility field; its value is ignored. HTTP and HTTPS are accepted directly based on origin, including edits retaining the existing secret.
+      auth_type:
+        type: string
+        enum:
+        - bearer
+        - api_key
+        - basic
+        - cookie
+      header_name:
+        type: string
+        description: API Key header name. Host, proxy and transport control headers are forbidden; other auth types use an empty string.
+        maxLength: 128
+      disabled:
+        type: boolean
+      username:
+        type: string
+        description: Write-only Basic username; provide again when replacing the Basic password.
+        maxLength: 256
+        x-write-only: true
+      secret:
+        type: string
+        description: Write-only token, API key, Basic password or Cookie string. Never returned.
+        maxLength: 8192
+        x-write-only: true
+  targetcredentials.UpdateInput:
+    type: object
+    additionalProperties: false
+    required:
+    - name
+    - origin
+    - auth_type
+    properties:
+      name:
+        type: string
+        description: Display name of this private credential.
+        maxLength: 160
+      origin:
+        type: string
+        description: Canonical target origin; HTTP and HTTPS are accepted by default. Scheme, host and optional port only, without userinfo, path, query or fragment. Default HTTPS port 443 and HTTP port 80 are normalized.
+        maxLength: 2048
+      allow_insecure_http:
+        type: boolean
+        description: Legacy optional compatibility field; its value is ignored. HTTP and HTTPS are accepted directly based on origin, including edits retaining the existing secret.
+      auth_type:
+        type: string
+        enum:
+        - bearer
+        - api_key
+        - basic
+        - cookie
+      header_name:
+        type: string
+        description: API Key header name. Host, proxy and transport control headers are forbidden; other auth types use an empty string.
+        maxLength: 128
+      disabled:
+        type: boolean
+      username:
+        type: string
+        description: Write-only Basic username; provide again when replacing the Basic password.
+        maxLength: 256
+        x-write-only: true
+      secret:
+        type: string
+        description: Empty or omitted retains the current secret. Changing origin, auth_type or header_name requires a new nonempty secret. Any update increments revision.
+        maxLength: 8192
+        x-write-only: true
 info:
   contact: {}
   description: API for managing AIG Custom Platform AI security scanning tasks. Based on Tencent Zhuque Lab AI-Infra-Guard (https://github.com/Tencent/AI-Infra-Guard).
@@ -2722,7 +2860,7 @@ paths:
     post:
       consumes:
       - application/json
-      description: 'Breaking security hardening: create responses now use the browser-safe TaskDetail with bounded input_summary and optional remark instead of the former internal task View; clients must migrate field access. The JSON body is limited to 256 KiB. Creates an owner-scoped platform task from the authenticated Cookie Subject. Idempotency-Key is required and unique per owner. A retry with the same persisted request payload returns the existing task without revalidating live governed references; reusing that key with a different payload returns 400 invalid task request. Historical same-key requests are compared before the new Agent input constraints, so matching historical tasks are not rejected for empty content or attachments. Only exact canonical task types are accepted and the platform maps them to private Agent aliases: ai_infra_scan params allow model_id, timeout, and port_scan_mode (fixed_ai or full_tcp; omission defaults to fixed_ai); model_redteam_report params require model_id as a bounded string array plus eval_model_id and may include dataset numPrompts/randomSeed/promptColumn and techniques; agent_scan params require only agent_id and eval_model_id. skills_scan params allow only model_id, a required available governed model ID; exactly one owner-scoped ready ZIP attachment is required and content must be empty. Skills perform static audit only, with no dynamic, URL, repository, concurrency, port, or custom prompt options. The ZIP limit is 20 MiB compressed, 100 MiB actual expanded bytes, 5 MiB per file, and at most 2,000 original ZIP entries and normalized files/directories (including implicit directories); it must contain exactly one valid UTF-8 SKILL.md with non-empty name and description frontmatter strings, at the archive root or inside one top-level wrapper directory. Unsafe paths, links, duplicate entries, case conflicts, invalid YAML, CRC damage, encrypted entries, and unsupported compression are rejected. Every model_id/eval_model_id must resolve through the governed model boundary, and agent_id through the user or public Agent registry, before persistence; unknown or invisible references write no task. New agent_scan tasks require non-whitespace valid UTF-8 content of at most 32 KiB (32768 bytes) and do not support attachments. The Agent configuration must contain a single provider validated before persistence and again at dispatch: HTTP/HTTPS, WebSocket, or Dify; Coze and unknown providers are rejected. Dify requires explicit apiKey, apiBaseUrl, and extra.dify_type equal to chat or workflow; conflicting routing fields, ambiguous YAML scalars, aliases, and malformed configuration are rejected. The three stages of information collection, vulnerability detection, and review use the selected eval_model_id for primary and auxiliary models in platform mode. Failed or incomplete execution, invalid final review, and missing results produce no successful report. Unknown fields, nested credential objects, raw model credentials, and legacy aliases are rejected. Task types supporting attachments accept at most ten opaque attachment IDs. Optional remark is trimmed and limited to 2,000 Unicode code points, participates in idempotency, and is returned only in authorized TaskDetail; it never enters the engine, audit metadata, or reports. Dispatch uses persisted claims and a global attempt budget. An uncertain network acknowledgement becomes dispatch_unknown and is never submitted automatically again; this is at-most-once dispatch, not exactly-once execution. Requires CSRF protection. MCP mcp_scan and Mcp-Scan are isolated: return 409 MCP_SPECIALIZED_ENDPOINT_REQUIRED with specialized_path pointing to /api/v1/platform/mcp-scans. Use the dedicated endpoint; generic default lists exclude both aliases before count and pagination.'
+      description: 'Breaking security hardening: create responses now use the browser-safe TaskDetail with bounded input_summary and optional remark instead of the former internal task View; clients must migrate field access. The JSON body is limited to 256 KiB. Creates an owner-scoped platform task from the authenticated Cookie Subject. Idempotency-Key is required and unique per owner. A retry with the same persisted request payload returns the existing task without revalidating live governed references; reusing that key with a different payload returns 400 invalid task request. Historical same-key requests are compared before the new Agent input constraints, so matching historical tasks are not rejected for empty content or attachments. Only exact canonical task types are accepted and the platform maps them to private Agent aliases: ai_infra_scan params allow model_id, timeout, the optional paired target_credential_id/target_credential_revision, and port_scan_mode (fixed_ai or full_tcp; omission defaults to fixed_ai); model_redteam_report params require model_id as a bounded string array plus eval_model_id and may include dataset numPrompts/randomSeed/promptColumn and techniques; agent_scan params require only agent_id and eval_model_id. skills_scan params allow only model_id, a required available governed model ID; exactly one owner-scoped ready ZIP attachment is required and content must be empty. Skills perform static audit only, with no dynamic, URL, repository, concurrency, port, or custom prompt options. The ZIP limit is 20 MiB compressed, 100 MiB actual expanded bytes, 5 MiB per file, and at most 2,000 original ZIP entries and normalized files/directories (including implicit directories); it must contain exactly one valid UTF-8 SKILL.md with non-empty name and description frontmatter strings, at the archive root or inside one top-level wrapper directory. Unsafe paths, links, duplicate entries, case conflicts, invalid YAML, CRC damage, encrypted entries, and unsupported compression are rejected. Every model_id/eval_model_id must resolve through the governed model boundary, and agent_id through the user or public Agent registry, before persistence; unknown or invisible references write no task. New agent_scan tasks require non-whitespace valid UTF-8 content of at most 32 KiB (32768 bytes) and do not support attachments. The Agent configuration must contain a single provider validated before persistence and again at dispatch: HTTP/HTTPS, WebSocket, or Dify; Coze and unknown providers are rejected. Dify requires explicit apiKey, apiBaseUrl, and extra.dify_type equal to chat or workflow; conflicting routing fields, ambiguous YAML scalars, aliases, and malformed configuration are rejected. The three stages of information collection, vulnerability detection, and review use the selected eval_model_id for primary and auxiliary models in platform mode. Failed or incomplete execution, invalid final review, and missing results produce no successful report. Unknown fields, nested credential objects, raw model credentials, and legacy aliases are rejected. Task types supporting attachments accept at most ten opaque attachment IDs. Optional remark is trimmed and limited to 2,000 Unicode code points, participates in idempotency, and is returned only in authorized TaskDetail; it never enters the engine, audit metadata, or reports. Dispatch uses persisted claims and a global attempt budget. An uncertain network acknowledgement becomes dispatch_unknown and is never submitted automatically again; this is at-most-once dispatch, not exactly-once execution. Requires CSRF protection. MCP mcp_scan and Mcp-Scan are isolated: return 409 MCP_SPECIALIZED_ENDPOINT_REQUIRED with specialized_path pointing to /api/v1/platform/mcp-scans. Use the dedicated endpoint; generic default lists exclude both aliases before count and pagination. Infrastructure target authentication requires a currently enabled owner credential at the selected revision and explicit same-origin HTTP or HTTPS URLs (HTTP and HTTPS are accepted by default) in content; attachments, bare hosts and port discovery expressions are rejected. Stored task and engine parameters contain only ID and revision. Before assignment the server revalidates and decrypts into target_auth via a private runtime channel, deriving allow_insecure_http from the saved origin; task parameters cannot supply this runtime flag. Assignment proceeds only to an Agent advertising infra-target-auth-v2. No compatible Agent or unavailable credentials fail the assignment instead of scanning anonymously. Authenticated scans load the rule bundle shipped with the Agent (AIG_DATA_DIR may select its root); missing, empty or malformed local rules fail initialization. TLS, network or scope errors and explicit 401/403 responses from authenticated primary targets fail the task without a successful report. Authenticated scans use HTTP evidence and optional text-model analysis; browser screenshots and visual analysis are skipped. Successful authenticated access alone does not establish an unauthorized-access vulnerability. The HTTP client verifies TLS, rejects Host overrides and off-origin redirects, and redacts reflected authentication before evidence or model analysis. Existing identical idempotent retries return their persisted task before revalidating current credential state.'
       parameters:
       - in: header
         maxLength: 128
@@ -2754,7 +2892,7 @@ paths:
               type: string
               description: Output language. The Chinese Skills UI explicitly sends zh_CN; the API retains all documented language values.
             params:
-              description: Exact per-task schema described by this operation; agent_scan accepts only agent_id and eval_model_id, both required governed string references. skills_scan accepts only the required model_id string. Unknown, arbitrary, and credential-bearing fields are rejected.
+              description: Exact per-task schema described by this operation; agent_scan accepts only agent_id and eval_model_id, both required governed string references. skills_scan accepts only the required model_id string. Unknown, arbitrary, and credential-bearing fields are rejected. ai_infra_scan additionally accepts optional paired target_credential_id (opaque string) and target_credential_revision (positive int64), never target_auth or raw headers. Selected credentials restrict content to explicit same-origin HTTP or HTTPS URLs (HTTP and HTTPS are accepted by default) and prohibit attachments.
               type: object
             remark:
               description: Optional task note, trimmed and limited to 2000 Unicode code points of valid UTF-8. Stored separately from content and included in idempotency comparison; never passed to the scan engine, audit metadata, or report snapshot.
@@ -4453,4 +4591,140 @@ paths:
           description: Fixed safe error only; no upstream diagnostics or secrets.
         '503':
           description: Required governed runtime or egress unavailable.
+  /api/v1/platform/target-credentials:
+    get:
+      tags: &a1
+        - target-credentials
+      produces: &a2
+        - application/json
+      summary: List own infrastructure target credentials
+      description: "Private infrastructure target credential. Users and administrators access only their own resources; auditors cannot access them. Cookie identity, completed password change and CSRF for unsafe methods are required. Responses are Cache-Control: no-store and never expose username, secret, encryption material or headers. AES-GCM storage reuses the managed MODEL_MASTER_KEY keyring with a domain-separated AAD binding resource, owner, origin, auth type, header name and revision."
+      responses:
+        "200":
+          description: Safe metadata including disabled entries.
+          schema:
+            type: object
+            required:
+            - items
+            properties:
+              items:
+                type: array
+                items:
+                  $ref: "#/definitions/targetcredentials.View"
+        "400": &a3
+          description: Invalid body or target; fixed safe message.
+        "401": &a4
+          description: Unauthenticated.
+        "403": &a5
+          description: Only authenticated users and administrators with completed password change may access their own credentials; writes require CSRF.
+        "404": &a6
+          description: No credential visible to this owner.
+        "500": &a7
+          description: Credential or audit unavailable; no internal details.
+    post:
+      tags: *a1
+      produces: *a2
+      consumes:
+      - application/json
+      summary: Create private infrastructure target credential
+      description: "Private infrastructure target credential. Users and administrators access only their own resources; auditors cannot access them. Cookie identity, completed password change and CSRF for unsafe methods are required. Responses are Cache-Control: no-store and never expose username, secret, encryption material or headers. AES-GCM storage reuses the managed MODEL_MASTER_KEY keyring with a domain-separated AAD binding resource, owner, origin, auth type, header name and revision. Body limit: 16 KiB. Bearer receives the token without its prefix; API Key specifies header_name; Basic requires username and secret; Cookie uses name=value pairs. No connection probe is performed."
+      parameters:
+      - in: body
+        name: body
+        required: true
+        schema:
+          $ref: "#/definitions/targetcredentials.CreateInput"
+      responses:
+        "201":
+          description: Created; ETag contains quoted revision.
+          schema:
+            $ref: "#/definitions/targetcredentials.View"
+        "400": *a3
+        "401": *a4
+        "403": *a5
+        "404": *a6
+        "500": *a7
+  /api/v1/platform/target-credentials/{id}:
+    get:
+      tags: &a1
+        - target-credentials
+      produces: &a2
+        - application/json
+      summary: Get own infrastructure target credential
+      description: "Private infrastructure target credential. Users and administrators access only their own resources; auditors cannot access them. Cookie identity, completed password change and CSRF for unsafe methods are required. Responses are Cache-Control: no-store and never expose username, secret, encryption material or headers. AES-GCM storage reuses the managed MODEL_MASTER_KEY keyring with a domain-separated AAD binding resource, owner, origin, auth type, header name and revision."
+      parameters:
+      - &a3
+        in: path
+        name: id
+        required: true
+        type: string
+      responses:
+        "200":
+          description: Safe metadata with ETag.
+          schema:
+            $ref: "#/definitions/targetcredentials.View"
+        "400": &a4
+          description: Invalid body or target; fixed safe message.
+        "401": &a5
+          description: Unauthenticated.
+        "403": &a6
+          description: Only authenticated users and administrators with completed password change may access their own credentials; writes require CSRF.
+        "404": &a7
+          description: No credential visible to this owner.
+        "500": &a8
+          description: Credential or audit unavailable; no internal details.
+    put:
+      tags: *a1
+      produces: *a2
+      consumes:
+      - application/json
+      summary: Replace or disable an infrastructure target credential
+      description: "Private infrastructure target credential. Users and administrators access only their own resources; auditors cannot access them. Cookie identity, completed password change and CSRF for unsafe methods are required. Responses are Cache-Control: no-store and never expose username, secret, encryption material or headers. AES-GCM storage reuses the managed MODEL_MASTER_KEY keyring with a domain-separated AAD binding resource, owner, origin, auth type, header name and revision. Body limit: 16 KiB. Name, origin and auth_type are required. Empty secret retains the current encrypted secret only when target and authentication configuration are unchanged. Successful update increments revision, invalidating pending references; requests already issued are not recalled."
+      parameters:
+      - *a3
+      - &a9
+        in: header
+        name: If-Match
+        required: true
+        type: string
+        description: Quoted positive decimal revision, for example "1". Stale revision returns 409; missing or malformed header returns 428.
+      - in: body
+        name: body
+        required: true
+        schema:
+          $ref: "#/definitions/targetcredentials.UpdateInput"
+      responses:
+        "200":
+          description: Updated metadata with new ETag.
+          schema:
+            $ref: "#/definitions/targetcredentials.View"
+        "400": *a4
+        "401": *a5
+        "403": *a6
+        "404": *a7
+        "409":
+          description: Concurrent revision conflict; refresh before editing.
+        "428":
+          description: Current If-Match revision required.
+        "500": *a8
+    delete:
+      tags: *a1
+      produces: *a2
+      summary: Delete own infrastructure target credential
+      description: "Private infrastructure target credential. Users and administrators access only their own resources; auditors cannot access them. Cookie identity, completed password change and CSRF for unsafe methods are required. Responses are Cache-Control: no-store and never expose username, secret, encryption material or headers. AES-GCM storage reuses the managed MODEL_MASTER_KEY keyring with a domain-separated AAD binding resource, owner, origin, auth type, header name and revision. New and pending tasks can no longer resolve the deleted credential; already-issued requests are not recalled."
+      parameters:
+      - *a3
+      - *a9
+      responses:
+        "204":
+          description: Deleted.
+        "400": *a4
+        "401": *a5
+        "403": *a6
+        "404": *a7
+        "409":
+          description: Concurrent revision conflict.
+        "428":
+          description: Current If-Match revision required.
+        "500": *a8
 swagger: '2.0'
