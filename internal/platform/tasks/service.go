@@ -140,6 +140,9 @@ func (service *Service) Create(ctx context.Context, subject identity.Subject, in
 		!validTaskRemark(input.Remark) || !validTaskCountry(input.CountryIsoCode) || !validTaskAttachmentIDs(input.AttachmentIDs) {
 		return View{}, ErrInvalid
 	}
+	if input.TaskType == "skills_scan" && (input.Content != "" || len(input.AttachmentIDs) != 1) {
+		return View{}, ErrInvalid
+	}
 	params := input.Params
 	if len(params) == 0 {
 		params = json.RawMessage(`{}`)
@@ -229,6 +232,11 @@ func (service *Service) createLocked(
 				return nil, validateErr
 			}
 			candidate.TargetCount = targetCount
+		}
+		if input.TaskType == "skills_scan" {
+			if err := service.attachments.validateReadySkill(ctx, subject.UserID, input.AttachmentIDs[0]); err != nil {
+				return nil, err
+			}
 		}
 	}
 
@@ -370,6 +378,9 @@ func validTaskParams(taskType string, raw json.RawMessage) bool {
 		return false
 	}
 	switch taskType {
+	case "skills_scan":
+		var params skillsTaskParams
+		return decodeExactJSON(raw, &params) && validReference(params.ModelID)
 	case "mcp_scan":
 		var params mcpTaskParams
 		return decodeExactJSON(raw, &params) && validOptionalReference(fields, "model_id", params.ModelID) &&
@@ -797,7 +808,7 @@ func isBrowserTaskStatus(status Status) bool {
 
 func isBrowserTaskType(taskType string) bool {
 	switch taskType {
-	case "mcp_scan", "ai_infra_scan", "model_redteam_report", "agent_scan":
+	case "mcp_scan", "skills_scan", "ai_infra_scan", "model_redteam_report", "agent_scan":
 		return true
 	default:
 		return false
@@ -806,6 +817,8 @@ func isBrowserTaskType(taskType string) bool {
 
 func browserStoredTaskTypes(taskType string) []string {
 	switch taskType {
+	case "skills_scan":
+		return []string{"skills_scan", "Skills-Scan"}
 	case "mcp_scan":
 		return []string{"mcp_scan", "Mcp-Scan"}
 	case "ai_infra_scan":

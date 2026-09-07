@@ -49,6 +49,12 @@ function renderSidebar(initialEntry = '/reports', withRouteDriver = false) {
 }
 
 describe('Sidebar', () => {
+  it.each(['/tasks/skills', '/tasks/skills/new', '/tasks/skills/task-opaque-1'])('在%s保持 Skills 子导航活动状态', (path) => {
+    renderSidebar(path)
+    expect(screen.getByRole('link', { name: 'Skills 扫描' })).toHaveAttribute('aria-current', 'page')
+    expect(screen.getByRole('link', { name: 'AI 基础设施扫描' })).not.toHaveAttribute('aria-current')
+  })
+
   it('renders the user navigation in order and marks the active link', () => {
     renderSidebar()
 
@@ -81,7 +87,7 @@ describe('Sidebar', () => {
     fireEvent.click(screen.getByRole('button', { name: '展开扫描任务子菜单' }))
 
     expect(screen.getByRole('link', { name: 'MCP 扫描' })).toHaveAttribute('href', '/tasks/new?scan=mcp')
-    expect(screen.getByRole('link', { name: 'Skills 扫描' })).toHaveAttribute('href', '/tasks/new?scan=skills')
+    expect(screen.getByRole('link', { name: 'Skills 扫描' })).toHaveAttribute('href', '/tasks/skills')
     expect(screen.getByRole('link', { name: 'AI 基础设施扫描' })).toHaveAttribute(
       'href',
       '/tasks/ai-infra',

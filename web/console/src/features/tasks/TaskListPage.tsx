@@ -23,6 +23,7 @@ import { AIInfraTaskTable } from './components/AIInfraTaskTable'
 import { AIInfraWorkbenchHeader } from './components/AIInfraWorkbenchHeader'
 import { useAIInfraWorkbenchStyles } from './components/AIInfraWorkbench.styles'
 import { TaskOperationsSummary } from './components/TaskOperationsSummary'
+import { taskWorkbenchFor } from './taskWorkbenches'
 
 const useStyles = makeStyles({
   page: { display: 'flex', flexDirection: 'column', gap: tokens.spacingVerticalL, minWidth: 0 },
@@ -103,6 +104,7 @@ const useStyles = makeStyles({
 export const taskTypeLabels: Record<TaskType, string> = {
   mcp_scan: 'MCP 扫描',
   ai_infra_scan: 'AI 基础设施扫描',
+  skills_scan: 'Skills 扫描',
   model_redteam_report: '模型红队评测',
   agent_scan: 'Agent 扫描',
   unknown: '未知任务',
@@ -160,7 +162,7 @@ export function TaskListPage({ fixedTaskType }: TaskListPageProps) {
   const styles = useStyles()
   const aiStyles = useAIInfraWorkbenchStyles()
   const { state } = useSession()
-  const isAiInfraList = fixedTaskType === 'ai_infra_scan'
+  const workbench = taskWorkbenchFor(fixedTaskType)
   const [searchParams, setSearchParams] = useSearchParams()
   const page = positivePage(searchParams.get('page'))
   const statusValue = searchParams.get('status') as TaskStatus | null
@@ -203,26 +205,7 @@ export function TaskListPage({ fixedTaskType }: TaskListPageProps) {
     dispatch_unknown: styles.statusAttention,
     cancelled: styles.statusTerminal,
   }
-  const columns: readonly DataTableColumn<TaskSummary>[] = isAiInfraList ? [
-    { id: 'id', header: '任务 ID', render: (task) => task.id },
-    { id: 'owner', header: '负责人', render: (task) => task.owner },
-    {
-      id: 'status',
-      header: '状态',
-      render: (task) => <span className={mergeClasses(styles.statusMark, statusMarkStyles[task.status])}>{taskStatusLabels[task.status]}</span>,
-    },
-    { id: 'created', header: '创建时间', render: (task) => formatTaskTime(task.created_at) },
-    { id: 'updated', header: '更新时间', render: (task) => formatTaskTime(task.updated_at) },
-    {
-      id: 'action',
-      header: '操作',
-      render: (task) => (
-        <Link className={styles.taskLink} to={`/tasks/ai-infra/${encodeURIComponent(task.id)}`} aria-label={`查看任务 ${task.id}`}>
-          查看
-        </Link>
-      ),
-    },
-  ] : [
+  const columns: readonly DataTableColumn<TaskSummary>[] = [
     { id: 'type', header: '任务类型', render: (task) => taskTypeLabels[task.task_type] },
     { id: 'owner', header: '负责人', render: (task) => task.owner },
     {
@@ -246,18 +229,20 @@ export function TaskListPage({ fixedTaskType }: TaskListPageProps) {
   const pageDescription = '按权限范围查看任务状态，筛选由服务端在分页前执行。'
   const tableCaption = '扫描任务台账'
 
-  if (isAiInfraList) {
+  if (workbench) {
     return (
       <section className={aiStyles.page}>
         <AIInfraWorkbenchHeader
+          title={workbench.title}
+          description={workbench.description}
           action={canCreate ? (
-            <Link className={aiStyles.primaryAction} to="/tasks/ai-infra/new" aria-label="新建 AI 基础设施扫描任务">
+            <Link className={aiStyles.primaryAction} to={`${workbench.path}/new`} aria-label={`新建 ${workbench.title}任务`}>
               <AddRegular aria-hidden="true" />
-              <span>新建 AI 基础设施扫描任务</span>
+              <span>新建 {workbench.title}任务</span>
             </Link>
           ) : undefined}
         />
-        <div className={aiStyles.surface} role="group" aria-label="AI 基础设施扫描状态筛选">
+        <div className={aiStyles.surface} role="group" aria-label={`${workbench.title}状态筛选`}>
           <div className={aiStyles.filterControls}>
             <Field className={aiStyles.filterField} label="任务状态">
               <Select
@@ -277,18 +262,20 @@ export function TaskListPage({ fixedTaskType }: TaskListPageProps) {
             ) : null}
           </div>
         </div>
-        {query.isSuccess ? <AIInfraTaskOperationsSummary tasks={query.data.items} total={query.data.total} /> : null}
-        {query.isPending ? <StatePanel state="loading" title="正在加载 AI 基础设施扫描任务" /> : null}
+        {query.isSuccess ? <AIInfraTaskOperationsSummary tasks={query.data.items} total={query.data.total} taskLabel={workbench.title} /> : null}
+        {query.isPending ? <StatePanel state="loading" title={`正在加载 ${workbench.title}任务`} /> : null}
         {query.isError && query.error instanceof ApiError && query.error.kind === 'forbidden' ? (
-          <StatePanel state="forbidden" title="无权查看 AI 基础设施扫描任务台账" />
+          <StatePanel state="forbidden" title={`无权查看 ${workbench.title}任务台账`} />
         ) : null}
         {query.isError && !(query.error instanceof ApiError && query.error.kind === 'forbidden') ? (
-          <StatePanel state="error" title="暂时无法加载 AI 基础设施扫描任务" description="请稍后重试。" actionLabel="重试" onAction={() => void query.refetch()} />
+          <StatePanel state="error" title={`暂时无法加载 ${workbench.title}任务`} description="请稍后重试。" actionLabel="重试" onAction={() => void query.refetch()} />
         ) : null}
         {query.data?.items.length === 0 ? <StatePanel state="empty" title="暂无匹配任务" description="调整状态筛选或创建新的扫描任务。" /> : null}
         {query.data && (query.data.items.length > 0 || query.data.total > 0) ? (
           <AIInfraTaskTable
             tasks={query.data.items}
+            taskLabel={workbench.title}
+            detailPath={(task) => `${workbench.path}/${encodeURIComponent(task.id)}`}
             pagination={{
               total: query.data.total,
               page: query.data.page,

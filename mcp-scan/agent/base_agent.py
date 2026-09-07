@@ -108,7 +108,7 @@ class BaseAgent:
 
         compact_prompt = prompt_manager.load_template("compact")
         msgs_to_compact.append({"role": "user", "content": compact_prompt})
-        compacted_msgs = self.llm.chat(msgs_to_compact)
+        compacted_msgs = self.llm.chat(self._build_compaction_messages(msgs_to_compact))
         self.summary_memory = compacted_msgs
 
         if not self.original_task:
@@ -124,6 +124,10 @@ class BaseAgent:
             },
             *recent_msgs,
         ]
+
+    def _build_compaction_messages(self, messages: list[dict]) -> list[dict]:
+        """为受限扫描模式提供压缩消息钩子；默认保留 MCP 原有请求。"""
+        return messages
 
     async def generate_system_prompt(self):
         tools_prompt = await self.dispatcher.get_all_tools_prompt()

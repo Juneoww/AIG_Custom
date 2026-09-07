@@ -16,7 +16,12 @@
 # Tencent Zhuque Lab (https://github.com/Tencent/AI-Infra-Guard) in its
 # documentation or user interface, as detailed in the NOTICE file.
 
+"""功能：调度扫描工具；Skills 模式强制使用固定根目录的只读白名单。
+输入：工具名、参数及运行上下文。输出：工具结果文本；MCP 原有行为保持不变。
+"""
+
 import inspect
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, Optional
 
 from tools.registry import get_tool_by_name, get_tools_prompt, needs_context
@@ -30,17 +35,23 @@ if TYPE_CHECKING:  # pragma: no cover
 
 class ToolDispatcher:
     def __init__(
-        self, mcp_server_url: str | None = None, mcp_headers: dict[str, str] | None = None
+        self, mcp_server_url: str | None = None, mcp_headers: dict[str, str] | None = None,
+        *, skills_root: str | None = None,
     ):
         """
         NOTE: __init__ must be synchronous. We do lazy MCP connection on first remote usage.
         """
+        if skills_root is not None and (mcp_server_url or mcp_headers):
+            raise ValueError("Skills static mode cannot connect to MCP servers")
+        self.skills_root = Path(skills_root).resolve(strict=True) if skills_root is not None else None
         self.mcp_server_url = mcp_server_url
         self.mcp_tools_manager: MCPTools | None = None
         self.mcp_transport = None
         self.mcp_headers = mcp_headers
 
     async def _ensure_mcp_manager(self) -> MCPTools | None:
+        if self.skills_root is not None:
+            return None
         if not self.mcp_server_url:
             return None
         if self.mcp_tools_manager:
@@ -67,6 +78,9 @@ class ToolDispatcher:
 
     async def get_all_tools_prompt(self) -> str:
         """获取所有可用工具的描述 Prompt"""
+        if self.skills_root is not None:
+            from tools.skills_static import TOOLS_PROMPT
+            return TOOLS_PROMPT
         # common_tools = ['finish', 'think']
         # normal_tools = copy.copy(common_tools)
         # normal_tools.extend(['read_file', 'execute_shell'])
@@ -96,6 +110,9 @@ class ToolDispatcher:
         self, tool_name: str, args: dict[str, Any], context: Optional["ToolContext"] = None
     ) -> str:
         """统一调用入口：自动识别是本地还是远程工具"""
+        if self.skills_root is not None:
+            from tools.skills_static import call_skills_tool
+            return call_skills_tool(self.skills_root, tool_name, args)
         # 1. 尝试作为本地工具调用
         tool_func = get_tool_by_name(tool_name)
         if tool_func:

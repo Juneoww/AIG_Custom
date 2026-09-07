@@ -16,6 +16,7 @@
 # Tencent Zhuque Lab (https://github.com/Tencent/AI-Infra-Guard) in its
 # documentation or user interface, as detailed in the NOTICE file.
 
+import os
 import sys
 import time
 
@@ -30,14 +31,15 @@ logger.add(
 )
 
 # 2. 添加文件输出 (File)
-logger.add(
-    f"./logs/mcp-scan_{time.strftime('%Y-%m-%d-%H-%M-%S')}.log",
-    rotation="10 MB",
-    retention="10 days",
-    level="DEBUG",
-    format="{time:YYYY-MM-DD HH:mm:ss} | {level} | {message}",
-    mode="w",  # 每次运行时覆盖旧日志
-)
+if os.environ.get("AIG_SCAN_MODE") != "skills":
+    logger.add(
+        f"./logs/mcp-scan_{time.strftime('%Y-%m-%d-%H-%M-%S')}.log",
+        rotation="10 MB",
+        retention="10 days",
+        level="DEBUG",
+        format="{time:YYYY-MM-DD HH:mm:ss} | {level} | {message}",
+        mode="w",  # 每次运行时覆盖旧日志
+    )
 if __name__ == "__main__":
     # 设置日志级别
     # 输出日志

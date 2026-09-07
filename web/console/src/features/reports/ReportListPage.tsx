@@ -38,6 +38,7 @@ const useStyles = makeStyles({
 
 const taskTypeLabels = {
   mcp_scan: 'MCP 扫描', ai_infra_scan: 'AI 基础设施扫描',
+  skills_scan: 'Skills 扫描',
   model_redteam_report: '模型红队评测', agent_scan: 'Agent 扫描',
 } as const
 

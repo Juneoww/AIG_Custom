@@ -1,8 +1,7 @@
 {
     "swagger": "2.0",
     "info": {
-        "contact": {
-        },
+        "contact": {},
         "description": "API for managing AIG Custom Platform AI security scanning tasks. Based on Tencent Zhuque Lab AI-Infra-Guard (https://github.com/Tencent/AI-Infra-Guard).",
         "title": "AIG Custom Platform 任务API",
         "version": "1.0"
@@ -1147,7 +1146,8 @@
                             "mcp_scan",
                             "ai_infra_scan",
                             "model_redteam_report",
-                            "agent_scan"
+                            "agent_scan",
+                            "skills_scan"
                         ],
                         "in": "query",
                         "name": "task_type",
@@ -1183,7 +1183,7 @@
                 "consumes": [
                     "application/json"
                 ],
-                "description": "Breaking security hardening: create responses now use the browser-safe TaskDetail with bounded input_summary instead of the former internal task View; clients must migrate field access. The JSON body is limited to 256 KiB. Creates an owner-scoped platform task from the authenticated Cookie Subject. Idempotency-Key is required and unique per owner. A retry with the same persisted request payload returns the existing task without revalidating live governed references; reusing that key with a different payload returns 400 invalid task request. Only exact canonical task types are accepted and the platform maps them to private Agent aliases: mcp_scan params allow model_id and thread; ai_infra_scan params allow model_id, timeout, and port_scan_mode (fixed_ai or full_tcp; omission defaults to fixed_ai); model_redteam_report params require model_id as a bounded string array plus eval_model_id and may include dataset numPrompts/randomSeed/promptColumn and techniques; agent_scan params require agent_id and eval_model_id. Every model_id/eval_model_id must resolve through the governed model boundary, and agent_id through the user or public Agent registry, before persistence; unknown or invisible references write no task. Unknown fields, nested credential objects, raw model credentials, and legacy aliases are rejected. Attachments are supplied only as at most ten opaque attachment IDs. Dispatch uses persisted claims and a global attempt budget. An uncertain network acknowledgement becomes dispatch_unknown and is never submitted automatically again; this is at-most-once dispatch, not exactly-once execution. Requires CSRF protection.",
+                "description": "Breaking security hardening: create responses now use the browser-safe TaskDetail with bounded input_summary instead of the former internal task View; clients must migrate field access. The JSON body is limited to 256 KiB. Creates an owner-scoped platform task from the authenticated Cookie Subject. Idempotency-Key is required and unique per owner. A retry with the same persisted request payload returns the existing task without revalidating live governed references; reusing that key with a different payload returns 400 invalid task request. Only exact canonical task types are accepted and the platform maps them to private Agent aliases: mcp_scan params allow model_id and thread; ai_infra_scan params allow model_id, timeout, and port_scan_mode (fixed_ai or full_tcp; omission defaults to fixed_ai); model_redteam_report params require model_id as a bounded string array plus eval_model_id and may include dataset numPrompts/randomSeed/promptColumn and techniques; agent_scan params require agent_id and eval_model_id. skills_scan params allow only model_id, a required available governed model ID; exactly one owner-scoped ready ZIP attachment is required and content must be empty. Skills perform static audit only, with no dynamic, URL, repository, concurrency, port, or custom prompt options. The ZIP limit is 20 MiB compressed, 100 MiB actual expanded bytes, 5 MiB per file, and at most 2,000 original ZIP entries and normalized files/directories (including implicit directories); it must contain exactly one valid UTF-8 SKILL.md with non-empty name and description frontmatter strings, at the archive root or inside one top-level wrapper directory. Unsafe paths, links, duplicate entries, case conflicts, invalid YAML, CRC damage, encrypted entries, and unsupported compression are rejected. Every model_id/eval_model_id must resolve through the governed model boundary, and agent_id through the user or public Agent registry, before persistence; unknown or invisible references write no task. Unknown fields, nested credential objects, raw model credentials, and legacy aliases are rejected. Attachments use opaque attachment IDs; the general maximum is ten and skills_scan requires exactly one. Optional remark is trimmed and limited to 2,000 Unicode code points, participates in idempotency, and is returned only in authorized TaskDetail; it never enters the engine, audit metadata, or reports. Dispatch uses persisted claims and a global attempt budget. An uncertain network acknowledgement becomes dispatch_unknown and is never submitted automatically again; this is at-most-once dispatch, not exactly-once execution. Requires CSRF protection.",
                 "parameters": [
                     {
                         "in": "header",
@@ -1204,11 +1204,13 @@
                                         "maxLength": 128
                                     },
                                     "type": "array",
-                                    "maxItems": 10
+                                    "maxItems": 10,
+                                    "description": "Owner-scoped opaque ready attachment IDs; skills_scan requires exactly one ZIP and validates the archive before binding."
                                 },
                                 "content": {
                                     "type": "string",
-                                    "maxLength": 32768
+                                    "maxLength": 32768,
+                                    "description": "skills_scan content must be empty or omitted; Skill source is supplied only by the ZIP attachment."
                                 },
                                 "country_iso_code": {
                                     "type": "string",
@@ -1217,11 +1219,12 @@
                                         "zh",
                                         "zh_CN",
                                         "en"
-                                    ]
+                                    ],
+                                    "description": "Output language. The Chinese Skills UI explicitly sends zh_CN; the API retains all documented language values."
                                 },
                                 "params": {
                                     "type": "object",
-                                    "description": "Exact per-task schema described by this operation; arbitrary and credential-bearing fields are rejected."
+                                    "description": "Exact per-task schema described by this operation. skills_scan accepts only the required model_id string; unknown parameters and credential-bearing fields are rejected."
                                 },
                                 "task_type": {
                                     "type": "string",
@@ -1229,8 +1232,14 @@
                                         "mcp_scan",
                                         "ai_infra_scan",
                                         "model_redteam_report",
-                                        "agent_scan"
+                                        "agent_scan",
+                                        "skills_scan"
                                     ]
+                                },
+                                "remark": {
+                                    "description": "Optional task remark, trimmed and limited to 2,000 Unicode code points. Included in idempotency and authorized detail only; never forwarded to the engine, audit metadata, or reports.",
+                                    "maxLength": 2000,
+                                    "type": "string"
                                 }
                             },
                             "required": [
@@ -2252,7 +2261,7 @@
         },
         "/api/v1/auth/password-resets/{userID}": {
             "post": {
-                "description": "Requires HTTPS, an administrator session, and a matching X-CSRF-Token header. This HTTP endpoint never returns a reset token. A trusted local administrator must run ai-infra-guard create-password-reset --username \u003cusername\u003e to obtain the sensitive one-time token for secure delivery; it must never be logged or persisted.",
+                "description": "Requires HTTPS, an administrator session, and a matching X-CSRF-Token header. This HTTP endpoint never returns a reset token. A trusted local administrator must run ai-infra-guard create-password-reset --username <username> to obtain the sensitive one-time token for secure delivery; it must never be logged or persisted.",
                 "parameters": [
                     {
                         "description": "Identity user ID",
@@ -3098,7 +3107,8 @@
                         "mcp_scan",
                         "ai_infra_scan",
                         "model_redteam_report",
-                        "agent_scan"
+                        "agent_scan",
+                        "skills_scan"
                     ],
                     "type": "string"
                 }
@@ -3571,7 +3581,8 @@
                     "type": "string"
                 },
                 "task_type": {
-                    "type": "string"
+                    "type": "string",
+                    "description": "Frozen task identity. New platform reports use mcp_scan, ai_infra_scan, model_redteam_report, agent_scan, or skills_scan; historical MCP and other engine aliases retain their original values. Skills reuse MCP result conversion without changing task_type."
                 }
             },
             "required": [
@@ -3609,7 +3620,8 @@
                     "type": "string"
                 },
                 "task_type": {
-                    "type": "string"
+                    "type": "string",
+                    "description": "Frozen task identity. New platform reports use mcp_scan, ai_infra_scan, model_redteam_report, agent_scan, or skills_scan; historical MCP and other engine aliases retain their original values. Skills reuse MCP result conversion without changing task_type."
                 }
             },
             "required": [
@@ -3728,7 +3740,8 @@
                     "type": "string"
                 },
                 "task_type": {
-                    "type": "string"
+                    "type": "string",
+                    "description": "Frozen task identity. New platform reports use mcp_scan, ai_infra_scan, model_redteam_report, agent_scan, or skills_scan; historical MCP and other engine aliases retain their original values. Skills reuse MCP result conversion without changing task_type."
                 },
                 "technical_findings": {
                     "items": {
@@ -3979,12 +3992,18 @@
                         "ai_infra_scan",
                         "model_redteam_report",
                         "agent_scan",
+                        "skills_scan",
                         "unknown"
                     ],
                     "type": "string"
                 },
                 "updated_at": {
                     "format": "date-time",
+                    "type": "string"
+                },
+                "remark": {
+                    "description": "Optional task remark, trimmed and limited to 2,000 Unicode code points. Included in idempotency and authorized detail only; never forwarded to the engine, audit metadata, or reports.",
+                    "maxLength": 2000,
                     "type": "string"
                 }
             },
@@ -4045,7 +4064,7 @@
                     "type": "string"
                 },
                 "model_id": {
-                    "description": "Opaque persisted and validated AI infrastructure model reference for current catalog-label recovery; not a Token, Base URL, credential, or current-availability claim.",
+                    "description": "Opaque persisted and validated AI infrastructure or Skills model reference for current catalog-label recovery; not a Token, Base URL, credential, or current-availability claim.",
                     "maxLength": 128,
                     "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$",
                     "type": "string"
@@ -4076,6 +4095,13 @@
                     "maximum": 86400,
                     "minimum": 1,
                     "type": "integer"
+                },
+                "scan_mode": {
+                    "description": "Only for skills_scan; fixed static audit mode. Other task types omit this field.",
+                    "enum": [
+                        "static"
+                    ],
+                    "type": "string"
                 }
             },
             "type": "object"
@@ -4143,6 +4169,7 @@
                         "ai_infra_scan",
                         "model_redteam_report",
                         "agent_scan",
+                        "skills_scan",
                         "unknown"
                     ],
                     "type": "string"

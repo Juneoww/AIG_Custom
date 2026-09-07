@@ -69,7 +69,8 @@ class ScanPipeline:
         instruction = prompt_manager.load_template(stage.template)
 
         # 初始化阶段 Agent
-        agent = BaseAgent(
+        agent_class = getattr(self.agent_wrapper, "agent_class", BaseAgent)
+        agent = agent_class(
             name=f"{stage.name} Agent",
             instruction=instruction,
             llm=self.agent_wrapper.llm,

@@ -29,6 +29,8 @@ import { createTaskSubmission, type TaskSubmission } from './api'
 import { AIInfraWorkbenchHeader } from './components/AIInfraWorkbenchHeader'
 import { useAIInfraWorkbenchStyles } from './components/AIInfraWorkbench.styles'
 import { GovernedModelSelector, type GovernedModelAvailability } from './components/GovernedModelSelector'
+import { TaskTypeSelector } from './components/TaskTypeSelector'
+import { SkillsTaskCreatePage } from './SkillsTaskCreatePage'
 import { previewTargetExpressions } from './targetExpressionPreview'
 
 const useStyles = makeStyles({
@@ -74,17 +76,29 @@ function isWellFormedUnicode(value: string): boolean {
 }
 
 export interface TaskCreatePageProps {
-  fixedTaskType?: 'ai_infra_scan'
+  fixedTaskType?: 'ai_infra_scan' | 'skills_scan'
   returnTo?: string
 }
 
 export function TaskCreatePage({ fixedTaskType, returnTo }: TaskCreatePageProps) {
+  const [taskType, setTaskType] = useState<TaskCreateRequest['task_type']>('mcp_scan')
+  if ((fixedTaskType ?? taskType) === 'skills_scan') {
+    return <SkillsTaskCreatePage returnTo={returnTo ?? (fixedTaskType ? '/tasks/skills' : '/tasks')} onTaskTypeChange={fixedTaskType ? undefined : setTaskType} />
+  }
+  return <StandardTaskCreatePage fixedTaskType={fixedTaskType === 'ai_infra_scan' ? fixedTaskType : undefined} returnTo={returnTo} taskType={taskType} setTaskType={setTaskType} />
+}
+
+function StandardTaskCreatePage({ fixedTaskType, returnTo, taskType, setTaskType }: {
+  fixedTaskType?: 'ai_infra_scan'
+  returnTo?: string
+  taskType: TaskCreateRequest['task_type']
+  setTaskType: (taskType: TaskCreateRequest['task_type']) => void
+}) {
   const styles = useStyles()
   const workbenchStyles = useAIInfraWorkbenchStyles()
   const navigate = useNavigate()
   const { state } = useSession()
   const role = state.status === 'authenticated' ? state.subject.role : 'auditor'
-  const [taskType, setTaskType] = useState<TaskCreateRequest['task_type']>('mcp_scan')
   const [content, setContent] = useState('')
   const [remark, setRemark] = useState('')
   const [language, setLanguage] = useState<'zh_CN' | 'en'>('zh_CN')
@@ -406,14 +420,7 @@ export function TaskCreatePage({ fixedTaskType, returnTo }: TaskCreatePageProps)
       <form className={styles.form} onSubmit={submit}>
         <fieldset className={styles.step} aria-label="第一步：任务类型">
           <Text weight="semibold">第一步：任务类型</Text>
-          <Field label="扫描类型">
-            <Select value={taskType} onChange={(_, data) => { setTaskType(data.value as TaskCreateRequest['task_type']); invalidateSubmission() }}>
-              <option value="mcp_scan">MCP 扫描</option>
-              <option value="ai_infra_scan">AI 基础设施扫描</option>
-              <option value="model_redteam_report">模型红队评测</option>
-              <option value="agent_scan">Agent 扫描</option>
-            </Select>
-          </Field>
+          <TaskTypeSelector value={taskType} onChange={(type) => { setTaskType(type); invalidateSubmission() }} disabled={uploading || submitting} />
         </fieldset>
         <fieldset className={styles.step} aria-label="第二步：参数">
           <Text weight="semibold">第二步：参数</Text>

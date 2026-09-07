@@ -69,11 +69,11 @@ AIG Custom Platform 是基于 Tencent Zhuque Lab AI-Infra-Guard（https://github
 | `GET /api/v1/platform/admin/audit-events` | `AuditListResponse` | 仅审计员/管理员；metadata 递归脱敏。 |
 | `GET /api/v1/platform/models` | `CatalogPage` | 普通用户看全局和本人私有 platform 行；审计员只读全局行；管理员看全部 platform 行。token 始终为 `********`，`source` 为 `platform` 或 `yaml`，并显式返回 `read_only`。只读 YAML 行与同 ID platform 行发生碰撞时仍分别保留；目录加载失败时失败关闭。 |
 
-`GET /api/v1/platform/tasks/{taskID}` 返回 `TaskDetail`，其 `input_summary` 仅含有界展示元数据。只有 `ai_infra_scan` 的详情可以包含 `model_id`：它是用于恢复当前模型目录标签的 opaque、已持久化/已验证模型引用。模型被删除、禁用或对当前用户不可见时，必须使用安全 ID 回退展示。该字段不是 Token、Base URL、凭据、原始参数对象，也不代表当前可用性；原始 params、嵌套凭据和 model 对象仍不会返回。普通用户只看本人任务，审计员/管理员全局只读；任务不存在或对普通用户不可见时返回 `404`。`GET /api/v1/platform/tasks/{taskID}/result` 已退役：通过认证与首次改密门禁后恒定返回 `410 Gone`，且绝不读取引擎输出。
+`GET /api/v1/platform/tasks/{taskID}` 返回 `TaskDetail`，其 `input_summary` 仅含有界展示元数据。只有 `ai_infra_scan` 和 `skills_scan` 的详情可以包含 `model_id`：它是用于恢复当前模型目录标签的 opaque、已持久化/已验证模型引用。模型被删除、禁用或对当前用户不可见时，必须使用安全 ID 回退展示。该字段不是 Token、Base URL、凭据、原始参数对象，也不代表当前可用性；原始 params、嵌套凭据和 model 对象仍不会返回。Skills 摘要只含 `language`、`model_id` 与固定为 `static` 的 `scan_mode`；其他类型不返回 `scan_mode`，Skills 不返回名称、文件数、技能数或 `target_count`。普通用户只看本人任务，审计员/管理员拥有全局读取权限；任务不存在或对普通用户不可见时返回 `404`。`GET /api/v1/platform/tasks/{taskID}/result` 已退役：通过认证与首次改密门禁后恒定返回 `410 Gone`，且绝不读取引擎输出。
 
 ### 任务创建响应的安全加固迁移
 
-**破坏性变更：** `POST /api/v1/platform/tasks` 不再返回旧的内部任务 `View`。成功的 `202` 现在返回 `TaskDetail`，精确包含 `id`、用于展示的安全 `owner`、规范化 `task_type`、`status`、`created_at`、`updated_at` 和有界 `input_summary`。此变更阻止持久化请求与引擎内部字段越过浏览器边界。
+**破坏性变更：** `POST /api/v1/platform/tasks` 不再返回旧的内部任务 `View`。成功的 `202` 现在返回 `TaskDetail`，包含 `id`、用于展示的安全 `owner`、规范化 `task_type`、`status`、`created_at`、`updated_at`、有界 `input_summary` 和可选 `remark`。此变更阻止持久化请求与引擎内部字段越过浏览器边界；列表仍只有六个安全字段，不返回备注。
 
 | 旧 `View` 字段 | 新客户端行为 |
 |---|---|
@@ -90,7 +90,27 @@ AIG Custom Platform 是基于 Tencent Zhuque Lab AI-Infra-Guard（https://github
 
 浏览器任务执行只能使用上文受保护的平台任务 API。原 `/api/v1/app/taskapi*` 和 `/api/v1/app/tasks*` 浏览器路由族仅是历史名称，不是可调用的兼容 API；只有通过正常会话、首次改密与 CSRF 校验后才返回 `410 Gone`（CSRF 适用于变更请求）。它们不能用于创建任务、上传、查询状态、获取结果、流式更新，也不能在连接中断后作为回退。
 
-平台任务创建 JSON body 最大 256 KiB，`content` 最大 32 KiB，最多引用 10 个不重复且不超过 128 字节的 opaque 附件 ID；只接受 canonical `mcp_scan`、`ai_infra_scan`、`model_redteam_report`、`agent_scan`，服务端在私有 Adapter 边界分别映射为真实 Agent Alias。参数采用逐类型白名单：MCP 仅 `model_id`/`thread`；基础设施仅 `model_id`/`timeout`/`port_scan_mode`；模型红队要求 `model_id` 字符串数组和 `eval_model_id`，可带 `dataset.numPrompts/randomSeed/promptColumn` 与 `techniques`；Agent 扫描要求 `agent_id` 与 `eval_model_id`。`ai_infra_scan.params.port_scan_mode` 只能精确为 `fixed_ai` 或 `full_tcp`，省略时规范化为 `fixed_ai`；前者对裸 IPv4 发现 `11434,1337,7000-9000,18789`（2,004 个）TCP 端口，后者发现全部 `1-65535` TCP 端口。它不接受自定义端口、UDP 或版本识别选项，且 URL、域名、带端口 IP、IPv6 不触发该端口发现步骤。安全 `TaskDetail.input_summary.port_scan_mode` 仅在可验证时返回上述规范化枚举值，绝不返回原始参数。所有 `model_id`/`eval_model_id` 必须在持久化任务前通过受治理模型解析器验证，`agent_id` 必须解析到该用户或公共只读 Agent 配置；未知或不可见引用固定拒绝且不写入任务。未知字段、嵌套凭据对象、明文模型凭据、旧 model 对象和任务 Alias 均被拒绝。浏览器附件只使用 opaque 附件 ID，并按 owner 隔离。内部 Agent WebSocket 与旧形状制品传输属于独立的 internal-token 边界，不是浏览器 API。
+平台任务创建 JSON body 最大 256 KiB，`content` 最大 32 KiB，最多引用 10 个不重复且不超过 128 字节的 opaque 附件 ID；只接受 canonical `mcp_scan`、`ai_infra_scan`、`model_redteam_report`、`agent_scan`、`skills_scan`，服务端在私有 Adapter 边界分别映射为真实 Agent Alias。参数采用逐类型白名单：MCP 仅 `model_id`/`thread`；基础设施仅 `model_id`/`timeout`/`port_scan_mode`；模型红队要求 `model_id` 字符串数组和 `eval_model_id`，可带 `dataset.numPrompts/randomSeed/promptColumn` 与 `techniques`；Agent 扫描要求 `agent_id` 与 `eval_model_id`；Skills 仅允许必填字符串 `model_id`，且必须使用恰好一个 ready ZIP 附件和空 `content`。`ai_infra_scan.params.port_scan_mode` 只能精确为 `fixed_ai` 或 `full_tcp`，省略时规范化为 `fixed_ai`；前者对裸 IPv4 发现 `11434,1337,7000-9000,18789`（2,004 个）TCP 端口，后者发现全部 `1-65535` TCP 端口。它不接受自定义端口、UDP 或版本识别选项，且 URL、域名、带端口 IP、IPv6 不触发该端口发现步骤。安全 `TaskDetail.input_summary.port_scan_mode` 仅在可验证时返回上述规范化枚举值，绝不返回原始参数。所有 `model_id`/`eval_model_id` 必须在持久化任务前通过受治理模型解析器验证，`agent_id` 必须解析到该用户或公共只读 Agent 配置；未知或不可见引用固定拒绝且不写入任务。未知字段、嵌套凭据对象、明文模型凭据、旧 model 对象和任务 Alias 均被拒绝。浏览器附件只使用 opaque 附件 ID，并按 owner 隔离。内部 Agent WebSocket 与旧形状制品传输属于独立的 internal-token 边界，不是浏览器 API。
+
+### Skills ZIP 静态扫描
+
+`skills_scan` 是独立平台类型，内部映射为 `Skills-Scan`，列表筛选与报告均保留 Skills 身份。使用当前用户已上传且处于 ready 状态的单个 ZIP，`params` 恰好包含可用受治理模型的 `model_id`；未知参数会被拒绝。`content` 必须省略或为空字符串。首期不接受 URL、仓库地址、自定义审计提示词、并发、端口或动态扫描选项。中文 Skills 界面明确提交 `country_iso_code: "zh_CN"`，API 本身仍允许既有空值、`zh`、`zh_CN`、`en`。
+
+```json
+{
+  "task_type": "skills_scan",
+  "params": { "model_id": "governed-model-id" },
+  "attachment_ids": ["ready-attachment-id"],
+  "country_iso_code": "zh_CN",
+  "remark": "待发布 Skill 的静态审计"
+}
+```
+
+ZIP 压缩大小最多 20 MiB，实际解压总量最多 100 MiB，单文件最多 5 MiB，原始 ZIP 条目和规范化后的文件/目录总数（含隐式目录）均最多 2,000。必须只有一个 `SKILL.md`，位于 ZIP 根目录或单个顶层包裹目录；所有文件都在同一 Skill 根目录下。`SKILL.md` 必须为有效 UTF-8，YAML frontmatter 是对象，`name` 和 `description` 为非空字符串，分别不超过 128 与 2,000 个 Unicode 码点。无脚本的说明型 Skill 也可提交。路径穿越、绝对路径、反斜杠、链接、特殊文件、重复或大小写冲突路径、文件/目录冲突、重复 YAML 键、加密、不支持的压缩方式及损坏 ZIP/CRC 均被拒绝；服务端按实际解压流计算限制，不能只依赖元数据。
+
+创建前检查附件但不在 Web 服务目录解压，附件与任务原子绑定；相同幂等键及请求的重试先返回已存在任务，不因附件已绑定而失败。执行器在独立临时目录复检并解压，结束或取消后清理。扫描只允许受根目录约束且输出有界的静态读取、目录与搜索，禁止执行包内代码、安装依赖或访问任意外部目标；全部模型阶段使用已选治理模型。模型、解析或结果事件失败时任务失败，不产生成功空报告。
+
+可选 `remark` 沿用现有任务规则：去除首尾空白，最多 2,000 个 Unicode 码点，参与幂等请求比较，仅在授权 `TaskDetail` 中返回，不进入引擎、审计元数据或报告。
 
 ### 受保护平台边界
 
@@ -133,6 +153,8 @@ Prompt 删除的规范路由是 `DELETE /api/v1/knowledge/prompt_collections/{id
 - `GET /api/v1/platform/reports/{reportID}` 返回安全详情，其中 `render` 是任务完成时保存的不可变 RenderModel。
 
 不可变 `report-render-v2` RenderModel 固化风险映射版本、生成/完成时间、任务元数据、产品名/主色/水印、风险评分及评分说明、风险分布、`risk_trend` 中 30 个固定 UTC 日桶、Top 风险、含证据/影响/修复的技术发现、建议、覆盖范围和结论。对于可信的 AI 基础设施任务，它可选地同时包含 `port_scan_mode` 与 `port_spec`，且只允许 `fixed_ai` + `11434,1337,7000-9000,18789` 或 `full_tcp` + `1-65535`；字段缺失、孤立、未知或不匹配时必须整体省略。技术发现仅按四类可信引擎的显式 schema 白名单映射，完成脱敏和严重度排序后最多保留 50 条；提示词、会话、附件、截图、凭据、URL 查询参数和用户绝对路径都不会进入 RenderModel。在线详情与自动分页 PDF 重试只消费同一个模型。列表与详情契约明确分离：绝不暴露原始引擎结果与 Logo 字节，也不暴露存储的渲染载荷、owner ID、文件路径或当前可变品牌记录。列表仅接受 `page=1..1000`、`page_size=1..100`（默认 20）。
+
+Skills 使用与 MCP 相同的经验证 `score`/`results`/`level` 结果转换，但快照、在线详情与报告列表的 `task_type` 仍为 `skills_scan`；既有 MCP 报告及历史任务类型别名保持原值，不重新归类。
 
 读取成功返回 `200`；分页或趋势参数无效返回 `400`；未认证返回 `401`；角色不支持返回 `403`；报告不存在或对普通用户不可见返回 `404`。
 

@@ -75,6 +75,7 @@ const (
 	TaskTypeTestDemo           = "Test-Demo"
 	TaskTypeAIInfraScan        = "AI-Infra-Scan"
 	TaskTypeMcpScan            = "Mcp-Scan"
+	TaskTypeSkillsScan         = "Skills-Scan"
 	TaskTypeModelRedteamReport = "Model-Redteam-Report"
 	TaskTypeModelJailbreak     = "Model-Jailbreak"
 	TaskTypeAgentScan          = "Agent-Scan"
