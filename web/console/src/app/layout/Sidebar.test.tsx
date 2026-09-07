@@ -22,7 +22,7 @@ function RouteDriver() {
       <button onClick={() => navigate('/tasks')}>前往任务列表</button>
       <button onClick={() => navigate('/tasks/new')}>前往新建任务</button>
       <button onClick={() => navigate('/tasks/new?scan=mcp')}>前往 MCP 扫描</button>
-      <button onClick={() => navigate('/tasks/new?scan=agent-workflow')}>前往 Agent 扫描</button>
+      <button onClick={() => navigate('/tasks/agent-workflow')}>前往 Agent 扫描</button>
       <button onClick={() => navigate('/tasks/ai-infra?status=running')}>前往 AI 基础设施运行中</button>
       <button onClick={() => navigate('/tasks/ai-infra?status=failed&page=2')}>前往 AI 基础设施失败</button>
       <button onClick={() => navigate('/tasks/ai-infra/new')}>前往新建 AI 基础设施任务</button>
@@ -94,7 +94,7 @@ describe('Sidebar', () => {
     )
     expect(screen.getByRole('link', { name: 'Agent 工作流扫描' })).toHaveAttribute(
       'href',
-      '/tasks/new?scan=agent-workflow',
+      '/tasks/agent-workflow',
     )
 
     fireEvent.click(screen.getByRole('button', { name: '展开凭证配置子菜单' }))
@@ -142,7 +142,7 @@ describe('Sidebar', () => {
   })
 
   it('expands from the initial route and activates only the exact scan child', () => {
-    renderSidebar('/tasks/new?scan=agent-workflow')
+    renderSidebar('/tasks/agent-workflow')
 
     const scanToggle = screen.getByRole('button', { name: '收起扫描任务子菜单' })
     const scanSubmenu = document.getElementById(scanToggle.getAttribute('aria-controls')!)
@@ -199,6 +199,11 @@ describe('Sidebar', () => {
     expect(screen.getByRole('link', { name: 'AI 基础设施扫描' })).toHaveAttribute('aria-current', 'page')
   })
 
+  it.each(['/tasks/agent-workflow', '/tasks/agent-workflow/new', '/tasks/agent-workflow/scan-42'])('activates Agent scans across its task routes', (path) => {
+    renderSidebar(path)
+    expect(screen.getByRole('link', { name: 'Agent 工作流扫描' })).toHaveAttribute('aria-current', 'page')
+    expect(screen.getByRole('link', { name: 'AI 基础设施扫描' })).not.toHaveAttribute('aria-current', 'page')
+  })
   it('preserves a manual task collapse across query-only navigation', () => {
     renderSidebar('/tasks/ai-infra?status=running', true)
 

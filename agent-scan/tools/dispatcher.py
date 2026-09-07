@@ -16,6 +16,10 @@
 # Tencent Zhuque Lab (https://github.com/Tencent/AI-Infra-Guard) in its
 # documentation or user interface, as detailed in the NOTICE file.
 
+"""功能：分发扫描工具；实现：保留 dialogue 的异常终态，与目标回复文本分开。
+输入：工具名、参数和上下文；输出：工具结果文本或执行异常。
+"""
+
 import inspect
 import copy
 from typing import Any, Dict, Optional, TYPE_CHECKING
@@ -48,10 +52,14 @@ class ToolDispatcher:
             try:
                 result = tool_func(**args)
             except Exception as e:
+                if tool_name == "dialogue":
+                    raise
                 return f"Error: {e}"
             if inspect.isawaitable(result):
                 result = await result
             return self._format_result(result)
+        if tool_name == "dialogue":
+            raise RuntimeError("Target dialogue tool is unavailable")
         return f"Error: Tool '{tool_name}' not found locally or MCP server is unavailable"
 
     def _format_result(self, result: Any) -> str:

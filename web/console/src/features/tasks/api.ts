@@ -7,6 +7,7 @@
  */
 import { apiRequest } from '../../shared/api/client'
 import { ApiError, NetworkError } from '../../shared/api/errors'
+import { safeAgentReference, safeEvaluationModelReference, safeReportReference } from './agentWorkflow'
 import type {
   TaskCreateRequest,
   TaskDetail,
@@ -109,6 +110,18 @@ function parseInputSummary(value: unknown, taskType?: TaskType): TaskInputSummar
   const source = recordOf(value)
   if (!source) return undefined
   const result: TaskInputSummary = {}
+  if (taskType === 'agent_scan') {
+    if (source.agent_id !== undefined) {
+      const id = safeAgentReference(source.agent_id)
+      if (!id) return undefined
+      result.agent_id = id
+    }
+    if (source.eval_model_id !== undefined) {
+      const id = safeEvaluationModelReference(source.eval_model_id)
+      if (!id) return undefined
+      result.eval_model_id = id
+    }
+  }
   if (source.model_id !== undefined) {
     const modelID = safeModelID(source.model_id)
     if (!modelID) return undefined
@@ -149,6 +162,11 @@ export function parseTaskDetail(value: unknown): TaskDetail {
   const inputSummary = parseInputSummary(source?.input_summary, summary?.task_type)
   if (!summary || !inputSummary) throw new ApiError('unexpected-response', 200)
   const detail: TaskDetail = { ...summary, input_summary: inputSummary }
+  if (source?.report_id !== undefined) {
+    const reportID = safeReportReference(source.report_id)
+    if (!reportID || summary.status !== 'succeeded') throw new ApiError('unexpected-response', 200)
+    detail.report_id = reportID
+  }
   if (source?.remark !== undefined) {
     const remark = safeTaskRemark(source.remark)
     if (!remark) throw new ApiError('unexpected-response', 200)

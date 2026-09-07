@@ -30,6 +30,7 @@ import { ProfilePage } from '../features/profile/ProfilePage'
 import { ReportDetailPage } from '../features/reports/ReportDetailPage'
 import { ReportListPage } from '../features/reports/ReportListPage'
 import { TaskCreatePage } from '../features/tasks/TaskCreatePage'
+import { AgentWorkflowTaskCreatePage } from '../features/tasks/AgentWorkflowTaskCreatePage'
 import { TaskDetailPage } from '../features/tasks/TaskDetailPage'
 import { TaskListPage } from '../features/tasks/TaskListPage'
 import type { SubjectRole } from '../shared/api/types'
@@ -253,6 +254,18 @@ export const appRoutes: RouteObject[] = [
                 <TaskDetailPage expectedTaskType="ai_infra_scan" returnTo="/tasks/ai-infra" />
               </RequireRole>
             ),
+          },
+          {
+            path: 'tasks/agent-workflow',
+            element: <RequireRole allowedRoles={['user', 'auditor', 'admin']}><TaskListPage fixedTaskType="agent_scan" /></RequireRole>,
+          },
+          {
+            path: 'tasks/agent-workflow/new',
+            element: <RequireRole allowedRoles={['user', 'admin']}><AgentWorkflowTaskCreatePage /></RequireRole>,
+          },
+          {
+            path: 'tasks/agent-workflow/:taskId',
+            element: <RequireRole allowedRoles={['user', 'auditor', 'admin']}><TaskDetailPage expectedTaskType="agent_scan" returnTo="/tasks/agent-workflow" /></RequireRole>,
           },
           {
             path: 'tasks/skills',

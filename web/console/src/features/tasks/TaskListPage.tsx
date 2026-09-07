@@ -1,6 +1,6 @@
 /**
  * 功能：展示按当前主体限定的任务分页台账和服务端精确筛选。
- * 实现：用 TanStack Query 将分页、状态和类型传给真实列表 API，并以原生表格呈现安全摘要。
+ * 实现：用 TanStack Query 将分页、状态和类型传给真实列表 API，仅在读取成功时呈现摘要、表格与分页。
  * 输入：当前会话角色和 GET /platform/tasks 的分页响应。
  * 输出：任务台账、筛选、分页及独立加载/空/失败/403状态。
  * 依赖：Fluent UI、React Query、React Router 与共享监管组件。
@@ -270,8 +270,8 @@ export function TaskListPage({ fixedTaskType }: TaskListPageProps) {
         {query.isError && !(query.error instanceof ApiError && query.error.kind === 'forbidden') ? (
           <StatePanel state="error" title={`暂时无法加载 ${workbench.title}任务`} description="请稍后重试。" actionLabel="重试" onAction={() => void query.refetch()} />
         ) : null}
-        {query.data?.items.length === 0 ? <StatePanel state="empty" title="暂无匹配任务" description="调整状态筛选或创建新的扫描任务。" /> : null}
-        {query.data && (query.data.items.length > 0 || query.data.total > 0) ? (
+        {query.isSuccess && query.data.items.length === 0 ? <StatePanel state="empty" title="暂无匹配任务" description="调整状态筛选或创建新的扫描任务。" /> : null}
+        {query.isSuccess && (query.data.items.length > 0 || query.data.total > 0) ? (
           <AIInfraTaskTable
             tasks={query.data.items}
             taskLabel={workbench.title}
@@ -356,13 +356,13 @@ export function TaskListPage({ fixedTaskType }: TaskListPageProps) {
       {query.isError && !(query.error instanceof ApiError && query.error.kind === 'forbidden') ? (
         <StatePanel state="error" title="暂时无法加载任务" description="请稍后重试。" actionLabel="重试" onAction={() => void query.refetch()} />
       ) : null}
-      {query.data?.items.length === 0 ? <StatePanel state="empty" title="暂无匹配任务" description="调整筛选条件或创建新的扫描任务。" /> : null}
-      {query.data?.items.length ? (
+      {query.isSuccess && query.data.items.length === 0 ? <StatePanel state="empty" title="暂无匹配任务" description="调整筛选条件或创建新的扫描任务。" /> : null}
+      {query.isSuccess && query.data.items.length > 0 ? (
         <div className={styles.tableViewport}>
           <DataTable caption={tableCaption} columns={columns} rows={query.data.items} getRowKey={(task) => task.id} />
         </div>
       ) : null}
-      {query.data ? (
+      {query.isSuccess ? (
         <nav className={styles.pagination} aria-label="任务分页">
           <span>共 {query.data.total} 条，第 {query.data.page} 页</span>
           <div className={styles.paginationActions}>

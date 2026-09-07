@@ -16,6 +16,11 @@
 # Tencent Zhuque Lab (https://github.com/Tencent/AI-Infra-Guard) in its
 # documentation or user interface, as detailed in the NOTICE file.
 
+"""功能：调用扫描模型并执行有界重试。
+实现：流式输出聚合，异常仅记录类型和重试次数，避免响应正文中的密钥进入日志。
+输入：显式模型配置与消息；输出：模型文本或固定错误标记。
+"""
+
 import asyncio
 import time
 
@@ -93,19 +98,18 @@ class LLM:
                             "Failed to connect to LLM, retried 3 times, model output is empty, please try again after 1 minute",
                         )
                     continue
-            except openai.BadRequestError as e:
+            except openai.BadRequestError:
                 # 400 error (e.g. DataInspectionFailed): content issue, retry is meaningless, return immediately
-                error_msg = str(e)
-                logger.warning(f"LLM BadRequestError (400), no retry: {error_msg}")
+                logger.warning("LLM BadRequestError (400), no retry")
                 return format_llm_error_message(
                     language,
                     "输入内容触发安全过滤 (400)",
                     "Input content triggered safety filter (400)",
                 )
-            except (openai.APIConnectionError, openai.APITimeoutError) as e:
+            except (openai.APIConnectionError, openai.APITimeoutError):
                 # Network/timeout error: can retry
                 retry += 1
-                logger.warning(f'LLM connection/timeout error, retry {retry}: {e}')
+                logger.warning(f'LLM connection/timeout error, retry {retry}')
                 if retry > 5:
                     logger.error('LLM connection error, retry 5 times, exit')
                     return format_llm_error_message(
@@ -115,10 +119,10 @@ class LLM:
                     )
                 time.sleep(2)
                 continue
-            except openai.APIError as e:
+            except openai.APIError:
                 # Other API errors (5xx, etc.): can retry
                 retry += 1
-                logger.warning(f'LLM API error, retry {retry}: {e}')
+                logger.warning(f'LLM API error, retry {retry}')
                 if retry > 3:
                     logger.error('LLM API error, retry 3 times, exit')
                     return format_llm_error_message(
@@ -128,13 +132,13 @@ class LLM:
                     )
                 time.sleep(1)
                 continue
-            except Exception as e:
+            except Exception:
                 # Unexpected exception: return immediately, do not retry
-                logger.error(f'Unexpected LLM error: {e}', exc_info=True)
+                logger.error('Unexpected LLM error')
                 return format_llm_error_message(
                     language,
-                    f"发生未预期的错误 - {str(e)[:100]}",
-                    f"Unexpected error occurred - {str(e)[:100]}",
+                    "发生未预期的模型错误",
+                    "Unexpected model error occurred",
                 )
 
         if p:
@@ -189,7 +193,7 @@ class LLM:
                 openai.APITimeoutError, openai.APIError):
             # OpenAI exceptions propagate directly to chat() for handling
             raise
-        except Exception as e:
+        except Exception:
             # Log unexpected (non-OpenAI) exceptions before re-raising
-            logger.error(f'Unexpected error in chat_stream: {e}', exc_info=True)
+            logger.error('Unexpected error in chat_stream')
             raise

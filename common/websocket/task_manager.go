@@ -382,8 +382,14 @@ func (tm *TaskManager) ValidateTaskReferences(ctx context.Context, task platform
 		if !ok {
 			return platformtasks.ErrInvalid
 		}
-		if _, err := readAgentConfigContent(task.OwnerUsername, agentID); err != nil {
+		agentData, err := readAgentConfigContent(task.OwnerUsername, agentID)
+		if err != nil {
 			return normalizeGovernedReferenceError(err)
+		}
+		if task.TaskType == "agent_scan" {
+			if err := validateAgentWorkflowProvider(agentData); err != nil {
+				return err
+			}
 		}
 	}
 	return nil
@@ -663,6 +669,11 @@ func (tm *TaskManager) dispatchTask(sessionId string, traceID string) error {
 				if err != nil {
 					log.Errorf("获取Agent配置失败: trace_id=%s, sessionId=%s", traceID, sessionId)
 					return fmt.Errorf("获取Agent配置失败")
+				}
+				if task.Task == "Agent-Scan" {
+					if err := validateAgentWorkflowProvider(agentData); err != nil {
+						return fmt.Errorf("Agent 配置不符合扫描要求")
+					}
 				}
 				enhancedParams["agent_data"] = string(agentData)
 			}

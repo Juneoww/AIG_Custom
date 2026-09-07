@@ -34,6 +34,8 @@ type TaskListResponse struct {
 // are intentionally not representable by this type.
 type TaskInputSummary struct {
 	Language     string `json:"language,omitempty"`
+	AgentID      string `json:"agent_id,omitempty"`
+	EvalModelID  string `json:"eval_model_id,omitempty"`
 	ModelID      string `json:"model_id,omitempty"`
 	Thread       int    `json:"thread,omitempty"`
 	Timeout      int    `json:"timeout,omitempty"`
@@ -49,6 +51,7 @@ type TaskDetail struct {
 	TaskType     string           `json:"task_type"`
 	Status       Status           `json:"status"`
 	Remark       string           `json:"remark,omitempty"`
+	ReportID     string           `json:"report_id,omitempty"`
 	CreatedAt    time.Time        `json:"created_at"`
 	UpdatedAt    time.Time        `json:"updated_at"`
 	InputSummary TaskInputSummary `json:"input_summary"`
@@ -164,7 +167,8 @@ func safeInputSummary(task *Task) TaskInputSummary {
 			NumPrompts: safePositiveInt(params.Dataset.NumPrompts, 1_000_000),
 		}
 	case "agent_scan":
-		return TaskInputSummary{Language: safeLanguage(task.CountryIsoCode)}
+		agentID, evalModelID := safeAgentReferences(task.Params)
+		return TaskInputSummary{Language: safeLanguage(task.CountryIsoCode), AgentID: agentID, EvalModelID: evalModelID}
 	default:
 		return TaskInputSummary{}
 	}

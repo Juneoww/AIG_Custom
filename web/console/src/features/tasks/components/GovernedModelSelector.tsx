@@ -17,8 +17,8 @@ import { MODEL_CATALOG_PAGE_SIZE, canonicalModels, hasRepeatedCatalogPage, model
 const useStyles = makeStyles({
   field: { minWidth: 0 },
   container: { display: 'flex', flexDirection: 'column', gap: tokens.spacingVerticalS, minWidth: 0 },
-  select: { width: '100%', maxWidth: '100%', minWidth: 0, boxSizing: 'border-box' },
-  actions: { display: 'flex', alignItems: 'center', gap: tokens.spacingHorizontalS },
+  select: { minWidth: 0, width: '100%', maxWidth: '100%', boxSizing: 'border-box', '& select': { minWidth: 0, maxWidth: '100%' } },
+  actions: { display: 'flex', alignItems: 'center', gap: tokens.spacingHorizontalS, flexWrap: 'wrap' },
 })
 
 export interface GovernedModelSelectorProps {
@@ -26,12 +26,13 @@ export interface GovernedModelSelectorProps {
   onChange: (modelID: string | undefined) => void
   onAvailabilityChange?: (availability: GovernedModelAvailability) => void
   disabled?: boolean
+  label?: string
   required?: boolean
 }
 
 export type GovernedModelAvailability = 'available' | 'pending' | 'unavailable'
 
-export function GovernedModelSelector({ value, onChange, onAvailabilityChange, disabled = false, required = false }: GovernedModelSelectorProps) {
+export function GovernedModelSelector({ value, onChange, onAvailabilityChange, disabled = false, label = '扫描模型', required = false }: GovernedModelSelectorProps) {
   const styles = useStyles()
   const clearedModelIDRef = useRef<string | undefined>(undefined)
   const verifiedPageParamsRef = useRef<string | undefined>(undefined)
@@ -125,7 +126,7 @@ export function GovernedModelSelector({ value, onChange, onAvailabilityChange, d
   }, [canAutomaticallyVerifySelection, catalog.fetchNextPage, verificationPageParamsKey])
 
   return (
-    <Field className={styles.field} label="扫描模型" required={required}>
+    <Field className={styles.field} label={label} required={required}>
       <div className={styles.container}>
         {catalog.isPending ? <span role="status">正在加载模型…</span> : null}
         {firstPageFailed ? (
@@ -146,7 +147,7 @@ export function GovernedModelSelector({ value, onChange, onAvailabilityChange, d
         ) : null}
         <Select
           className={styles.select}
-          aria-label="扫描模型"
+          aria-label={label}
           required={required}
           value={value ?? ''}
           disabled={disabled || catalog.isPending}
