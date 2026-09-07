@@ -106,6 +106,7 @@ describe('Sidebar', () => {
     expect(within(credentialSubmenu!).getAllByRole('link').map((link) => link.textContent?.trim())).toEqual([
       '模型配置',
       '智能体配置',
+      'MCP 连接配置',
     ])
   })
 
@@ -245,9 +246,9 @@ describe('Sidebar', () => {
     expect(screen.getByRole('link', { name: 'Agent 工作流扫描' })).not.toHaveAttribute('aria-current')
   })
 
-  it('requires an exact pathname for a child without target query parameters', () => {
+  it('keeps the MCP parent active for its dedicated subroutes', () => {
     renderSidebar('/tasks/mcp/history')
 
-    expect(screen.getByRole('link', { name: 'MCP 安全扫描' })).not.toHaveAttribute('aria-current')
+    expect(screen.getByRole('link', { name: 'MCP 安全扫描' })).toHaveAttribute('aria-current', 'page')
   })
 })

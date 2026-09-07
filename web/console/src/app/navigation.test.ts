@@ -64,6 +64,7 @@ describe('role navigation', () => {
     const credentialChildren = [
       expect.objectContaining({ label: '模型配置', path: '/models' }),
       expect.objectContaining({ label: '智能体配置', path: '/knowledge/agents' }),
+      expect.objectContaining({ label: 'MCP 连接配置', path: '/credentials/mcp-connections' }),
     ]
 
     for (const role of ['user', 'auditor', 'admin'] as const) {

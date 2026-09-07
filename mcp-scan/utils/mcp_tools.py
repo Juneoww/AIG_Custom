@@ -16,16 +16,25 @@
 # Tencent Zhuque Lab (https://github.com/Tencent/AI-Infra-Guard) in its
 # documentation or user interface, as detailed in the NOTICE file.
 
-import asyncio
+"""功能：通过任务内部网关执行 MCP 1.x 会话。
+实现：固定传输、可信地址和能力头；禁用代理、重定向与错误细节回显。
+输入：私有运行时、Agent 环境凭据。输出：脱敏工具元数据或结果。
+"""
+
 import json
+import os
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from datetime import timedelta
 from typing import Any, Literal
+from urllib.parse import urlsplit
+
+import httpx
 
 from mcp import ClientSession
 from mcp.client.sse import sse_client
 from mcp.client.streamable_http import streamablehttp_client
+from utils.runtime_config import validate_gateway, runtime_redactor, OPAQUE_ID
 
 
 class MCPTools:
@@ -34,15 +43,20 @@ class MCPTools:
     def __init__(
         self,
         url: str | None = None,
-        transport: Literal["sse", "streamable-http"] = "sse",
+        transport: Literal["sse", "streamable-http"] | None = None,
         headers: dict = None,
+        *, task_capability: str | None = None, redact=None,
     ):
-        if headers is None:
-            headers = {}
-        self.url = url
+        if headers or transport not in {"sse", "streamable-http"} or not isinstance(task_capability, str) or not task_capability or len(task_capability) > 8192 or any(ord(c) < 32 for c in task_capability):
+            raise ValueError("MCP runtime configuration invalid")
+        self.url = validate_gateway(url)
         self.transport = transport
         self.timeout_seconds = 10
-        self.headers = headers
+        token = os.environ.get("AIG_AGENT_TOKEN", "")
+        if not token:
+            raise ValueError("MCP runtime configuration invalid")
+        self.headers = {"X-Internal-Agent-Token": token, "X-AIG-MCP-Capability": task_capability}
+        self.redact = redact or runtime_redactor({"mcp_proxy_url": self.url, "task_capability": task_capability})
         # 缓存工具 schema，用于参数类型转换
         self._tools_schema: dict[str, dict[str, Any]] = {}
 
@@ -57,11 +71,11 @@ class MCPTools:
             raise ValueError("MCP server url is required")
 
         if self.transport == "sse":
-            ctx = sse_client(url=self.url, headers=self.headers)  # type: ignore
+            ctx = sse_client(url=self.url, headers=self.headers, httpx_client_factory=self._http_client)  # type: ignore
         elif self.transport == "streamable-http":
-            ctx = streamablehttp_client(url=self.url, headers=self.headers)  # type: ignore
+            ctx = streamablehttp_client(url=self.url, headers=self.headers, httpx_client_factory=self._http_client)  # type: ignore
         else:
-            raise ValueError(f"Unsupported transport protocol: {self.transport}")
+            raise ValueError("MCP runtime configuration invalid")
 
         async with ctx as session_params:  # type: ignore
             read, write = session_params[0:2]
@@ -72,6 +86,19 @@ class MCPTools:
             ) as session:  # type: ignore
                 await session.initialize()
                 yield session
+
+    def _http_client(self, headers=None, timeout=None, auth=None):
+        async def guard(request):
+            actual, expected = urlsplit(str(request.url)), urlsplit(self.url)
+            # SSE 的 endpoint 也必须保留在本任务网关内，不能携能力头访问其他路由。
+            session_prefix = expected.path + "/sessions/"
+            session_path = (request.method == "POST" and actual.path.startswith(session_prefix)
+                            and OPAQUE_ID.fullmatch(actual.path[len(session_prefix):]))
+            if (actual.scheme != expected.scheme or actual.netloc != expected.netloc or actual.query or actual.fragment
+                    or (actual.path != expected.path and not session_path)):
+                raise RuntimeError("MCP operation failed")
+        return httpx.AsyncClient(headers=headers, timeout=timeout, auth=auth, trust_env=False,
+                                 follow_redirects=False, event_hooks={"request": [guard]})
 
     def _build_parameter_attributes(self, param: dict[str, Any]) -> str:
         """构建参数的 XML 属性字符串，包含所有 schema 信息"""
@@ -151,11 +178,8 @@ class MCPTools:
         try:
             async with self._session() as session:
                 data = await session.list_tools()
-        except BaseExceptionGroup as eg:
-            root_cause = self._extract_root_cause(eg)
-            raise RuntimeError(f"Failed to fetch MCP tools: {root_cause}") from eg
-        except Exception as e:
-            raise RuntimeError(f"Failed to fetch MCP tools: {type(e).__name__}: {e}") from e
+        except Exception:
+            raise RuntimeError("MCP operation failed") from None
 
         xml_lines = ["<mcp_tools>"]
         for t in data.tools:
@@ -185,7 +209,7 @@ class MCPTools:
             detail = t.description or ""
             xml_lines.append(f"detail:{detail} 调用格式:\n<tool_name>{name}</tool_name>\n</tool>")
         xml_lines.append("</mcp_tools>")
-        return "\n".join(xml_lines)
+        return self.redact("\n".join(xml_lines))
 
     def _convert_param_type(self, value: Any, param_type: str) -> Any:
         """根据 schema 定义的类型转换参数值"""
@@ -242,18 +266,6 @@ class MCPTools:
 
         return converted_args
 
-    def _extract_root_cause(self, exc: Exception) -> str:
-        """从 ExceptionGroup/TaskGroup 中提取原始错误信息"""
-        # 处理 ExceptionGroup (Python 3.11+)
-        if isinstance(exc, BaseExceptionGroup):
-            messages = []
-            for sub_exc in exc.exceptions:
-                # 递归提取嵌套的 ExceptionGroup
-                messages.append(self._extract_root_cause(sub_exc))
-            return "; ".join(messages)
-        # 普通异常，返回其消息
-        return f"{type(exc).__name__}: {exc}"
-
     async def call_remote_tool(self, tool_name: str, **kw) -> Any:
         """
         Call remote MCP server tool.
@@ -273,24 +285,24 @@ class MCPTools:
                 result = result.content[0]
                 # 判断TextContent or ImageContent or VideoContent
                 if hasattr(result, "text"):
-                    return result.text
+                    return self.redact(result.text)
                 elif hasattr(result, "data"):
-                    return result.data
-        except BaseExceptionGroup as eg:
-            # 提取 TaskGroup 中的原始错误
-            root_cause = self._extract_root_cause(eg)
-            raise RuntimeError(f"MCP call failed: {root_cause}") from eg
-        except Exception as e:
-            raise RuntimeError(f"MCP call failed: {type(e).__name__}: {e}") from e
+                    return self.redact(result.data)
+        except Exception:
+            raise RuntimeError("MCP operation failed") from None
 
+    async def list_remote_prompts(self):
+        try:
+            async with self._session() as session:
+                result = await session.list_prompts()
+            return self.redact(result.model_dump_json())
+        except Exception:
+            raise RuntimeError("MCP operation failed") from None
 
-if __name__ == "__main__":
-
-    async def main():
-        mcp_tools_manager = MCPTools(url="http://localhost:8090/sse", transport="sse")
-        description = await mcp_tools_manager.describe_mcp_tools()
-        print(description)
-        result = await mcp_tools_manager.call_remote_tool("get_filename1", filename="/etc/passwd")
-        print(f"Tool call result: {result}")
-
-    asyncio.run(main())
+    async def list_remote_resources(self):
+        try:
+            async with self._session() as session:
+                result = await session.list_resources()
+            return self.redact(result.model_dump_json())
+        except Exception:
+            raise RuntimeError("MCP operation failed") from None

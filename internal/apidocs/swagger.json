@@ -1137,7 +1137,7 @@
         },
         "/api/v1/platform/tasks": {
             "get": {
-                "description": "Lists persisted platform tasks as TaskListResponse without polling the engine or mutating state. Users see only their own tasks; auditors and administrators see the stable global list. Items use the narrow TaskSummary only. page defaults to 1, page_size defaults to 20, values over 100 are capped at 100, and page cannot exceed 1000. Optional status and task_type filters accept only the documented exact canonical values and are applied before total and pagination.",
+                "description": "Lists persisted platform tasks as TaskListResponse without polling the engine or mutating state. Users see only their own tasks; auditors and administrators see the stable global list. Items use the narrow TaskSummary only. page defaults to 1, page_size defaults to 20, values over 100 are capped at 100, and page cannot exceed 1000. Optional status and task_type filters accept only the documented exact canonical values and are applied before total and pagination. MCP mcp_scan and Mcp-Scan are isolated: return 409 MCP_SPECIALIZED_ENDPOINT_REQUIRED with specialized_path pointing to /api/v1/platform/mcp-scans. Use the dedicated endpoint; generic default lists exclude both aliases before count and pagination.",
                 "parameters": [
                     {
                         "default": 1,
@@ -1172,7 +1172,6 @@
                     },
                     {
                         "enum": [
-                            "mcp_scan",
                             "ai_infra_scan",
                             "model_redteam_report",
                             "agent_scan",
@@ -1199,6 +1198,9 @@
                     "403": {
                         "description": "Password change is incomplete or the Subject role is unsupported."
                     },
+                    "409": {
+                        "description": "MCP_SPECIALIZED_ENDPOINT_REQUIRED. specialized_path identifies the dedicated MCP endpoint."
+                    },
                     "500": {
                         "description": "Task query failed; internal details are not exposed."
                     }
@@ -1212,7 +1214,7 @@
                 "consumes": [
                     "application/json"
                 ],
-                "description": "Breaking security hardening: create responses now use the browser-safe TaskDetail with bounded input_summary and optional remark instead of the former internal task View; clients must migrate field access. The JSON body is limited to 256 KiB. Creates an owner-scoped platform task from the authenticated Cookie Subject. Idempotency-Key is required and unique per owner. A retry with the same persisted request payload returns the existing task without revalidating live governed references; reusing that key with a different payload returns 400 invalid task request. Historical same-key requests are compared before the new Agent input constraints, so matching historical tasks are not rejected for empty content or attachments. Only exact canonical task types are accepted and the platform maps them to private Agent aliases: mcp_scan params allow model_id and thread; ai_infra_scan params allow model_id, timeout, and port_scan_mode (fixed_ai or full_tcp; omission defaults to fixed_ai); model_redteam_report params require model_id as a bounded string array plus eval_model_id and may include dataset numPrompts/randomSeed/promptColumn and techniques; agent_scan params require only agent_id and eval_model_id. skills_scan params allow only model_id, a required available governed model ID; exactly one owner-scoped ready ZIP attachment is required and content must be empty. Skills perform static audit only, with no dynamic, URL, repository, concurrency, port, or custom prompt options. The ZIP limit is 20 MiB compressed, 100 MiB actual expanded bytes, 5 MiB per file, and at most 2,000 original ZIP entries and normalized files/directories (including implicit directories); it must contain exactly one valid UTF-8 SKILL.md with non-empty name and description frontmatter strings, at the archive root or inside one top-level wrapper directory. Unsafe paths, links, duplicate entries, case conflicts, invalid YAML, CRC damage, encrypted entries, and unsupported compression are rejected. For mcp_scan, params.source_kind is required and is exactly repository or service. repository accepts exactly a Git repository reference or opaque code attachments and must not include authorization_confirmed. service accepts a controlled HTTP(S) endpoint with no attachments and requires params.authorization_confirmed=true; source-related audit metadata contains source_kind and the Boolean authorization confirmation, and the general task audit flow may retain safe phase metadata, while endpoint and authorization data never cross the browser boundary. Every model_id/eval_model_id must resolve through the governed model boundary, and agent_id through the user or public Agent registry, before persistence; unknown or invisible references write no task. New agent_scan tasks require non-whitespace valid UTF-8 content of at most 32 KiB (32768 bytes) and do not support attachments. The Agent configuration must contain a single provider validated before persistence and again at dispatch: HTTP/HTTPS, WebSocket, or Dify; Coze and unknown providers are rejected. Dify requires explicit apiKey, apiBaseUrl, and extra.dify_type equal to chat or workflow; conflicting routing fields, ambiguous YAML scalars, aliases, and malformed configuration are rejected. The three stages of information collection, vulnerability detection, and review use the selected eval_model_id for primary and auxiliary models in platform mode. Failed or incomplete execution, invalid final review, and missing results produce no successful report. Unknown fields, nested credential objects, raw model credentials, and legacy aliases are rejected. Task types supporting attachments accept at most ten opaque attachment IDs. Optional remark is trimmed and limited to 2,000 Unicode code points, participates in idempotency, and is returned only in authorized TaskDetail; it never enters the engine, audit metadata, or reports. Dispatch uses persisted claims and a global attempt budget. An uncertain network acknowledgement becomes dispatch_unknown and is never submitted automatically again; this is at-most-once dispatch, not exactly-once execution. Requires CSRF protection.",
+                "description": "Breaking security hardening: create responses now use the browser-safe TaskDetail with bounded input_summary and optional remark instead of the former internal task View; clients must migrate field access. The JSON body is limited to 256 KiB. Creates an owner-scoped platform task from the authenticated Cookie Subject. Idempotency-Key is required and unique per owner. A retry with the same persisted request payload returns the existing task without revalidating live governed references; reusing that key with a different payload returns 400 invalid task request. Historical same-key requests are compared before the new Agent input constraints, so matching historical tasks are not rejected for empty content or attachments. Only exact canonical task types are accepted and the platform maps them to private Agent aliases: ai_infra_scan params allow model_id, timeout, and port_scan_mode (fixed_ai or full_tcp; omission defaults to fixed_ai); model_redteam_report params require model_id as a bounded string array plus eval_model_id and may include dataset numPrompts/randomSeed/promptColumn and techniques; agent_scan params require only agent_id and eval_model_id. skills_scan params allow only model_id, a required available governed model ID; exactly one owner-scoped ready ZIP attachment is required and content must be empty. Skills perform static audit only, with no dynamic, URL, repository, concurrency, port, or custom prompt options. The ZIP limit is 20 MiB compressed, 100 MiB actual expanded bytes, 5 MiB per file, and at most 2,000 original ZIP entries and normalized files/directories (including implicit directories); it must contain exactly one valid UTF-8 SKILL.md with non-empty name and description frontmatter strings, at the archive root or inside one top-level wrapper directory. Unsafe paths, links, duplicate entries, case conflicts, invalid YAML, CRC damage, encrypted entries, and unsupported compression are rejected. Every model_id/eval_model_id must resolve through the governed model boundary, and agent_id through the user or public Agent registry, before persistence; unknown or invisible references write no task. New agent_scan tasks require non-whitespace valid UTF-8 content of at most 32 KiB (32768 bytes) and do not support attachments. The Agent configuration must contain a single provider validated before persistence and again at dispatch: HTTP/HTTPS, WebSocket, or Dify; Coze and unknown providers are rejected. Dify requires explicit apiKey, apiBaseUrl, and extra.dify_type equal to chat or workflow; conflicting routing fields, ambiguous YAML scalars, aliases, and malformed configuration are rejected. The three stages of information collection, vulnerability detection, and review use the selected eval_model_id for primary and auxiliary models in platform mode. Failed or incomplete execution, invalid final review, and missing results produce no successful report. Unknown fields, nested credential objects, raw model credentials, and legacy aliases are rejected. Task types supporting attachments accept at most ten opaque attachment IDs. Optional remark is trimmed and limited to 2,000 Unicode code points, participates in idempotency, and is returned only in authorized TaskDetail; it never enters the engine, audit metadata, or reports. Dispatch uses persisted claims and a global attempt budget. An uncertain network acknowledgement becomes dispatch_unknown and is never submitted automatically again; this is at-most-once dispatch, not exactly-once execution. Requires CSRF protection. MCP mcp_scan and Mcp-Scan are isolated: return 409 MCP_SPECIALIZED_ENDPOINT_REQUIRED with specialized_path pointing to /api/v1/platform/mcp-scans. Use the dedicated endpoint; generic default lists exclude both aliases before count and pagination.",
                 "parameters": [
                     {
                         "in": "header",
@@ -1253,21 +1255,7 @@
                                 },
                                 "params": {
                                     "type": "object",
-                                    "description": "Exact per-task schema described by this operation; agent_scan accepts only agent_id and eval_model_id, both required governed string references. skills_scan accepts only the required model_id string. Unknown, arbitrary, and credential-bearing fields are rejected.",
-                                    "properties": {
-                                        "authorization_confirmed": {
-                                            "description": "Allowed and required only for mcp_scan service, where it must be true. repository rejects this field. Source-related audit metadata contains source_kind and the Boolean confirmation; general task audit flow may retain safe phase metadata, while endpoint and authorization material are never exposed.",
-                                            "type": "boolean"
-                                        },
-                                        "source_kind": {
-                                            "description": "Required only for mcp_scan. repository selects a Git repository reference or code attachments; service selects a controlled HTTP(S) service with no attachments.",
-                                            "enum": [
-                                                "repository",
-                                                "service"
-                                            ],
-                                            "type": "string"
-                                        }
-                                    }
+                                    "description": "Exact per-task schema described by this operation; agent_scan accepts only agent_id and eval_model_id, both required governed string references. skills_scan accepts only the required model_id string. Unknown, arbitrary, and credential-bearing fields are rejected."
                                 },
                                 "remark": {
                                     "description": "Optional task note, trimmed and limited to 2000 Unicode code points of valid UTF-8. Stored separately from content and included in idempotency comparison; never passed to the scan engine, audit metadata, or report snapshot.",
@@ -1276,7 +1264,6 @@
                                 },
                                 "task_type": {
                                     "enum": [
-                                        "mcp_scan",
                                         "ai_infra_scan",
                                         "model_redteam_report",
                                         "agent_scan",
@@ -1311,6 +1298,9 @@
                     "403": {
                         "description": "Role cannot create tasks, password change is incomplete, or CSRF is invalid."
                     },
+                    "409": {
+                        "description": "MCP_SPECIALIZED_ENDPOINT_REQUIRED. specialized_path identifies the dedicated MCP endpoint."
+                    },
                     "500": {
                         "description": "Persistence or durable audit failed; internal details are not exposed."
                     },
@@ -1329,7 +1319,7 @@
         },
         "/api/v1/platform/tasks/{taskID}": {
             "get": {
-                "description": "Short-poll browser-safe TaskDetail using the authenticated Cookie Subject. Users read only their own task; auditors and administrators have global read access. The input_summary is a narrow display projection; agent_id and eval_model_id are optional safe references for agent_scan only. Optional remark is display metadata and is never sent to the engine. Optional report_id is available only for a succeeded task when its existing immutable report snapshot is authorized for this Subject; absent snapshots produce no report link. Browser-supplied identity headers are ignored.",
+                "description": "Short-poll browser-safe TaskDetail using the authenticated Cookie Subject. Users read only their own task; auditors and administrators have global read access. The input_summary is a narrow display projection; agent_id and eval_model_id are optional safe references for agent_scan only. Optional remark is display metadata and is never sent to the engine. Optional report_id is available only for a succeeded task when its existing immutable report snapshot is authorized for this Subject; absent snapshots produce no report link. Browser-supplied identity headers are ignored. MCP mcp_scan and Mcp-Scan are isolated: return 409 MCP_SPECIALIZED_ENDPOINT_REQUIRED with specialized_path pointing to /api/v1/platform/mcp-scans. Use the dedicated endpoint; generic default lists exclude both aliases before count and pagination.",
                 "parameters": [
                     {
                         "in": "path",
@@ -1353,6 +1343,9 @@
                     },
                     "404": {
                         "description": "Task not found or not visible to this user."
+                    },
+                    "409": {
+                        "description": "MCP_SPECIALIZED_ENDPOINT_REQUIRED. specialized_path identifies the dedicated MCP endpoint."
                     },
                     "500": {
                         "description": "Task query failed; internal details are not exposed."
@@ -1395,7 +1388,7 @@
         },
         "/api/v1/platform/tasks/{taskID}/cancel": {
             "post": {
-                "description": "Cancels an owned task or, for administrators, any task. A task owned by another user is indistinguishable from an absent task and returns 404; auditors remain read-only with 403. Only the exact 204 response represents confirmed cancellation; clients may perform one status GET after an uncertain transport/server/non-contract-2xx outcome but must never automatically repeat the POST. Requires CSRF protection and records a durable audit event.",
+                "description": "Cancels an owned task or, for administrators, any task. A task owned by another user is indistinguishable from an absent task and returns 404; auditors remain read-only with 403. Only the exact 204 response represents confirmed cancellation; clients may perform one status GET after an uncertain transport/server/non-contract-2xx outcome but must never automatically repeat the POST. Requires CSRF protection and records a durable audit event. MCP mcp_scan and Mcp-Scan are isolated: return 409 MCP_SPECIALIZED_ENDPOINT_REQUIRED with specialized_path pointing to /api/v1/platform/mcp-scans. Use the dedicated endpoint; generic default lists exclude both aliases before count and pagination.",
                 "parameters": [
                     {
                         "in": "path",
@@ -1416,6 +1409,9 @@
                     },
                     "404": {
                         "description": "Task not found or owned by another ordinary user."
+                    },
+                    "409": {
+                        "description": "MCP_SPECIALIZED_ENDPOINT_REQUIRED. specialized_path identifies the dedicated MCP endpoint."
                     },
                     "500": {
                         "description": "Cancellation or durable audit failed; internal details are not exposed."
@@ -2826,6 +2822,1004 @@
                 "tags": [
                     "platform-task-attachments"
                 ]
+            }
+        },
+        "/api/v1/platform/mcp-scans": {
+            "get": {
+                "summary": "List MCP scans",
+                "description": "Authenticated Cookie Subject; first-password-change gate. Ordinary users access their own resources, admins govern all, auditors read safe lists/details only and cannot mutate or obtain connection management details/options. Only MCP canonical and historical aliases. No engine polling or raw parameter projection. Source kind is repository, service or legacy_unknown.",
+                "tags": [
+                    "MCP"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "parameters": [
+                    {
+                        "in": "query",
+                        "name": "page",
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": 1000,
+                        "default": 1
+                    },
+                    {
+                        "in": "query",
+                        "name": "page_size",
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": 100,
+                        "default": 20
+                    },
+                    {
+                        "in": "query",
+                        "name": "status",
+                        "type": "string",
+                        "enum": [
+                            "pending",
+                            "dispatching",
+                            "running",
+                            "succeeded",
+                            "failed",
+                            "dispatch_failed",
+                            "dispatch_unknown",
+                            "cancelled"
+                        ]
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "Safe response.",
+                        "schema": {
+                            "$ref": "#/definitions/mcpscans.ListResponse"
+                        }
+                    },
+                    "400": {
+                        "description": "Invalid strict request or server-owned outbound policy rejected."
+                    },
+                    "401": {
+                        "description": "Authentication required."
+                    },
+                    "403": {
+                        "description": "Role, first-password-change or CSRF gate denied."
+                    },
+                    "404": {
+                        "description": "Absent or inaccessible opaque resource."
+                    },
+                    "409": {
+                        "description": "IDEMPOTENCY_KEY_REUSED, MCP_CONNECTION_VERSION_CONFLICT or state conflict; refresh before a new operation."
+                    },
+                    "500": {
+                        "description": "Fixed safe error only; no upstream diagnostics or secrets."
+                    },
+                    "503": {
+                        "description": "Required governed runtime or egress unavailable."
+                    }
+                }
+            },
+            "post": {
+                "summary": "Create MCP scan",
+                "description": "Authenticated Cookie Subject; first-password-change gate. Ordinary users access their own resources, admins govern all, auditors read safe lists/details only and cannot mutate or obtain connection management details/options. Dedicated mcp_scan only. Flat strict JSON object, exact case-sensitive keys; null, duplicates and unknown fields rejected. source_kind repository accepts exactly one HTTPS Git repository_url or 1..10 ready owner-scoped MCP attachment_ids; both service fields and authorization_confirmed must be absent. service requires connection_config_id, exact immutable connection_config_version, authorization_confirmed=true and no repository fields. Only enabled, tested and policy-approved saved connections are eligible. model_id is an optional governed reference; thread defaults to 4 and is 1..32. Language is server-fixed zh_CN; task_type, language, country_iso_code, content, headers and secrets are forbidden. Source-related audit metadata contains source_kind and the Boolean authorization confirmation; safe phase metadata may appear in the general task audit. Task/binding/replay writes are atomic. HTTP 202 is the accepted task; 200 plus Idempotent-Replay:true is the same success replay. A reused key with a different payload returns 409. Never automatically repeat a POST after an uncertain response; explicit retry reuses its key. No endpoint, Git URL or credential is returned. After commit, dispatch failure or unknown acknowledgement still returns 202 with the accepted task_id. Read dedicated task details for actual dispatch state; never create again with a new key. Gateway or server 5xx is also an unknown outcome; explicit retry retains the original idempotency key.",
+                "tags": [
+                    "MCP"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "consumes": [
+                    "application/json"
+                ],
+                "parameters": [
+                    {
+                        "in": "header",
+                        "name": "X-CSRF-Token",
+                        "type": "string",
+                        "required": true,
+                        "description": "Must match current aig_csrf Cookie."
+                    },
+                    {
+                        "in": "header",
+                        "name": "Idempotency-Key",
+                        "type": "string",
+                        "required": true,
+                        "maxLength": 128
+                    },
+                    {
+                        "in": "body",
+                        "name": "request",
+                        "required": true,
+                        "schema": {
+                            "$ref": "#/definitions/mcpscans.CreateRequest"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "Successful operation or Idempotent-Replay:true.",
+                        "schema": {
+                            "$ref": "#/definitions/mcpscans.MutationResponse"
+                        }
+                    },
+                    "202": {
+                        "description": "Safe response.",
+                        "schema": {
+                            "$ref": "#/definitions/mcpscans.MutationResponse"
+                        }
+                    },
+                    "400": {
+                        "description": "Invalid strict request or server-owned outbound policy rejected."
+                    },
+                    "401": {
+                        "description": "Authentication required."
+                    },
+                    "403": {
+                        "description": "Role, first-password-change or CSRF gate denied."
+                    },
+                    "404": {
+                        "description": "Absent or inaccessible opaque resource."
+                    },
+                    "409": {
+                        "description": "IDEMPOTENCY_KEY_REUSED, MCP_CONNECTION_VERSION_CONFLICT or state conflict; refresh before a new operation."
+                    },
+                    "500": {
+                        "description": "Fixed safe error only; no upstream diagnostics or secrets."
+                    },
+                    "503": {
+                        "description": "Required governed runtime or egress unavailable."
+                    }
+                }
+            }
+        },
+        "/api/v1/platform/mcp-scans/{taskID}": {
+            "get": {
+                "summary": "Read MCP scan",
+                "description": "Authenticated Cookie Subject; first-password-change gate. Ordinary users access their own resources, admins govern all, auditors read safe lists/details only and cannot mutate or obtain connection management details/options. Historical MCP remains readable. No raw target/parameter/log/attachment-name fields. report_id only for an existing authorized completed snapshot.",
+                "tags": [
+                    "MCP"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "parameters": [
+                    {
+                        "in": "path",
+                        "name": "taskID",
+                        "type": "string",
+                        "required": true
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "Safe response.",
+                        "schema": {
+                            "$ref": "#/definitions/mcpscans.Detail"
+                        }
+                    },
+                    "400": {
+                        "description": "Invalid strict request or server-owned outbound policy rejected."
+                    },
+                    "401": {
+                        "description": "Authentication required."
+                    },
+                    "403": {
+                        "description": "Role, first-password-change or CSRF gate denied."
+                    },
+                    "404": {
+                        "description": "Absent or inaccessible opaque resource."
+                    },
+                    "409": {
+                        "description": "IDEMPOTENCY_KEY_REUSED, MCP_CONNECTION_VERSION_CONFLICT or state conflict; refresh before a new operation."
+                    },
+                    "500": {
+                        "description": "Fixed safe error only; no upstream diagnostics or secrets."
+                    },
+                    "503": {
+                        "description": "Required governed runtime or egress unavailable."
+                    }
+                }
+            }
+        },
+        "/api/v1/platform/mcp-scans/{taskID}/cancel": {
+            "post": {
+                "summary": "Cancel MCP scan",
+                "description": "Authenticated Cookie Subject; first-password-change gate. Ordinary users access their own resources, admins govern all, auditors read safe lists/details only and cannot mutate or obtain connection management details/options. Engine cancellation is idempotent; final task status, audit and replay response commit atomically. No automatic POST retry.",
+                "tags": [
+                    "MCP"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "consumes": [
+                    "application/json"
+                ],
+                "parameters": [
+                    {
+                        "in": "header",
+                        "name": "X-CSRF-Token",
+                        "type": "string",
+                        "required": true,
+                        "description": "Must match current aig_csrf Cookie."
+                    },
+                    {
+                        "in": "header",
+                        "name": "Idempotency-Key",
+                        "type": "string",
+                        "required": true,
+                        "maxLength": 128
+                    },
+                    {
+                        "in": "path",
+                        "name": "taskID",
+                        "type": "string",
+                        "required": true
+                    },
+                    {
+                        "in": "body",
+                        "name": "request",
+                        "required": true,
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": false,
+                            "properties": {},
+                            "required": []
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "Successful operation or Idempotent-Replay:true.",
+                        "schema": {
+                            "$ref": "#/definitions/mcpscans.MutationResponse"
+                        }
+                    },
+                    "400": {
+                        "description": "Invalid strict request or server-owned outbound policy rejected."
+                    },
+                    "401": {
+                        "description": "Authentication required."
+                    },
+                    "403": {
+                        "description": "Role, first-password-change or CSRF gate denied."
+                    },
+                    "404": {
+                        "description": "Absent or inaccessible opaque resource."
+                    },
+                    "409": {
+                        "description": "IDEMPOTENCY_KEY_REUSED, MCP_CONNECTION_VERSION_CONFLICT or state conflict; refresh before a new operation."
+                    },
+                    "500": {
+                        "description": "Fixed safe error only; no upstream diagnostics or secrets."
+                    },
+                    "503": {
+                        "description": "Required governed runtime or egress unavailable."
+                    }
+                }
+            }
+        },
+        "/api/v1/platform/mcp-connection-configs": {
+            "get": {
+                "summary": "List safe MCP connection configurations",
+                "description": "Authenticated Cookie Subject; first-password-change gate. Ordinary users access their own resources, admins govern all, auditors read safe lists/details only and cannot mutate or obtain connection management details/options. ",
+                "tags": [
+                    "MCP"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "parameters": [],
+                "responses": {
+                    "200": {
+                        "description": "Safe response.",
+                        "schema": {
+                            "$ref": "#/definitions/mcpconnections.ListResponse"
+                        }
+                    },
+                    "400": {
+                        "description": "Invalid strict request or server-owned outbound policy rejected."
+                    },
+                    "401": {
+                        "description": "Authentication required."
+                    },
+                    "403": {
+                        "description": "Role, first-password-change or CSRF gate denied."
+                    },
+                    "404": {
+                        "description": "Absent or inaccessible opaque resource."
+                    },
+                    "409": {
+                        "description": "IDEMPOTENCY_KEY_REUSED, MCP_CONNECTION_VERSION_CONFLICT or state conflict; refresh before a new operation."
+                    },
+                    "500": {
+                        "description": "Fixed safe error only; no upstream diagnostics or secrets."
+                    },
+                    "503": {
+                        "description": "Required governed runtime or egress unavailable."
+                    }
+                }
+            },
+            "post": {
+                "summary": "Create MCP connection configuration",
+                "description": "Authenticated Cookie Subject; first-password-change gate. Ordinary users access their own resources, admins govern all, auditors read safe lists/details only and cannot mutate or obtain connection management details/options. ",
+                "tags": [
+                    "MCP"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "consumes": [
+                    "application/json"
+                ],
+                "parameters": [
+                    {
+                        "in": "header",
+                        "name": "X-CSRF-Token",
+                        "type": "string",
+                        "required": true,
+                        "description": "Must match current aig_csrf Cookie."
+                    },
+                    {
+                        "in": "header",
+                        "name": "Idempotency-Key",
+                        "type": "string",
+                        "required": true,
+                        "maxLength": 128
+                    },
+                    {
+                        "in": "body",
+                        "name": "request",
+                        "required": true,
+                        "schema": {
+                            "$ref": "#/definitions/mcpconnections.CreateRequest"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "Successful operation or Idempotent-Replay:true.",
+                        "schema": {
+                            "$ref": "#/definitions/mcpconnections.MutationResponse"
+                        }
+                    },
+                    "201": {
+                        "description": "Safe response.",
+                        "schema": {
+                            "$ref": "#/definitions/mcpconnections.MutationResponse"
+                        }
+                    },
+                    "400": {
+                        "description": "Invalid strict request or server-owned outbound policy rejected."
+                    },
+                    "401": {
+                        "description": "Authentication required."
+                    },
+                    "403": {
+                        "description": "Role, first-password-change or CSRF gate denied."
+                    },
+                    "404": {
+                        "description": "Absent or inaccessible opaque resource."
+                    },
+                    "409": {
+                        "description": "IDEMPOTENCY_KEY_REUSED, MCP_CONNECTION_VERSION_CONFLICT or state conflict; refresh before a new operation."
+                    },
+                    "500": {
+                        "description": "Fixed safe error only; no upstream diagnostics or secrets."
+                    },
+                    "503": {
+                        "description": "Required governed runtime or egress unavailable."
+                    }
+                }
+            }
+        },
+        "/api/v1/platform/mcp-connection-configs/{configID}": {
+            "get": {
+                "summary": "Read editable MCP configuration",
+                "description": "Authenticated Cookie Subject; first-password-change gate. Ordinary users access their own resources, admins govern all, auditors read safe lists/details only and cannot mutate or obtain connection management details/options. Owner or administrator only; no-store; ETag is quoted resource_revision. Secrets remain write-only.",
+                "tags": [
+                    "MCP"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "parameters": [
+                    {
+                        "in": "path",
+                        "name": "configID",
+                        "type": "string",
+                        "required": true
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "Safe response.",
+                        "schema": {
+                            "$ref": "#/definitions/mcpconnections.Detail"
+                        }
+                    },
+                    "400": {
+                        "description": "Invalid strict request or server-owned outbound policy rejected."
+                    },
+                    "401": {
+                        "description": "Authentication required."
+                    },
+                    "403": {
+                        "description": "Role, first-password-change or CSRF gate denied."
+                    },
+                    "404": {
+                        "description": "Absent or inaccessible opaque resource."
+                    },
+                    "409": {
+                        "description": "IDEMPOTENCY_KEY_REUSED, MCP_CONNECTION_VERSION_CONFLICT or state conflict; refresh before a new operation."
+                    },
+                    "500": {
+                        "description": "Fixed safe error only; no upstream diagnostics or secrets."
+                    },
+                    "503": {
+                        "description": "Required governed runtime or egress unavailable."
+                    }
+                }
+            },
+            "patch": {
+                "summary": "Update MCP configuration",
+                "description": "Authenticated Cookie Subject; first-password-change gate. Ordinary users access their own resources, admins govern all, auditors read safe lists/details only and cannot mutate or obtain connection management details/options. Version eligibility and revision checked under lock. Missing/malformed If-Match:428.",
+                "tags": [
+                    "MCP"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "consumes": [
+                    "application/json"
+                ],
+                "parameters": [
+                    {
+                        "in": "header",
+                        "name": "X-CSRF-Token",
+                        "type": "string",
+                        "required": true,
+                        "description": "Must match current aig_csrf Cookie."
+                    },
+                    {
+                        "in": "header",
+                        "name": "Idempotency-Key",
+                        "type": "string",
+                        "required": true,
+                        "maxLength": 128
+                    },
+                    {
+                        "in": "path",
+                        "name": "configID",
+                        "type": "string",
+                        "required": true
+                    },
+                    {
+                        "in": "header",
+                        "name": "If-Match",
+                        "type": "string",
+                        "required": true,
+                        "description": "Quoted current resource_revision; missing or malformed is 428."
+                    },
+                    {
+                        "in": "body",
+                        "name": "request",
+                        "required": true,
+                        "schema": {
+                            "$ref": "#/definitions/mcpconnections.UpdateRequest"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "Successful operation or Idempotent-Replay:true.",
+                        "schema": {
+                            "$ref": "#/definitions/mcpconnections.MutationResponse"
+                        }
+                    },
+                    "400": {
+                        "description": "Invalid strict request or server-owned outbound policy rejected."
+                    },
+                    "401": {
+                        "description": "Authentication required."
+                    },
+                    "403": {
+                        "description": "Role, first-password-change or CSRF gate denied."
+                    },
+                    "404": {
+                        "description": "Absent or inaccessible opaque resource."
+                    },
+                    "409": {
+                        "description": "IDEMPOTENCY_KEY_REUSED, MCP_CONNECTION_VERSION_CONFLICT or state conflict; refresh before a new operation."
+                    },
+                    "428": {
+                        "description": "Quoted If-Match resource revision required."
+                    },
+                    "500": {
+                        "description": "Fixed safe error only; no upstream diagnostics or secrets."
+                    },
+                    "503": {
+                        "description": "Required governed runtime or egress unavailable."
+                    }
+                }
+            }
+        },
+        "/api/v1/platform/mcp-connection-configs/{configID}/test": {
+            "post": {
+                "summary": "Test configured MCP connection",
+                "description": "Authenticated Cookie Subject; first-password-change gate. Ordinary users access their own resources, admins govern all, auditors read safe lists/details only and cannot mutate or obtain connection management details/options. Controlled initialize only; no tools/call. Begins by disabling connection, clearing prior result and reserving a monotonic attempt outside the network call. Final passed/failed result, audit and replay commit together. A real connection failure returns safe status failed with HTTP 200; no upstream details. At least one minute between attempts per config. Successful test does not enable automatically. 428 missing If-Match; 429 rate limit.",
+                "tags": [
+                    "MCP"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "consumes": [
+                    "application/json"
+                ],
+                "parameters": [
+                    {
+                        "in": "header",
+                        "name": "X-CSRF-Token",
+                        "type": "string",
+                        "required": true,
+                        "description": "Must match current aig_csrf Cookie."
+                    },
+                    {
+                        "in": "header",
+                        "name": "Idempotency-Key",
+                        "type": "string",
+                        "required": true,
+                        "maxLength": 128
+                    },
+                    {
+                        "in": "path",
+                        "name": "configID",
+                        "type": "string",
+                        "required": true
+                    },
+                    {
+                        "in": "header",
+                        "name": "If-Match",
+                        "type": "string",
+                        "required": true,
+                        "description": "Quoted current resource_revision; missing or malformed is 428."
+                    },
+                    {
+                        "in": "body",
+                        "name": "request",
+                        "required": true,
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": false,
+                            "properties": {},
+                            "required": []
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "Successful operation or Idempotent-Replay:true.",
+                        "schema": {
+                            "$ref": "#/definitions/mcpconnections.MutationResponse"
+                        }
+                    },
+                    "400": {
+                        "description": "Invalid strict request or server-owned outbound policy rejected."
+                    },
+                    "401": {
+                        "description": "Authentication required."
+                    },
+                    "403": {
+                        "description": "Role, first-password-change or CSRF gate denied."
+                    },
+                    "404": {
+                        "description": "Absent or inaccessible opaque resource."
+                    },
+                    "409": {
+                        "description": "IDEMPOTENCY_KEY_REUSED, MCP_CONNECTION_VERSION_CONFLICT or state conflict; refresh before a new operation."
+                    },
+                    "428": {
+                        "description": "Quoted If-Match resource revision required."
+                    },
+                    "429": {
+                        "description": "Probe rate limited."
+                    },
+                    "500": {
+                        "description": "Fixed safe error only; no upstream diagnostics or secrets."
+                    },
+                    "503": {
+                        "description": "Required governed runtime or egress unavailable."
+                    }
+                }
+            }
+        },
+        "/api/v1/platform/mcp-connection-options": {
+            "get": {
+                "summary": "Select eligible MCP connections",
+                "description": "Authenticated Cookie Subject; first-password-change gate. Ordinary users access their own resources, admins govern all, auditors read safe lists/details only and cannot mutate or obtain connection management details/options. Writer roles only. Includes only visible enabled, passed current immutable versions with a concrete transport and current outbound eligibility. No endpoint/header values.",
+                "tags": [
+                    "MCP"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "parameters": [],
+                "responses": {
+                    "200": {
+                        "description": "Safe response.",
+                        "schema": {
+                            "$ref": "#/definitions/mcpconnections.OptionsResponse"
+                        }
+                    },
+                    "400": {
+                        "description": "Invalid strict request or server-owned outbound policy rejected."
+                    },
+                    "401": {
+                        "description": "Authentication required."
+                    },
+                    "403": {
+                        "description": "Role, first-password-change or CSRF gate denied."
+                    },
+                    "404": {
+                        "description": "Absent or inaccessible opaque resource."
+                    },
+                    "409": {
+                        "description": "IDEMPOTENCY_KEY_REUSED, MCP_CONNECTION_VERSION_CONFLICT or state conflict; refresh before a new operation."
+                    },
+                    "500": {
+                        "description": "Fixed safe error only; no upstream diagnostics or secrets."
+                    },
+                    "503": {
+                        "description": "Required governed runtime or egress unavailable."
+                    }
+                }
+            }
+        },
+        "/api/v1/platform/mcp-scan-attachments": {
+            "post": {
+                "summary": "Upload MCP-only code attachment",
+                "description": "Authenticated Cookie Subject; first-password-change gate. Ordinary users access their own resources, admins govern all, auditors read safe lists/details only and cannot mutate or obtain connection management details/options. MCP-only namespace. Response has opaque ID, state, bytes and configured size limits; no filename. There is no browser download endpoint.",
+                "tags": [
+                    "MCP"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "consumes": [
+                    "multipart/form-data"
+                ],
+                "parameters": [
+                    {
+                        "in": "header",
+                        "name": "X-CSRF-Token",
+                        "type": "string",
+                        "required": true,
+                        "description": "Must match current aig_csrf Cookie."
+                    },
+                    {
+                        "in": "formData",
+                        "name": "file",
+                        "type": "file",
+                        "required": true
+                    }
+                ],
+                "responses": {
+                    "201": {
+                        "description": "Safe response.",
+                        "schema": {
+                            "$ref": "#/definitions/mcpscans.AttachmentResponse"
+                        }
+                    },
+                    "400": {
+                        "description": "Invalid strict request or server-owned outbound policy rejected."
+                    },
+                    "401": {
+                        "description": "Authentication required."
+                    },
+                    "403": {
+                        "description": "Role, first-password-change or CSRF gate denied."
+                    },
+                    "404": {
+                        "description": "Absent or inaccessible opaque resource."
+                    },
+                    "409": {
+                        "description": "IDEMPOTENCY_KEY_REUSED, MCP_CONNECTION_VERSION_CONFLICT or state conflict; refresh before a new operation."
+                    },
+                    "500": {
+                        "description": "Fixed safe error only; no upstream diagnostics or secrets."
+                    },
+                    "503": {
+                        "description": "Required governed runtime or egress unavailable."
+                    }
+                }
+            }
+        },
+        "/api/v1/platform/mcp-scan-attachments/chunked": {
+            "post": {
+                "summary": "Begin MCP chunked attachment",
+                "description": "Authenticated Cookie Subject; first-password-change gate. Ordinary users access their own resources, admins govern all, auditors read safe lists/details only and cannot mutate or obtain connection management details/options. ",
+                "tags": [
+                    "MCP"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "consumes": [
+                    "application/json"
+                ],
+                "parameters": [
+                    {
+                        "in": "header",
+                        "name": "X-CSRF-Token",
+                        "type": "string",
+                        "required": true,
+                        "description": "Must match current aig_csrf Cookie."
+                    },
+                    {
+                        "in": "body",
+                        "name": "request",
+                        "required": true,
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": false,
+                            "properties": {
+                                "filename": {
+                                    "type": "string",
+                                    "maxLength": 255
+                                },
+                                "size": {
+                                    "type": "integer",
+                                    "minimum": 1
+                                }
+                            },
+                            "required": [
+                                "filename",
+                                "size"
+                            ]
+                        }
+                    }
+                ],
+                "responses": {
+                    "201": {
+                        "description": "Safe response.",
+                        "schema": {
+                            "$ref": "#/definitions/mcpscans.AttachmentResponse"
+                        }
+                    },
+                    "400": {
+                        "description": "Invalid strict request or server-owned outbound policy rejected."
+                    },
+                    "401": {
+                        "description": "Authentication required."
+                    },
+                    "403": {
+                        "description": "Role, first-password-change or CSRF gate denied."
+                    },
+                    "404": {
+                        "description": "Absent or inaccessible opaque resource."
+                    },
+                    "409": {
+                        "description": "IDEMPOTENCY_KEY_REUSED, MCP_CONNECTION_VERSION_CONFLICT or state conflict; refresh before a new operation."
+                    },
+                    "500": {
+                        "description": "Fixed safe error only; no upstream diagnostics or secrets."
+                    },
+                    "503": {
+                        "description": "Required governed runtime or egress unavailable."
+                    }
+                }
+            }
+        },
+        "/api/v1/platform/mcp-scan-attachments/{attachmentID}/chunks": {
+            "post": {
+                "summary": "Upload idempotent MCP chunk",
+                "description": "Authenticated Cookie Subject; first-password-change gate. Ordinary users access their own resources, admins govern all, auditors read safe lists/details only and cannot mutate or obtain connection management details/options. Idempotency is server-derived from upload ID, chunk index and SHA-256 digest. Exact replay returns 204; same index with different bytes returns 409. Per-upload lock serializes chunk/merge/abort/cleanup. Counter, audit and replay are atomic.",
+                "tags": [
+                    "MCP"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "consumes": [
+                    "multipart/form-data"
+                ],
+                "parameters": [
+                    {
+                        "in": "header",
+                        "name": "X-CSRF-Token",
+                        "type": "string",
+                        "required": true,
+                        "description": "Must match current aig_csrf Cookie."
+                    },
+                    {
+                        "in": "path",
+                        "name": "attachmentID",
+                        "type": "string",
+                        "required": true
+                    },
+                    {
+                        "in": "formData",
+                        "name": "chunk_index",
+                        "type": "integer",
+                        "minimum": 0,
+                        "required": true
+                    },
+                    {
+                        "in": "formData",
+                        "name": "chunk",
+                        "type": "file",
+                        "required": true
+                    }
+                ],
+                "responses": {
+                    "204": {
+                        "description": "Safe response."
+                    },
+                    "400": {
+                        "description": "Invalid strict request or server-owned outbound policy rejected."
+                    },
+                    "401": {
+                        "description": "Authentication required."
+                    },
+                    "403": {
+                        "description": "Role, first-password-change or CSRF gate denied."
+                    },
+                    "404": {
+                        "description": "Absent or inaccessible opaque resource."
+                    },
+                    "409": {
+                        "description": "IDEMPOTENCY_KEY_REUSED, MCP_CONNECTION_VERSION_CONFLICT or state conflict; refresh before a new operation."
+                    },
+                    "500": {
+                        "description": "Fixed safe error only; no upstream diagnostics or secrets."
+                    },
+                    "503": {
+                        "description": "Required governed runtime or egress unavailable."
+                    }
+                }
+            }
+        },
+        "/api/v1/platform/mcp-scan-attachments/{attachmentID}/merge": {
+            "post": {
+                "summary": "Merge MCP code attachment",
+                "description": "Authenticated Cookie Subject; first-password-change gate. Ordinary users access their own resources, admins govern all, auditors read safe lists/details only and cannot mutate or obtain connection management details/options. Validates complete bytes under per-upload resource lock. Same-key replay returns ready without remerging. No browser download route.",
+                "tags": [
+                    "MCP"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "consumes": [
+                    "application/json"
+                ],
+                "parameters": [
+                    {
+                        "in": "header",
+                        "name": "X-CSRF-Token",
+                        "type": "string",
+                        "required": true,
+                        "description": "Must match current aig_csrf Cookie."
+                    },
+                    {
+                        "in": "header",
+                        "name": "Idempotency-Key",
+                        "type": "string",
+                        "required": true,
+                        "maxLength": 128
+                    },
+                    {
+                        "in": "path",
+                        "name": "attachmentID",
+                        "type": "string",
+                        "required": true
+                    },
+                    {
+                        "in": "body",
+                        "name": "request",
+                        "required": true,
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": false,
+                            "properties": {
+                                "total_chunks": {
+                                    "type": "integer",
+                                    "minimum": 1
+                                },
+                                "file_size": {
+                                    "type": "integer",
+                                    "minimum": 1
+                                }
+                            },
+                            "required": [
+                                "total_chunks",
+                                "file_size"
+                            ]
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "Successful operation or Idempotent-Replay:true.",
+                        "schema": {
+                            "$ref": "#/definitions/mcpscans.AttachmentResponse"
+                        }
+                    },
+                    "400": {
+                        "description": "Invalid strict request or server-owned outbound policy rejected."
+                    },
+                    "401": {
+                        "description": "Authentication required."
+                    },
+                    "403": {
+                        "description": "Role, first-password-change or CSRF gate denied."
+                    },
+                    "404": {
+                        "description": "Absent or inaccessible opaque resource."
+                    },
+                    "409": {
+                        "description": "IDEMPOTENCY_KEY_REUSED, MCP_CONNECTION_VERSION_CONFLICT or state conflict; refresh before a new operation."
+                    },
+                    "500": {
+                        "description": "Fixed safe error only; no upstream diagnostics or secrets."
+                    },
+                    "503": {
+                        "description": "Required governed runtime or egress unavailable."
+                    }
+                }
+            }
+        },
+        "/api/v1/platform/mcp-scan-attachments/{attachmentID}": {
+            "delete": {
+                "summary": "Abort unbound MCP attachment",
+                "description": "Authenticated Cookie Subject; first-password-change gate. Ordinary users access their own resources, admins govern all, auditors read safe lists/details only and cannot mutate or obtain connection management details/options. Only uploading/ready owner-scoped attachments. Attached files cannot be removed.",
+                "tags": [
+                    "MCP"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "consumes": [
+                    "application/json"
+                ],
+                "parameters": [
+                    {
+                        "in": "header",
+                        "name": "X-CSRF-Token",
+                        "type": "string",
+                        "required": true,
+                        "description": "Must match current aig_csrf Cookie."
+                    },
+                    {
+                        "in": "path",
+                        "name": "attachmentID",
+                        "type": "string",
+                        "required": true
+                    }
+                ],
+                "responses": {
+                    "204": {
+                        "description": "Safe response."
+                    },
+                    "400": {
+                        "description": "Invalid strict request or server-owned outbound policy rejected."
+                    },
+                    "401": {
+                        "description": "Authentication required."
+                    },
+                    "403": {
+                        "description": "Role, first-password-change or CSRF gate denied."
+                    },
+                    "404": {
+                        "description": "Absent or inaccessible opaque resource."
+                    },
+                    "409": {
+                        "description": "IDEMPOTENCY_KEY_REUSED, MCP_CONNECTION_VERSION_CONFLICT or state conflict; refresh before a new operation."
+                    },
+                    "500": {
+                        "description": "Fixed safe error only; no upstream diagnostics or secrets."
+                    },
+                    "503": {
+                        "description": "Required governed runtime or egress unavailable."
+                    }
+                }
             }
         }
     },
@@ -4616,6 +5610,790 @@
                 "build_time"
             ],
             "type": "object"
+        },
+        "mcpscans.CreateRequest": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+                "source_kind": {
+                    "type": "string",
+                    "enum": [
+                        "repository",
+                        "service"
+                    ]
+                },
+                "repository_url": {
+                    "type": "string",
+                    "maxLength": 8192,
+                    "format": "uri"
+                },
+                "attachment_ids": {
+                    "type": "array",
+                    "items": {
+                        "type": "string",
+                        "format": "uuid"
+                    },
+                    "minItems": 1,
+                    "maxItems": 10,
+                    "uniqueItems": true
+                },
+                "connection_config_id": {
+                    "type": "string",
+                    "format": "uuid"
+                },
+                "connection_config_version": {
+                    "type": "integer",
+                    "minimum": 1
+                },
+                "authorization_confirmed": {
+                    "type": "boolean",
+                    "description": "Required true only for service; repository forbids this field."
+                },
+                "model_id": {
+                    "type": "string",
+                    "format": "uuid",
+                    "description": "Optional governed model. Omit for basic read-only checks without an LLM; no default-model or environment-credential fallback. Basic report coverage and reference scores are explicitly limited."
+                },
+                "thread": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 32,
+                    "default": 4
+                }
+            },
+            "required": [
+                "source_kind"
+            ],
+            "description": "Dedicated mcp_scan only. Flat strict JSON object, exact case-sensitive keys; null, duplicates and unknown fields rejected. source_kind repository accepts exactly one HTTPS Git repository_url or 1..10 ready owner-scoped MCP attachment_ids; both service fields and authorization_confirmed must be absent. service requires connection_config_id, exact immutable connection_config_version, authorization_confirmed=true and no repository fields. Only enabled, tested and policy-approved saved connections are eligible. model_id is an optional governed reference; thread defaults to 4 and is 1..32. Language is server-fixed zh_CN; task_type, language, country_iso_code, content, headers and secrets are forbidden. Source-related audit metadata contains source_kind and the Boolean authorization confirmation; safe phase metadata may appear in the general task audit. Task/binding/replay writes are atomic. HTTP 202 is the accepted task; 200 plus Idempotent-Replay:true is the same success replay. A reused key with a different payload returns 409. Never automatically repeat a POST after an uncertain response; explicit retry reuses its key. No endpoint, Git URL or credential is returned."
+        },
+        "mcpscans.MutationResponse": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+                "task_id": {
+                    "type": "string",
+                    "format": "uuid"
+                },
+                "status": {
+                    "type": "string",
+                    "enum": [
+                        "pending",
+                        "dispatching",
+                        "running",
+                        "succeeded",
+                        "failed",
+                        "dispatch_failed",
+                        "dispatch_unknown",
+                        "cancelled"
+                    ]
+                }
+            },
+            "required": [
+                "task_id",
+                "status"
+            ]
+        },
+        "mcpscans.Summary": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+                "id": {
+                    "type": "string",
+                    "format": "uuid"
+                },
+                "owner": {
+                    "type": "string"
+                },
+                "status": {
+                    "type": "string",
+                    "enum": [
+                        "pending",
+                        "dispatching",
+                        "running",
+                        "succeeded",
+                        "failed",
+                        "dispatch_failed",
+                        "dispatch_unknown",
+                        "cancelled"
+                    ]
+                },
+                "source_kind": {
+                    "type": "string",
+                    "enum": [
+                        "repository",
+                        "service",
+                        "legacy_unknown"
+                    ]
+                },
+                "created_at": {
+                    "type": "string",
+                    "format": "date-time"
+                },
+                "updated_at": {
+                    "type": "string",
+                    "format": "date-time"
+                }
+            },
+            "required": [
+                "id",
+                "owner",
+                "status",
+                "source_kind",
+                "created_at",
+                "updated_at"
+            ]
+        },
+        "mcpscans.Detail": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+                "id": {
+                    "type": "string",
+                    "format": "uuid"
+                },
+                "owner": {
+                    "type": "string"
+                },
+                "status": {
+                    "type": "string",
+                    "enum": [
+                        "pending",
+                        "dispatching",
+                        "running",
+                        "succeeded",
+                        "failed",
+                        "dispatch_failed",
+                        "dispatch_unknown",
+                        "cancelled"
+                    ]
+                },
+                "source_kind": {
+                    "type": "string",
+                    "enum": [
+                        "repository",
+                        "service",
+                        "legacy_unknown"
+                    ]
+                },
+                "created_at": {
+                    "type": "string",
+                    "format": "date-time"
+                },
+                "updated_at": {
+                    "type": "string",
+                    "format": "date-time"
+                },
+                "input_summary": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "properties": {
+                        "language": {
+                            "type": "string",
+                            "enum": [
+                                "zh_CN"
+                            ]
+                        },
+                        "source_kind": {
+                            "type": "string",
+                            "enum": [
+                                "repository",
+                                "service",
+                                "legacy_unknown"
+                            ]
+                        },
+                        "model_id": {
+                            "type": "string",
+                            "format": "uuid"
+                        },
+                        "thread": {
+                            "type": "integer",
+                            "minimum": 1,
+                            "maximum": 32
+                        }
+                    },
+                    "required": [
+                        "language",
+                        "source_kind"
+                    ]
+                },
+                "report_id": {
+                    "type": "string",
+                    "format": "uuid"
+                }
+            },
+            "required": [
+                "id",
+                "owner",
+                "status",
+                "source_kind",
+                "created_at",
+                "updated_at",
+                "input_summary"
+            ]
+        },
+        "mcpscans.ListResponse": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+                "items": {
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/definitions/mcpscans.Summary"
+                    }
+                },
+                "total": {
+                    "type": "integer",
+                    "minimum": 0
+                },
+                "page": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 1000
+                },
+                "page_size": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 100
+                }
+            },
+            "required": [
+                "items",
+                "total",
+                "page",
+                "page_size"
+            ]
+        },
+        "mcpscans.AttachmentResponse": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+                "id": {
+                    "type": "string",
+                    "format": "uuid"
+                },
+                "state": {
+                    "type": "string",
+                    "enum": [
+                        "uploading",
+                        "ready"
+                    ]
+                },
+                "size": {
+                    "type": "integer",
+                    "minimum": 0
+                },
+                "max_file_bytes": {
+                    "type": "integer",
+                    "minimum": 1
+                },
+                "max_chunk_bytes": {
+                    "type": "integer",
+                    "minimum": 1
+                }
+            },
+            "required": [
+                "id",
+                "state",
+                "size",
+                "max_file_bytes",
+                "max_chunk_bytes"
+            ]
+        },
+        "mcpconnections.CreateRequest": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+                "name": {
+                    "type": "string",
+                    "maxLength": 80
+                },
+                "description": {
+                    "type": "string",
+                    "maxLength": 500
+                },
+                "server_url": {
+                    "type": "string",
+                    "format": "uri",
+                    "description": "Configured HTTP(S) endpoint; validated against server-owned outbound CIDRs. No URL credentials, query or fragment."
+                },
+                "transport": {
+                    "type": "string",
+                    "enum": [
+                        "auto",
+                        "http",
+                        "sse"
+                    ]
+                },
+                "authentication": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "properties": {
+                        "kind": {
+                            "type": "string",
+                            "enum": [
+                                "none",
+                                "bearer",
+                                "api_key_header",
+                                "custom_headers"
+                            ]
+                        },
+                        "header_name": {
+                            "type": "string",
+                            "maxLength": 64
+                        },
+                        "secret": {
+                            "type": "string",
+                            "format": "password",
+                            "x-writeOnly": true
+                        }
+                    },
+                    "required": [
+                        "kind"
+                    ],
+                    "description": "Write-only authentication. bearer requires secret; api_key_header requires header_name and secret; none forbids credentials and headers; custom_headers requires at least one header."
+                },
+                "headers": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "additionalProperties": false,
+                        "properties": {
+                            "name": {
+                                "type": "string",
+                                "maxLength": 64
+                            },
+                            "value": {
+                                "type": "string",
+                                "maxLength": 8192,
+                                "format": "password",
+                                "x-writeOnly": true
+                            }
+                        },
+                        "required": [
+                            "name",
+                            "value"
+                        ]
+                    },
+                    "maxItems": 10
+                }
+            },
+            "required": [
+                "name",
+                "server_url",
+                "transport",
+                "authentication"
+            ],
+            "description": "Always creates a private connection owned by the authenticated Subject. scope/owner IDs and outbound policy flags are not accepted."
+        },
+        "mcpconnections.UpdateRequest": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+                "name": {
+                    "type": "string",
+                    "maxLength": 80
+                },
+                "description": {
+                    "type": "string",
+                    "maxLength": 500
+                },
+                "server_url": {
+                    "type": "string",
+                    "format": "uri",
+                    "description": "Configured HTTP(S) endpoint; validated against server-owned outbound CIDRs. No URL credentials, query or fragment."
+                },
+                "transport": {
+                    "type": "string",
+                    "enum": [
+                        "auto",
+                        "http",
+                        "sse"
+                    ]
+                },
+                "authentication": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "properties": {
+                        "kind": {
+                            "type": "string",
+                            "enum": [
+                                "none",
+                                "bearer",
+                                "api_key_header",
+                                "custom_headers"
+                            ]
+                        },
+                        "header_name": {
+                            "type": "string",
+                            "maxLength": 64
+                        },
+                        "secret": {
+                            "type": "string",
+                            "format": "password",
+                            "x-writeOnly": true
+                        }
+                    },
+                    "required": [],
+                    "description": "Omitted secret retains a previously configured secret only for the same kind and header name. Kind/header-name changes require replacement. Explicit blank secret is invalid when required."
+                },
+                "headers": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "additionalProperties": false,
+                        "properties": {
+                            "name": {
+                                "type": "string",
+                                "maxLength": 64
+                            },
+                            "value": {
+                                "type": "string",
+                                "maxLength": 8192,
+                                "format": "password",
+                                "x-writeOnly": true
+                            }
+                        },
+                        "required": [
+                            "name"
+                        ]
+                    },
+                    "maxItems": 10
+                },
+                "enabled": {
+                    "type": "boolean"
+                }
+            },
+            "required": [],
+            "description": "Partial patch. enabled must be the only field when present. Connection-material or transport changes create a new immutable version, disable it and require a new test. Metadata-only edits preserve version and eligibility. headers:[] removes headers; omitted values preserve matching names. none must remove prior headers. If-Match revision CAS required."
+        },
+        "mcpconnections.Summary": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+                "id": {
+                    "type": "string",
+                    "format": "uuid"
+                },
+                "name": {
+                    "type": "string",
+                    "maxLength": 80
+                },
+                "description": {
+                    "type": "string",
+                    "maxLength": 500
+                },
+                "scope": {
+                    "type": "string",
+                    "enum": [
+                        "private",
+                        "global"
+                    ]
+                },
+                "current_version": {
+                    "type": "integer",
+                    "minimum": 1
+                },
+                "resource_revision": {
+                    "type": "string",
+                    "pattern": "^[1-9][0-9]*$",
+                    "description": "Decimal string; send quoted as If-Match, for example \"2\". Not a connection version."
+                },
+                "enabled": {
+                    "type": "boolean"
+                },
+                "transport": {
+                    "type": "string",
+                    "enum": [
+                        "auto",
+                        "http",
+                        "sse"
+                    ]
+                },
+                "detected_transport": {
+                    "type": "string",
+                    "enum": [
+                        "http",
+                        "sse"
+                    ]
+                },
+                "probe_status": {
+                    "type": "string",
+                    "enum": [
+                        "not_tested",
+                        "passed",
+                        "failed"
+                    ]
+                },
+                "authentication_kind": {
+                    "type": "string",
+                    "enum": [
+                        "none",
+                        "bearer",
+                        "api_key_header",
+                        "custom_headers",
+                        "unknown"
+                    ]
+                },
+                "created_at": {
+                    "type": "string",
+                    "format": "date-time"
+                },
+                "updated_at": {
+                    "type": "string",
+                    "format": "date-time"
+                }
+            },
+            "required": [
+                "id",
+                "name",
+                "description",
+                "scope",
+                "current_version",
+                "resource_revision",
+                "enabled",
+                "transport",
+                "probe_status",
+                "authentication_kind",
+                "created_at",
+                "updated_at"
+            ]
+        },
+        "mcpconnections.ListResponse": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+                "items": {
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/definitions/mcpconnections.Summary"
+                    }
+                }
+            },
+            "required": [
+                "items"
+            ]
+        },
+        "mcpconnections.Detail": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+                "id": {
+                    "type": "string",
+                    "format": "uuid"
+                },
+                "name": {
+                    "type": "string",
+                    "maxLength": 80
+                },
+                "description": {
+                    "type": "string",
+                    "maxLength": 500
+                },
+                "scope": {
+                    "type": "string",
+                    "enum": [
+                        "private",
+                        "global"
+                    ]
+                },
+                "current_version": {
+                    "type": "integer",
+                    "minimum": 1
+                },
+                "resource_revision": {
+                    "type": "string",
+                    "pattern": "^[1-9][0-9]*$",
+                    "description": "Decimal string; send quoted as If-Match, for example \"2\". Not a connection version."
+                },
+                "enabled": {
+                    "type": "boolean"
+                },
+                "transport": {
+                    "type": "string",
+                    "enum": [
+                        "auto",
+                        "http",
+                        "sse"
+                    ]
+                },
+                "detected_transport": {
+                    "type": "string",
+                    "enum": [
+                        "http",
+                        "sse"
+                    ]
+                },
+                "probe_status": {
+                    "type": "string",
+                    "enum": [
+                        "not_tested",
+                        "passed",
+                        "failed"
+                    ]
+                },
+                "authentication_kind": {
+                    "type": "string",
+                    "enum": [
+                        "none",
+                        "bearer",
+                        "api_key_header",
+                        "custom_headers",
+                        "unknown"
+                    ]
+                },
+                "created_at": {
+                    "type": "string",
+                    "format": "date-time"
+                },
+                "updated_at": {
+                    "type": "string",
+                    "format": "date-time"
+                },
+                "server_url": {
+                    "type": "string",
+                    "format": "uri",
+                    "description": "Configured HTTP(S) endpoint; validated against server-owned outbound CIDRs. No URL credentials, query or fragment."
+                },
+                "authentication_header_name": {
+                    "type": "string"
+                },
+                "authentication_configured": {
+                    "type": "boolean"
+                },
+                "headers": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "additionalProperties": false,
+                        "properties": {
+                            "name": {
+                                "type": "string"
+                            },
+                            "configured": {
+                                "type": "boolean"
+                            }
+                        },
+                        "required": [
+                            "name",
+                            "configured"
+                        ]
+                    }
+                }
+            },
+            "required": [
+                "id",
+                "name",
+                "description",
+                "scope",
+                "current_version",
+                "resource_revision",
+                "enabled",
+                "transport",
+                "probe_status",
+                "authentication_kind",
+                "created_at",
+                "updated_at",
+                "server_url",
+                "authentication_configured",
+                "headers"
+            ],
+            "description": "Owner/admin management-only exception: returns endpoint and configured header names for editing, but never secret/header values. No-store. Auditor has no management detail access."
+        },
+        "mcpconnections.MutationResponse": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+                "id": {
+                    "type": "string",
+                    "format": "uuid"
+                },
+                "current_version": {
+                    "type": "integer",
+                    "minimum": 1
+                },
+                "resource_revision": {
+                    "type": "string",
+                    "pattern": "^[1-9][0-9]*$",
+                    "description": "Decimal string; send quoted as If-Match, for example \"2\". Not a connection version."
+                },
+                "status": {
+                    "type": "string",
+                    "enum": [
+                        "created",
+                        "updated",
+                        "enabled",
+                        "disabled",
+                        "passed",
+                        "failed"
+                    ]
+                }
+            },
+            "required": [
+                "id",
+                "current_version",
+                "resource_revision",
+                "status"
+            ]
+        },
+        "mcpconnections.OptionsResponse": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+                "items": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "additionalProperties": false,
+                        "properties": {
+                            "connection_id": {
+                                "type": "string",
+                                "format": "uuid"
+                            },
+                            "connection_version": {
+                                "type": "integer",
+                                "minimum": 1
+                            },
+                            "name": {
+                                "type": "string"
+                            },
+                            "scope": {
+                                "type": "string",
+                                "enum": [
+                                    "private",
+                                    "global"
+                                ]
+                            },
+                            "transport": {
+                                "type": "string",
+                                "enum": [
+                                    "http",
+                                    "sse"
+                                ]
+                            },
+                            "authentication_kind": {
+                                "type": "string",
+                                "enum": [
+                                    "none",
+                                    "bearer",
+                                    "api_key_header",
+                                    "custom_headers"
+                                ]
+                            }
+                        },
+                        "required": [
+                            "connection_id",
+                            "connection_version",
+                            "name",
+                            "scope",
+                            "transport",
+                            "authentication_kind"
+                        ]
+                    }
+                }
+            },
+            "required": [
+                "items"
+            ]
         }
     }
 }

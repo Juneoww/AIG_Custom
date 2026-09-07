@@ -43,6 +43,22 @@ function renderRoute(initialState: SessionState, path: string) {
 afterEach(() => vi.unstubAllGlobals())
 
 describe('production routes', () => {
+  it.each(['mcp_scan', 'Mcp-Scan'])('redirects legacy %s create links to a clean dedicated page', (type) => {
+    vi.stubGlobal('fetch', vi.fn(() => new Promise<Response>(() => undefined)))
+    renderRoute(subjectState('user'), `/tasks/new?task_type=${type}&server_url=SECRET`)
+    expect(screen.getByRole('heading', { name: '新建 MCP 扫描' })).toBeInTheDocument()
+    expect(screen.getByLabelText('当前位置')).toHaveTextContent('"path":"/tasks/mcp/new"')
+    expect(screen.queryByDisplayValue('SECRET')).not.toBeInTheDocument()
+  })
+
+  it('registers MCP history before generic detail and uses no generic task query', () => {
+    const fetcher = vi.fn<(url: RequestInfo | URL) => Promise<Response>>(() => new Promise<Response>(() => undefined))
+    vi.stubGlobal('fetch', fetcher)
+    renderRoute(subjectState('auditor'), '/tasks/mcp/scans')
+    expect(screen.getByRole('heading', { name: 'MCP 扫描历史' })).toBeInTheDocument()
+    expect(fetcher.mock.calls.some((call) => String(call[0]).includes('/platform/tasks'))).toBe(false)
+  })
+
   it('allows anonymous users to open password reset outside the shell', () => {
     renderRoute({ status: 'anonymous' }, '/reset-password')
 

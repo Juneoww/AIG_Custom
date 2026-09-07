@@ -55,6 +55,9 @@ type PostCommitDispatcher interface {
 }
 
 type CreateUnitOfWorkDependencies struct {
+	Models interface {
+		Describe(context.Context, string, string) (string, error)
+	}
 	Idempotency *idempotency.Service
 	Audits      audit.Recorder
 	Tasks       SpecializedTaskCreator
@@ -68,6 +71,9 @@ type CreateUnitOfWorkDependencies struct {
 // CreateUnitOfWork coordinates the only MCP task-create write path. It has no
 // browser/HTTP dependency and does not expose raw connection material.
 type CreateUnitOfWork struct {
+	models interface {
+		Describe(context.Context, string, string) (string, error)
+	}
 	idempotency *idempotency.Service
 	audits      audit.Recorder
 	tasks       SpecializedTaskCreator
@@ -82,6 +88,7 @@ type CreateUnitOfWork struct {
 
 func NewCreateUnitOfWork(dependencies CreateUnitOfWorkDependencies) *CreateUnitOfWork {
 	return &CreateUnitOfWork{
+		models:      dependencies.Models,
 		idempotency: dependencies.Idempotency,
 		audits:      dependencies.Audits,
 		tasks:       dependencies.Tasks,
@@ -122,6 +129,14 @@ func (workflow *CreateUnitOfWork) Create(ctx context.Context, subject identity.S
 		// blocked by a later DNS/gateway/configuration change.
 		if workflow.audits == nil || workflow.tasks == nil || workflow.bindings == nil {
 			return ErrInvalidCreate
+		}
+		if normalized.ModelID != "" {
+			if workflow.models == nil {
+				return ErrInvalidCreate
+			}
+			if _, err := workflow.models.Describe(lockedContext, subject.Username, normalized.ModelID); err != nil {
+				return ErrInvalidCreate
+			}
 		}
 		if normalized.SourceKind == SourceKindRepository {
 			if workflow.policy == nil || workflow.policy.RequireControlledDialer() != nil {
@@ -179,9 +194,10 @@ func (workflow *CreateUnitOfWork) Create(ctx context.Context, subject identity.S
 	}
 	created := CreateResult{TaskID: result.Response.TaskID, Status: tasks.Status(result.Response.Status), Replay: result.Replay}
 	if !created.Replay && workflow.dispatcher != nil {
-		if err := workflow.dispatcher.DispatchMCPAfterCommit(ctx, subject, created.TaskID); err != nil {
-			return created, err
-		}
+		// 创建事务及幂等成功响应已经提交。调度结果由任务状态机持久化，
+		// 不能再返回创建失败并丢掉 task_id，否则客户端换键重试会重复扫描。
+		// 此处返回受理快照；客户端通过专属详情读取实际调度状态。
+		_ = workflow.dispatcher.DispatchMCPAfterCommit(ctx, subject, created.TaskID)
 	}
 	return created, nil
 }
@@ -238,7 +254,7 @@ func normalizeCreateInput(input CreateInput) (CreateInput, error) {
 		!validOptionalReference(input.ModelID) || !validAttachmentIDs(normalized.AttachmentIDs) {
 		return CreateInput{}, ErrInvalidCreate
 	}
-	if normalized.Thread != nil && (*normalized.Thread < 1 || *normalized.Thread > 1_024) {
+	if normalized.Thread != nil && (*normalized.Thread < 1 || *normalized.Thread > 32) {
 		return CreateInput{}, ErrInvalidCreate
 	}
 	switch normalized.SourceKind {

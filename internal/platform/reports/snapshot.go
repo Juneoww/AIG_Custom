@@ -1097,6 +1097,7 @@ func buildSnapshotWithInfrastructurePortScanAt(taskID, ownerUserID, taskType str
 		render.PortScanMode = string(mode)
 		render.PortSpec = spec
 	}
+	applyMCPAnalysisCoverage(&render, taskType, raw)
 	renderData, err := json.Marshal(render)
 	if err != nil {
 		return nil, ErrInvalidSnapshot

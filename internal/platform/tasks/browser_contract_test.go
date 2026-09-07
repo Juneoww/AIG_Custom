@@ -45,7 +45,7 @@ func TestTaskBrowserListReturnsSafePagedOwnerScopedContract(t *testing.T) {
 		putBrowserTask(t, repository, Task{
 			ID: fmt.Sprintf("task-%02d", index), OwnerUserID: ownerID, OwnerUsername: ownerName,
 			IdempotencyKey: fmt.Sprintf("key-%02d", index), EngineSessionID: "engine-secret",
-			TaskType: "mcp_scan", Content: "private-content", Params: json.RawMessage(`{"token":"params-secret"}`),
+			TaskType: "ai_infra_scan", Content: "private-content", Params: json.RawMessage(`{"token":"params-secret"}`),
 			Remark: "list-remark-secret", TargetCount: 4123,
 			AttachmentRefs: json.RawMessage(`["attachment-secret"]`), Status: StatusRunning,
 			DispatchError: "dispatch-secret", DispatchClaimToken: "claim-secret",
@@ -86,7 +86,7 @@ func TestTaskBrowserPaginationDefaultsCapsAndRejectsInvalidValues(t *testing.T) 
 	for index := range 105 {
 		putBrowserTask(t, repository, Task{
 			ID: fmt.Sprintf("page-%03d", index), OwnerUserID: "user-alice", OwnerUsername: "alice",
-			IdempotencyKey: fmt.Sprintf("page-key-%03d", index), TaskType: "mcp_scan", Status: StatusPending,
+			IdempotencyKey: fmt.Sprintf("page-key-%03d", index), TaskType: "ai_infra_scan", Status: StatusPending,
 			Params: json.RawMessage(`{}`), AttachmentRefs: json.RawMessage(`[]`), CreatedAt: now, UpdatedAt: now,
 		})
 	}
@@ -119,11 +119,11 @@ func TestTaskBrowserListFiltersStatusAndTaskTypeBeforePaging(t *testing.T) {
 	router, tokens, repository, _ := newTaskBrowserFixture(t)
 	now := time.Now().UTC()
 	fixtures := []Task{
-		{ID: "alice-canonical", OwnerUserID: "user-alice", OwnerUsername: "alice", TaskType: "mcp_scan", Status: StatusRunning},
-		{ID: "alice-alias", OwnerUserID: "user-alice", OwnerUsername: "alice", TaskType: "Mcp-Scan", Status: StatusRunning},
-		{ID: "alice-pending", OwnerUserID: "user-alice", OwnerUsername: "alice", TaskType: "mcp_scan", Status: StatusPending},
+		{ID: "alice-canonical", OwnerUserID: "user-alice", OwnerUsername: "alice", TaskType: "ai_infra_scan", Status: StatusRunning},
+		{ID: "alice-alias", OwnerUserID: "user-alice", OwnerUsername: "alice", TaskType: "AI-Infra-Scan", Status: StatusRunning},
+		{ID: "alice-pending", OwnerUserID: "user-alice", OwnerUsername: "alice", TaskType: "ai_infra_scan", Status: StatusPending},
 		{ID: "alice-agent", OwnerUserID: "user-alice", OwnerUsername: "alice", TaskType: "agent_scan", Status: StatusRunning},
-		{ID: "bob-running", OwnerUserID: "user-bob", OwnerUsername: "bob", TaskType: "mcp_scan", Status: StatusRunning},
+		{ID: "bob-running", OwnerUserID: "user-bob", OwnerUsername: "bob", TaskType: "ai_infra_scan", Status: StatusRunning},
 	}
 	for index := range fixtures {
 		fixtures[index].IdempotencyKey = fixtures[index].ID
@@ -134,7 +134,7 @@ func TestTaskBrowserListFiltersStatusAndTaskTypeBeforePaging(t *testing.T) {
 		putBrowserTask(t, repository, fixtures[index])
 	}
 
-	response := performTaskJSON(t, router, tokens["alice"], http.MethodGet, "/tasks?status=running&task_type=mcp_scan&page=1&page_size=1", "", nil)
+	response := performTaskJSON(t, router, tokens["alice"], http.MethodGet, "/tasks?status=running&task_type=ai_infra_scan&page=1&page_size=1", "", nil)
 	require.Equal(t, http.StatusOK, response.Code, response.Body.String())
 	var listed TaskListResponse
 	require.NoError(t, json.Unmarshal(response.Body.Bytes(), &listed))
@@ -142,7 +142,7 @@ func TestTaskBrowserListFiltersStatusAndTaskTypeBeforePaging(t *testing.T) {
 	require.Len(t, listed.Items, 1)
 	assert.Equal(t, "alice-alias", listed.Items[0].ID)
 
-	global := performTaskJSON(t, router, tokens["auditor"], http.MethodGet, "/tasks?status=running&task_type=mcp_scan&page_size=20", "", nil)
+	global := performTaskJSON(t, router, tokens["auditor"], http.MethodGet, "/tasks?status=running&task_type=ai_infra_scan&page_size=20", "", nil)
 	require.Equal(t, http.StatusOK, global.Code, global.Body.String())
 	require.NoError(t, json.Unmarshal(global.Body.Bytes(), &listed))
 	assert.Equal(t, int64(3), listed.Total)
@@ -155,7 +155,7 @@ func TestTaskBrowserListRejectsInvalidExactFilters(t *testing.T) {
 		"?status=done",
 		"?status=RUNNING",
 		"?task_type=unknown",
-		"?task_type=Mcp-Scan",
+		"?task_type=ai-infra",
 		"?task_type=not_registered",
 	} {
 		response := performTaskJSON(t, router, tokens["alice"], http.MethodGet, "/tasks"+query, "", nil)
@@ -195,8 +195,8 @@ func TestTaskBrowserCanonicalizesOnlyRegisteredTaskTypeAliases(t *testing.T) {
 		stored   string
 		expected string
 	}{
-		{id: "mcp-snake", stored: "mcp_scan", expected: "mcp_scan"},
-		{id: "mcp-agent", stored: "Mcp-Scan", expected: "mcp_scan"},
+		{id: "mcp-snake", stored: "mcp_scan", expected: ""},
+		{id: "mcp-agent", stored: "Mcp-Scan", expected: ""},
 		{id: "infra-snake", stored: "ai_infra_scan", expected: "ai_infra_scan"},
 		{id: "infra-agent", stored: "AI-Infra-Scan", expected: "ai_infra_scan"},
 		{id: "redteam-snake", stored: "model_redteam_report", expected: "model_redteam_report"},
@@ -502,6 +502,29 @@ func TestTaskBrowserGormRepositoryFiltersOwnerBeforePagingAndCountsFilteredTotal
 
 	_, err = service.BrowserGet(context.Background(), identity.Subject{UserID: "user-alice", Username: "alice", Role: identity.RoleUser}, "bob-19")
 	require.ErrorIs(t, err, ErrNotFound)
+}
+
+func TestMCPBrowserGormSourceProjectionExcludesRawParams(t *testing.T) {
+	dsn := os.Getenv("AIG_TEST_DB_DSN")
+	require.NotEmpty(t, dsn)
+	db, err := gorm.Open(postgres.Open(dsn), &gorm.Config{DisableForeignKeyConstraintWhenMigrating: true})
+	require.NoError(t, err)
+	require.NoError(t, database.Migrate(db))
+	repository := NewGormRepository(db)
+	for _, kind := range []string{"repository", "service", "legacy"} {
+		id := "mcp-summary-" + kind
+		putBrowserTask(t, repository, Task{ID: id, OwnerUserID: "mcp-summary-owner", OwnerUsername: "alice", IdempotencyKey: id, EngineSessionID: id, TaskType: "mcp_scan", Status: StatusPending, Params: json.RawMessage(`{"source_kind":"` + kind + `","token":"sentinel-private"}`), AttachmentRefs: json.RawMessage(`[]`)})
+	}
+	rows, total, err := repository.ListBrowser(context.Background(), TaskListQuery{OwnerUserID: "mcp-summary-owner", TaskType: "mcp_scan", IncludeMCPSummary: true, Limit: 10})
+	require.NoError(t, err)
+	require.EqualValues(t, 3, total)
+	for _, row := range rows {
+		var projection map[string]string
+		require.NoError(t, json.Unmarshal(row.Params, &projection))
+		require.Len(t, projection, 1)
+		require.Contains(t, []string{"repository", "service", "legacy_unknown"}, projection["source_kind"])
+		require.NotContains(t, string(row.Params), "sentinel")
+	}
 }
 
 func newTaskBrowserFixture(t *testing.T) (http.Handler, map[string]string, *MemoryRepository, *recordingEngine) {

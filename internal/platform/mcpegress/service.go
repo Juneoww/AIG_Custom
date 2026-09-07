@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"net/url"
 	"strings"
@@ -238,7 +239,18 @@ func (service *Service) resolveBoundSource(ctx context.Context, taskID string) (
 		snapshot, err := service.keyring.OpenRepositorySource(binding, mcpconnections.BindingEncryptionContext{
 			OwnerUserID: task.OwnerUserID, Scope: mcpconnections.ScopePrivate, Version: 1,
 		})
-		if err != nil || service.policy.ValidateGitURL(ctx, snapshot.RepositoryURL) != nil {
+		if err != nil {
+			return boundSource{}, ErrRuntimeUnavailable
+		}
+		var attachmentIDs []string
+		if len(task.AttachmentRefs) > tasks.MaxTaskParamsLength || (len(task.AttachmentRefs) > 0 && json.Unmarshal(task.AttachmentRefs, &attachmentIDs) != nil) {
+			return boundSource{}, ErrRuntimeUnavailable
+		}
+		if snapshot.RepositoryURL != "" {
+			if len(attachmentIDs) > 0 || service.policy.ValidateGitURL(ctx, snapshot.RepositoryURL) != nil {
+				return boundSource{}, ErrRuntimeUnavailable
+			}
+		} else if len(attachmentIDs) == 0 || len(attachmentIDs) > tasks.MaxTaskAttachmentCount {
 			return boundSource{}, ErrRuntimeUnavailable
 		}
 		return boundSource{task: task, kind: "repository", repositoryURL: snapshot.RepositoryURL}, nil

@@ -79,16 +79,19 @@ type Repository interface {
 }
 
 type TaskListQuery struct {
-	OwnerUserID string
-	Status      Status
-	TaskType    string
-	Limit       int
-	Offset      int
+	IncludeMCPSummary bool
+	ExcludeMCP        bool
+	OwnerUserID       string
+	Status            Status
+	TaskType          string
+	Limit             int
+	Offset            int
 }
 
 type TaskListFilters struct {
-	Status   Status
-	TaskType string
+	ExcludeMCP bool
+	Status     Status
+	TaskType   string
 }
 
 // RecentRepository is an optional bounded browser-summary read model.
@@ -147,6 +150,7 @@ type Service struct {
 	engine              EngineAdapter
 	audits              audit.Recorder
 	attachments         *AttachmentService
+	mcpAttachments      *AttachmentService
 	reportSnapshots     reportSnapshotter
 	mcpRuntimeIssuer    MCPRuntimeIssuer
 	now                 func() time.Time
@@ -179,6 +183,14 @@ func NewService(repository Repository, engine EngineAdapter, audits audit.Record
 
 func (service *Service) SetAttachmentService(attachments *AttachmentService) {
 	service.attachments = attachments
+}
+
+func (service *Service) SetMCPAttachmentService(attachments *AttachmentService) {
+	if attachments != nil && attachments.config.MCPOnly {
+		service.mcpAttachments = attachments
+	} else {
+		service.mcpAttachments = nil
+	}
 }
 
 func (service *Service) SetReportSnapshotService(snapshotter reportSnapshotter) {
@@ -312,10 +324,10 @@ func (service *Service) CreateSpecializedInUnitOfWork(ctx context.Context, subje
 		return nil, getErr
 	}
 	if len(attachmentIDs) > 0 {
-		if service.attachments == nil {
+		if service.mcpAttachments == nil {
 			return nil, ErrInvalid
 		}
-		if err := service.attachments.LockReady(ctx, subject.UserID, attachmentIDs); err != nil {
+		if err := service.mcpAttachments.LockReady(ctx, subject.UserID, attachmentIDs); err != nil {
 			return nil, err
 		}
 	}
@@ -327,7 +339,7 @@ func (service *Service) CreateSpecializedInUnitOfWork(ctx context.Context, subje
 		return nil, ErrInvalid
 	}
 	if created && len(attachmentIDs) > 0 {
-		if err := service.attachments.repository.BindReadyAttachments(ctx, subject.UserID, attachmentIDs, now); err != nil {
+		if err := service.mcpAttachments.repository.BindReadyAttachments(ctx, subject.UserID, attachmentIDs, now); err != nil {
 			return nil, err
 		}
 	}
@@ -997,7 +1009,7 @@ func (service *Service) dispatch(ctx context.Context, subject identity.Subject, 
 	}
 	var attachmentIDs []string
 	_ = json.Unmarshal(task.AttachmentRefs, &attachmentIDs)
-	if len(attachmentIDs) > 0 {
+	if len(attachmentIDs) > 0 && canonicalTaskType(task.TaskType) != "mcp_scan" {
 		if service.attachments == nil {
 			return task, ErrInvalid
 		}
@@ -1235,6 +1247,7 @@ func (service *Service) Browse(ctx context.Context, subject identity.Subject, pa
 	}
 	query.Status = filters.Status
 	query.TaskType = filters.TaskType
+	query.ExcludeMCP = filters.ExcludeMCP
 	query.Limit = pageSize
 	query.Offset = (page - 1) * pageSize
 	tasks, total, err := service.repository.ListBrowser(ctx, query)
@@ -1448,6 +1461,25 @@ func (service *Service) refresh(ctx context.Context, subject identity.Subject, t
 }
 
 func (service *Service) Cancel(ctx context.Context, subject identity.Subject, id string) error {
+	return service.cancelWithCompletion(ctx, subject, id, nil)
+}
+
+// CancelMCPWithCompletion 把专属幂等结果与任务状态、完成审计原子提交。
+func (service *Service) CancelMCPWithCompletion(ctx context.Context, subject identity.Subject, id string, complete func(context.Context, Status) error) error {
+	if complete == nil {
+		return ErrInvalid
+	}
+	task, err := service.repository.Get(ctx, id)
+	if err != nil {
+		return err
+	}
+	if canonicalTaskType(task.TaskType) != "mcp_scan" {
+		return ErrNotFound
+	}
+	return service.cancelWithCompletion(ctx, subject, id, complete)
+}
+
+func (service *Service) cancelWithCompletion(ctx context.Context, subject identity.Subject, id string, complete func(context.Context, Status) error) error {
 	task, err := service.repository.Get(ctx, id)
 	if err != nil {
 		return err
@@ -1459,7 +1491,14 @@ func (service *Service) Cancel(ctx context.Context, subject identity.Subject, id
 		return ErrForbidden
 	}
 	if task.Status == StatusCancelled || task.Status == StatusSucceeded || task.Status == StatusEngineFailed {
-		return nil
+		if complete == nil {
+			return nil
+		}
+		mutation, err := audit.BeginMutation(ctx, service.audits, subject, audit.EventInput{Action: audit.ActionTaskChanged, ResourceType: "task", ResourceID: task.ID})
+		if err != nil {
+			return err
+		}
+		return mutation.Run(ctx, task.ID, nil, func(tx context.Context) error { return complete(tx, task.Status) })
 	}
 	mutation, err := audit.BeginMutationWithCompletionAction(ctx, service.audits, subject, audit.EventInput{
 		Action: audit.ActionTaskCancelRequested, ResourceType: "task", ResourceID: task.ID,
@@ -1496,7 +1535,17 @@ func (service *Service) Cancel(ctx context.Context, subject identity.Subject, id
 		var transitioned bool
 		transitioned, businessErr = service.repository.TransitionStatus(transactionContext, task.ID, []Status{task.Status}, targetStatus, "", service.now())
 		if businessErr == nil && !transitioned {
-			businessErr = ErrStatusTransition
+			current, getErr := service.repository.Get(transactionContext, task.ID)
+			if getErr != nil {
+				businessErr = getErr
+			} else if isTerminalStatus(current.Status) {
+				targetStatus = current.Status
+			} else {
+				businessErr = ErrStatusTransition
+			}
+		}
+		if businessErr == nil && complete != nil {
+			businessErr = complete(transactionContext, targetStatus)
 		}
 		return businessErr
 	})
@@ -1917,15 +1966,23 @@ func (repository *GormRepository) withinSessionLock(
 	if repository == nil || repository.db == nil || apply == nil {
 		return ErrInvalid
 	}
-	database, err := repository.db.DB()
-	if err != nil {
-		return err
+	// 嵌套幂等锁与附件资源锁复用同一连接，避免连接池耗尽。
+	var connection *sql.Conn
+	if existing, ok := txcontext.FromGorm(ctx); ok {
+		connection, _ = existing.Statement.ConnPool.(*sql.Conn)
 	}
-	connection, err := database.Conn(ctx)
-	if err != nil {
-		return err
+	if connection == nil {
+		database, err := repository.db.DB()
+		if err != nil {
+			return err
+		}
+		connection, err = database.Conn(ctx)
+		if err != nil {
+			return err
+		}
+		defer connection.Close()
 	}
-	defer connection.Close()
+	var err error
 	if _, err = connection.ExecContext(ctx, "SELECT pg_advisory_lock(hashtextextended($1, 0))", lockKey); err != nil {
 		return err
 	}
@@ -2005,12 +2062,19 @@ func (repository *GormRepository) ListBrowser(ctx context.Context, query TaskLis
 	if query.TaskType != "" {
 		db = db.Where("task_type IN ?", browserStoredTaskTypes(query.TaskType))
 	}
+	if query.ExcludeMCP {
+		db = db.Where("task_type NOT IN ?", browserStoredTaskTypes("mcp_scan"))
+	}
 	var total int64
 	if err := db.Count(&total).Error; err != nil {
 		return nil, 0, err
 	}
 	db = db.Select("id", "owner_username", "task_type", "status", "created_at", "updated_at").
 		Order("created_at DESC, id DESC")
+	if query.IncludeMCPSummary && canonicalTaskType(query.TaskType) == "mcp_scan" {
+		// 仅投影白名单来源枚举，不把历史参数、地址或秘密读入浏览器查询。
+		db = db.Select("id, owner_username, task_type, status, created_at, updated_at, jsonb_build_object('source_kind', CASE WHEN params->>'source_kind' IN ('repository','service') THEN params->>'source_kind' ELSE 'legacy_unknown' END) AS params")
+	}
 	if query.Offset > 0 {
 		db = db.Offset(query.Offset)
 	}
@@ -2247,6 +2311,7 @@ const (
 )
 
 type AttachmentConfig struct {
+	MCPOnly       bool
 	UploadDir     string
 	MaxFileBytes  int64
 	MaxChunkBytes int64
@@ -2341,6 +2406,27 @@ func NewAttachmentService(repository PlatformTaskAttachmentRepository, config At
 	}, nil
 }
 
+// scopedAttachment 使用服务端生成的存储命名空间隔离 MCP 附件。
+// 该名称不来自客户端，不对浏览器投影，不需要重写既有附件数据。
+func (service *AttachmentService) scopedAttachment(ctx context.Context, id string) (*Attachment, error) {
+	attachment, err := service.repository.GetAttachment(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	if strings.HasPrefix(attachment.StorageName, "mcp-") != service.config.MCPOnly {
+		return nil, ErrNotFound
+	}
+	return attachment, nil
+}
+func (service *AttachmentService) attachmentStorageName(id, filename string) string {
+	if service.config.MCPOnly {
+		id = "mcp-" + id
+	}
+	return id + strings.ToLower(filepath.Ext(filename))
+}
+func (service *AttachmentService) MaxChunkBytes() int64 { return service.config.MaxChunkBytes }
+func (service *AttachmentService) MCPOnly() bool        { return service.config.MCPOnly }
+
 func (service *AttachmentService) MaxFileBytes() int64 { return service.config.MaxFileBytes }
 
 func (service *AttachmentService) maxChunkCount() int64 {
@@ -2359,28 +2445,53 @@ func (service *AttachmentService) PurgeExpiredUploads(ctx context.Context) error
 	}
 	for index := range expired {
 		attachment := &expired[index]
-		marked, markErr := service.repository.MarkAttachmentDeleting(ctx, attachment.ID, attachment.OwnerUserID, before, service.now())
-		if markErr != nil {
-			return markErr
+		cleanup := func(ctx context.Context) error {
+			marked, markErr := service.repository.MarkAttachmentDeleting(ctx, attachment.ID, attachment.OwnerUserID, before, service.now())
+			if markErr != nil {
+				return markErr
+			}
+			if !marked {
+				return nil
+			}
+			if cleanupErr := service.cleanupAttachmentFiles(attachment); cleanupErr != nil {
+				return cleanupErr
+			}
+			if _, deleteErr := service.repository.DeleteMarkedAttachment(ctx, attachment.ID, attachment.OwnerUserID); deleteErr != nil {
+				return deleteErr
+			}
+			return nil
 		}
-		if !marked {
-			continue
+		if strings.HasPrefix(attachment.StorageName, "mcp-") {
+			err = service.withMCPAttachmentLock(ctx, attachment.ID, cleanup)
+		} else {
+			err = cleanup(ctx)
 		}
-		if cleanupErr := service.cleanupAttachmentFiles(attachment); cleanupErr != nil {
-			return cleanupErr
-		}
-		if _, deleteErr := service.repository.DeleteMarkedAttachment(ctx, attachment.ID, attachment.OwnerUserID); deleteErr != nil {
-			return deleteErr
+		if err != nil {
+			return err
 		}
 	}
 	return nil
 }
 
 func (service *AttachmentService) Abort(ctx context.Context, subject identity.Subject, id string) error {
+	if service.config.MCPOnly {
+		return service.withMCPAttachmentLock(ctx, id, func(locked context.Context) error { return service.abort(locked, subject, id) })
+	}
+	return service.abort(ctx, subject, id)
+}
+
+func (service *AttachmentService) withMCPAttachmentLock(ctx context.Context, id string, apply func(context.Context) error) error {
+	if len(id) > MaxTaskReferenceLength || id == "" {
+		return ErrInvalid
+	}
+	return service.tasks.WithinCreateKeyLock(ctx, "mcp-attachments", id, apply)
+}
+
+func (service *AttachmentService) abort(ctx context.Context, subject identity.Subject, id string) error {
 	if subject.Role == identity.RoleAuditor {
 		return ErrForbidden
 	}
-	attachment, err := service.repository.GetAttachment(ctx, id)
+	attachment, err := service.scopedAttachment(ctx, id)
 	if err != nil {
 		return err
 	}
@@ -2479,7 +2590,7 @@ func (service *AttachmentService) Upload(ctx context.Context, subject identity.S
 	if err != nil {
 		return AttachmentView{}, err
 	}
-	storageName := id + strings.ToLower(filepath.Ext(filename))
+	storageName := service.attachmentStorageName(id, filename)
 	path, err := service.storagePath(storageName)
 	if err != nil {
 		return AttachmentView{}, failAttachmentMutation(ctx, mutation, id, err)
@@ -2560,7 +2671,7 @@ func (service *AttachmentService) BeginChunked(ctx context.Context, subject iden
 	}
 	attachment := &Attachment{
 		ID: id, OwnerUserID: subject.UserID, OriginalName: filename,
-		StorageName: id + strings.ToLower(filepath.Ext(filename)), Size: size,
+		StorageName: service.attachmentStorageName(id, filename), Size: size,
 		State: AttachmentStateUploading, CreatedAt: now, UpdatedAt: now,
 	}
 	var createErr error
@@ -2578,10 +2689,24 @@ func (service *AttachmentService) BeginChunked(ctx context.Context, subject iden
 }
 
 func (service *AttachmentService) UploadChunk(ctx context.Context, subject identity.Subject, id string, index int, source io.Reader) error {
+	return service.uploadChunk(ctx, subject, id, index, source, nil)
+}
+
+// UploadMCPChunk 同步提交分片字节计数、幂等结果和审计完成记录。
+func (service *AttachmentService) UploadMCPChunk(ctx context.Context, subject identity.Subject, id string, index int, source io.Reader, complete func(context.Context, int64) error) error {
+	if !service.config.MCPOnly || complete == nil {
+		return ErrInvalid
+	}
+	return service.withMCPAttachmentLock(ctx, id, func(locked context.Context) error {
+		return service.uploadChunk(locked, subject, id, index, source, complete)
+	})
+}
+
+func (service *AttachmentService) uploadChunk(ctx context.Context, subject identity.Subject, id string, index int, source io.Reader, complete func(context.Context, int64) error) error {
 	if source == nil || index < 0 || int64(index) >= service.maxChunkCount() {
 		return ErrInvalid
 	}
-	attachment, err := service.repository.GetAttachment(ctx, id)
+	attachment, err := service.scopedAttachment(ctx, id)
 	if err != nil {
 		return err
 	}
@@ -2623,6 +2748,9 @@ func (service *AttachmentService) UploadChunk(ctx context.Context, subject ident
 	var updateErr error
 	err = mutation.Run(ctx, attachment.ID, map[string]any{"chunk_index": index, "size": written}, func(transactionContext context.Context) error {
 		updateErr = service.repository.AddAttachmentChunkBytes(transactionContext, attachment.ID, attachment.OwnerUserID, written, limit, service.now())
+		if updateErr == nil && complete != nil {
+			updateErr = complete(transactionContext, written)
+		}
 		return updateErr
 	})
 	if updateErr != nil {
@@ -2637,10 +2765,27 @@ func (service *AttachmentService) UploadChunk(ctx context.Context, subject ident
 }
 
 func (service *AttachmentService) Merge(ctx context.Context, subject identity.Subject, id string, totalChunks int, declaredSize int64) (AttachmentView, error) {
+	return service.merge(ctx, subject, id, totalChunks, declaredSize, nil)
+}
+
+func (service *AttachmentService) MergeMCP(ctx context.Context, subject identity.Subject, id string, totalChunks int, declaredSize int64, complete func(context.Context, int64) error) (AttachmentView, error) {
+	if !service.config.MCPOnly || complete == nil {
+		return AttachmentView{}, ErrInvalid
+	}
+	var view AttachmentView
+	err := service.withMCPAttachmentLock(ctx, id, func(locked context.Context) error {
+		var mergeErr error
+		view, mergeErr = service.merge(locked, subject, id, totalChunks, declaredSize, complete)
+		return mergeErr
+	})
+	return view, err
+}
+
+func (service *AttachmentService) merge(ctx context.Context, subject identity.Subject, id string, totalChunks int, declaredSize int64, complete func(context.Context, int64) error) (AttachmentView, error) {
 	if totalChunks <= 0 || int64(totalChunks) > service.maxChunkCount() || declaredSize <= 0 || declaredSize > service.config.MaxFileBytes {
 		return AttachmentView{}, ErrInvalid
 	}
-	attachment, err := service.repository.GetAttachment(ctx, id)
+	attachment, err := service.scopedAttachment(ctx, id)
 	if err != nil {
 		return AttachmentView{}, err
 	}
@@ -2664,6 +2809,13 @@ func (service *AttachmentService) Merge(ctx context.Context, subject identity.Su
 		return AttachmentView{}, failAttachmentMutation(ctx, mutation, attachment.ID, err)
 	}
 	temporary := finalPath + ".merging"
+	if complete != nil && service.config.MCPOnly {
+		for _, orphan := range []string{temporary, finalPath} {
+			if err := removeMCPMergeOrphan(orphan); err != nil {
+				return AttachmentView{}, failAttachmentMutation(ctx, mutation, attachment.ID, err)
+			}
+		}
+	}
 	destination, err := os.OpenFile(temporary, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
 	if err != nil {
 		return AttachmentView{}, failAttachmentMutation(ctx, mutation, attachment.ID, errors.New("无法合并附件"))
@@ -2703,6 +2855,9 @@ func (service *AttachmentService) Merge(ctx context.Context, subject identity.Su
 	var updateErr error
 	err = mutation.Run(ctx, attachment.ID, map[string]any{"size": actual, "chunks": totalChunks}, func(transactionContext context.Context) error {
 		updateErr = service.repository.MarkAttachmentReady(transactionContext, attachment.ID, attachment.OwnerUserID, actual, service.now())
+		if updateErr == nil && complete != nil {
+			updateErr = complete(transactionContext, actual)
+		}
 		return updateErr
 	})
 	if updateErr != nil {
@@ -2720,10 +2875,13 @@ func (service *AttachmentService) Merge(ctx context.Context, subject identity.Su
 }
 
 func (service *AttachmentService) Open(ctx context.Context, subject identity.Subject, id string) (*os.File, string, int64, error) {
+	if service.config.MCPOnly {
+		return nil, "", 0, ErrForbidden
+	}
 	if subject.Role == identity.RoleAuditor {
 		return nil, "", 0, ErrForbidden
 	}
-	attachment, err := service.repository.GetAttachment(ctx, id)
+	attachment, err := service.scopedAttachment(ctx, id)
 	if err != nil {
 		return nil, "", 0, err
 	}
@@ -2800,7 +2958,11 @@ func (service *AttachmentService) LockReady(ctx context.Context, ownerUserID str
 	if service == nil || service.repository == nil || strings.TrimSpace(ownerUserID) == "" || !validTaskAttachmentIDs(ids) {
 		return ErrInvalid
 	}
-	return service.repository.LockReadyAttachments(ctx, ownerUserID, ids)
+	if err := service.repository.LockReadyAttachments(ctx, ownerUserID, ids); err != nil {
+		return err
+	}
+	_, err := service.ResolveReady(ctx, ownerUserID, ids)
+	return err
 }
 
 func (service *AttachmentService) ResolveAttached(ctx context.Context, ownerUserID string, ids []string) ([]string, error) {
@@ -2813,7 +2975,7 @@ func (service *AttachmentService) ReadReadyTargetExpressions(ctx context.Context
 		return nil, err
 	}
 	for _, id := range ids {
-		attachment, err := service.repository.GetAttachment(ctx, id)
+		attachment, err := service.scopedAttachment(ctx, id)
 		if err != nil {
 			return nil, err
 		}
@@ -2879,7 +3041,7 @@ func (service *AttachmentService) resolveWithState(ctx context.Context, ownerUse
 			return nil, ErrInvalid
 		}
 		seen[id] = struct{}{}
-		attachment, err := service.repository.GetAttachment(ctx, id)
+		attachment, err := service.scopedAttachment(ctx, id)
 		if err != nil {
 			return nil, err
 		}
@@ -3201,6 +3363,9 @@ func (repository *MemoryRepository) ListBrowser(_ context.Context, query TaskLis
 			continue
 		}
 		if query.TaskType != "" && canonicalTaskType(task.TaskType) != query.TaskType {
+			continue
+		}
+		if query.ExcludeMCP && canonicalTaskType(task.TaskType) == "mcp_scan" {
 			continue
 		}
 		tasks = append(tasks, *cloneTask(task))

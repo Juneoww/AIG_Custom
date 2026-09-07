@@ -243,6 +243,48 @@ func (repository *GormRepository) UpdateDisplayMetadata(ctx context.Context, con
 	return &updated, nil
 }
 
+// UpdateConditional 把元数据、新版本和 revision 作为一次条件写入提交。
+// 不复用无条件元数据接口，防止 HTTP If-Match 在并发编辑时失效。
+func (repository *GormRepository) UpdateConditional(ctx context.Context, configID string, expectedVersion int, expectedRevision, name, description string, next *ConnectionVersion) (*ConnectionConfig, error) {
+	if repository == nil || repository.db == nil || configID == "" || expectedVersion < 1 || expectedRevision == "" || name == "" {
+		return nil, ErrInvalid
+	}
+	if next != nil && (!validVersionMaterial(next) || next.ConnectionConfigID != configID || next.Version != expectedVersion+1) {
+		return nil, ErrInvalid
+	}
+	var updated ConnectionConfig
+	err := txcontext.Gorm(ctx, repository.db).Transaction(func(tx *gorm.DB) error {
+		var config ConnectionConfig
+		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Where("id = ?", configID).First(&config).Error; err != nil {
+			return mapNotFound(err)
+		}
+		if config.ResourceRevision != expectedRevision || config.CurrentVersion != expectedVersion {
+			return ErrConflict
+		}
+		revision, err := incrementRevision(config.ResourceRevision)
+		if err != nil {
+			return err
+		}
+		values := map[string]any{"name": name, "description": description, "resource_revision": revision, "updated_at": time.Now().UTC()}
+		if next != nil {
+			stored := cloneConnectionVersionRecord(next)
+			stored.ProbeStatus, stored.DetectedTransport = ProbeStatusNotTested, ""
+			if err := tx.Create(stored).Error; err != nil {
+				return err
+			}
+			values["current_version"], values["enabled"] = next.Version, false
+		}
+		if err := tx.Model(&ConnectionConfig{}).Where("id = ?", configID).Updates(values).Error; err != nil {
+			return err
+		}
+		return tx.Where("id = ?", configID).First(&updated).Error
+	})
+	if err != nil {
+		return nil, err
+	}
+	return &updated, nil
+}
+
 // StartProbe 在真实网络操作前创建持久化的单调 attempt token。它按 config →
 // current version 加锁，在锁内先核对快照和跨进程的 config-ID 限流，再将连接置为
 // 不可用并清空旧结果；随后只有携带相同 token 的结果能够写回。

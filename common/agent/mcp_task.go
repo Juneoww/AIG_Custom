@@ -19,19 +19,16 @@
 package agent
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"net/url"
 	"os"
-	"path/filepath"
 	"strconv"
 	"strings"
-	"time"
 
 	"github.com/Juneoww/AIG_Custom/common/utils"
-	"github.com/Juneoww/AIG_Custom/internal/gologger"
 )
 
 type McpTask struct {
@@ -166,137 +163,61 @@ func (m *McpTask) GetName() string {
 }
 
 func (m *McpTask) Execute(ctx context.Context, request TaskRequest, callbacks TaskCallbacks) error {
-	type ScanMcpRequest struct {
-		Content string `json:"-"`
-		Model   struct {
-			Model   string `json:"model"`
-			Token   string `json:"token"`
-			BaseUrl string `json:"base_url"`
-		} `json:"model"`
-		Headers map[string]string `json:"headers"`
+	if ctx == nil {
+		ctx = context.Background()
 	}
-
-	var params ScanMcpRequest
-	if err := json.Unmarshal(request.Params, &params); err != nil {
-		return err
+	if ctx.Err() != nil {
+		return ctx.Err()
 	}
-	params.Content = request.Content
-	files := request.Attachments
-	plan, err := planMcpExecution(request.Params, request.Content, files)
+	params, err := parseMCPRuntime(m.Server, request)
 	if err != nil {
 		return err
 	}
-	transport := plan.transport
-	language := request.Language
-	if language == "" {
+	language := strings.ToLower(strings.TrimSpace(request.Language))
+	if language == "" || language == "zh_cn" || language == "zh-cn" {
 		language = "zh"
 	}
-
-	var folder string
-	var serverUrl string
-	if transport == "code" {
-		// 创建临时目录用于存储上传的文件
-		tempDir := "uploads"
-		if err := os.MkdirAll(tempDir, 0755); err != nil {
-			gologger.Errorf("%s: %v", "createTempDir", err)
+	if language != "zh" && language != "en" {
+		return errMCPRuntime
+	}
+	argv := []string{"run", "--no-project", "main.py", "--runtime-config-stdin", "--language", language}
+	plan := mcpServiceExecutionPlan()
+	if params.SourceKind == "repository" {
+		folder, err := os.MkdirTemp("", "aig-mcp-source-")
+		if err != nil {
+			return errMCPArchive
+		}
+		defer os.RemoveAll(folder)
+		if err = downloadMCPArchive(ctx, m.Server, request.SessionId, params.ArchiveRef, folder); err != nil {
 			return err
 		}
-		if len(files) > 0 {
-			// 远程下载
-			for _, file := range files {
-				// 下载文件
-				ext := ""
-				supports := []string{".zip", ".tar.gz", ".tgz", ".whl"}
-				for _, support := range supports {
-					if strings.HasSuffix(file, support) {
-						ext = support
-						break
-					}
-				}
-				if ext == "" {
-					gologger.Errorln("Unsupported file type", strings.Join(supports, ","))
-					continue
-				}
-
-				fileName := filepath.Join(tempDir, fmt.Sprintf("tmp-%d%s", time.Now().UnixMicro(), ext))
-				err := utils.DownloadFile(m.Server, request.SessionId, file, fileName)
-				if err != nil {
-					return fmt.Errorf("download failed: %v", err)
-				}
-				extractPath, _ := filepath.Abs(filepath.Join(tempDir, fmt.Sprintf("tmp-%d", time.Now().UnixMicro())))
-				switch ext {
-				case ".zip", ".whl":
-					err = utils.ExtractZipFile(fileName, extractPath)
-				case ".tgz", ".tar.gz":
-					err = utils.ExtractTGZ(fileName, extractPath)
-				default:
-					return errors.New("Unsupported file type: " + strings.Join(supports, ","))
-				}
-				if err != nil {
-					return errors.New(fmt.Sprintf("extract failed: %v", err))
-				}
-				folder = extractPath
-			}
-		} else {
-			extractPath, _ := filepath.Abs(filepath.Join(tempDir, fmt.Sprintf("tmp-%d", time.Now().UnixMicro())))
-			err := utils.GitClone(params.Content, extractPath, 10*time.Minute)
-			if err != nil {
-				return fmt.Errorf("clone failed: %v", err)
-			}
-			folder = extractPath
-		}
-
-		// 判断文件夹是否存在
-		if info, err := os.Stat(folder); os.IsNotExist(err) || !info.IsDir() {
-			return fmt.Errorf("folder does not exist or is not a directory: %s", folder)
-		}
-	} else if transport == "url" {
-		serverUrl = params.Content
-	}
-
-	var argv []string = make([]string, 0)
-	argv = append(argv, "run", "--no-project", "main.py")
-	argv = append(argv, "--model", params.Model.Model)
-	argv = append(argv, "--base_url", params.Model.BaseUrl)
-	argv = append(argv, "--api_key", params.Model.Token)
-	argv = append(argv, "--prompt", params.Content)
-	argv = append(argv, "--debug")
-	argv = append(argv, "--language", language)
-	if params.Headers != nil {
-		for k, v := range params.Headers {
-			argv = append(argv, "--header", fmt.Sprintf("%s:%s", k, v))
-		}
-	}
-
-	taskTitles := plan.taskTitles
-	if transport == "code" {
 		argv = append(argv, "--repo", folder)
-	} else if transport == "url" {
-		argv = append(argv, "--server_url", serverUrl)
+		plan = mcpCodeExecutionPlan()
 	}
-
-	var tasks []SubTask
-	//taskTitles := []string{
-	//	"信息收集",
-	//	"代码审计",
-	//	"漏洞整理",
-	//}
-
-	for i, title := range taskTitles {
-		tasks = append(tasks, CreateSubTask(SubTaskStatusTodo, title, 0, strconv.Itoa(i+1)))
+	if params.Model == nil {
+		plan.taskTitles = []string{"基础检查（未使用模型）"}
 	}
-	callbacks.PlanUpdateCallback(tasks)
-	config := CmdConfig{StatusId: ""}
+	private, err := json.Marshal(params.mcpPrivateConfig)
+	if err != nil {
+		return errMCPRuntime
+	}
 	mcpDir, err := utils.ResolveMcpScanDir()
 	if err != nil {
-		return fmt.Errorf("resolve mcp-scan directory: %v", err)
+		return errors.New("MCP scanner runtime unavailable")
 	}
 	uvBin, err := utils.ResolveUvBin()
 	if err != nil {
-		return fmt.Errorf("resolve uv binary: %v", err)
+		return errors.New("MCP scanner runtime unavailable")
 	}
-	err = utils.RunCmdWithContext(ctx, mcpDir, uvBin, argv, func(line string) {
+	var tasks []SubTask
+	for i, title := range plan.taskTitles {
+		tasks = append(tasks, CreateSubTask(SubTaskStatusTodo, title, 0, strconv.Itoa(i+1)))
+	}
+	if callbacks.PlanUpdateCallback != nil {
+		callbacks.PlanUpdateCallback(tasks)
+	}
+	config := CmdConfig{}
+	return utils.RunCmdWithContextInput(ctx, mcpDir, uvBin, argv, bytes.NewReader(private), []string{"AIG_SERVER=" + m.Server, "PYTHONUTF8=1", "PYTHONIOENCODING=utf-8"}, mcpRuntimeRedactor(params), func(line string) {
 		ParseStdoutLine(m.Server, request.SessionId, mcpDir, tasks, line, callbacks, &config, false)
 	})
-	return err
 }

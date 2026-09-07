@@ -114,11 +114,11 @@ func TestMCPCreateUnitOfWorkPostgresRollsBackTaskAttachmentBindingAndIdempotency
 	require.NoError(t, idempotencyRepository.Init())
 	auditService := audit.NewService(auditRepository)
 	attachmentService, err := tasks.NewAttachmentService(taskRepository, tasks.AttachmentConfig{
-		UploadDir: t.TempDir(), MaxFileBytes: 16, MaxChunkBytes: 8,
+		MCPOnly: true, UploadDir: t.TempDir(), MaxFileBytes: 16, MaxChunkBytes: 8,
 	}, auditService)
 	require.NoError(t, err)
 	taskService := tasks.NewService(taskRepository, postgresNoopEngine{}, auditService)
-	taskService.SetAttachmentService(attachmentService)
+	taskService.SetMCPAttachmentService(attachmentService)
 	keyring := postgresTestKeyring(t)
 	policy := postgresTestPolicy(t)
 	failingBindings := &failingPostgresBindingRepository{delegate: bindingRepository, err: errors.New("injected binding failure")}
@@ -128,7 +128,7 @@ func TestMCPCreateUnitOfWorkPostgresRollsBackTaskAttachmentBindingAndIdempotency
 	})
 	subject := identity.Subject{UserID: "rollback-owner", Username: "rollback-user", Role: identity.RoleUser}
 	attachment := &tasks.Attachment{
-		ID: "rollback-ready-attachment", OwnerUserID: subject.UserID, OriginalName: "private-source.zip", StorageName: "opaque-rollback-storage",
+		ID: "rollback-ready-attachment", OwnerUserID: subject.UserID, OriginalName: "private-source.zip", StorageName: "mcp-opaque-rollback-storage",
 		Size: 8, State: tasks.AttachmentStateReady, CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC(),
 	}
 	require.NoError(t, taskRepository.CreateAttachment(ctx, attachment))
@@ -183,7 +183,7 @@ func TestMCPCreateUnitOfWorkPostgresLocksServiceVersionAndDispatchesAfterCommit(
 	dispatcher := &committedPostgresDispatcher{tasks: taskRepository, bindings: bindingRepository}
 	workflow := NewCreateUnitOfWork(CreateUnitOfWorkDependencies{
 		Idempotency: idempotency.NewService(idempotencyRepository), Audits: auditService, Tasks: taskService,
-		Connections: connectionService, Bindings: bindingRepository, Keyring: keyring, Policy: policy, Dispatcher: dispatcher,
+		Connections: connectionService, Bindings: bindingRepository, Keyring: keyring, Policy: policy, Dispatcher: dispatcher, Models: allowedModelDescriber{},
 	})
 	input := CreateInput{
 		IdempotencyKey: "service-postgres-key", SourceKind: SourceKindService, ConnectionConfigID: connection.ID,
@@ -228,11 +228,11 @@ func TestMCPCreateUnitOfWorkPostgresAllowsOnlyOneCompetingAttachmentBinding(t *t
 	require.NoError(t, idempotencyRepository.Init())
 	auditService := audit.NewService(auditRepository)
 	attachmentService, err := tasks.NewAttachmentService(taskRepository, tasks.AttachmentConfig{
-		UploadDir: t.TempDir(), MaxFileBytes: 16, MaxChunkBytes: 8,
+		MCPOnly: true, UploadDir: t.TempDir(), MaxFileBytes: 16, MaxChunkBytes: 8,
 	}, auditService)
 	require.NoError(t, err)
 	taskService := tasks.NewService(taskRepository, postgresNoopEngine{}, auditService)
-	taskService.SetAttachmentService(attachmentService)
+	taskService.SetMCPAttachmentService(attachmentService)
 	blockingBindings := &blockingPostgresBindingRepository{
 		delegate: bindingRepository, started: make(chan struct{}), release: make(chan struct{}),
 	}
@@ -242,7 +242,7 @@ func TestMCPCreateUnitOfWorkPostgresAllowsOnlyOneCompetingAttachmentBinding(t *t
 	})
 	subject := identity.Subject{UserID: "attachment-race-owner", Username: "attachment-race-user", Role: identity.RoleUser}
 	attachment := &tasks.Attachment{
-		ID: "attachment-race-ready", OwnerUserID: subject.UserID, OriginalName: "private-source.zip", StorageName: "opaque-attachment-race",
+		ID: "attachment-race-ready", OwnerUserID: subject.UserID, OriginalName: "private-source.zip", StorageName: "mcp-opaque-attachment-race",
 		Size: 8, State: tasks.AttachmentStateReady, CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC(),
 	}
 	require.NoError(t, taskRepository.CreateAttachment(ctx, attachment))

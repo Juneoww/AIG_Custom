@@ -84,7 +84,7 @@ func TestResetPostgresTestDBClearsMCPConnectionSchemaFixtures(t *testing.T) {
 
 	require.NoError(t, Migrate(db), "the next test run must not inherit stale v10 objects")
 	assertMCPConnectionSchema(t, db)
-	require.Equal(t, []int64{1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11}, migrationVersions(t, db))
+	require.Equal(t, []int64{1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12}, migrationVersions(t, db))
 }
 
 func testPostgresDSN(t *testing.T) string {

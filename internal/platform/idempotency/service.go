@@ -10,6 +10,8 @@ import (
 	"math/big"
 	"net/url"
 	"path"
+	"reflect"
+	"strconv"
 	"strings"
 	"time"
 
@@ -395,6 +397,20 @@ func encodeSafeResponse(response SafeResponse) (json.RawMessage, error) {
 }
 
 func decodeSafeResponse(raw json.RawMessage) (SafeResponse, error) {
+	var variant map[string]json.RawMessage
+	if json.Unmarshal(raw, &variant) != nil {
+		return SafeResponse{}, ErrUnsafeResponse
+	}
+	if _, task := variant["task_id"]; !task {
+		var response SafeResponse
+		if DecodeStrict(raw, &response) != nil || validateSafeResponse(response) != nil {
+			return SafeResponse{}, ErrUnsafeResponse
+		}
+		if response.ID != "" && len(variant) != 4 || response.AttachmentID != "" && len(variant) != 3 {
+			return SafeResponse{}, ErrUnsafeResponse
+		}
+		return response, nil
+	}
 	if len(raw) == 0 {
 		return SafeResponse{}, ErrUnsafeResponse
 	}
@@ -439,13 +455,115 @@ func decodeSafeResponse(raw json.RawMessage) (SafeResponse, error) {
 }
 
 func validateSafeResponse(response SafeResponse) error {
+	if response.ID != "" {
+		if response.TaskID != "" || response.AttachmentID != "" || response.Size != 0 || response.CurrentVersion < 1 {
+			return ErrUnsafeResponse
+		}
+		if _, err := uuid.Parse(response.ID); err != nil {
+			return ErrUnsafeResponse
+		}
+		revision, err := strconv.ParseUint(response.ResourceRevision, 10, 64)
+		if err != nil || revision == 0 || strconv.FormatUint(revision, 10) != response.ResourceRevision {
+			return ErrUnsafeResponse
+		}
+		switch response.Status {
+		case "created", "updated", "enabled", "disabled", "passed", "failed":
+			return nil
+		}
+		return ErrUnsafeResponse
+	}
+	if response.AttachmentID != "" {
+		if response.TaskID != "" || response.CurrentVersion != 0 || response.ResourceRevision != "" || response.Size <= 0 || (response.Status != "ready" && response.Status != "chunk_uploaded") {
+			return ErrUnsafeResponse
+		}
+		if _, err := uuid.Parse(response.AttachmentID); err != nil {
+			return ErrUnsafeResponse
+		}
+		return nil
+	}
+	if response.CurrentVersion != 0 || response.ResourceRevision != "" || response.Size != 0 {
+		return ErrUnsafeResponse
+	}
 	if _, err := uuid.Parse(strings.TrimSpace(response.TaskID)); err != nil {
 		return ErrUnsafeResponse
 	}
 	switch response.Status {
-	case "pending", "dispatching", "running", "dispatch_failed", "dispatch_unknown":
+	case "pending", "dispatching", "running", "dispatch_failed", "dispatch_unknown", "cancelled", "succeeded", "failed":
 		return nil
 	default:
 		return ErrUnsafeResponse
 	}
+}
+
+// DecodeStrict 在所有 MCP 写入边界拒绝未知字段、重复键和拼接 JSON，避免
+// 浏览器所见 DTO 与幂等载荷哈希解释不同。调用方应同时限制 HTTP 请求体大小。
+func DecodeStrict(raw []byte, destination any) error {
+	trimmed := bytes.TrimSpace(raw)
+	if len(trimmed) == 0 || trimmed[0] != '{' || len(raw) > maxPayloadBytes || validateUniqueJSONMembers(raw) != nil || !exactJSONFields(raw, reflect.TypeOf(destination)) {
+		return ErrInvalid
+	}
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder.DisallowUnknownFields()
+	if decoder.Decode(destination) != nil {
+		return ErrInvalid
+	}
+	if decoder.Decode(&struct{}{}) != io.EOF {
+		return ErrInvalid
+	}
+	return nil
+}
+
+// encoding/json 默认忽略字段名大小写；专属 wire 合同不允许这种别名。
+func exactJSONFields(raw json.RawMessage, shape reflect.Type) bool {
+	if shape == nil {
+		return false
+	}
+	for shape.Kind() == reflect.Pointer {
+		shape = shape.Elem()
+	}
+	if bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
+		return true
+	}
+	switch shape.Kind() {
+	case reflect.Struct:
+		var fields map[string]json.RawMessage
+		if json.Unmarshal(raw, &fields) != nil || fields == nil {
+			return false
+		}
+		allowed := map[string]reflect.Type{}
+		for index := 0; index < shape.NumField(); index++ {
+			field := shape.Field(index)
+			if field.PkgPath != "" {
+				continue
+			}
+			name := strings.Split(field.Tag.Get("json"), ",")[0]
+			if name == "-" {
+				continue
+			}
+			if name == "" {
+				name = field.Name
+			}
+			allowed[name] = field.Type
+		}
+		for name, value := range fields {
+			typ, ok := allowed[name]
+			if !ok || !exactJSONFields(value, typ) {
+				return false
+			}
+		}
+	case reflect.Slice, reflect.Array:
+		if shape.Elem().Kind() == reflect.Uint8 {
+			return true
+		}
+		var values []json.RawMessage
+		if json.Unmarshal(raw, &values) != nil {
+			return false
+		}
+		for _, value := range values {
+			if !exactJSONFields(value, shape.Elem()) {
+				return false
+			}
+		}
+	}
+	return true
 }

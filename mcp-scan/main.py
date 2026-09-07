@@ -18,7 +18,7 @@
 # documentation or user interface, as detailed in the NOTICE file.
 
 """功能：启动 MCP 扫描或 Skills 只读静态扫描。
-实现：按 mode 分流；Skills 使用专用边界、固定模型环境和严格结果校验。
+实现：MCP 私有 stdin 固定网关；无模型进行只读基础检查，有模型增加辅助分析。
 输入：命令行、模型环境变量与目标路径。输出：扫描事件及最终结果；失败非零退出。
 依赖：requirements.txt；Skills 示例：python main.py --mode skills --repo /path/to/skill。
 """
@@ -31,19 +31,31 @@ import sys
 # 在导入配置和日志模块之前确定模式，Skills 不加载本地 .env 或调试文件日志。
 _mode_parser = argparse.ArgumentParser(add_help=False)
 _mode_parser.add_argument("--mode", choices=["mcp", "skills"], default="mcp")
+_mode_parser.add_argument("--runtime-config-stdin", action="store_true")
 _early_mode, _ = _mode_parser.parse_known_args()
 if _early_mode.mode == "skills":
     os.environ["AIG_SCAN_MODE"] = "skills"
+elif _early_mode.runtime_config_stdin:
+    os.environ["AIG_SCAN_MODE"] = "mcp-private"
+    # 私有 CLI 与 Go Agent 使用同一 UTF-8 事件协议；不改变 Skills 日志行为。
+    for _stream in (sys.stdout, sys.stderr):
+        if hasattr(_stream, "reconfigure"):
+            _stream.reconfigure(encoding="utf-8", errors="strict")
 
-from agent.agent import Agent
-from utils import config
+_private_runtime = None
+if _early_mode.runtime_config_stdin and "--help" not in sys.argv and "-h" not in sys.argv:
+    from utils.runtime_config import load_runtime_config, install_private_output
+    try:
+        _private_runtime = load_runtime_config(sys.stdin.buffer)
+    except ValueError:
+        print('{"type":"error","content":"MCP runtime configuration invalid"}', file=sys.stderr)
+        raise SystemExit(1) from None
+    install_private_output(_private_runtime)
+    import logging
+    for _name in ("mcp", "httpx", "httpcore"):
+        logging.getLogger(_name).setLevel(logging.CRITICAL + 1)
+
 from utils.aig_logger import mcpLogger
-from utils.llm import LLM
-from utils.llm_manager import LLMManager
-from utils.loging import logger
-
-# 重要：导入 tools 包以触发工具注册
-import tools as _  # isort: skip
 
 _prompts = {"zh": "所有回复都应使用中文。", "en": "All responses should be in English."}
 
@@ -58,45 +70,46 @@ def parse_args():
     # 必需参数
     parser.add_argument("--mode", choices=["mcp", "skills"], default="mcp", help="扫描模式")
     parser.add_argument("--repo", default="", help="要扫描的项目文件夹路径")
+    parser.add_argument("--runtime-config-stdin", action="store_true", help="从私有标准输入读取受治理运行时")
 
     # 可选参数
-    parser.add_argument("-p", "--prompt", default="", help="自定义扫描提示词（可选）")
+    parser.add_argument("-p", "--prompt", default="", help=argparse.SUPPRESS)
 
     parser.add_argument(
         "-m",
         "--model",
-        default=config.DEFAULT_MODEL,
-        help=f"LLM 模型名称（默认: {config.DEFAULT_MODEL}）",
+        default=None,
+        help=argparse.SUPPRESS,
     )
 
     parser.add_argument(
         "-k",
         "--api_key",
         default=None,
-        help="API Key（如果不提供，将从环境变量 OPENROUTER_API_KEY 读取）",
+        help=argparse.SUPPRESS,
     )
 
     parser.add_argument(
         "-u",
         "--base_url",
-        default=config.DEFAULT_BASE_URL,
-        help=f"API 基础 URL（默认: {config.DEFAULT_BASE_URL}）",
+        default=None,
+        help=argparse.SUPPRESS,
     )
 
     parser.add_argument(
         "--debug",
         action="store_true",
-        help="启用 debug 模式（包括 Laminar 跟踪）",
+        help=argparse.SUPPRESS,
         default=False,
     )
 
-    parser.add_argument("--server_url", help="remote MCP server URL", default=None)
+    parser.add_argument("--server_url", help=argparse.SUPPRESS, default=None)
 
     parser.add_argument(
         "--header",
         action="append",
         dest="headers",
-        help="Custom header in key:value format (can be used multiple times)",
+        help=argparse.SUPPRESS,
         default=[],
     )
 
@@ -114,96 +127,48 @@ async def main():
         await run_skills(args)
         return
 
-    # 获取 API Key（优先使用命令行参数，否则从环境变量读取）
-    api_key = args.api_key or os.environ.get("OPENROUTER_API_KEY")
-    if not api_key:
-        logger.error(
-            "API Key not provided. Use --api_key or set OPENROUTER_API_KEY environment variable."
-        )
-        sys.exit(1)
-
-    # 创建主 LLM 实例
-    llm = LLM(
-        model=args.model,
-        api_key=api_key,
-        base_url=args.base_url,
-        context_window=config.DEFAULT_MODEL_CONTEXT_WINDOW,
-    )
-    logger.info(f"Main LLM initialized: {args.model}")
-
-    # 使用主 API Key 作为默认值
-    llm_manager = LLMManager(api_key=api_key, base_url=args.base_url)
-
-    # 获取专用LLM实例字典
-    specialized_llms = llm_manager.get_specialized_llms(["thinking", "coding"])
-    logger.info(f"Specialized LLMs configured: {list(specialized_llms.keys())}")
-
-    user_prompt = args.prompt.strip()
-    lang_prompt = _prompts.get(args.language, "")
-    prompt = f"{user_prompt}\n\n{lang_prompt}" if user_prompt else lang_prompt
-    if prompt:
-        logger.info(f"Custom prompt: {prompt}")
-
-    # 解析 headers
-    headers = {}
-    if args.headers:
-        for header_item in args.headers:
-            try:
-                if ":" in header_item:
-                    key, value = header_item.split(":", 1)
-                    headers[key.strip()] = value.strip()
-                elif "=" in header_item:
-                    key, value = header_item.split("=", 1)
-                    headers[key.strip()] = value.strip()
-                else:
-                    logger.warning(f"Ignored invalid header format: {header_item}")
-            except Exception as e:
-                logger.warning(f"Failed to parse header {header_item}: {e}")
-
-        if headers:
-            logger.info(f"Custom headers: {headers}")
-
-    agent = Agent(
-        llm=llm,
-        specialized_llms=specialized_llms,
-        debug=args.debug,
-        server_url=args.server_url,
-        language=args.language,
-        headers=headers,
-    )
+    agent = None
     try:
-        if args.server_url:
-            logger.info(f"Server mode enabled with URL: {args.server_url}")
-            dynamic_results = await agent.dynamic_analysis(prompt)
-            logger.info(f"Dynamic analysis results:\n{dynamic_results}")
+        if not args.runtime_config_stdin or _private_runtime is None or args.api_key or args.server_url or args.headers or args.prompt or args.debug or args.model or args.base_url:
+            raise ValueError("MCP runtime configuration invalid")
+        runtime = _private_runtime
+        if bool(runtime.get("archive_ref")) != bool(args.repo):
+            raise ValueError("MCP runtime configuration invalid")
+        if "model" not in runtime:
+            from agent.basic_mcp_scan import run_basic_scan
+            mcpLogger.result_update(await run_basic_scan(runtime, args.repo))
+            return
+        repository_root = None
+        if "archive_ref" in runtime:
+            from tools.repository_static import validate_repository_root
+            repository_root = str(validate_repository_root(args.repo))
+        # 仅模型辅助分支导入模型及完整 Agent，基础模式不读取模型环境。
+        from agent.agent import Agent
+        from utils import config
+        from utils.llm import LLM
+        import tools as _
+        model = runtime["model"]
+        # 主模型和专用推理角色共用本任务私有配置，避免本地环境覆盖出口。
+        llm = LLM(model=model["model"], api_key=model["token"], base_url=model["base_url"],
+                  context_window=config.DEFAULT_MODEL_CONTEXT_WINDOW)
+        # 空流式响应必须失败，不能把旧版 LLM 的连接失败说明当成阶段证据。
+        llm.strict_empty_output = True
+        agent = Agent(llm=llm, specialized_llms={"thinking": llm, "coding": llm},
+                      debug=False, language=args.language, runtime_config=runtime, repository_root=repository_root)
+        prompt = _prompts.get(args.language, "")
+        if runtime.get("mcp_proxy_url"):
+            await agent.dynamic_analysis(prompt)
         else:
-            # 验证项目路径
-            if not os.path.exists(args.repo):
-                logger.error(f"Project path does not exist: {args.repo}")
-                sys.exit(1)
-
-            if not os.path.isdir(args.repo):
-                logger.error(f"Project path is not a directory: {args.repo}")
-                sys.exit(1)
-
-            logger.info(f"Starting scan on: {args.repo}")
-            result = await agent.scan(args.repo, prompt)
-            logger.info(f"Scan completed successfully:\n\n {result}")
-    except KeyboardInterrupt:
-        print("\n\nTask interrupted by user.")
-        logger.warning("Task interrupted by user")
-    except Exception as e:
-        print(f"\n\nError during execution: {e}")
-        logger.error(f"Error during execution: {e}")
-        import traceback
-
-        tb = traceback.format_exc()
-        mcpLogger.error_log(f"Execution failed: {e}\n{tb}")
-        raise
+            await agent.scan(repository_root, prompt)
+    except (Exception, KeyboardInterrupt):
+        mcpLogger.error_log("MCP scan failed")
+        raise SystemExit(1) from None
     finally:
-        # 确保关闭资源
-        if hasattr(agent, "dispatcher"):
-            await agent.dispatcher.close()
+        if agent is not None:
+            try:
+                await agent.dispatcher.close()
+            except Exception:
+                pass
 
 
 async def run_skills(args):
@@ -212,7 +177,7 @@ async def run_skills(args):
 
     scanner = None
     try:
-        if args.debug or args.server_url or args.headers or args.prompt:
+        if args.debug or args.server_url or args.headers or args.prompt or args.runtime_config_stdin:
             raise ValueError("Skills mode only supports local static analysis")
         root = validate_skill_root(args.repo)
         scanner = SkillsAgent(create_skills_llm(), language=args.language)
@@ -227,4 +192,9 @@ async def run_skills(args):
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    try:
+        asyncio.run(main())
+    finally:
+        for _stream in (sys.stdout, sys.stderr):
+            if hasattr(_stream, "close_private"):
+                _stream.close_private()

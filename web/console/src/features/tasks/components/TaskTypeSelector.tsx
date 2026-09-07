@@ -12,7 +12,7 @@ export function TaskTypeSelector({ value, onChange, disabled = false }: {
   return (
     <Field label="扫描类型">
       <Select value={value} disabled={disabled} onChange={(_, data) => onChange(data.value as TaskCreateRequest['task_type'])}>
-        {Object.entries(taskTypeLabels).filter(([type]) => type !== 'unknown').map(([type, label]) => <option key={type} value={type}>{label}</option>)}
+        {Object.entries(taskTypeLabels).filter(([type]) => type !== 'unknown' && type !== 'mcp_scan').map(([type, label]) => <option key={type} value={type}>{label}</option>)}
       </Select>
     </Field>
   )

@@ -151,7 +151,7 @@ func RunWebServer(options *version.Options) {
 	}
 	log.Infof("Trpc-go initialized successfully: trace_id=system_startup")
 
-	r := gin.Default()
+	r := newWebServerRouter(gin.DefaultWriter, gin.DefaultErrorWriter)
 	// 2. 添加中间件
 	//r.Use(middleware.TrpcMiddleware())
 	//r.Use(middleware.RequestLoggerMiddleware()) // 添加请求参数日志中间件
@@ -209,7 +209,8 @@ func RunWebServer(options *version.Options) {
 	sseManager := NewSSEManager()
 
 	taskManager := NewTaskManager(agentManager, taskStore, modelStore, fileConfig, sseManager)
-	taskManager.SetModelResolver(platformmodels.NewScannerResolver(platformModelRepo, identityRepo, modelKeyring))
+	modelResolver := platformmodels.NewScannerResolver(platformModelRepo, identityRepo, modelKeyring)
+	taskManager.SetModelResolver(modelResolver)
 	attachmentConfig, err := platformtasks.LoadAttachmentConfigFromEnv(fileConfig.UploadDir)
 	if err != nil {
 		log.Fatalf("附件大小配置无效: trace_id=system_startup, error=%v", err)
@@ -220,6 +221,10 @@ func RunWebServer(options *version.Options) {
 	}
 	platformTaskService := platformtasks.NewService(stores.platformTaskRepository, taskManager, auditService)
 	platformTaskService.SetAttachmentService(attachmentService)
+	mcpModule, err := newMCPServerModule(db, stores.platformTaskRepository, platformTaskService, taskManager, modelResolver, auditService, attachmentConfig, options.WebServerAddr)
+	if err != nil {
+		log.Fatalf("初始化 MCP 专属服务失败: trace_id=system_startup")
+	}
 	brandService := platformbrand.NewGovernedService(stores.brandRepository, auditService)
 	reportRenderer, err := platformreports.NewEmbeddedPDFRenderer()
 	if err != nil {
@@ -252,6 +257,8 @@ func RunWebServer(options *version.Options) {
 		identity.RegisterRoutesWithObserver(auth, identityService, identityPolicy, auditService)
 		platformGroup := v1.Group("/platform")
 		registerPlatformGovernanceRoutes(platformGroup, identityService, identityPolicy, adminHandler, platformModelService, platformTaskHandler)
+		mcpModule.RegisterPlatform(platformGroup)
+		mcpModule.RegisterInternal(r.Group("/api/internal"), agentManager.RequireInternalToken())
 		registerPlatformDashboardRoutes(platformGroup, dashboardHandler)
 		registerPlatformMCPWorkbenchRoutes(platformGroup, mcpWorkbenchHandler)
 		registerPlatformReportRoutes(platformGroup, reportHandler, brandHandler)

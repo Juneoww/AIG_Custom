@@ -87,6 +87,8 @@ const useStyles = makeStyles({
     },
   },
   entryTitle: {
+    display: 'block',
+    marginBottom: tokens.spacingVerticalS,
     color: tokens.colorNeutralForeground1,
     fontSize: tokens.fontSizeBase400,
     fontWeight: tokens.fontWeightSemibold,
@@ -242,7 +244,7 @@ function ActiveTaskTable({ tasks }: { tasks: readonly MCPWorkbenchActiveTask[] }
       id: 'label',
       header: '任务',
       render: (task) => (
-        <Link className={styles.detailLink} to={`/tasks/${encodeURIComponent(task.task_id)}`} aria-label={`查看任务 ${task.label}`}>
+        <Link className={styles.detailLink} to={`/tasks/mcp/${encodeURIComponent(task.task_id)}`} aria-label={`查看任务 ${task.label}`}>
           {task.label}
         </Link>
       ),
@@ -295,7 +297,7 @@ function CreationEntries() {
     <section aria-labelledby="mcp-scan-entry-title">
       <h2 className={styles.sectionTitle} id="mcp-scan-entry-title">开始 MCP 扫描</h2>
       <div className={styles.entryGrid}>
-        <Link className={styles.entryLink} to="/tasks/new?task_type=mcp_scan&source_kind=repository" aria-label="创建仓库 MCP 扫描">
+        <Link className={styles.entryLink} to="/tasks/mcp/new" aria-label="创建仓库 MCP 扫描">
           <Card className={styles.entryCard}>
             <div>
               <Text className={styles.entryTitle}>仓库 / 代码包扫描</Text>
@@ -304,7 +306,7 @@ function CreationEntries() {
             <Text className={styles.entryHint}>配置仓库扫描 →</Text>
           </Card>
         </Link>
-        <Link className={styles.entryLink} to="/tasks/new?task_type=mcp_scan&source_kind=service" aria-label="创建受控服务 MCP 扫描">
+        <Link className={styles.entryLink} to="/tasks/mcp/new" aria-label="创建受控服务 MCP 扫描">
           <Card className={styles.entryCard}>
             <div>
               <Text className={styles.entryTitle}>受控 MCP 服务验证</Text>
@@ -336,7 +338,7 @@ function MCPWorkbenchBreadcrumb() {
 }
 
 function NewMCPScanAction() {
-  const to = '/tasks/new?task_type=mcp_scan&source_kind=repository'
+  const to = '/tasks/mcp/new'
   const href = useHref(to)
   const onClick = useLinkClickHandler(to)
 
@@ -385,7 +387,7 @@ function WorkbenchContent({
         </Card>
       </div>
       <nav className={styles.footerLinks} aria-label="MCP 工作台相关链接">
-        <Link className={styles.footerLink} to="/tasks?task_type=mcp_scan" aria-label="查看 MCP 扫描历史">查看 MCP 扫描历史</Link>
+        <Link className={styles.footerLink} to="/tasks/mcp/scans" aria-label="查看 MCP 扫描历史">查看 MCP 扫描历史</Link>
         <Link className={styles.footerLink} to="/knowledge/mcp" aria-label="查看 MCP 知识库">查看 MCP 知识库</Link>
       </nav>
     </>

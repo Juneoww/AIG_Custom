@@ -652,7 +652,7 @@ func TestSwaggerDocumentsTaskCreateAndLegacySecurityCorrections(t *testing.T) {
 				t.Errorf("attachment id maxLength = %v", got)
 			}
 			taskTypes := swaggerValue(t, body, "properties", "task_type", "enum").([]interface{})
-			if !reflect.DeepEqual(taskTypes, []interface{}{"mcp_scan", "ai_infra_scan", "model_redteam_report", "agent_scan", "skills_scan"}) {
+			if !reflect.DeepEqual(taskTypes, []interface{}{"ai_infra_scan", "model_redteam_report", "agent_scan", "skills_scan"}) {
 				t.Errorf("task create type enum = %v", taskTypes)
 			}
 			badRequestDescription := strings.ToLower(swaggerValue(t, document, "paths", createPath, "post", "responses", "400", "description").(string))
@@ -717,7 +717,7 @@ func TestSwaggerDocumentsTaskCreateAndLegacySecurityCorrections(t *testing.T) {
 func TestSwaggerDocumentsGovernedMCPCreateAndWorkbenchContract(t *testing.T) {
 	for name, document := range loadSwaggerDocuments(t) {
 		t.Run(name, func(t *testing.T) {
-			const createPath = "/api/v1/platform/tasks"
+			const createPath = "/api/v1/platform/mcp-scans"
 			createDescription := strings.ToLower(swaggerValue(t, document, "paths", createPath, "post", "description").(string))
 			for _, term := range []string{"mcp_scan", "source_kind", "repository", "service", "authorization_confirmed", "audit", "source-related audit metadata", "safe phase metadata"} {
 				if !strings.Contains(createDescription, term) {
@@ -725,7 +725,7 @@ func TestSwaggerDocumentsGovernedMCPCreateAndWorkbenchContract(t *testing.T) {
 				}
 			}
 
-			params := swaggerValue(t, swaggerBodyParameterSchema(t, document, createPath, "post"), "properties", "params").(map[string]interface{})
+			params := swaggerValue(t, document, "definitions", "mcpscans.CreateRequest").(map[string]interface{})
 			assertSwaggerStringEnum(t, swaggerValue(t, params, "properties").(map[string]interface{}), "source_kind", []string{"repository", "service"})
 			authorization := swaggerValue(t, params, "properties", "authorization_confirmed").(map[string]interface{})
 			if authorization["type"] != "boolean" {
@@ -836,7 +836,7 @@ func TestSwaggerDocumentsTaskListExactFilters(t *testing.T) {
 				t.Errorf("task status filter enum = %v", status)
 			}
 			taskType := swaggerParameterValue(t, document, path, "get", "task_type", "enum").([]interface{})
-			if !reflect.DeepEqual(taskType, []interface{}{"mcp_scan", "ai_infra_scan", "model_redteam_report", "agent_scan", "skills_scan"}) {
+			if !reflect.DeepEqual(taskType, []interface{}{"ai_infra_scan", "model_redteam_report", "agent_scan", "skills_scan"}) {
 				t.Errorf("task_type filter enum = %v", taskType)
 			}
 			description := swaggerValue(t, document, "paths", path, "get", "responses", "400", "description").(string)

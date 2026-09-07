@@ -93,7 +93,7 @@ describe('MCPWorkbenchPage', () => {
     renderWorkbench()
 
     fireEvent.click(screen.getByRole('link', { name: '新建 MCP 扫描' }))
-    expect(screen.getByLabelText('当前工作台路由')).toHaveTextContent('/tasks/new?task_type=mcp_scan&source_kind=repository')
+    expect(screen.getByLabelText('当前工作台路由')).toHaveTextContent('/tasks/mcp/new')
 
     fireEvent.click(screen.getByRole('link', { name: '扫描任务' }))
     expect(screen.getByLabelText('当前工作台路由')).toHaveTextContent('/tasks')
@@ -132,22 +132,22 @@ describe('MCPWorkbenchPage', () => {
     expect(screen.getByRole('link', { name: '扫描任务' })).toHaveAttribute('href', '/tasks')
     expect(screen.getByRole('link', { name: '新建 MCP 扫描' })).toHaveAttribute(
       'href',
-      '/tasks/new?task_type=mcp_scan&source_kind=repository',
+      '/tasks/mcp/new',
     )
     expect(screen.getByRole('link', { name: '创建仓库 MCP 扫描' })).toHaveAttribute(
       'href',
-      '/tasks/new?task_type=mcp_scan&source_kind=repository',
+      '/tasks/mcp/new',
     )
     expect(screen.getByRole('link', { name: '创建受控服务 MCP 扫描' })).toHaveAttribute(
       'href',
-      '/tasks/new?task_type=mcp_scan&source_kind=service',
+      '/tasks/mcp/new',
     )
     expect(screen.getByRole('table', { name: '进行中的 MCP 扫描' })).toBeInTheDocument()
-    expect(screen.getByRole('link', { name: '查看任务 MCP 扫描 · task-opa' })).toHaveAttribute('href', '/tasks/task-opaque-1')
+    expect(screen.getByRole('link', { name: '查看任务 MCP 扫描 · task-opa' })).toHaveAttribute('href', '/tasks/mcp/task-opaque-1')
     expect(screen.getByText('阶段未提供')).toBeInTheDocument()
     expect(screen.getByRole('region', { name: '最近风险' })).toHaveTextContent('危险工具调用')
     expect(screen.getByRole('link', { name: '查看安全报告 report-opaque-1' })).toHaveAttribute('href', '/reports/report-opaque-1')
-    expect(screen.getByRole('link', { name: '查看 MCP 扫描历史' })).toHaveAttribute('href', '/tasks?task_type=mcp_scan')
+    expect(screen.getByRole('link', { name: '查看 MCP 扫描历史' })).toHaveAttribute('href', '/tasks/mcp/scans')
     expect(screen.getByRole('link', { name: '查看 MCP 知识库' })).toHaveAttribute('href', '/knowledge/mcp')
     expect(document.body).not.toHaveTextContent(/ENDPOINT-SENTINEL|RAW-RESULT-SENTINEL|MODEL-SENTINEL|TOKEN-SENTINEL|RISK-RAW-SENTINEL/)
   })

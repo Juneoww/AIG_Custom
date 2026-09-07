@@ -19,7 +19,7 @@ var (
 
 const (
 	maxConnectionNameRunes        = 80
-	maxConnectionDescriptionRunes = 240
+	maxConnectionDescriptionRunes = 500
 	maxDisplayTokenRunes          = 31
 	maxCustomHeaders              = 10
 	maxHTTPHeaderNameBytes        = 64
@@ -77,6 +77,10 @@ func NewService(repository ConnectionRepository, keyring *Keyring, prober *Probe
 // Create 只保存 disabled/not_tested 的新版本。即使浏览器伪造已测试或 enabled
 // 字段也无效；实际可用性只能由受控 gateway 完成 probe 后再启用。
 func (service *Service) Create(ctx context.Context, subject identity.Subject, input CreateConnectionInput) (*ConnectionSummary, error) {
+	return service.create(ctx, subject, input, "")
+}
+
+func (service *Service) create(ctx context.Context, subject identity.Subject, input CreateConnectionInput, preparedID string) (*ConnectionSummary, error) {
 	if service == nil || service.repository == nil || service.keyring == nil {
 		return nil, ErrInvalid
 	}
@@ -91,8 +95,11 @@ func (service *Service) Create(ctx context.Context, subject identity.Subject, in
 		return nil, ErrOutboundDenied
 	}
 	now := service.now()
+	if preparedID == "" {
+		preparedID = service.newID()
+	}
 	config := &ConnectionConfig{
-		ID:               service.newID(),
+		ID:               preparedID,
 		OwnerUserID:      subject.UserID,
 		Scope:            input.Scope,
 		Name:             strings.TrimSpace(input.Name),
@@ -182,12 +189,41 @@ func (service *Service) GetManagementDetail(ctx context.Context, subject identit
 // token，随后只允许相同 token 的最小 initialize 结果写回；跨 Engine 的迟到
 // 成功因此不能覆盖较晚失败或配置变更后的最新状态。
 func (service *Service) Probe(ctx context.Context, subject identity.Subject, configID string) (*ConnectionSummary, error) {
+	return service.probe(ctx, subject, configID, "")
+}
+
+func (service *Service) probe(ctx context.Context, subject identity.Subject, configID, expectedRevision string) (*ConnectionSummary, error) {
+	prepared, err := service.prepareProbe(ctx, subject, configID, expectedRevision)
+	if err != nil {
+		return nil, err
+	}
+	summary, err := service.completePreparedProbe(ctx, prepared)
+	if err == nil && prepared.status == ProbeStatusFailed {
+		return nil, ErrProbeFailed
+	}
+	return summary, err
+}
+
+type preparedProbe struct {
+	config   *ConnectionConfig
+	version  *ConnectionVersion
+	payload  *ConnectionPayload
+	attempt  *ProbeAttempt
+	status   ProbeStatus
+	detected Transport
+}
+
+// prepareProbe 只持久化开始状态，网络请求不占业务事务。
+func (service *Service) prepareProbe(ctx context.Context, subject identity.Subject, configID, expectedRevision string) (*preparedProbe, error) {
 	config, version, err := service.visibleCurrentVersion(ctx, subject, configID)
 	if err != nil {
 		return nil, err
 	}
 	if !canManage(subject, config) {
 		return nil, ErrForbidden
+	}
+	if expectedRevision != "" && config.ResourceRevision != expectedRevision {
+		return nil, ErrConflict
 	}
 	if service.policy == nil || service.policy.RequireControlledDialer() != nil {
 		return nil, ErrControlledEgressRequired
@@ -217,20 +253,30 @@ func (service *Service) Probe(ctx context.Context, subject identity.Subject, con
 	config.ResourceRevision = attempt.Token
 	version.DetectedTransport = ""
 	version.ProbeStatus = ProbeStatusNotTested
+	prepared := &preparedProbe{config: config, version: version, attempt: attempt, status: ProbeStatusFailed}
 	payload, err := service.keyring.OpenConnectionPayload(config, version)
 	if err != nil {
-		return service.recordProbeFailure(ctx, attempt)
+		return prepared, nil
 	}
+	prepared.payload = &payload
 	result, err := service.prober.probeReserved(ctx, payload, version.Transport)
 	if err != nil {
-		return service.recordProbeFailure(ctx, attempt)
+		return prepared, nil
 	}
-	if err := service.repository.RecordProbeResult(ctx, config.ID, version.Version, attempt.Token, result.DetectedTransport, ProbeStatusPassed); err != nil {
+	prepared.status, prepared.detected = ProbeStatusPassed, result.DetectedTransport
+	return prepared, nil
+}
+
+// completePreparedProbe 可与幂等结果和完成审计在调用方事务内一起提交。
+func (service *Service) completePreparedProbe(ctx context.Context, prepared *preparedProbe) (*ConnectionSummary, error) {
+	config, version, attempt := prepared.config, prepared.version, prepared.attempt
+	if err := service.repository.RecordProbeResult(ctx, config.ID, version.Version, attempt.Token, prepared.detected, prepared.status); err != nil {
 		return nil, mapServiceRepositoryError(err)
 	}
-	version.DetectedTransport = result.DetectedTransport
-	version.ProbeStatus = ProbeStatusPassed
-	summary := summaryOf(config, version, &payload)
+	version.DetectedTransport = prepared.detected
+	version.ProbeStatus = prepared.status
+	config.ResourceRevision, _ = incrementRevision(attempt.Token)
+	summary := summaryOf(config, version, prepared.payload)
 	return &summary, nil
 }
 
@@ -247,12 +293,19 @@ func (service *Service) recordProbeFailure(ctx context.Context, attempt *ProbeAt
 }
 
 func (service *Service) SetEnabled(ctx context.Context, subject identity.Subject, configID string, enabled bool) (*ConnectionSummary, error) {
+	return service.setEnabled(ctx, subject, configID, enabled, "")
+}
+
+func (service *Service) setEnabled(ctx context.Context, subject identity.Subject, configID string, enabled bool, expectedRevision string) (*ConnectionSummary, error) {
 	config, version, err := service.visibleCurrentVersion(ctx, subject, configID)
 	if err != nil {
 		return nil, err
 	}
 	if !canManage(subject, config) {
 		return nil, ErrForbidden
+	}
+	if expectedRevision != "" && config.ResourceRevision != expectedRevision {
+		return nil, ErrConflict
 	}
 	if enabled {
 		// 已通过且具有具体 transport 的版本仍须在锁外重解密并按当前策略复验；
@@ -317,11 +370,12 @@ func (service *Service) TaskOptions(ctx context.Context, subject identity.Subjec
 			continue
 		}
 		options = append(options, TaskConnectionOption{
-			ConnectionID:      config.ID,
-			ConnectionVersion: version.Version,
-			Name:              name,
-			Scope:             config.Scope,
-			Transport:         version.DetectedTransport,
+			ConnectionID:       config.ID,
+			ConnectionVersion:  version.Version,
+			Name:               name,
+			Scope:              config.Scope,
+			Transport:          version.DetectedTransport,
+			AuthenticationKind: payload.Authentication.Kind,
 		})
 	}
 	return options, nil
@@ -449,16 +503,24 @@ func (service *Service) safeSummaryOf(config *ConnectionConfig, version *Connect
 
 func summaryOf(config *ConnectionConfig, version *ConnectionVersion, payload *ConnectionPayload) ConnectionSummary {
 	name, description, _ := safeConnectionDisplayText(config.Name, config.Description, payload)
+	authenticationKind := AuthenticationKind("unknown")
+	if payload != nil {
+		authenticationKind = payload.Authentication.Kind
+	}
 	return ConnectionSummary{
-		ID:                config.ID,
-		Name:              name,
-		Description:       description,
-		Scope:             config.Scope,
-		CurrentVersion:    config.CurrentVersion,
-		Enabled:           config.Enabled,
-		Transport:         version.Transport,
-		DetectedTransport: version.DetectedTransport,
-		ProbeStatus:       version.ProbeStatus,
+		ID:                 config.ID,
+		Name:               name,
+		Description:        description,
+		Scope:              config.Scope,
+		CurrentVersion:     config.CurrentVersion,
+		Enabled:            config.Enabled,
+		Transport:          version.Transport,
+		DetectedTransport:  version.DetectedTransport,
+		ProbeStatus:        version.ProbeStatus,
+		ResourceRevision:   config.ResourceRevision,
+		AuthenticationKind: authenticationKind,
+		CreatedAt:          config.CreatedAt,
+		UpdatedAt:          config.UpdatedAt,
 	}
 }
 

@@ -1,13 +1,12 @@
 /**
  * 功能：提供分步任务创建、附件上传与同逻辑提交幂等重试。
- * 实现：表单只收安全参数和模型ID，MCP 来源由白名单预设控制；附件先换取opaque ID；失败重试复用原Submission。
+ * 实现：表单只收安全参数和模型 ID；附件先换取 opaque ID；失败重试复用原Submission。
  * 输入：任务类型、目标/说明、安全参数和本地 File。
  * 输出：202 后导航到任务详情；错误时保留可核对表单但不自动重放写请求。
  * 依赖：Fluent UI、React Router、Session、任务及附件 API。
  */
 import {
   Button,
-  Checkbox,
   Field,
   Input,
   MessageBar,
@@ -19,11 +18,11 @@ import {
   tokens,
 } from '@fluentui/react-components'
 import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from 'react'
-import { useLocation, useNavigate } from 'react-router-dom'
+import { Navigate, useLocation, useNavigate } from 'react-router-dom'
 
 import { useSession } from '../auth/session'
 import { ApiError } from '../../shared/api/errors'
-import type { AttachmentView, InfrastructurePortScanMode, MCPSourceKind, TaskCreateRequest } from '../../shared/api/types'
+import type { AttachmentView, InfrastructurePortScanMode, TaskCreateRequest } from '../../shared/api/types'
 import { PageHeader } from '../../shared/components/PageHeader'
 import { downloadAttachment, preflightAttachments, uploadAttachment } from './attachments'
 import { createTaskSubmission, type TaskSubmission } from './api'
@@ -54,21 +53,6 @@ const useStyles = makeStyles({
   portScanMode: { display: 'flex', flexDirection: 'column', gap: tokens.spacingVerticalXS, gridColumn: '1 / -1' },
 })
 
-type MCPCreateSourceKind = Extract<MCPSourceKind, 'repository' | 'service'>
-
-function mcpCreatePreset(search: string): { taskType: TaskCreateRequest['task_type']; sourceKind: MCPCreateSourceKind } {
-  const query = new URLSearchParams(search)
-  if (query.get('task_type') !== 'mcp_scan') return { taskType: 'mcp_scan', sourceKind: 'repository' }
-  return {
-    taskType: 'mcp_scan',
-    sourceKind: query.get('source_kind') === 'service' ? 'service' : 'repository',
-  }
-}
-
-function isMCPServiceTarget(taskType: TaskCreateRequest['task_type'], sourceKind: MCPCreateSourceKind): boolean {
-  return taskType === 'mcp_scan' && sourceKind === 'service'
-}
-
 const MAX_AI_TARGET_LIST_BYTES = 1_024 * 1_024
 const MAX_TASK_REMARK_CODE_POINTS = 2_000
 
@@ -97,7 +81,9 @@ export interface TaskCreatePageProps {
 }
 
 export function TaskCreatePage({ fixedTaskType, returnTo }: TaskCreatePageProps) {
-  const [taskType, setTaskType] = useState<TaskCreateRequest['task_type']>('mcp_scan')
+  const [taskType, setTaskType] = useState<TaskCreateRequest['task_type']>('ai_infra_scan')
+  const location = useLocation()
+  if (!fixedTaskType && ['mcp_scan', 'Mcp-Scan'].includes(new URLSearchParams(location.search).get('task_type') ?? '')) return <Navigate replace to="/tasks/mcp/new" />
   if ((fixedTaskType ?? taskType) === 'skills_scan') {
     return <SkillsTaskCreatePage returnTo={returnTo ?? (fixedTaskType ? '/tasks/skills' : '/tasks')} onTaskTypeChange={fixedTaskType ? undefined : setTaskType} />
   }
@@ -113,13 +99,8 @@ function StandardTaskCreatePage({ fixedTaskType, returnTo, taskType, setTaskType
   const styles = useStyles()
   const workbenchStyles = useAIInfraWorkbenchStyles()
   const navigate = useNavigate()
-  const location = useLocation()
   const { state } = useSession()
   const role = state.status === 'authenticated' ? state.subject.role : 'auditor'
-  const preset = useMemo(() => mcpCreatePreset(location.search), [location.search])
-  const appliedPresetRef = useRef(preset)
-  const [mcpSourceKind, setMCPSourceKind] = useState<MCPCreateSourceKind>(() => preset.sourceKind)
-  const [authorizationConfirmed, setAuthorizationConfirmed] = useState(false)
   const [content, setContent] = useState('')
   const [remark, setRemark] = useState('')
   const [language, setLanguage] = useState<'zh_CN' | 'en'>('zh_CN')
@@ -127,7 +108,6 @@ function StandardTaskCreatePage({ fixedTaskType, returnTo, taskType, setTaskType
   const [modelAvailability, setModelAvailability] = useState<GovernedModelAvailability>('available')
   const [evalModelID, setEvalModelID] = useState('')
   const [agentID, setAgentID] = useState('')
-  const [thread, setThread] = useState('4')
   const [timeout, setTimeoutValue] = useState('300')
   const [portScanMode, setPortScanMode] = useState<InfrastructurePortScanMode>('fixed_ai')
   const [numPrompts, setNumPrompts] = useState('100')
@@ -145,8 +125,6 @@ function StandardTaskCreatePage({ fixedTaskType, returnTo, taskType, setTaskType
   const submitControllerRef = useRef<AbortController | null>(null)
   const downloadControllerRef = useRef<AbortController | null>(null)
   const configurationVersionRef = useRef(0)
-  const hasMCPRepositoryAttachment = effectiveTaskType === 'mcp_scan' && mcpSourceKind === 'repository' && attachments.length > 0
-  const contentRequired = !hasMCPRepositoryAttachment
   const targetPreview = useMemo(
     () => (effectiveTaskType === 'ai_infra_scan' ? previewTargetExpressions(content) : null),
     [content, effectiveTaskType],
@@ -165,27 +143,15 @@ function StandardTaskCreatePage({ fixedTaskType, returnTo, taskType, setTaskType
     setUploading(false)
   }, [])
 
-  const transitionMCPConfiguration = (
-    nextTaskType: TaskCreateRequest['task_type'],
-    nextSourceKind: MCPCreateSourceKind,
-  ) => {
-    if (submitting) return
-    const configurationChanged = nextTaskType !== taskType || nextSourceKind !== mcpSourceKind
-    if (configurationChanged) {
-      configurationVersionRef.current += 1
-      clearAttachmentContext()
-    } else if (isMCPServiceTarget(nextTaskType, nextSourceKind)) {
-      clearAttachmentContext()
-    }
-    if (!configurationChanged) return
+  const transitionTaskType = (nextTaskType: TaskCreateRequest['task_type']) => {
+    if (submitting || nextTaskType === 'mcp_scan') return
+    configurationVersionRef.current += 1
+    clearAttachmentContext()
     setTaskType(nextTaskType)
-    setMCPSourceKind(nextSourceKind)
-    setAuthorizationConfirmed(false)
     invalidateSubmission()
   }
 
   const handleContentChange = (value: string) => {
-    if (isMCPServiceTarget(effectiveTaskType, mcpSourceKind) && value !== content) setAuthorizationConfirmed(false)
     setContent(value)
     invalidateSubmission()
   }
@@ -200,28 +166,7 @@ function StandardTaskCreatePage({ fixedTaskType, returnTo, taskType, setTaskType
     }
   }, [])
 
-  useEffect(() => {
-    if (fixedTaskType || (appliedPresetRef.current.taskType === preset.taskType && appliedPresetRef.current.sourceKind === preset.sourceKind)) return
-    if (mutexRef.current) return
-    appliedPresetRef.current = preset
-    configurationVersionRef.current += 1
-    setTaskType(preset.taskType)
-    setMCPSourceKind(preset.sourceKind)
-    setAuthorizationConfirmed(false)
-    submissionRef.current = null
-    clearAttachmentContext()
-  }, [clearAttachmentContext, fixedTaskType, preset, setTaskType])
-
-  const chooseMCPSource = (value: string) => {
-    const sourceKind: MCPCreateSourceKind = value === 'service' ? 'service' : 'repository'
-    transitionMCPConfiguration(taskType, sourceKind)
-  }
-
   const handleUpload = async () => {
-    if (effectiveTaskType === 'mcp_scan' && mcpSourceKind === 'service') {
-      setError('服务扫描不能携带代码附件。')
-      return
-    }
     if (uploading || submitting || files.length === 0) return
     setError('')
     if (isDedicatedAI && files.some((file) => file.size > MAX_AI_TARGET_LIST_BYTES)) {
@@ -235,7 +180,6 @@ function StandardTaskCreatePage({ fixedTaskType, returnTo, taskType, setTaskType
       return
     }
     const uploadConfigurationVersion = configurationVersionRef.current
-    const repositoryUpload = effectiveTaskType === 'mcp_scan' && mcpSourceKind === 'repository'
     const controller = new AbortController()
     uploadControllerRef.current?.abort()
     uploadControllerRef.current = controller
@@ -245,7 +189,6 @@ function StandardTaskCreatePage({ fixedTaskType, returnTo, taskType, setTaskType
         const uploaded = await uploadAttachment(file, controller.signal)
         if (!mountedRef.current || controller.signal.aborted || configurationVersionRef.current !== uploadConfigurationVersion) return
         setAttachments((current) => [...current, uploaded])
-        if (repositoryUpload) setContent('')
         setFiles((current) => current.filter((candidate) => candidate !== file))
         invalidateSubmission()
       }
@@ -263,20 +206,6 @@ function StandardTaskCreatePage({ fixedTaskType, returnTo, taskType, setTaskType
 
   const submit = async (event: FormEvent) => {
     event.preventDefault()
-    const serviceScan = effectiveTaskType === 'mcp_scan' && mcpSourceKind === 'service'
-    const repositoryAttachmentScan = effectiveTaskType === 'mcp_scan' && mcpSourceKind === 'repository' && attachments.length > 0
-    if (serviceScan && (files.length > 0 || attachments.length > 0)) {
-      setError('服务扫描不能携带代码附件。')
-      return
-    }
-    if (serviceScan && !authorizationConfirmed) {
-      setError('请确认已获得该目标的安全测试授权。')
-      return
-    }
-    if (repositoryAttachmentScan && content !== '') {
-      setError('代码附件扫描不能同时填写扫描目标或任务说明。')
-      return
-    }
     if (uploading || files.length > 0) {
       setError('请先完成已选择附件的上传。')
       return
@@ -299,21 +228,13 @@ function StandardTaskCreatePage({ fixedTaskType, returnTo, taskType, setTaskType
       const hasManualTarget = content.trim().length > 0
       const hasImportedTargetList = attachments.length > 0
       if (isDedicatedAI && !hasManualTarget && !hasImportedTargetList) throw new Error('请填写扫描目标或导入目标清单。')
-      if (!isDedicatedAI && !hasManualTarget && !repositoryAttachmentScan) throw new Error('请填写扫描目标或任务说明。')
+      if (!isDedicatedAI && !hasManualTarget) throw new Error('请填写扫描目标或任务说明。')
       const normalizedRemark = isDedicatedAI ? remark.trim() : ''
       if (normalizedRemark && !isWellFormedUnicode(normalizedRemark)) throw new Error('任务说明包含无效字符。')
       if (normalizedRemark && codePointLength(normalizedRemark) > MAX_TASK_REMARK_CODE_POINTS) {
         throw new Error('任务说明不能超过 2,000 个字符。')
       }
       const params: TaskCreateRequest['params'] = {}
-      if (effectiveTaskType === 'mcp_scan') {
-        params.source_kind = mcpSourceKind
-        if (mcpSourceKind === 'service') params.authorization_confirmed = true
-        if (modelID.trim()) params.model_id = modelID.trim()
-        const parsed = Number(thread)
-        if (!Number.isInteger(parsed) || parsed < 1 || parsed > 1_024) throw new Error('请填写有效的并发数。')
-        params.thread = parsed
-      }
       if (effectiveTaskType === 'ai_infra_scan') {
         if (modelID.trim()) params.model_id = modelID.trim()
         const parsed = Number(timeout)
@@ -343,7 +264,7 @@ function StandardTaskCreatePage({ fixedTaskType, returnTo, taskType, setTaskType
         task_type: effectiveTaskType,
         content,
         params,
-        attachment_ids: serviceScan ? [] : attachments.map((item) => item.id),
+        attachment_ids: attachments.map((item) => item.id),
         country_iso_code: isDedicatedAI ? 'zh_CN' : language,
         ...(normalizedRemark ? { remark: normalizedRemark } : {}),
       }
@@ -524,11 +445,11 @@ function StandardTaskCreatePage({ fixedTaskType, returnTo, taskType, setTaskType
       <form className={styles.form} onSubmit={submit}>
         <fieldset className={styles.step} aria-label="第一步：任务类型" disabled={submitting}>
           <Text weight="semibold">第一步：任务类型</Text>
-          <TaskTypeSelector value={taskType} onChange={(type) => transitionMCPConfiguration(type, mcpSourceKind)} disabled={submitting} />
+          <TaskTypeSelector value={taskType} onChange={transitionTaskType} disabled={submitting} />
         </fieldset>
         <fieldset className={styles.step} aria-label="第二步：参数" disabled={submitting}>
           <Text weight="semibold">第二步：参数</Text>
-          <Field label="扫描目标或任务说明" required={contentRequired}>
+          <Field label="扫描目标或任务说明" required>
             <Textarea
               value={content}
               onChange={(_, data) => handleContentChange(data.value)}
@@ -562,15 +483,7 @@ function StandardTaskCreatePage({ fixedTaskType, returnTo, taskType, setTaskType
                 <option value="zh_CN">中文</option><option value="en">英文</option>
               </Select>
             </Field>
-            {effectiveTaskType === 'mcp_scan' ? (
-              <Field label="MCP 扫描对象">
-                <Select value={mcpSourceKind} disabled={submitting} onChange={(_, data) => chooseMCPSource(data.value)}>
-                  <option value="repository">代码仓库或代码压缩包扫描</option>
-                  <option value="service">受控运行服务扫描</option>
-                </Select>
-              </Field>
-            ) : null}
-            {effectiveTaskType === 'mcp_scan' || effectiveTaskType === 'ai_infra_scan' ? (
+            {effectiveTaskType === 'ai_infra_scan' ? (
               <Field label="模型 ID" hint="仅填写平台模型 ID，不填写密钥。">
                 <Input value={modelID} onChange={(_, data) => { setModelID(data.value); invalidateSubmission() }} autoComplete="off" />
               </Field>
@@ -589,18 +502,6 @@ function StandardTaskCreatePage({ fixedTaskType, returnTo, taskType, setTaskType
               <Field label="裁判模型 ID" hint="仅填写平台模型 ID，不填写密钥。">
                 <Input value={evalModelID} onChange={(_, data) => { setEvalModelID(data.value); invalidateSubmission() }} autoComplete="off" />
               </Field>
-            ) : null}
-            {effectiveTaskType === 'mcp_scan' ? <Field label="并发数"><Input type="number" min={1} max={1024} value={thread} onChange={(_, data) => { setThread(data.value); invalidateSubmission() }} /></Field> : null}
-            {effectiveTaskType === 'mcp_scan' && mcpSourceKind === 'service' ? (
-              <div className={styles.portScanMode}>
-                <Text weight="semibold">服务扫描授权声明</Text>
-                <Checkbox
-                  label="我确认已获得该目标的安全测试授权"
-                  aria-required="true"
-                  checked={authorizationConfirmed}
-                  onChange={(_, data) => { setAuthorizationConfirmed(data.checked === true); invalidateSubmission() }}
-                />
-              </div>
             ) : null}
             {effectiveTaskType === 'ai_infra_scan' ? <Field label="超时秒数"><Input type="number" min={1} max={86400} value={timeout} onChange={(_, data) => { setTimeoutValue(data.value); invalidateSubmission() }} /></Field> : null}
             {effectiveTaskType === 'ai_infra_scan' ? (
@@ -626,8 +527,7 @@ function StandardTaskCreatePage({ fixedTaskType, returnTo, taskType, setTaskType
             {effectiveTaskType === 'model_redteam_report' ? <Field label="提示词数量"><Input type="number" min={1} max={1000000} value={numPrompts} onChange={(_, data) => { setNumPrompts(data.value); invalidateSubmission() }} /></Field> : null}
           </div>
         </fieldset>
-        {!(effectiveTaskType === 'mcp_scan' && mcpSourceKind === 'service') ? (
-          <fieldset className={styles.step} aria-label="第三步：附件">
+        <fieldset className={styles.step} aria-label="第三步：附件">
             <Text weight="semibold">第三步：附件</Text>
             <Field label="选择附件" hint="单文件最大 50 MiB，超过 5 MiB 时自动分片。">
               <input type="file" multiple disabled={uploading || submitting} onChange={(event) => { setFiles(Array.from(event.currentTarget.files ?? [])); invalidateSubmission() }} />
@@ -639,8 +539,7 @@ function StandardTaskCreatePage({ fixedTaskType, returnTo, taskType, setTaskType
                 {role !== 'auditor' ? <Button type="button" appearance="subtle" disabled={uploading || submitting} onClick={() => void handleDownload(attachment.id)}>下载附件 {attachment.filename}</Button> : null}
               </div>
             ))}
-          </fieldset>
-        ) : null}
+        </fieldset>
         <fieldset className={styles.step} aria-label="第四步：确认">
           <Text weight="semibold">第四步：确认</Text>
           <Text>提交后将创建真实扫描任务；网络失败不会自动创建第二个任务。</Text>

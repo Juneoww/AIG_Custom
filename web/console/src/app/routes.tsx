@@ -34,6 +34,11 @@ import { AgentWorkflowTaskCreatePage } from '../features/tasks/AgentWorkflowTask
 import { TaskDetailPage } from '../features/tasks/TaskDetailPage'
 import { TaskListPage } from '../features/tasks/TaskListPage'
 import { MCPWorkbenchPage } from '../features/tasks/MCPWorkbenchPage'
+import { MCPScanCreatePage } from '../features/tasks/MCPScanCreatePage'
+import { MCPScanDetailPage } from '../features/tasks/MCPScanDetailPage'
+import { MCPScanListPage } from '../features/tasks/MCPScanListPage'
+import { MCPConnectionListPage } from '../features/mcp-connections/MCPConnectionListPage'
+import { MCPConnectionFormPage } from '../features/mcp-connections/MCPConnectionFormPage'
 import type { SubjectRole } from '../shared/api/types'
 import { PageHeader } from '../shared/components/PageHeader'
 import { StatePanel } from '../shared/components/StatePanel'
@@ -224,6 +229,12 @@ export const appRoutes: RouteObject[] = [
         element: <AppShell />,
         children: [
           ...navigationItems.map(routeForNavigation),
+          { path: 'credentials/mcp-connections', element: <RequireRole allowedRoles={['user', 'auditor', 'admin']}><MCPConnectionListPage /></RequireRole> },
+          { path: 'credentials/mcp-connections/new', element: <RequireRole allowedRoles={['user', 'admin']}><MCPConnectionFormPage /></RequireRole> },
+          { path: 'credentials/mcp-connections/:connectionConfigId', element: <RequireRole allowedRoles={['user', 'admin']}><MCPConnectionFormPage /></RequireRole> },
+          { path: 'tasks/mcp/new', element: <RequireRole allowedRoles={['user', 'admin']}><MCPScanCreatePage /></RequireRole> },
+          { path: 'tasks/mcp/scans', element: <RequireRole allowedRoles={['user', 'auditor', 'admin']}><MCPScanListPage /></RequireRole> },
+          { path: 'tasks/mcp/:taskId', element: <RequireRole allowedRoles={['user', 'auditor', 'admin']}><MCPScanDetailPage /></RequireRole> },
           {
             path: 'tasks/new',
             element: (

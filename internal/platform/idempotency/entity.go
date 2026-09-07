@@ -47,8 +47,13 @@ type Operation struct {
 // SafeResponse is intentionally not a generic JSON envelope. A replayed MCP
 // creation request can expose only its opaque task ID and a safe task status.
 type SafeResponse struct {
-	TaskID string `json:"task_id"`
-	Status string `json:"status"`
+	TaskID           string `json:"task_id,omitempty"`
+	Status           string `json:"status"`
+	ID               string `json:"id,omitempty"`
+	CurrentVersion   int    `json:"current_version,omitempty"`
+	ResourceRevision string `json:"resource_revision,omitempty"`
+	AttachmentID     string `json:"attachment_id,omitempty"`
+	Size             int64  `json:"size,omitempty"`
 }
 
 // Result is returned to the future MCP handler without exposing record or

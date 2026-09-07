@@ -684,7 +684,7 @@ func TestServiceRejectsUnsafeDisplayTextAndOmitsDescriptionFromTaskOptions(t *te
 		"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdef0123456789",
 		"控制字符\x00",
 		"行尾换行\n",
-		strings.Repeat("过长", 200),
+		strings.Repeat("过长", 251),
 	} {
 		for _, field := range []struct {
 			name string
@@ -745,7 +745,8 @@ func TestServiceDoesNotProjectUnsafeLegacyDisplayText(t *testing.T) {
 	encoded, err := json.Marshal(summary)
 	require.NoError(t, err)
 	assert.NotContains(t, string(encoded), "legacy.example.invalid")
-	assert.NotContains(t, string(encoded), "header")
+	assert.NotContains(t, string(encoded), "header reference")
+	assert.Empty(t, summary.Description)
 	options, err := service.TaskOptions(ctx, alice)
 	require.NoError(t, err)
 	assert.Empty(t, options, "unsafe legacy display text must not be task-selectable")

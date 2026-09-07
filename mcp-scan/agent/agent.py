@@ -20,6 +20,8 @@ import time
 from typing import Any
 
 from agent.base_agent import BaseAgent
+from agent.mcp_review import (MCP_REVIEW_FORMAT, PrivateMCPBaseAgent, is_mcp_review_output,
+                              parse_mcp_review, validate_mcp_stage_output)
 from tools.dispatcher import ToolDispatcher
 from utils.aig_logger import mcpLogger
 from utils.extract_vuln import VulnerabilityExtractor
@@ -96,6 +98,8 @@ class ScanPipeline:
 
         # 运行并返回结果
         result = await agent.run()
+        if getattr(self.agent_wrapper, "private_runtime", False):
+            validate_mcp_stage_output(result, stage.output_check_fn)
         self.results[stage.name] = result
         return result
 
@@ -109,7 +113,8 @@ class ScanPipeline:
         instruction = prompt_manager.load_template(stage.template)
 
         # 初始化阶段 Agent
-        agent = BaseAgent(
+        agent_class = getattr(self.agent_wrapper, "agent_class", BaseAgent)
+        agent = agent_class(
             name=f"{stage.name} Agent",
             instruction=instruction,
             llm=self.agent_wrapper.llm,
@@ -133,6 +138,8 @@ class ScanPipeline:
 
         # 运行并返回结果
         result = await agent.run()
+        if getattr(self.agent_wrapper, "private_runtime", False):
+            validate_mcp_stage_output(result, stage.output_check_fn)
         self.results[stage.name] = result
         return result
 
@@ -146,17 +153,24 @@ class Agent:
         server_url: str = None,
         language="zh",
         headers=None,
+        runtime_config=None,
+        repository_root=None,
     ):
         self.llm = llm
         self.specialized_llms = specialized_llms or {}
         self.debug = debug
-        self.dispatcher = ToolDispatcher(mcp_server_url=server_url, mcp_headers=headers)
+        self.private_runtime = runtime_config is not None
+        if self.private_runtime:
+            self.agent_class = PrivateMCPBaseAgent
+        self.dispatcher = ToolDispatcher(mcp_server_url=server_url, mcp_headers=headers,
+                                         runtime_config=runtime_config, repository_root=repository_root)
         self.pipeline = ScanPipeline(self)
         self.language = language
 
     async def scan(self, repo_dir: str, prompt: str):
         result_meta = {
             "readme": "",
+            "analysis_mode": "model_assisted",
             "score": 0,
             "language": "",
             "start_time": time.time(),
@@ -234,8 +248,8 @@ markdown格式返回
                 "3",
                 "Vulnerability Review",
                 "agents/vuln_review",
-                output_format=review_format,
-                output_check_fn=is_vuln_review_output,
+                output_format=MCP_REVIEW_FORMAT if self.private_runtime else review_format,
+                output_check_fn=is_mcp_review_output if self.private_runtime else is_vuln_review_output,
                 language=self.language,
             ),
             repo_dir,
@@ -245,7 +259,7 @@ markdown格式返回
 
         # 提取与分析结果
         extractor = VulnerabilityExtractor()
-        vuln_results = extractor.extract_vulnerabilities(vuln_review)
+        vuln_results = parse_mcp_review(vuln_review) if self.private_runtime else extractor.extract_vulnerabilities(vuln_review)
 
         elasped_time = (time.time() - result_meta["start_time"]) / 60
         logger.info(f"扫描任务完成，总耗时 {elasped_time:.2f} 分钟")
@@ -268,6 +282,7 @@ markdown格式返回
     async def dynamic_analysis(self, prompt: str):
         result_meta = {
             "readme": "",
+            "analysis_mode": "model_assisted",
             "score": 0,
             "language": "",
             "start_time": time.time(),
@@ -363,8 +378,8 @@ markdown格式返回
                 "4",
                 "Vulnerability Review",
                 "agents/dynamic/general_analyzing_prompt_template",
-                output_format=review_format,
-                output_check_fn=is_vuln_review_output,
+                output_format=MCP_REVIEW_FORMAT if self.private_runtime else review_format,
+                output_check_fn=is_mcp_review_output if self.private_runtime else is_vuln_review_output,
                 language=self.language,
             ),
             prompt,
@@ -372,7 +387,7 @@ markdown格式返回
         )
         # 提取与分析结果
         extractor = VulnerabilityExtractor()
-        vuln_results = extractor.extract_vulnerabilities(vuln_review)
+        vuln_results = parse_mcp_review(vuln_review) if self.private_runtime else extractor.extract_vulnerabilities(vuln_review)
         safety_score = calc_mcp_score(vuln_results)
 
         result_meta.update(

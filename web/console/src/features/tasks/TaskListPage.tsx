@@ -9,7 +9,7 @@ import { AddRegular } from '@fluentui/react-icons'
 import { Button, Field, Select, makeStyles, mergeClasses, tokens } from '@fluentui/react-components'
 import { useQuery } from '@tanstack/react-query'
 import { useEffect } from 'react'
-import { Link, useSearchParams } from 'react-router-dom'
+import { Link, Navigate, useSearchParams } from 'react-router-dom'
 
 import { useSession } from '../auth/session'
 import { ApiError } from '../../shared/api/errors'
@@ -159,6 +159,12 @@ interface TaskListPageProps {
 }
 
 export function TaskListPage({ fixedTaskType }: TaskListPageProps) {
+  const [search] = useSearchParams()
+  if (fixedTaskType === 'mcp_scan' || (!fixedTaskType && ['mcp_scan', 'Mcp-Scan'].includes(search.get('task_type') ?? ''))) return <Navigate replace to="/tasks/mcp/scans" />
+  return <GenericTaskListPage fixedTaskType={fixedTaskType} />
+}
+
+function GenericTaskListPage({ fixedTaskType }: TaskListPageProps) {
   const styles = useStyles()
   const aiStyles = useAIInfraWorkbenchStyles()
   const { state } = useSession()
@@ -218,7 +224,7 @@ export function TaskListPage({ fixedTaskType }: TaskListPageProps) {
       id: 'action',
       header: '操作',
       render: (task) => (
-        <Link className={styles.taskLink} to={`/tasks/${encodeURIComponent(task.id)}`} aria-label={`查看任务 ${task.id}`}>
+        <Link className={styles.taskLink} to={`${task.task_type === 'mcp_scan' ? '/tasks/mcp' : '/tasks'}/${encodeURIComponent(task.id)}`} aria-label={`查看任务 ${task.id}`}>
           查看
         </Link>
       ),
@@ -333,7 +339,7 @@ export function TaskListPage({ fixedTaskType }: TaskListPageProps) {
                 }}
               >
                 <option value="">全部类型</option>
-                {Object.entries(taskTypeLabels).filter(([value]) => value !== 'unknown').map(([value, label]) => (
+                {Object.entries(taskTypeLabels).filter(([value]) => value !== 'unknown' && value !== 'mcp_scan').map(([value, label]) => (
                   <option key={value} value={value}>{label}</option>
                 ))}
               </Select>

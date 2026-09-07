@@ -68,6 +68,7 @@ const secondaryNavigation: Readonly<Record<string, readonly SecondaryNavigationI
   credentials: [
     { id: 'model-config', path: '/models', label: '模型配置', allowedRoles: ALL_ROLES },
     { id: 'agent-config', path: '/knowledge/agents', label: '智能体配置', allowedRoles: ALL_ROLES },
+    { id: 'mcp-connections', path: '/credentials/mcp-connections', label: 'MCP 连接配置', allowedRoles: ALL_ROLES },
   ],
 }
 

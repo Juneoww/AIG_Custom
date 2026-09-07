@@ -31,7 +31,7 @@ logger.add(
 )
 
 # 2. 添加文件输出 (File)
-if os.environ.get("AIG_SCAN_MODE") != "skills":
+if os.environ.get("AIG_SCAN_MODE") not in {"skills", "mcp-private"}:
     logger.add(
         f"./logs/mcp-scan_{time.strftime('%Y-%m-%d-%H-%M-%S')}.log",
         rotation="10 MB",

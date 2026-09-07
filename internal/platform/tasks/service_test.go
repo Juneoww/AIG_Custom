@@ -3029,14 +3029,14 @@ func TestMCPCreateUnitOfWorkPortBindsReadyAttachments(t *testing.T) {
 	repository := NewMemoryRepository()
 	auditService := audit.NewService(audit.NewMemoryRepository())
 	attachments, err := NewAttachmentService(repository, AttachmentConfig{
-		UploadDir: t.TempDir(), MaxFileBytes: 16, MaxChunkBytes: 8,
+		MCPOnly: true, UploadDir: t.TempDir(), MaxFileBytes: 16, MaxChunkBytes: 8,
 	}, auditService)
 	require.NoError(t, err)
 	service := NewService(repository, &recordingEngine{}, auditService)
-	service.SetAttachmentService(attachments)
+	service.SetMCPAttachmentService(attachments)
 	subject := identity.Subject{UserID: "mcp-attachment-owner", Username: "mcp-owner-name", Role: identity.RoleUser}
 	attachment := &Attachment{
-		ID: "mcp-ready-attachment", OwnerUserID: subject.UserID, OriginalName: "private-source.zip", StorageName: "opaque-storage",
+		ID: "mcp-ready-attachment", OwnerUserID: subject.UserID, OriginalName: "private-source.zip", StorageName: "mcp-opaque-storage",
 		Size: 8, State: AttachmentStateReady, CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC(),
 	}
 	require.NoError(t, repository.CreateAttachment(ctx, attachment))
@@ -3062,14 +3062,14 @@ func TestMCPCreateUnitOfWorkPortRetriesAttachedInputIdempotently(t *testing.T) {
 	repository := NewMemoryRepository()
 	auditService := audit.NewService(audit.NewMemoryRepository())
 	attachments, err := NewAttachmentService(repository, AttachmentConfig{
-		UploadDir: t.TempDir(), MaxFileBytes: 16, MaxChunkBytes: 8,
+		MCPOnly: true, UploadDir: t.TempDir(), MaxFileBytes: 16, MaxChunkBytes: 8,
 	}, auditService)
 	require.NoError(t, err)
 	service := NewService(repository, &recordingEngine{}, auditService)
-	service.SetAttachmentService(attachments)
+	service.SetMCPAttachmentService(attachments)
 	subject := identity.Subject{UserID: "mcp-retry-owner", Username: "mcp-retry-owner-name", Role: identity.RoleUser}
 	attachment := &Attachment{
-		ID: "mcp-retry-attachment", OwnerUserID: subject.UserID, OriginalName: "private-source.zip", StorageName: "opaque-retry-storage",
+		ID: "mcp-retry-attachment", OwnerUserID: subject.UserID, OriginalName: "private-source.zip", StorageName: "mcp-opaque-retry-storage",
 		Size: 8, State: AttachmentStateReady, CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC(),
 	}
 	require.NoError(t, repository.CreateAttachment(ctx, attachment))

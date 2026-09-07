@@ -134,6 +134,22 @@ type unitOfWorkFixture struct {
 	auditRecords *audit.MemoryRepository
 }
 
+type allowedModelDescriber struct{}
+
+func (allowedModelDescriber) Describe(context.Context, string, string) (string, error) {
+	return "安全模型", nil
+}
+
+func TestMCPCreateRejectsUnvalidatedModelAndExcessiveConcurrency(t *testing.T) {
+	fixture := newUnitOfWorkFixture(t)
+	fixture.workflow.models = nil
+	_, err := fixture.workflow.Create(context.Background(), identity.Subject{UserID: "owner", Role: identity.RoleUser}, CreateInput{IdempotencyKey: "invalid-model", SourceKind: SourceKindRepository, RepositoryURL: "https://git.allowed.example.test/repo", ModelID: "missing"})
+	require.ErrorIs(t, err, ErrInvalidCreate)
+	require.Zero(t, fixture.tasks.calls)
+	_, err = normalizeCreateInput(CreateInput{SourceKind: SourceKindRepository, RepositoryURL: "https://git.allowed.example.test/repo", Thread: pointerTo(33)})
+	require.ErrorIs(t, err, ErrInvalidCreate)
+}
+
 func newUnitOfWorkFixture(t *testing.T) unitOfWorkFixture {
 	t.Helper()
 	keyring, err := mcpconnections.NewKeyring("mcp-scan-uow-test-key", []byte("01234567890123456789012345678901"), nil)
@@ -155,6 +171,7 @@ func newUnitOfWorkFixture(t *testing.T) unitOfWorkFixture {
 		Keyring:     keyring,
 		Policy:      policy,
 		Dispatcher:  dispatcher,
+		Models:      allowedModelDescriber{},
 	})
 	return unitOfWorkFixture{
 		workflow: workflow, keyring: keyring, tasks: taskCreator, bindings: bindingRepository,
