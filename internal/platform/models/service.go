@@ -243,6 +243,7 @@ func (repository *MemoryRepository) Delete(_ context.Context, id string) error {
 }
 
 type Service struct {
+	probe         *probeRunner
 	repository    Repository
 	keyring       *Keyring
 	audits        audit.Recorder
@@ -255,7 +256,7 @@ type Service struct {
 }
 
 func NewService(repository Repository, keyring *Keyring, audits audit.Recorder) *Service {
-	return &Service{repository: repository, keyring: keyring, audits: audits, now: func() time.Time { return time.Now().UTC() }}
+	return &Service{probe: newProbeRunner(), repository: repository, keyring: keyring, audits: audits, now: func() time.Time { return time.Now().UTC() }}
 }
 
 func (service *Service) SetCatalogLoader(loader CatalogLoader) {
@@ -469,7 +470,15 @@ func (service *Service) Update(ctx context.Context, subject identity.Subject, id
 		model.ProviderModel = strings.TrimSpace(*input.ProviderModel)
 	}
 	if input.BaseURL != nil {
-		model.BaseURL = strings.TrimSpace(*input.BaseURL)
+		nextURL := strings.TrimSpace(*input.BaseURL)
+		if nextURL != model.BaseURL && (input.Token == nil || !validProbeToken(*input.Token)) {
+			previous, previousErr := normalizeProbeURL(model.BaseURL)
+			next, nextErr := normalizeProbeURL(nextURL)
+			if previousErr != nil || nextErr != nil || previous != next {
+				return View{}, ErrInvalid
+			}
+		}
+		model.BaseURL = nextURL
 	}
 	if input.Note != nil {
 		model.Note = *input.Note

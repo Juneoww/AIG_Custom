@@ -76,6 +76,35 @@ AIG Custom Platform 是基于 Tencent Zhuque Lab AI-Infra-Guard（https://github
 
 详情 GET 可选返回 `report_id`，条件是任务为 `succeeded`，该任务已有不可变报告快照，且当前 Subject 获准读取该快照。尚未成功或没有快照时省略；浏览器不能根据任务 ID 猜测报告 ID，也不能扫描报告列表寻找关联。创建的 `202` 与 `503.task` 均省略 `report_id`，包括对已完成历史任务的幂等确认；查看报告应使用详情 GET 返回的引用访问 `/api/v1/platform/reports/{reportID}`。
 
+### 模型连通性测试
+
+控制台“供应商模型”现显示为“模型ID”，接口字段仍为 `provider_model`；它与配置记录的 `modelID` 不同。表单灰色示例不作为实际值提交。调用限制留空按既有默认值 `0` 保存。
+
+| 接口 | 用途 |
+| --- | --- |
+| `POST /api/v1/platform/models/test` | 测试当前未保存的连接参数；必须提供 Token。 |
+| `POST /api/v1/platform/models/{modelID}/test` | 测试已保存模型的当前表单参数；必须拥有该模型的可写权限。 |
+
+请求是最大 16 KiB 的 JSON，字段为 `provider_model`（最多 512 字节）、`base_url`（最多 2048 字节）和仅写入的 `token`（最多 8192 字节）。不要求模型名称、备注或调用限制。基础 URL 支持 HTTP/HTTPS 和合法内网地址，填写 API 基础路径，不含账号、查询或片段。
+
+```json
+{
+  "provider_model": "internal-chat",
+  "base_url": "http://inference.internal:8000/v1",
+  "token": "fictional-example-api-key"
+}
+```
+
+编辑测试时 `token` 省略或留空，可由服务端使用保存的凭据，但规范化后的完整基础 URL 必须保持一致。**更改基础 URL 时，测试和保存都必须提供新的有效 Token**；API 路径变化也算地址变化，仅尾斜线、默认端口等语义等价差异不算。掩码不能作为新的 Token。
+
+入口遵循 Cookie 会话、首次改密、角色/可写资源、CSRF 校验。审计员不可测试；普通用户不可使用他人的私有凭据。每用户最多 1 个进行中的测试、启动间隔 5 秒；进程内全局最多 8 个并发、启动间隔 100 毫秒，用户限流状态有界。过频/并发冲突返回 `429`。无效参数返回 `400`，会话/权限为 `401/403`，记录不存在为 `404`，凭据或审计不可用为固定安全 `500`。
+
+平台服务端发送一次兼容 Chat Completions 的简短请求，30 秒超时，响应上限 64 KiB，不使用代理、不重试、不跟随跳转，HTTPS 验证证书。地址解析及实际拨号拒绝环回、链路本地、未指定、组播和元数据地址。仅 HTTP 200 不足以判定成功，必须获得有效非空文本响应。
+
+已执行的探测返回 HTTP `200`，响应只有 `status`（`success` 或 `error`）、`code`、固定安全 `message`、非负整数 `elapsed_ms`。成功 `code=ok`；错误包括 `invalid_config`、`authentication_failed`、`model_not_found`、`rate_limited`、`timeout`、`network_error`、`invalid_response`、`upstream_error`、`redirect_blocked`、`busy`、`unavailable`。模型服务返回的 401/403 是探测结果 `authentication_failed`，不代表平台登录失效。
+
+测试不保存模型、不创建任务，不回传 Token 或模型原始响应；审计只含安全元数据。浏览器按固定代码显示中文结果和耗时，取消/离开时取消请求，更改连接字段后清除旧结果。测试代表平台服务端当时的调用结果，不承诺其他 Agent 网络环境的可达性；保存不强制依赖测试成功。
+
 ### 受治理的 MCP 扫描创建
 
 MCP 只使用专属接口 `/api/v1/platform/mcp-scans`，不调用 AI 基础设施扫描或通用任务接口。通用 tasks 的创建、MCP 筛选、MCP 详情和取消返回 `409 MCP_SPECIALIZED_ENDPOINT_REQUIRED` 与 `specialized_path`；默认列表在统计和分页前排除 `mcp_scan` / `Mcp-Scan`。

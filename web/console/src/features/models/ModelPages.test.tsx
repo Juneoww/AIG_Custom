@@ -273,7 +273,7 @@ describe('ModelListPage', () => {
     fireEvent.click(screen.getByRole('button', { name: '编辑 模型B' }))
     expect(oldSignal?.aborted).toBe(true)
     expect(screen.getByLabelText(/^模型名称/)).toHaveValue('模型B')
-    expect(screen.getByLabelText(/^供应商模型/)).toHaveValue('provider-b')
+    expect(screen.getByLabelText(/^模型ID/)).toHaveValue('provider-b')
     expect(screen.getByLabelText('新 Token（留空保持不变）')).toHaveValue('')
 
     resolveOldWrite(jsonResponse(catalogItem({ id: 'model-a', source: undefined, read_only: undefined })))
@@ -319,7 +319,7 @@ describe('ModelForm', () => {
     renderWithProviders(<ModelForm role="user" onSaved={vi.fn()} onCancel={vi.fn()} />)
 
     fireEvent.change(screen.getByLabelText(/^模型名称/), { target: { value: '我的私有模型' } })
-    fireEvent.change(screen.getByLabelText(/^供应商模型/), { target: { value: 'gpt-secure' } })
+    fireEvent.change(screen.getByLabelText(/^模型ID/), { target: { value: 'gpt-secure' } })
     fireEvent.change(screen.getByLabelText(/^基础 URL/), { target: { value: 'https://models.invalid/v1' } })
     fireEvent.change(screen.getByLabelText(/^访问 Token/), { target: { value: secret } })
     fireEvent.click(screen.getByRole('button', { name: '创建私有模型' }))
@@ -354,7 +354,7 @@ describe('ModelForm', () => {
     vi.stubGlobal('fetch', fetchMock)
     const view = renderWithProviders(<ModelForm role="user" onSaved={vi.fn()} onCancel={vi.fn()} />)
     fireEvent.change(screen.getByLabelText(/^模型名称/), { target: { value: '私有模型' } })
-    fireEvent.change(screen.getByLabelText(/^供应商模型/), { target: { value: 'gpt-secure' } })
+    fireEvent.change(screen.getByLabelText(/^模型ID/), { target: { value: 'gpt-secure' } })
     fireEvent.change(screen.getByLabelText(/^基础 URL/), { target: { value: 'https://models.invalid/v1' } })
     fireEvent.change(screen.getByLabelText(/^访问 Token/), { target: { value: 'one-use-secret' } })
     const submit = screen.getByRole('button', { name: '创建私有模型' })

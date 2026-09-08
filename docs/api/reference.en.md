@@ -76,6 +76,35 @@ Only an `agent_scan` input summary may additionally include `agent_id` and `eval
 
 A detail GET may return `report_id` only when the task is `succeeded`, an immutable snapshot already exists for that task, and the current Subject is authorized to read that snapshot. Non-successful tasks or absent snapshots omit the field. Clients must not guess a report ID from a task ID or search report pages for an association. Create responses (`202` and `503.task`) always omit `report_id`, including idempotent acknowledgements of completed tasks. Open `/api/v1/platform/reports/{reportID}` using the reference returned by the detail GET.
 
+### Model connectivity testing
+
+The console labels `provider_model` as “模型ID” (Model ID); this upstream model identifier is distinct from the configuration record `modelID`. Gray placeholders are examples, never submitted values. A blank call limit retains the existing default semantics of `0`.
+
+| Endpoint | Purpose |
+| --- | --- |
+| `POST /api/v1/platform/models/test` | Test unsaved connection input; Token is required. |
+| `POST /api/v1/platform/models/{modelID}/test` | Test current input for an existing model; writable access is required. |
+
+The JSON body is limited to 16 KiB and accepts `provider_model` (512 bytes), `base_url` (2048 bytes) and write-only `token` (8192 bytes). Name, note and call limit are not required. The API base URL accepts HTTP/HTTPS and ordinary intranet addresses, without userinfo, query or fragment.
+
+```json
+{
+  "provider_model": "internal-chat",
+  "base_url": "http://inference.internal:8000/v1",
+  "token": "fictional-example-api-key"
+}
+```
+
+For saved models, an omitted or empty Token reuses the stored credential only when the normalized full base URL is unchanged. **Changing the base URL requires a new valid Token both when testing and saving.** A changed API path counts as a change; equivalent trailing slashes and default ports do not. A masked value is not a new Token.
+
+Cookie authentication, completed password change, writable-model role and CSRF are required. Auditors cannot test; users cannot use another user's private credentials. Limits are one active probe per user with five seconds between starts, and eight active probes per process with 100 milliseconds between starts; user limiter state is bounded. Frequency/concurrency rejection returns `429`, invalid input `400`, session/access failure `401/403`, a missing saved record `404`, and unavailable credentials or audit a fixed safe `500`.
+
+The platform server issues one short Chat Completions-compatible request, with a 30-second timeout and a 64 KiB response limit. It uses no proxy, retry or redirect and verifies HTTPS certificates. DNS/dial validation rejects loopback, link-local, unspecified, multicast and metadata destinations. HTTP 200 alone is insufficient: a valid nonempty text response is required.
+
+An executed probe returns HTTP `200` with only `status` (`success` or `error`), `code`, fixed safe `message` and nonnegative integer `elapsed_ms`. Success uses `ok`; errors include `invalid_config`, `authentication_failed`, `model_not_found`, `rate_limited`, `timeout`, `network_error`, `invalid_response`, `upstream_error`, `redirect_blocked`, `busy`, and `unavailable`. Upstream 401/403 becomes `authentication_failed`, not an expired platform session.
+
+Testing neither saves models nor creates scan tasks. Tokens and raw model responses are never returned; audit contains safe metadata only. The console maps codes to local descriptions, shows elapsed time, cancels on exit and clears results when connection fields change. Platform-server reachability does not guarantee reachability from other Agents. Saving does not require a successful test.
+
 ### Governed MCP scan creation
 
 MCP uses only `/api/v1/platform/mcp-scans`, never AI-infrastructure or generic task APIs. Generic task creation, MCP filters, MCP detail and cancellation return `409 MCP_SPECIALIZED_ENDPOINT_REQUIRED` with `specialized_path`; default generic lists exclude both `mcp_scan` and `Mcp-Scan` before count and pagination.

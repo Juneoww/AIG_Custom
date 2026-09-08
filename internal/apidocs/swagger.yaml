@@ -2057,6 +2057,65 @@ definitions:
         description: Empty or omitted retains the current secret. Changing origin, auth_type or header_name requires a new nonempty secret. Any update increments revision.
         maxLength: 8192
         x-write-only: true
+  models.ProbeInput:
+    type: object
+    additionalProperties: false
+    required:
+    - provider_model
+    - base_url
+    properties:
+      provider_model:
+        type: string
+        minLength: 1
+        maxLength: 512
+        description: Model ID accepted by the inference endpoint; labeled 模型ID in the console.
+      base_url:
+        type: string
+        minLength: 1
+        maxLength: 2048
+        description: HTTP/HTTPS API base URL, such as http://inference.internal:8000/v1; no userinfo, query or fragment.
+      token:
+        type: string
+        maxLength: 8192
+        x-write-only: true
+        description: Write-only API key, without Bearer prefix. Required for drafts. On saved models, omitted or empty reuses the stored Token only when the normalized full base URL is unchanged. Masked tokens are not accepted.
+  models.ProbeResult:
+    type: object
+    additionalProperties: false
+    required:
+    - status
+    - code
+    - message
+    - elapsed_ms
+    properties:
+      status:
+        type: string
+        enum:
+        - success
+        - error
+      code:
+        type: string
+        enum:
+        - ok
+        - invalid_config
+        - authentication_failed
+        - model_not_found
+        - rate_limited
+        - timeout
+        - network_error
+        - invalid_response
+        - upstream_error
+        - redirect_blocked
+        - busy
+        - unavailable
+      message:
+        type: string
+        description: Fixed safe result description; never upstream text, credentials or request diagnostics. The console maps code to local copy.
+      elapsed_ms:
+        type: integer
+        format: int64
+        minimum: 0
+        description: Elapsed probe time in milliseconds.
 info:
   contact: {}
   description: API for managing AIG Custom Platform AI security scanning tasks. Based on Tencent Zhuque Lab AI-Infra-Guard (https://github.com/Tencent/AI-Infra-Guard).
@@ -2731,7 +2790,7 @@ paths:
         '500':
           description: Model query failed; internal details are not exposed.
     put:
-      description: Updates an authorized private or global model and audits the change. A masked token value preserves the existing encrypted token.
+      description: Updates an authorized private or global model and audits the change. Empty or masked Token preserves the existing encrypted Token only when the normalized full base URL is unchanged. Changing the base URL, including its API path, requires a new Token. Equivalent trailing slash and default-port normalization do not count as a change.
       parameters:
       - in: path
         name: modelID
@@ -4727,4 +4786,74 @@ paths:
         "428":
           description: Current If-Match revision required.
         "500": *a8
+  /api/v1/platform/models/test:
+    post:
+      tags:
+      - models
+      summary: Test unsaved model configuration
+      description: "Explicit model connectivity test from the platform server. Cookie authentication, completed password change, writable-model role and CSRF are required. Token is write-only and never returned or logged. Accepts HTTP/HTTPS and ordinary intranet addresses; rejects loopback, link-local, unspecified, multicast and metadata destinations with DNS/dial validation. Sends one bounded Chat Completions request with a 30-second timeout, verified TLS, no proxy, no retry and no redirect. Response limit is 64 KiB; HTTP 200 alone is not success: a valid nonempty assistant text response is required. Probe results use HTTP 200 even for upstream authentication or network failures. Does not save models or create scan tasks. Audit contains only safe metadata. One active probe per user, five seconds between user starts; globally eight active probes and 100 milliseconds between starts, with bounded user state. Platform reachability does not guarantee Agent reachability. Drafts require a nonempty Token; name, note and limit are not required."
+      consumes:
+      - application/json
+      produces:
+      - application/json
+      parameters:
+      - in: body
+        name: body
+        required: true
+        schema:
+          $ref: "#/definitions/models.ProbeInput"
+      responses:
+        "200":
+          description: Safe success or classified error result.
+          schema:
+            $ref: "#/definitions/models.ProbeResult"
+        "400":
+          description: Invalid or oversized input; no upstream request.
+        "401":
+          description: Unauthenticated.
+        "403":
+          description: Role, writable-model access, password-change or CSRF policy denied.
+        "404":
+          description: Saved model not found.
+        "429":
+          description: Probe concurrency or frequency limit reached.
+        "500":
+          description: Credentials or audit unavailable; no unsafe details.
+  /api/v1/platform/models/{modelID}/test:
+    post:
+      tags:
+      - models
+      summary: Test current input using an authorized saved model
+      description: "Explicit model connectivity test from the platform server. Cookie authentication, completed password change, writable-model role and CSRF are required. Token is write-only and never returned or logged. Accepts HTTP/HTTPS and ordinary intranet addresses; rejects loopback, link-local, unspecified, multicast and metadata destinations with DNS/dial validation. Sends one bounded Chat Completions request with a 30-second timeout, verified TLS, no proxy, no retry and no redirect. Response limit is 64 KiB; HTTP 200 alone is not success: a valid nonempty assistant text response is required. Probe results use HTTP 200 even for upstream authentication or network failures. Does not save models or create scan tasks. Audit contains only safe metadata. One active probe per user, five seconds between user starts; globally eight active probes and 100 milliseconds between starts, with bounded user state. Platform reachability does not guarantee Agent reachability. Stored Token reuse requires writable access and an unchanged normalized full base URL, including the API path."
+      consumes:
+      - application/json
+      produces:
+      - application/json
+      parameters:
+      - in: path
+        name: modelID
+        required: true
+        type: string
+      - in: body
+        name: body
+        required: true
+        schema:
+          $ref: "#/definitions/models.ProbeInput"
+      responses:
+        "200":
+          description: Safe success or classified error result.
+          schema:
+            $ref: "#/definitions/models.ProbeResult"
+        "400":
+          description: Invalid or oversized input; no upstream request.
+        "401":
+          description: Unauthenticated.
+        "403":
+          description: Role, writable-model access, password-change or CSRF policy denied.
+        "404":
+          description: Saved model not found.
+        "429":
+          description: Probe concurrency or frequency limit reached.
+        "500":
+          description: Credentials or audit unavailable; no unsafe details.
 swagger: '2.0'

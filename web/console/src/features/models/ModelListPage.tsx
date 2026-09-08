@@ -133,9 +133,9 @@ export function ModelListPage() {
   }
 
   const columns: readonly DataTableColumn<ModelCatalogItem>[] = [
-    { id: 'id', header: '模型 ID', render: (model) => model.id },
+    { id: 'id', header: '配置ID', render: (model) => model.id },
     { id: 'name', header: '模型名称', render: (model) => model.name },
-    { id: 'provider', header: '供应商模型', render: (model) => model.provider_model || '未配置' },
+    { id: 'provider', header: '模型ID', render: (model) => model.provider_model || '未配置' },
     {
       id: 'scope',
       header: '作用范围',
