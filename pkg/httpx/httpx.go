@@ -39,12 +39,22 @@ type HTTPX struct {
 	client2       *http.Client
 	CustomHeaders map[string]string
 	Options       *HTTPOptions
+	targetAuth    *TargetAuth
 }
 
 // NewHttpx instance
 func NewHttpx(options *HTTPOptions) (*HTTPX, error) {
 	httpx := &HTTPX{}
 	httpx.Options = options
+	if options.TargetAuth != nil {
+		if err := options.TargetAuth.Validate(); err != nil {
+			return nil, err
+		}
+		if options.Unsafe {
+			return nil, errTargetAuthUnsafe
+		}
+		httpx.targetAuth = options.TargetAuth.clone()
+	}
 
 	var retryablehttpOptions = retryablehttp.DefaultOptionsSpraying
 	retryablehttpOptions.Timeout = httpx.Options.Timeout
@@ -74,13 +84,35 @@ func NewHttpx(options *HTTPOptions) (*HTTPX, error) {
 	if httpx.Options.HTTPProxy != "" {
 		proxyURL, parseErr := url.Parse(httpx.Options.HTTPProxy)
 		if parseErr != nil {
+			if httpx.targetAuth != nil {
+				return nil, errTargetAuthRequest
+			}
 			return nil, parseErr
 		}
 		transport.Proxy = http.ProxyURL(proxyURL)
 	}
 
+	var roundTripper http.RoundTripper = transport
+	if httpx.targetAuth != nil {
+		transport.TLSClientConfig = &tls.Config{MinVersion: tls.VersionTLS12}
+		scoped := &targetAuthTransport{base: transport, auth: httpx.targetAuth}
+		roundTripper = scoped
+		followRedirects := options.FollowRedirects
+		redirectFunc = func(req *http.Request, via []*http.Request) error {
+			if err := scoped.validateRequest(req); err != nil {
+				return err
+			}
+			if !followRedirects {
+				return http.ErrUseLastResponse
+			}
+			if len(via) >= 10 {
+				return errTargetAuthRequest
+			}
+			return nil
+		}
+	}
 	httpx.client = retryablehttp.NewWithHTTPClient(&http.Client{
-		Transport:     transport,
+		Transport:     roundTripper,
 		Timeout:       httpx.Options.Timeout,
 		CheckRedirect: redirectFunc,
 	}, retryablehttpOptions)
@@ -93,6 +125,11 @@ func NewHttpx(options *HTTPOptions) (*HTTPX, error) {
 			AllowHTTP: true,
 		},
 		Timeout: httpx.Options.Timeout,
+	}
+	if httpx.targetAuth != nil {
+		// retryablehttp 内部也有 HTTP/2 回退客户端，必须复用同一安全边界。
+		httpx.client.HTTPClient2 = httpx.client.HTTPClient
+		httpx.client2 = httpx.client.HTTPClient
 	}
 
 	httpx.CustomHeaders = make(map[string]string)
@@ -155,6 +192,10 @@ func (h *HTTPX) do(req *retryablehttp.Request) (*Response, error) {
 		}
 	}
 EndCoding:
+	if h.targetAuth != nil {
+		respbodystr = h.targetAuth.Redact(respbodystr)
+		respbody = []byte(respbodystr)
+	}
 	resp.DataStr = respbodystr
 	resp.Title = ExtractTitle(respbodystr)
 	resp.ContentLength = utf8.RuneCountInString(respbodystr)
@@ -166,6 +207,16 @@ EndCoding:
 
 // getResponse returns response from safe / unsafe request
 func (h *HTTPX) getResponse(req *retryablehttp.Request) (*http.Response, error) {
+	if h.targetAuth != nil {
+		if h.Options.Unsafe {
+			return nil, errTargetAuthUnsafe
+		}
+		resp, err := h.client.Do(req)
+		if err != nil {
+			return nil, errTargetAuthRequest
+		}
+		return resp, nil
+	}
 	if h.Options.Unsafe {
 		return h.doUnsafe(req)
 	}
@@ -175,6 +226,9 @@ func (h *HTTPX) getResponse(req *retryablehttp.Request) (*http.Response, error) 
 
 // doUnsafe does an unsafe http request
 func (h *HTTPX) doUnsafe(req *retryablehttp.Request) (*http.Response, error) {
+	if h.targetAuth != nil {
+		return nil, errTargetAuthUnsafe
+	}
 	method := req.Method
 	headers := req.Header
 	targetURL := req.URL.String()
@@ -186,6 +240,9 @@ func (h *HTTPX) doUnsafe(req *retryablehttp.Request) (*http.Response, error) {
 func (h *HTTPX) newRequest(method, targetURL string, body interface{}) (req *retryablehttp.Request, err error) {
 	req, err = retryablehttp.NewRequest(method, targetURL, body)
 	if err != nil {
+		if h.targetAuth != nil {
+			err = errTargetAuthRequest
+		}
 		return
 	}
 
@@ -228,11 +285,11 @@ func (h *HTTPX) Get(targetUrl string, headers map[string]string) (*Response, err
 // POST on post request
 func (h *HTTPX) POST(targetUrl string, data interface{}, headers map[string]string) (*Response, error) {
 	req, err := h.newRequest("POST", targetUrl, data)
-	if headers != nil {
-		h.setCustomHeaders(req, headers)
-	}
 	if err != nil {
 		return nil, err
+	}
+	if headers != nil {
+		h.setCustomHeaders(req, headers)
 	}
 	return h.do(req)
 }

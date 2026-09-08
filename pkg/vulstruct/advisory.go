@@ -41,6 +41,15 @@ func NewAdvisoryEngine() *AdvisoryEngine {
 }
 
 func (ae *AdvisoryEngine) LoadFromDirectory(dir string) error {
+	return ae.loadFromDirectory(dir, false)
+}
+
+// LoadFromDirectoryStrict 用于认证扫描；任一文件不可读或规则无效时拒绝整批规则。
+func (ae *AdvisoryEngine) LoadFromDirectoryStrict(dir string) error {
+	return ae.loadFromDirectory(dir, true)
+}
+
+func (ae *AdvisoryEngine) loadFromDirectory(dir string, strict bool) error {
 	var files []string
 	var err error
 	if utils.IsDir(dir) {
@@ -58,6 +67,9 @@ func (ae *AdvisoryEngine) LoadFromDirectory(dir string) error {
 		}
 		body, err := os.ReadFile(file)
 		if err != nil {
+			if strict {
+				return fmt.Errorf("read advisory file error %s: %w", file, err)
+			}
 			gologger.WithError(err).Errorln("read directory error", file)
 			continue
 		}
@@ -65,7 +77,14 @@ func (ae *AdvisoryEngine) LoadFromDirectory(dir string) error {
 		if err != nil {
 			return fmt.Errorf("read advisory file error %s: %w", file, err)
 		}
+		// 名称是与指纹关联的必要字段；其他描述字段沿用现有规则格式的可选语义。
+		if strict && strings.TrimSpace(ad.Info.FingerPrintName) == "" {
+			return fmt.Errorf("invalid advisory file %s: fingerprint name is required", file)
+		}
 		ads = append(ads, *ad)
+	}
+	if strict && len(ads) == 0 {
+		return fmt.Errorf("advisory rule bundle is empty: %s", dir)
 	}
 	ae.ads = ads
 	return nil

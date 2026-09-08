@@ -39,6 +39,7 @@ func openPostgresTestDB(t *testing.T) *gorm.DB {
 func resetPostgresTestDB(t *testing.T, db *gorm.DB) {
 	t.Helper()
 	require.NoError(t, db.Migrator().DropTable(
+		"platform_target_credentials",
 		"platform_idempotency_records",
 		"platform_mcp_runtime_capabilities",
 		"platform_mcp_task_bindings",
@@ -84,7 +85,7 @@ func TestResetPostgresTestDBClearsMCPConnectionSchemaFixtures(t *testing.T) {
 
 	require.NoError(t, Migrate(db), "the next test run must not inherit stale v10 objects")
 	assertMCPConnectionSchema(t, db)
-	require.Equal(t, []int64{1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12}, migrationVersions(t, db))
+	require.Equal(t, []int64{1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13}, migrationVersions(t, db))
 }
 
 func testPostgresDSN(t *testing.T) string {

@@ -6,6 +6,39 @@ import (
 	"testing"
 )
 
+func TestResolveInfrastructureDataDirHonorsExplicitBundle(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("AIG_DATA_DIR", root)
+	resolved, err := ResolveInfrastructureDataDir()
+	if err != nil || resolved != root {
+		t.Fatalf("resolved=%q error=%v, want %q", resolved, err, root)
+	}
+	t.Setenv("AIG_DATA_DIR", filepath.Join(root, "missing"))
+	if resolved, err := ResolveInfrastructureDataDir(); err == nil || resolved != "" {
+		t.Fatalf("missing explicit rule bundle must fail without fallback: resolved=%q error=%v", resolved, err)
+	}
+}
+
+func TestInfrastructureDataCandidatesSupportAgentWorkingDirectories(t *testing.T) {
+	t.Setenv("AIG_DATA_DIR", "")
+	app := t.TempDir()
+	want := filepath.Join(app, "data")
+	for _, workingDir := range []string{app, filepath.Join(app, "agent-scan")} {
+		found := false
+		for _, candidate := range collectRuntimeDirCandidates("AIG_DATA_DIR", "/app/data", "data", workingDir) {
+			if candidate == want {
+				found = true
+			}
+			if !filepath.IsAbs(candidate) {
+				t.Fatalf("rule path is not absolute: %q", candidate)
+			}
+		}
+		if !found {
+			t.Fatalf("missing rule bundle candidate %q for working directory %q", want, workingDir)
+		}
+	}
+}
+
 func TestResolveRuntimeDirUsesEnvOverride(t *testing.T) {
 	overrideDir := t.TempDir()
 	t.Setenv(AgentScanDirEnv, overrideDir)

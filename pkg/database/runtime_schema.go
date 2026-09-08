@@ -23,9 +23,10 @@ import (
 
 // LatestSchemaVersion is the schema version required by the running server.
 // Schema changes are applied only by the explicit `aig migrate` command.
-const LatestSchemaVersion int64 = 12
+const LatestSchemaVersion int64 = 13
 
 var requiredRuntimeTables = []string{
+	"platform_target_credentials",
 	"users",
 	"sessions",
 	"task_messages",
@@ -49,6 +50,7 @@ var requiredRuntimeTables = []string{
 }
 
 var requiredRuntimeColumns = map[string][]string{
+	"platform_target_credentials": {"id", "owner_user_id", "name", "origin", "auth_type", "header_name", "disabled", "revision", "encrypted_secret", "secret_nonce", "key_id", "created_at", "updated_at"},
 	"platform_tasks": {
 		"remark", "target_count",
 	},
@@ -85,6 +87,7 @@ type runtimeIndexRequirement struct {
 }
 
 var requiredRuntimeIndexes = []runtimeIndexRequirement{
+	{model: &targetCredentialMigration{}, name: "idx_target_credentials_owner"},
 	{model: &Session{}, name: "idx_sessions_username_created"},
 	{model: &Session{}, name: "idx_sessions_username_tasktype"},
 	{model: &Session{}, name: "idx_sessions_status"},

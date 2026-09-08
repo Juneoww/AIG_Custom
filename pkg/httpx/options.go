@@ -35,4 +35,5 @@ type HTTPOptions struct {
 	DefaultUserAgent string
 	Dialer           *fastdialer.Dialer
 	CustomHeaders    []string
+	TargetAuth       *TargetAuth
 }

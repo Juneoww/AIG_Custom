@@ -9,11 +9,26 @@ import (
 )
 
 const (
-	AgentScanDirEnv      = "AIG_AGENT_SCAN_DIR"
-	McpScanDirEnv        = "AIG_MCP_SCAN_DIR"
-	PromptSecurityDirEnv = "AIG_PROMPT_SECURITY_DIR"
-	UvBinEnv             = "AIG_UV_BIN"
+	AgentScanDirEnv          = "AIG_AGENT_SCAN_DIR"
+	McpScanDirEnv            = "AIG_MCP_SCAN_DIR"
+	PromptSecurityDirEnv     = "AIG_PROMPT_SECURITY_DIR"
+	UvBinEnv                 = "AIG_UV_BIN"
+	InfrastructureDataDirEnv = "AIG_DATA_DIR"
 )
+
+// ResolveInfrastructureDataDir 定位随 Agent 部署的规则库；显式配置失效时不回退到其他版本。
+func ResolveInfrastructureDataDir() (string, error) {
+	if override := strings.TrimSpace(os.Getenv(InfrastructureDataDirEnv)); override != "" {
+		path, err := filepath.Abs(override)
+		if err == nil {
+			if info, statErr := os.Stat(path); statErr == nil && info.IsDir() {
+				return path, nil
+			}
+		}
+		return "", fmt.Errorf("unable to locate infrastructure rule bundle configured by %s", InfrastructureDataDirEnv)
+	}
+	return resolveRuntimeDir(InfrastructureDataDirEnv, "/app/data", "data")
+}
 
 func ResolveAgentScanDir() (string, error) {
 	return resolveRuntimeDir(AgentScanDirEnv, "/app/agent-scan", "agent-scan")

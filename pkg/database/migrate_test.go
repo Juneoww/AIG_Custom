@@ -82,7 +82,7 @@ func TestMigrationAppliesIdentitySchemaAsVersionTwo(t *testing.T) {
 
 	var versions []SchemaMigration
 	require.NoError(t, db.Order("version ASC").Find(&versions).Error)
-	require.Len(t, versions, 12)
+	require.Len(t, versions, int(LatestSchemaVersion))
 	assert.Equal(t, int64(1), versions[0].Version)
 	assert.Equal(t, int64(2), versions[1].Version)
 	assert.Equal(t, int64(3), versions[2].Version)
@@ -115,7 +115,7 @@ func TestMigrationAppliesGovernanceAndPlatformTaskSchemaThroughVersionTwelve(t *
 
 	var versions []SchemaMigration
 	require.NoError(t, db.Order("version ASC").Find(&versions).Error)
-	require.Len(t, versions, 12)
+	require.Len(t, versions, int(LatestSchemaVersion))
 	assert.Equal(t, int64(3), versions[2].Version)
 	assert.Equal(t, int64(4), versions[3].Version)
 	assert.Equal(t, int64(5), versions[4].Version)
@@ -137,7 +137,7 @@ func TestMigrationAppliesMCPConnectionSchemaThroughVersionTwelve(t *testing.T) {
 
 	require.NoError(t, Migrate(db))
 	assertMCPConnectionSchema(t, db)
-	assert.Equal(t, []int64{1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12}, migrationVersions(t, db))
+	assert.Equal(t, []int64{1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13}, migrationVersions(t, db))
 
 	require.NoError(t, Migrate(db), "v11 migration must remain idempotent")
 	assertMCPConnectionSchema(t, db)
@@ -158,7 +158,7 @@ func TestMigrationVersionTwelveAddsProbeTimestampToExistingVersionElevenSchema(t
 	require.NoError(t, Migrate(db))
 	require.NoError(t, Migrate(db), "v11 probe timestamp migration must remain idempotent")
 	assert.True(t, db.Migrator().HasColumn("platform_mcp_connection_configs", "last_probe_started_at"))
-	assert.Equal(t, []int64{1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12}, migrationVersions(t, db))
+	assert.Equal(t, []int64{1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13}, migrationVersions(t, db))
 }
 
 func TestMigrationVersionElevenRejectsIncompatibleExistingMCPIndexes(t *testing.T) {
@@ -220,8 +220,8 @@ func TestMigrationUpgradesExistingVersionThreeWithoutRewritingIt(t *testing.T) {
 	require.True(t, db.Migrator().HasTable("audit_completion_outbox"))
 	var versions []SchemaMigration
 	require.NoError(t, db.Order("version ASC").Find(&versions).Error)
-	require.Len(t, versions, 12)
-	assert.Equal(t, []int64{1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12}, []int64{versions[0].Version, versions[1].Version, versions[2].Version, versions[3].Version, versions[4].Version, versions[5].Version, versions[6].Version, versions[7].Version, versions[8].Version, versions[9].Version, versions[10].Version, versions[11].Version})
+	require.Len(t, versions, int(LatestSchemaVersion))
+	assert.Equal(t, []int64{1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13}, []int64{versions[0].Version, versions[1].Version, versions[2].Version, versions[3].Version, versions[4].Version, versions[5].Version, versions[6].Version, versions[7].Version, versions[8].Version, versions[9].Version, versions[10].Version, versions[11].Version, versions[12].Version})
 }
 
 func TestMigrationVersionFourRepairsDuplicateLegacyCompletionOutboxRows(t *testing.T) {
@@ -334,7 +334,7 @@ func TestMigrationIsIdempotentAndRecordsVersion(t *testing.T) {
 
 	var versions []SchemaMigration
 	require.NoError(t, db.Order("version ASC").Find(&versions).Error)
-	require.Len(t, versions, 12)
+	require.Len(t, versions, int(LatestSchemaVersion))
 	assert.Equal(t, int64(1), versions[0].Version)
 	assert.Equal(t, int64(2), versions[1].Version)
 	assert.Equal(t, int64(3), versions[2].Version)
@@ -378,7 +378,7 @@ func TestMigrationSerializesConcurrentPostgresCalls(t *testing.T) {
 
 	var versions []SchemaMigration
 	require.NoError(t, first.Order("version ASC").Find(&versions).Error)
-	require.Len(t, versions, 12)
+	require.Len(t, versions, int(LatestSchemaVersion))
 	assert.Equal(t, int64(1), versions[0].Version)
 	assert.Equal(t, int64(2), versions[1].Version)
 	assert.Equal(t, int64(3), versions[2].Version)
@@ -456,7 +456,7 @@ func TestMigrationUpgradesReleasedVersionFiveWithDispatchClaimColumn(t *testing.
 	require.NoError(t, Migrate(db))
 	require.NoError(t, Migrate(db), "v6 upgrade must remain idempotent")
 	assert.True(t, db.Migrator().HasColumn("platform_tasks", "dispatch_claim_token"))
-	assert.Equal(t, []int64{1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12}, migrationVersions(t, db))
+	assert.Equal(t, []int64{1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13}, migrationVersions(t, db))
 }
 
 func TestMigrationUpgradesReleasedVersionSixWithReportTables(t *testing.T) {
@@ -481,7 +481,7 @@ func TestMigrationUpgradesReleasedVersionSixWithReportTables(t *testing.T) {
 	assert.True(t, db.Migrator().HasTable("report_brand_settings"))
 	assertReportTrendIndexDefinitions(t, db)
 	assertPlatformTaskDashboardIndexDefinitions(t, db)
-	assert.Equal(t, []int64{1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12}, migrationVersions(t, db))
+	assert.Equal(t, []int64{1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13}, migrationVersions(t, db))
 }
 
 func TestMigrationUpgradesReleasedVersionSevenWithDashboardTaskIndexes(t *testing.T) {
@@ -509,7 +509,7 @@ func TestMigrationUpgradesReleasedVersionSevenWithDashboardTaskIndexes(t *testin
 	require.NoError(t, Migrate(db))
 	require.NoError(t, Migrate(db), "v8 through v11 upgrades must remain idempotent")
 	assertPlatformTaskDashboardIndexDefinitions(t, db)
-	assert.Equal(t, []int64{1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12}, migrationVersions(t, db))
+	assert.Equal(t, []int64{1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13}, migrationVersions(t, db))
 }
 
 func TestMigrationVersionNineBindsOnlyReadyAttachmentsReferencedByTasks(t *testing.T) {
@@ -556,7 +556,7 @@ func TestMigrationVersionNineBindsOnlyReadyAttachmentsReferencedByTasks(t *testi
 		ID    string
 		State string
 	}{{ID: "referenced-ready", State: "attached"}, {ID: "unbound-ready", State: "ready"}}, states)
-	assert.Equal(t, []int64{1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12}, migrationVersions(t, db))
+	assert.Equal(t, []int64{1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13}, migrationVersions(t, db))
 }
 
 func assertReportTrendIndexDefinitions(t *testing.T, db *gorm.DB) {
@@ -769,7 +769,7 @@ func TestMigrationAppliesGovernanceAndPlatformTaskSchemaThroughVersionTen(t *tes
 
 	var versions []SchemaMigration
 	require.NoError(t, db.Order("version ASC").Find(&versions).Error)
-	require.Len(t, versions, 12)
+	require.Len(t, versions, int(LatestSchemaVersion))
 	assert.Equal(t, int64(3), versions[2].Version)
 	assert.Equal(t, int64(4), versions[3].Version)
 	assert.Equal(t, int64(5), versions[4].Version)
@@ -871,5 +871,5 @@ ORDER BY column_name ASC`).Scan(&columns).Error)
 	require.NoError(t, db.Table("platform_tasks").Select("remark", "target_count").Where("id = ?", "released-v9-task").Scan(&row).Error)
 	assert.Equal(t, "", row.Remark)
 	assert.Equal(t, 0, row.TargetCount)
-	assert.Equal(t, []int64{1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12}, migrationVersions(t, db))
+	assert.Equal(t, []int64{1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13}, migrationVersions(t, db))
 }

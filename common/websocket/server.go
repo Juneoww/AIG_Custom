@@ -44,6 +44,7 @@ import (
 	platformmcpworkbench "github.com/Juneoww/AIG_Custom/internal/platform/mcpworkbench"
 	platformmodels "github.com/Juneoww/AIG_Custom/internal/platform/models"
 	platformreports "github.com/Juneoww/AIG_Custom/internal/platform/reports"
+	"github.com/Juneoww/AIG_Custom/internal/platform/targetcredentials"
 	platformtasks "github.com/Juneoww/AIG_Custom/internal/platform/tasks"
 	"github.com/Juneoww/AIG_Custom/pkg/database"
 	"github.com/gin-gonic/gin"
@@ -184,6 +185,7 @@ func RunWebServer(options *version.Options) {
 		log.Fatalf("模型主密钥配置无效: trace_id=system_startup, error=%v", err)
 	}
 	platformModelService := platformmodels.NewService(platformModelRepo, modelKeyring, auditService)
+	targetCredentialService := targetcredentials.NewService(stores.targetCredentialRepository, modelKeyring, auditService)
 	adminHandler := platformadmin.NewHandler(identityService, auditService)
 	knowledgeService := platformknowledge.NewService(auditService)
 	knowledgeHandler := platformknowledge.NewHandler(knowledgeService)
@@ -221,6 +223,7 @@ func RunWebServer(options *version.Options) {
 	}
 	platformTaskService := platformtasks.NewService(stores.platformTaskRepository, taskManager, auditService)
 	platformTaskService.SetAttachmentService(attachmentService)
+	platformTaskService.SetTargetCredentials(targetCredentialService)
 	mcpModule, err := newMCPServerModule(db, stores.platformTaskRepository, platformTaskService, taskManager, modelResolver, auditService, attachmentConfig, options.WebServerAddr)
 	if err != nil {
 		log.Fatalf("初始化 MCP 专属服务失败: trace_id=system_startup")
@@ -258,6 +261,7 @@ func RunWebServer(options *version.Options) {
 		platformGroup := v1.Group("/platform")
 		registerPlatformGovernanceRoutes(platformGroup, identityService, identityPolicy, adminHandler, platformModelService, platformTaskHandler)
 		mcpModule.RegisterPlatform(platformGroup)
+		targetcredentials.NewHandler(targetCredentialService).Register(platformGroup)
 		mcpModule.RegisterInternal(r.Group("/api/internal"), agentManager.RequireInternalToken())
 		registerPlatformDashboardRoutes(platformGroup, dashboardHandler)
 		registerPlatformMCPWorkbenchRoutes(platformGroup, mcpWorkbenchHandler)

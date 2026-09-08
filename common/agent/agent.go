@@ -108,6 +108,9 @@ func (a *Agent) RegisterTaskFunc(taskFunc TaskInterface) {
 	defer a.mutex.Unlock()
 	a.taskFunc = append(a.taskFunc, taskFunc)
 	a.info.Capabilities = append(a.info.Capabilities, taskFunc.GetName())
+	if _, ok := taskFunc.(*AIInfraScanAgent); ok {
+		a.info.Capabilities = append(a.info.Capabilities, TargetCredentialCapability)
+	}
 }
 
 // Start 启动Agent

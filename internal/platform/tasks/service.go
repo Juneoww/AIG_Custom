@@ -146,6 +146,7 @@ type dashboardTaskStatusRepository interface {
 }
 
 type Service struct {
+	targetCredentials   TargetCredentials
 	repository          Repository
 	engine              EngineAdapter
 	audits              audit.Recorder
@@ -434,6 +435,9 @@ func (service *Service) createLocked(
 			}
 		}
 		if input.TaskType == "ai_infra_scan" {
+			if err := service.validateTargetCredential(ctx, subject.UserID, input.Content, input.AttachmentIDs, params); err != nil {
+				return nil, err
+			}
 			targetCount, validateErr := service.validateInfrastructureTargets(ctx, subject.UserID, input.Content, input.AttachmentIDs)
 			if validateErr != nil {
 				return nil, validateErr
@@ -685,9 +689,11 @@ func normalizeMCPTaskParams(raw json.RawMessage) (json.RawMessage, bool) {
 }
 
 type infrastructureTaskParams struct {
-	ModelID      string `json:"model_id,omitempty"`
-	Timeout      *int   `json:"timeout,omitempty"`
-	PortScanMode string `json:"port_scan_mode"`
+	TargetCredentialID       string `json:"target_credential_id,omitempty"`
+	TargetCredentialRevision int64  `json:"target_credential_revision,omitempty"`
+	ModelID                  string `json:"model_id,omitempty"`
+	Timeout                  *int   `json:"timeout,omitempty"`
+	PortScanMode             string `json:"port_scan_mode"`
 }
 
 type redteamDatasetParams struct {
@@ -793,6 +799,11 @@ func decodeInfrastructureTaskParams(raw json.RawMessage) (infrastructureTaskPara
 	var params infrastructureTaskParams
 	if !decodeExactJSON(raw, &params) || !validOptionalReference(fields, "model_id", params.ModelID) ||
 		params.Timeout != nil && (*params.Timeout < 1 || *params.Timeout > 86_400) {
+		return infrastructureTaskParams{}, nil, false
+	}
+	_, hasID := fields["target_credential_id"]
+	_, hasRevision := fields["target_credential_revision"]
+	if hasID != hasRevision || (hasID && (!validReference(params.TargetCredentialID) || params.TargetCredentialRevision < 1)) {
 		return infrastructureTaskParams{}, nil, false
 	}
 	return params, fields, true
@@ -995,6 +1006,9 @@ func (service *Service) dispatch(ctx context.Context, subject identity.Subject, 
 	engineTask := EngineTask{
 		PlatformTaskID: task.ID, OwnerUsername: task.OwnerUsername, TaskType: task.TaskType,
 		Content: task.Content, Params: params, CountryIsoCode: task.CountryIsoCode,
+	}
+	if task.TaskType == "ai_infra_scan" && HasInfrastructureTargetCredential(params) {
+		engineTask.RuntimeIssuer = service.targetRuntimeIssuer(task)
 	}
 	// The dedicated MCP workflow supplies a factory, not an already-issued
 	// capability. The engine invokes it only after it has selected an Agent and

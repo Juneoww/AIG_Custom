@@ -89,6 +89,9 @@ function renderPage(
   routePath = '*',
   queryClient = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } }),
 ) {
+  // 非凭据用例预置空目录，避免可选目录请求消耗原有顺序网络替身。
+  queryClient.setQueryDefaults(['target-credentials'], { staleTime: Infinity })
+  if (!queryClient.getQueryData(['target-credentials'])) queryClient.setQueryData(['target-credentials'], [])
   return render(
     <QueryClientProvider client={queryClient}>
       <SessionProvider initialState={{ status: 'authenticated', subject }}>
@@ -131,6 +134,87 @@ afterEach(() => {
 })
 
 describe('任务页面', () => {
+  it('HTTP 凭据任务仅接受显式许可的同源 HTTP URL，并只提交 ID 与版本', async () => {
+    const credential = { id: 'http-credential-1', name: '内网推理访问', origin: 'http://inference.example.com', allow_insecure_http: true, auth_type: 'bearer', header_name: '', revision: 3, disabled: false }
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+    queryClient.setQueryData(['target-credentials'], [credential])
+    const fetchMock = vi.fn((request: RequestInfo | URL) => Promise.resolve(jsonResponse(String(request).includes('/models?') ? { items: [], total: 0, page: 1, page_size: 100 } : aiInfraDetail)))
+    vi.stubGlobal('fetch', fetchMock)
+    renderPage(<TaskCreatePage fixedTaskType="ai_infra_scan" />, { id: 'user-1', username: 'alice', role: 'user', must_change_password: false }, '/tasks/ai-infra/new', '*', queryClient)
+    fireEvent.change(screen.getByRole('combobox', { name: '目标访问凭据（可选）' }), { target: { value: credential.id } })
+    expect(screen.getByText('已选择目标凭据，请手工填写同源 HTTP URL。可以移除已有清单并保留其他配置。')).toBeInTheDocument()
+    expect(screen.getByLabelText('导入目标清单（可选）')).toBeDisabled()
+    for (const target of ['https://inference.example.com/api', 'http://other.example.com/api', 'http://inference.example.com:443/api']) {
+      fireEvent.change(screen.getByRole('textbox', { name: '手工填写扫描目标（可选）' }), { target: { value: target } })
+      fireEvent.click(screen.getByRole('button', { name: '创建 AI 基础设施扫描任务' }))
+      await screen.findByText('请填写与所选凭据同源的 HTTP URL，并移除导入的目标清单。')
+      expect(taskPostCalls(fetchMock.mock.calls)).toHaveLength(0)
+    }
+    const content = `${credential.origin}:80/api/version\n${credential.origin}/health`
+    fireEvent.change(screen.getByRole('textbox', { name: '手工填写扫描目标（可选）' }), { target: { value: content } })
+    fireEvent.click(screen.getByRole('button', { name: '创建 AI 基础设施扫描任务' }))
+    await waitFor(() => expect(taskPostCalls(fetchMock.mock.calls)).toHaveLength(1))
+    expect(JSON.parse(String(taskPostInit(fetchMock.mock.calls).body))).toEqual(expect.objectContaining({ content, params: { timeout: 300, port_scan_mode: 'fixed_ai', target_credential_id: credential.id, target_credential_revision: 3 } }))
+  })
+  it('基础设施任务提交凭据 ID 与版本，并阻止跨源目标', async () => {
+    const credential = { id: 'target-credential-1', name: '推理访问', origin: 'https://inference.example.com', allow_insecure_http: false, auth_type: 'bearer', header_name: '', revision: 3, disabled: false }
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+    queryClient.setQueryData(['target-credentials'], [credential])
+    const fetchMock = vi.fn((request: RequestInfo | URL) => Promise.resolve(jsonResponse(String(request).includes('/models?') ? { items: [], total: 0, page: 1, page_size: 100 } : aiInfraDetail)))
+    vi.stubGlobal('fetch', fetchMock)
+    renderPage(<TaskCreatePage fixedTaskType="ai_infra_scan" />, { id: 'user-1', username: 'alice', role: 'user', must_change_password: false }, '/tasks/ai-infra/new', '*', queryClient)
+    fireEvent.change(screen.getByRole('combobox', { name: '目标访问凭据（可选）' }), { target: { value: credential.id } })
+    fireEvent.change(screen.getByRole('textbox', { name: '手工填写扫描目标（可选）' }), { target: { value: 'https://other.example.com' } })
+    fireEvent.click(screen.getByRole('button', { name: '创建 AI 基础设施扫描任务' }))
+    await screen.findByText('请填写与所选凭据同源的 HTTPS URL，并移除导入的目标清单。')
+    expect(taskPostCalls(fetchMock.mock.calls)).toHaveLength(0)
+    fireEvent.change(screen.getByRole('textbox', { name: '手工填写扫描目标（可选）' }), { target: { value: `${credential.origin}/api/version` } })
+    fireEvent.click(screen.getByRole('button', { name: '创建 AI 基础设施扫描任务' }))
+    await waitFor(() => expect(taskPostCalls(fetchMock.mock.calls)).toHaveLength(1))
+    expect(JSON.parse(String(taskPostInit(fetchMock.mock.calls).body)).params).toEqual({ timeout: 300, port_scan_mode: 'fixed_ai', target_credential_id: credential.id, target_credential_revision: 3 })
+  })
+  it('已选基础设施凭据刷新失效后阻止任务提交，明确取消后才允许匿名扫描', async () => {
+    const credential = { id: 'target-credential-1', name: '推理访问', origin: 'https://inference.example.com', auth_type: 'bearer', header_name: '', revision: 1, disabled: false }
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+    queryClient.setQueryData(['target-credentials'], [credential])
+    const fetchMock = vi.fn((request: RequestInfo | URL) => Promise.resolve(jsonResponse(String(request).includes('/models?') ? { items: [], total: 0, page: 1, page_size: 100 } : aiInfraDetail)))
+    vi.stubGlobal('fetch', fetchMock)
+    renderPage(<TaskCreatePage fixedTaskType="ai_infra_scan" />, { id: 'user-1', username: 'alice', role: 'user', must_change_password: false }, '/tasks/ai-infra/new', '*', queryClient)
+    fireEvent.change(screen.getByRole('combobox', { name: '目标访问凭据（可选）' }), { target: { value: credential.id } })
+    fireEvent.change(screen.getByRole('textbox', { name: '手工填写扫描目标（可选）' }), { target: { value: credential.origin } })
+    await act(async () => { queryClient.setQueryData(['target-credentials'], [{ ...credential, revision: 2 }]) })
+    await screen.findByText('已选凭据已变更、停用或删除，请重新选择；如需匿名扫描，请明确选择“不使用目标凭据”。')
+    fireEvent.click(screen.getByRole('button', { name: '创建 AI 基础设施扫描任务' }))
+    await screen.findByText('已选目标凭据尚未确认可用，请重新选择或明确选择不使用目标凭据。')
+    expect(taskPostCalls(fetchMock.mock.calls)).toHaveLength(0)
+    fireEvent.change(screen.getByRole('combobox', { name: '目标访问凭据（可选）' }), { target: { value: '' } })
+    fireEvent.click(screen.getByRole('button', { name: '创建 AI 基础设施扫描任务' }))
+    await waitFor(() => expect(taskPostCalls(fetchMock.mock.calls)).toHaveLength(1))
+    expect(JSON.parse(String(taskPostInit(fetchMock.mock.calls).body)).params).not.toHaveProperty('target_credential_id')
+  })
+  it('上传清单后可以移除并切换为认证扫描，保留手工目标和备注', async () => {
+    const credential = { id: 'target-credential-1', name: '推理访问', origin: 'https://inference.example.com', auth_type: 'bearer', header_name: '', revision: 1, disabled: false }
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+    queryClient.setQueryData(['target-credentials'], [credential])
+    const fetchMock = vi.fn((request: RequestInfo | URL) => {
+      const url = String(request)
+      return Promise.resolve(jsonResponse(url.includes('/models?') ? { items: [], total: 0, page: 1, page_size: 100 } : url.endsWith('/attachments') ? { id: 'attachment-target-list', filename: 'targets.txt', size: 10, state: 'ready', created_at: '2026-09-07T00:00:00Z' } : aiInfraDetail))
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    renderPage(<TaskCreatePage fixedTaskType="ai_infra_scan" />, { id: 'user-1', username: 'alice', role: 'user', must_change_password: false }, '/tasks/ai-infra/new', '*', queryClient)
+    fireEvent.change(screen.getByLabelText('导入目标清单（可选）'), { target: { files: [new File(['192.0.2.10'], 'targets.txt')] } })
+    fireEvent.click(screen.getByRole('button', { name: '上传目标清单' }))
+    await screen.findByRole('button', { name: '下载附件 targets.txt' })
+    fireEvent.change(screen.getByRole('textbox', { name: '手工填写扫描目标（可选）' }), { target: { value: credential.origin } })
+    fireEvent.change(screen.getByRole('textbox', { name: '任务说明 / 备注（可选）' }), { target: { value: '保留备注' } })
+    fireEvent.change(screen.getByRole('combobox', { name: '目标访问凭据（可选）' }), { target: { value: credential.id } })
+    expect(screen.getByLabelText('导入目标清单（可选）')).toBeDisabled()
+    fireEvent.click(screen.getByRole('button', { name: '移除目标清单 targets.txt' }))
+    expect(screen.queryByRole('button', { name: '下载附件 targets.txt' })).not.toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: '创建 AI 基础设施扫描任务' }))
+    await waitFor(() => expect(taskPostCalls(fetchMock.mock.calls)).toHaveLength(1))
+    expect(JSON.parse(String(taskPostInit(fetchMock.mock.calls).body))).toEqual(expect.objectContaining({ content: credential.origin, remark: '保留备注', attachment_ids: [], params: expect.objectContaining({ target_credential_id: credential.id }) }))
+  })
   it('列表使用原生表格并让审计员保持只读', async () => {
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue(jsonResponse({ items: [task], total: 1, page: 1, page_size: 20 })))
     renderPage(

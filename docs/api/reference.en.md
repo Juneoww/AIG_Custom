@@ -140,7 +140,7 @@ Attachment mutations require CSRF. Users create/write only their own opaque atta
 
 Browser task execution is available only through the protected platform task API described above. The former `/api/v1/app/taskapi*` and `/api/v1/app/tasks*` browser families are historical names, are not callable compatibility APIs, and return `410 Gone` only after the normal session, password-change and CSRF checks (CSRF applies to mutating requests). They cannot be used for task creation, upload, status, results, streaming, or as a fallback after a broken connection.
 
-The platform task-create JSON body is limited to 256 KiB and `content` to 32 KiB. Task types supporting attachments allow at most ten unique opaque attachment IDs of at most 128 bytes each; new Agent scans do not support attachments. It accepts only the canonical `ai_infra_scan`, `model_redteam_report`, `agent_scan`, and `skills_scan` values and maps them to the real Agent aliases only at the private adapter boundary. MCP is isolated on its dedicated API above. Parameters use per-type allowlists: infrastructure permits `model_id`/`timeout`/`port_scan_mode`; model red-team requires a string-array `model_id` plus `eval_model_id` and may include `dataset.numPrompts/randomSeed/promptColumn` and `techniques`; Agent scan accepts only required `agent_id` and `eval_model_id` references; Skills permits only the required `model_id` string and requires exactly one ready ZIP attachment with empty `content`. `ai_infra_scan.params.port_scan_mode` accepts only the exact `fixed_ai` or `full_tcp` values and normalizes an omission to `fixed_ai`; the former discovers TCP ports `11434,1337,7000-9000,18789` (2,004 ports) on bare IPv4 targets, while the latter discovers all TCP ports `1-65535`. It does not accept custom ports, UDP, or version-identification options, and URLs, domains, port-bearing IPs, and IPv6 targets do not enter this port-discovery step. The safe `TaskDetail.input_summary.port_scan_mode` returns only a verified normalized enum value and never raw parameters. Every `model_id`/`eval_model_id` is resolved by the governed model resolver before task persistence, while `agent_id` must resolve to the user's or public read-only Agent configuration; unknown or invisible references are rejected without writing a task. Unknown fields, nested credential objects, raw model credentials, legacy model objects, and task aliases are rejected. Browser attachments are referenced only by opaque attachment IDs and remain owner-scoped. The internal Agent WebSocket and legacy-shaped artifact transport are a separate internal-token boundary and are not browser APIs.
+The platform task-create JSON body is limited to 256 KiB and `content` to 32 KiB. Task types supporting attachments allow at most ten unique opaque attachment IDs of at most 128 bytes each; new Agent scans do not support attachments. It accepts only the canonical `ai_infra_scan`, `model_redteam_report`, `agent_scan`, and `skills_scan` values and maps them to the real Agent aliases only at the private adapter boundary. MCP is isolated on its dedicated API above. Parameters use per-type allowlists: infrastructure permits `model_id`/`timeout`/`port_scan_mode` and paired `target_credential_id`/`target_credential_revision`; model red-team requires a string-array `model_id` plus `eval_model_id` and may include `dataset.numPrompts/randomSeed/promptColumn` and `techniques`; Agent scan accepts only required `agent_id` and `eval_model_id` references; Skills permits only the required `model_id` string and requires exactly one ready ZIP attachment with empty `content`. `ai_infra_scan.params.port_scan_mode` accepts only the exact `fixed_ai` or `full_tcp` values and normalizes an omission to `fixed_ai`; the former discovers TCP ports `11434,1337,7000-9000,18789` (2,004 ports) on bare IPv4 targets, while the latter discovers all TCP ports `1-65535`. It does not accept custom ports, UDP, or version-identification options, and URLs, domains, port-bearing IPs, and IPv6 targets do not enter this port-discovery step. The safe `TaskDetail.input_summary.port_scan_mode` returns only a verified normalized enum value and never raw parameters. Every `model_id`/`eval_model_id` is resolved by the governed model resolver before task persistence, while `agent_id` must resolve to the user's or public read-only Agent configuration; unknown or invisible references are rejected without writing a task. Unknown fields, nested credential objects, raw model credentials, legacy model objects, and task aliases are rejected. Browser attachments are referenced only by opaque attachment IDs and remain owner-scoped. The internal Agent WebSocket and legacy-shaped artifact transport are a separate internal-token boundary and are not browser APIs.
 
 ### Agent workflow scan contract
 
@@ -818,6 +818,58 @@ except Exception as e:
 12. **YAML Models**: Models configured through YAML are read-only and cannot be modified or deleted through the API
 13. **Batch Deletion**: Model deletion supports passing multiple model_ids for batch deletion
 14. **Permission Control**: Administrators can view, modify, and delete models across owners; auditors have global read-only access; users can view, modify, and delete only their own models
+
+## Infrastructure target access credentials
+
+The console's **Credentials → Infrastructure credentials** manages authentication for the service being scanned. Model configuration remains the optional analysis-model configuration. Users and administrators manage only their own private target credentials; auditors cannot read or use them. Writes require Cookie identity, completed password change and `X-CSRF-Token`. JSON bodies are limited to 16 KiB.
+
+| Method | Path | Purpose |
+| --- | --- | --- |
+| GET | `/api/v1/platform/target-credentials` | Safe `{items: [...]}` metadata, including disabled entries |
+| POST | `/api/v1/platform/target-credentials` | Create; 201 with safe metadata |
+| GET | `/api/v1/platform/target-credentials/{id}` | Read own metadata and ETag |
+| PUT | `/api/v1/platform/target-credentials/{id}` | Update, replace authentication or disable; 200 |
+| DELETE | `/api/v1/platform/target-credentials/{id}` | Delete; 204 |
+
+PUT/DELETE require a quoted decimal `If-Match: "1"`. Missing/malformed headers return 428; stale revisions return 409. Read responses contain only `id,name,origin,auth_type,header_name,disabled,revision,created_at,updated_at,allow_insecure_http`, with `Cache-Control: no-store`. Secrets, Basic usernames and encryption material are never returned.
+
+Example creation (placeholder values):
+
+```json
+{
+  "name": "Test inference service",
+  "origin": "http://inference.internal:8080",
+  "auth_type": "bearer",
+  "secret": "REPLACE_WITH_TARGET_TOKEN",
+  "disabled": false
+}
+```
+
+Supported `auth_type` values are `bearer`, `api_key`, `basic` and `cookie`. Bearer takes the token without the prefix. API Key also requires `header_name`, such as `X-API-Key`. Basic requires `username` and the password in `secret`. Cookie accepts `session=VALUE; tenant=VALUE` in `secret`. Host, proxy/transport control headers and control characters are rejected.
+
+`origin` accepts HTTP and HTTPS by default. Create and edit requests use the address directly without an extra checkbox or permission field. The legacy optional request field `allow_insecure_http` is accepted for compatibility and its value is ignored: omitted, false and true all use the origin scheme to determine behavior. The response field is derived from the saved scheme: true for HTTP and false for HTTPS. No database column is added: the stored protocol remains bound to the ciphertext AAD.
+
+Origins contain only scheme, host and optional port; no path, query, fragment or URL userinfo. A root slash is allowed; HTTP port 80 and HTTPS port 443 are normalized. PUT requires full `name,origin,auth_type` metadata; an empty/omitted `secret` retains the old authentication only when the origin, auth type and header name are unchanged. Changing those fields, including the HTTP/HTTPS scheme, requires a new secret. Replacing a Basic password also requires its username. Every update increments revision. Disabling or deleting prevents new or not-yet-dispatched tasks from resolving it; already-issued requests are not recalled.
+
+Add the paired safe references to an `ai_infra_scan` request, replacing the ID with the actual creation response:
+
+```json
+{
+  "task_type": "ai_infra_scan",
+  "content": "http://inference.internal:8080/api/version",
+  "params": {
+    "target_credential_id": "REPLACE_WITH_CREDENTIAL_ID",
+    "target_credential_revision": 1,
+    "timeout": 300,
+    "port_scan_mode": "fixed_ai"
+  },
+  "country_iso_code": "zh_CN"
+}
+```
+
+The task `Idempotency-Key` is still required. Identical retries return the persisted task before validating live credential state. Authenticated scans accept explicit same-origin HTTP/HTTPS URLs in manual content (same scheme, host and effective port), including multiple paths; attachments, bare hosts, IP ranges and port discovery expressions are rejected. Ownership, enabled state, revision and target scope are checked at creation and again before assignment; failures never downgrade to anonymous scanning. Task and engine session storage contains only ID/revision. Decrypted `target_auth` exists only in the private assignment channel to an authenticated Agent advertising `infra-target-auth-v2`. HTTP runtime authentication requires server-derived `allow_insecure_http: true`; omission is rejected and task parameters cannot supply this runtime field. Upgrade the server and Agent together.
+
+Authenticated scans load the fingerprint and vulnerability bundle shipped with the Agent (normally /app/data; AIG_DATA_DIR can explicitly select the bundle). They do not use the browser knowledge API; publish updated bundles to Agents to apply rule changes. Missing, empty or malformed local rule bundles fail initialization. TLS, network or scope errors and explicit 401/403 responses from authenticated primary targets fail the task without a successful report. Authenticated scans use HTTP evidence and optional text-model analysis; browser screenshots and visual analysis are skipped. Successful authenticated access alone does not establish an unauthorized-access vulnerability. HTTPS authentication verifies server certificates. All authenticated requests reject off-origin/cross-port/cross-scheme redirects and Host overrides, and redact authentication reflections before evidence, model analysis or event persistence. AES-GCM uses the existing `MODEL_MASTER_KEY`/`MODEL_MASTER_KEY_ID`/`MODEL_PREVIOUS_MASTER_KEYS` keyring with a distinct AAD domain binding resource, owner, target and revision. Run `aig migrate` for migration 13 before deployment; runtime startup never performs DDL. Existing scans without target credentials retain their behavior.
 
 ## Technical Support
 

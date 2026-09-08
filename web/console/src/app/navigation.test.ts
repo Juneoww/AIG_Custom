@@ -70,7 +70,7 @@ describe('role navigation', () => {
     for (const role of ['user', 'auditor', 'admin'] as const) {
       expect(visibleNavigationFor(role).map((item) => item.label)).toContain('凭证配置')
       expect(secondaryNavigationFor('tasks', role)).toEqual(scanChildren)
-      expect(secondaryNavigationFor('credentials', role)).toEqual(credentialChildren)
+      expect(secondaryNavigationFor('credentials', role)).toEqual(role === 'auditor' ? credentialChildren : [...credentialChildren, expect.objectContaining({ id: 'target-credentials', label: '基础设施凭据', path: '/credentials/target-credentials' })])
     }
   })
 })

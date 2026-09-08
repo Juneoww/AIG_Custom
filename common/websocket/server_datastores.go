@@ -22,6 +22,7 @@ import (
 	"github.com/Juneoww/AIG_Custom/internal/platform/identity"
 	platformmodels "github.com/Juneoww/AIG_Custom/internal/platform/models"
 	platformreports "github.com/Juneoww/AIG_Custom/internal/platform/reports"
+	"github.com/Juneoww/AIG_Custom/internal/platform/targetcredentials"
 	platformtasks "github.com/Juneoww/AIG_Custom/internal/platform/tasks"
 	"github.com/Juneoww/AIG_Custom/pkg/database"
 	"gorm.io/gorm"
@@ -31,15 +32,16 @@ var _ platformreports.DashboardRepository = (*platformreports.GormRepository)(ni
 var _ platformtasks.RecentRepository = (*platformtasks.GormRepository)(nil)
 
 type runtimeDatastores struct {
-	identityRepository      *identity.GormRepository
-	auditRepository         *platformaudit.GormRepository
-	platformModelRepository *platformmodels.GormRepository
-	platformTaskRepository  *platformtasks.GormRepository
-	reportRepository        *platformreports.GormRepository
-	brandRepository         *platformbrand.GormRepository
-	taskStore               *database.TaskStore
-	modelStore              *database.ModelStore
-	agentStore              *database.AgentStore
+	targetCredentialRepository *targetcredentials.GormRepository
+	identityRepository         *identity.GormRepository
+	auditRepository            *platformaudit.GormRepository
+	platformModelRepository    *platformmodels.GormRepository
+	platformTaskRepository     *platformtasks.GormRepository
+	reportRepository           *platformreports.GormRepository
+	brandRepository            *platformbrand.GormRepository
+	taskStore                  *database.TaskStore
+	modelStore                 *database.ModelStore
+	agentStore                 *database.AgentStore
 }
 
 // initializeRuntimeDatastores is the single production runtime initialization
@@ -51,20 +53,22 @@ func initializeRuntimeDatastores(db *gorm.DB) (*runtimeDatastores, error) {
 	}
 
 	stores := &runtimeDatastores{
-		identityRepository:      identity.NewGormRepository(db),
-		auditRepository:         platformaudit.NewGormRepository(db),
-		platformModelRepository: platformmodels.NewGormRepository(db),
-		platformTaskRepository:  platformtasks.NewGormRepository(db),
-		reportRepository:        platformreports.NewGormRepository(db),
-		brandRepository:         platformbrand.NewGormRepository(db),
-		taskStore:               database.NewTaskStore(db),
-		modelStore:              database.NewModelStore(db),
-		agentStore:              database.NewAgentStore(db),
+		targetCredentialRepository: targetcredentials.NewGormRepository(db),
+		identityRepository:         identity.NewGormRepository(db),
+		auditRepository:            platformaudit.NewGormRepository(db),
+		platformModelRepository:    platformmodels.NewGormRepository(db),
+		platformTaskRepository:     platformtasks.NewGormRepository(db),
+		reportRepository:           platformreports.NewGormRepository(db),
+		brandRepository:            platformbrand.NewGormRepository(db),
+		taskStore:                  database.NewTaskStore(db),
+		modelStore:                 database.NewModelStore(db),
+		agentStore:                 database.NewAgentStore(db),
 	}
 	initializers := []struct {
 		name string
 		init func() error
 	}{
+		{name: "target credentials", init: stores.targetCredentialRepository.Init},
 		{name: "identity", init: stores.identityRepository.Init},
 		{name: "audit", init: stores.auditRepository.Init},
 		{name: "platform models", init: stores.platformModelRepository.Init},
