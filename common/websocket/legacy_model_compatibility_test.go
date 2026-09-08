@@ -248,9 +248,15 @@ func TestLegacyModelHTTPContractUsesEncryptedPlatformStorage(t *testing.T) {
 	require.Equal(t, http.StatusOK, yamlDetailAfterWrites.Code, yamlDetailAfterWrites.Body.String())
 	assert.NotContains(t, yamlDetailAfterWrites.Body.String(), "must-not-change")
 
+	blockedURLChange := governanceRequest(t, router, login.Token, http.MethodPut, "/api/v1/app/models/"+modelID, map[string]any{
+		"model": map[string]any{"model": "gpt-updated", "token": platformmodels.MaskedToken, "base_url": "https://updated.invalid/v1"},
+	})
+	require.Equal(t, http.StatusOK, blockedURLChange.Code)
+	assertLegacyEnvelope(t, blockedURLChange.Body.Bytes(), 1, nil)
+
 	updated := governanceRequest(t, router, login.Token, http.MethodPut, "/api/v1/app/models/"+modelID, map[string]any{
 		"model": map[string]any{
-			"model": "gpt-updated", "token": platformmodels.MaskedToken, "base_url": "https://updated.invalid/v1", "note": "updated", "limit": 88,
+			"model": "gpt-updated", "token": platformmodels.MaskedToken, "base_url": "https://models.invalid/v1", "note": "updated", "limit": 88,
 		},
 	})
 	require.Equal(t, http.StatusOK, updated.Code, updated.Body.String())

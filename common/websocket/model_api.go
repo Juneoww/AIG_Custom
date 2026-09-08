@@ -269,6 +269,7 @@ func respondLegacyPlatformModelError(c *gin.Context, err error, message string) 
 
 // registerGovernanceModelRoutes exposes the new flat platform contract.
 func registerGovernanceModelRoutes(group *gin.RouterGroup, service *platformmodels.Service) {
+	registerModelProbeRoutes(group, service)
 	group.GET("", func(c *gin.Context) {
 		subject, ok := identity.CurrentSubject(c)
 		if !ok {
